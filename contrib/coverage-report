@@ -31,8 +31,9 @@ import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "tests" / "i3" / "coverage.toml"
-UNVENDORED = ROOT / "tests" / "i3" / "unvendored.toml"
-VENDOR = ROOT / "tests" / "i3" / "t"
+ORACLE = ROOT / ".cache" / "sway-ipc-oracle" / "i3"
+UNVENDORED = ORACLE / "unvendored.toml"
+VENDOR = ORACLE / "t"
 
 LABELS = ("pass", "skip", "unproven", "fail", "unaccounted")
 
@@ -57,6 +58,8 @@ STRUCTURAL_REASONS = frozenset(
 
 
 def load():
+    if not VENDOR.is_dir():
+        raise SystemExit("i3 oracle is missing; run ./contrib/fetch-oracle")
     with DATA.open("rb") as handle:
         return tomllib.load(handle)
 
@@ -249,7 +252,7 @@ def check_unvendored(vendored_names):
     a file we already have, and cannot omit one we do not.
     """
     if not UNVENDORED.exists():
-        return ["tests/i3/unvendored.toml is missing"]
+        return ["pinned oracle i3/unvendored.toml is missing"]
     with UNVENDORED.open("rb") as handle:
         listed = set(tomllib.load(handle).get("files", {}))
 

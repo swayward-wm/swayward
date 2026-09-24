@@ -11,14 +11,13 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use swayward_config::{CornerRadius, LayoutPart};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
-use super::scrolling::ColumnWidth;
 use super::tile::Tile;
 use super::tiling_tree::NodeId;
 use super::workspace::{
     compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
     WorkspaceRenderElement,
 };
-use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
+use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options, TiledWidth};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::RenderLayer;
@@ -59,6 +58,8 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) workspaces: Vec<Workspace<W>>,
     /// Index of the currently active workspace.
     pub(super) active_workspace_idx: usize,
+    /// Workspaces ordered from most to least recently focused.
+    pub(super) workspace_focus_history: Vec<WorkspaceId>,
     /// ID of the previously active workspace.
     pub(super) previous_workspace_id: Option<WorkspaceId>,
     /// Sway name of the previously active workspace, retained after cleanup.
@@ -340,6 +341,8 @@ impl<W: LayoutElement> Monitor<W> {
             workspaces.push(ws);
         }
 
+        let workspace_focus_history = workspaces.iter().map(Workspace::id).rev().collect();
+
         Self {
             output_name: output.name(),
             output,
@@ -348,6 +351,7 @@ impl<W: LayoutElement> Monitor<W> {
             working_area,
             workspaces,
             active_workspace_idx,
+            workspace_focus_history,
             previous_workspace_id: None,
             previous_workspace_name: None,
             insert_hint: None,
@@ -569,11 +573,11 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let prev_active_idx = self.active_workspace_idx;
-        let focused = self.workspaces[prev_active_idx]
-            .active_window()
-            .map(|window| window.id().clone());
         self.active_workspace_idx = idx;
-        self.move_sticky_to_active_workspace(prev_active_idx, focused.as_ref());
+        let active = self.active_workspace_ref().id();
+        self.workspace_focus_history.retain(|id| *id != active);
+        self.workspace_focus_history.insert(0, active);
+        self.move_sticky_to_active_workspace(prev_active_idx);
 
         let config = config.unwrap_or(self.options.animations.workspace_switch.0);
 
@@ -641,7 +645,7 @@ impl<W: LayoutElement> Monitor<W> {
         window: W,
         target: MonitorAddWindowTarget<W>,
         activate: ActivateWindow,
-        width: ColumnWidth,
+        width: TiledWidth,
         is_full_width: bool,
         is_floating: bool,
     ) {
@@ -684,7 +688,7 @@ impl<W: LayoutElement> Monitor<W> {
         activate: ActivateWindow,
         // FIXME: Refactor ActivateWindow enum to make this better.
         allow_to_activate_workspace: bool,
-        width: ColumnWidth,
+        width: TiledWidth,
         is_full_width: bool,
         is_floating: bool,
         anim: Option<swayward_config::Animation>,
@@ -736,31 +740,26 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    fn move_sticky_to_active_workspace(&mut self, old_idx: usize, focused: Option<&W::Id>) {
+    fn move_sticky_to_active_workspace(&mut self, old_idx: usize) {
         if old_idx == self.active_workspace_idx {
             return;
         }
         let sticky = self.workspaces[old_idx].take_sticky_tiles();
         let target = &mut self.workspaces[self.active_workspace_idx];
-        let activate_sticky = !target.has_windows()
-            || sticky
-                .iter()
-                .any(|removed| Some(removed.tile.window().id()) == focused);
+        let target_was_empty = !target.has_windows();
         for removed in sticky {
-            let activate = activate_sticky && Some(removed.tile.window().id()) == focused;
             target.add_tile(
                 removed.tile,
                 WorkspaceAddWindowTarget::Auto,
-                if activate {
-                    ActivateWindow::Yes
-                } else {
-                    ActivateWindow::No
-                },
+                ActivateWindow::No,
                 removed.width,
                 removed.is_full_width,
                 true,
                 None,
             );
+        }
+        if target_was_empty {
+            target.focus_workspace_node();
         }
     }
 
@@ -1073,7 +1072,7 @@ impl<W: LayoutElement> Monitor<W> {
         tile.set_anim_y_between_workspaces();
     }
 
-    pub fn move_column_to_workspace(&mut self, target: WorkspaceId, activate: bool) {
+    pub fn move_focused_to_workspace(&mut self, target: WorkspaceId, activate: bool) {
         let source_workspace = self.active_workspace_ref().id();
         if target == source_workspace {
             return;
@@ -1191,6 +1190,10 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn previous_workspace_id(&self) -> Option<WorkspaceId> {
         self.previous_workspace_id
+    }
+
+    pub(crate) fn workspace_focus_history(&self) -> impl Iterator<Item = WorkspaceId> + '_ {
+        self.workspace_focus_history.iter().copied()
     }
 
     /// Re-read the cached back-and-forth name for `id` after a rename.

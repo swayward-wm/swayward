@@ -68,7 +68,7 @@ way back.
 The production behaviour is correct. The hazard is that `cargo test --all`
 inherits the operator's interactive `SWAYSOCK`, so no test may call
 `IpcServer::start`. Use `start_at` with an explicit private path.
-`src/tests/ipc.rs::test_socket_path` provides one, and
+`src/tests/ipc/fixtures.rs::test_socket_path` provides one, and
 `no_test_server_adopts_the_ambient_swaysock` fails if a caller reappears.
 
 A probe connection cannot detect the victim, because an unlinked path is
@@ -166,12 +166,13 @@ Run `./contrib/check-divergence` before committing.
 
 ## Tests
 
-`tests/i3/t/*.t` is vendored i3, byte-for-byte. Never edit those files: they
-are the external oracle, and a test you can edit to pass is not evidence. Where
-i3 and sway differ, record a skip with a citation into sway's source rather
-than changing the assertion.
+The unchanged i3 tests live in `martintrojer/sway-ipc-oracle` at the commit in
+`tests/oracle.toml`. Never edit those files: they are the external oracle, and a
+test you can edit to pass is not evidence. Run `./contrib/fetch-oracle` before
+the in-process harness. Where i3 and sway differ, record a skip with a citation
+into sway's source rather than changing the assertion.
 
-`tests/i3/coverage.toml` is the source of truth for what the suite measures.
+`tests/i3/coverage.toml` is the source of truth for what the in-process harness measures.
 Use `./contrib/coverage-report` for the current census; its `--json` output is
 machine-readable. `./contrib/coverage-report --check` must report 0 violations.
 

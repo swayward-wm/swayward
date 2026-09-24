@@ -24,7 +24,6 @@ use swayward_ipc::command::{LayoutToggle, LayoutToggleEntry};
 use swayward_ipc::{ColumnDisplay, SizeChange, WindowLayout};
 
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
-use super::scrolling::ScrollDirection;
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::tile::{DecoratedCorners, Tile, TileRenderElement};
 use super::titlebar::TitlebarState;
@@ -89,6 +88,7 @@ enum DetachedNode<W: LayoutElement> {
         old_id: NodeId,
         tile: Box<Tile<W>>,
         pending_mode: Option<PendingMode>,
+        mapped_under_fullscreen: bool,
     },
 }
 
@@ -178,6 +178,8 @@ pub enum IpcNode<I> {
         deco_rect: Option<Rectangle<f64, Logical>>,
         border: (swayward_ipc::command::BorderStyle, u16),
         border_edges: ResizeEdge,
+        sticky: bool,
+        mapped_under_fullscreen: bool,
     },
 }
 
@@ -258,10 +260,12 @@ pub struct TilingTree<W: LayoutElement> {
     nodes: HashMap<NodeId, Node<W>>,
     root: NodeId,
     focus: Option<NodeId>,
+    has_had_tile: bool,
     focus_history: Vec<NodeId>,
     previous_split_layouts: HashMap<NodeId, Layout>,
     title_formats: HashMap<NodeId, String>,
     pending_modes: HashMap<NodeId, PendingMode>,
+    mapped_under_fullscreen: HashSet<NodeId>,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,
@@ -310,10 +314,12 @@ impl<W: LayoutElement> TilingTree<W> {
             nodes,
             root,
             focus: None,
+            has_had_tile: false,
             focus_history: Vec::new(),
             previous_split_layouts: HashMap::new(),
             title_formats: HashMap::new(),
             pending_modes: HashMap::new(),
+            mapped_under_fullscreen: HashSet::new(),
             interactive_resize: None,
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),
@@ -332,6 +338,23 @@ impl<W: LayoutElement> TilingTree<W> {
 
     pub fn is_empty(&self) -> bool {
         self.focus.is_none()
+    }
+
+    pub fn has_had_tile(&self) -> bool {
+        self.has_had_tile
+    }
+
+    pub fn reset_empty_layout(&mut self) {
+        assert!(self.is_empty());
+        let layout = match self.options.layout.default_orientation {
+            swayward_config::DefaultOrientation::Horizontal => Layout::SplitH,
+            swayward_config::DefaultOrientation::Vertical => Layout::SplitV,
+            swayward_config::DefaultOrientation::Auto if self.view_size.h > self.view_size.w => {
+                Layout::SplitV
+            }
+            swayward_config::DefaultOrientation::Auto => Layout::SplitH,
+        };
+        self.set_layout(self.root, layout);
     }
 
     pub fn update_config(
@@ -469,12 +492,22 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         let id = self.add_tile_with_activation(tile, InsertTarget::Node(target), activate);
         if edge.intersects(ResizeEdge::LEFT | ResizeEdge::TOP) {
-            let parent = self.nodes[&id].parent.unwrap();
-            let first = self.child_index(parent, target).unwrap();
-            let second = self.child_index(parent, id).unwrap();
+            let parent = self.nodes[&id]
+                .parent
+                .expect("invariant: an inserted tile has a parent");
+            let first = self
+                .child_index(parent, target)
+                .expect("invariant: the drop target remains a child of the insertion parent");
+            let second = self
+                .child_index(parent, id)
+                .expect("invariant: the inserted tile is a child of its parent");
             let TreeNode::Split {
                 children, percents, ..
-            } = &mut self.nodes.get_mut(&parent).unwrap().value
+            } = &mut self
+                .nodes
+                .get_mut(&parent)
+                .expect("invariant: every child parent is present in the arena")
+                .value
             else {
                 unreachable!()
             };
@@ -512,8 +545,10 @@ impl<W: LayoutElement> TilingTree<W> {
         activate: bool,
     ) -> NodeId {
         self.interactive_resize = None;
+        self.has_had_tile = true;
         tile.update_config(self.view_size, self.scale, self.options.clone());
         let pending_mode = tile.window().pending_sizing_mode();
+        let mapped_under_fullscreen = self.fullscreen_node().is_some();
         let previous_focus = self.focus;
         let old_geometries = self.compute_geometry();
         let id = self.alloc(Node {
@@ -550,6 +585,9 @@ impl<W: LayoutElement> TilingTree<W> {
             self.focus = Some(previous_focus);
         } else {
             self.set_focus_id(Some(id));
+        }
+        if mapped_under_fullscreen && !pending_mode.is_fullscreen() {
+            self.mapped_under_fullscreen.insert(id);
         }
         if pending_mode.is_maximized() {
             self.pending_modes.insert(
@@ -608,11 +646,22 @@ impl<W: LayoutElement> TilingTree<W> {
         subtree: DetachedSubtree<W>,
         slot: DetachedSlot,
     ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        if !matches!(
+            self.nodes.get(&slot.parent).map(|node| &node.value),
+            Some(TreeNode::Split { .. })
+        ) {
+            debug_assert!(false, "detached swap slot parent must remain a split");
+            return self.attach_subtree_at(subtree, None);
+        }
         let mut remapped = Vec::new();
         let id = self.insert_detached_node(subtree.node, None, &mut remapped);
         let TreeNode::Split {
             children, percents, ..
-        } = &mut self.nodes.get_mut(&slot.parent).unwrap().value
+        } = &mut self
+            .nodes
+            .get_mut(&slot.parent)
+            .expect("invariant: the validated swap slot parent remains in the arena")
+            .value
         else {
             unreachable!()
         };
@@ -622,7 +671,10 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         children.insert(index, id);
         percents.insert(index, slot.percent);
-        self.nodes.get_mut(&id).unwrap().parent = Some(slot.parent);
+        self.nodes
+            .get_mut(&id)
+            .expect("invariant: a freshly inserted detached node remains in the arena")
+            .parent = Some(slot.parent);
         for window in subtree.focus_history.into_iter().rev() {
             if let Some(leaf) = self.node_for_window(&window) {
                 self.focus_history.retain(|candidate| *candidate != leaf);
@@ -714,17 +766,24 @@ impl<W: LayoutElement> TilingTree<W> {
         let focus_history = subtree.focus_history;
         let mut remapped = Vec::new();
         let id = self.insert_detached_node(subtree.node, None, &mut remapped);
-        let (parent, after) = match target.and_then(|target| self.nodes.get(&target)) {
-            Some(Node {
-                parent: Some(parent),
-                value: TreeNode::Leaf { .. },
-            }) => (*parent, target),
-            Some(Node {
-                value: TreeNode::Split { .. },
-                ..
-            }) => (target.unwrap(), None),
-            _ => (self.root, None),
-        };
+        let (parent, after) =
+            match target.and_then(|target| self.nodes.get(&target).map(|node| (target, node))) {
+                Some((
+                    target,
+                    Node {
+                        parent: Some(parent),
+                        value: TreeNode::Leaf { .. },
+                    },
+                )) => (*parent, Some(target)),
+                Some((
+                    target,
+                    Node {
+                        value: TreeNode::Split { .. },
+                        ..
+                    },
+                )) => (target, None),
+                _ => (self.root, None),
+            };
         self.insert_child(parent, id, after);
         let insertion = usize::from(self.focus.is_some());
         for window in focus_history.into_iter().rev() {
@@ -754,6 +813,7 @@ impl<W: LayoutElement> TilingTree<W> {
         let previous_layout = self.previous_split_layouts.get(&id).copied();
         let title_format = self.title_formats.get(&id).cloned();
         let pending_mode = self.pending_modes.get(&id).copied();
+        let mapped_under_fullscreen = self.mapped_under_fullscreen.contains(&id);
         let node = self.remove_node(id)?;
         match node.value {
             TreeNode::Split {
@@ -776,6 +836,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 old_id: id,
                 tile,
                 pending_mode,
+                mapped_under_fullscreen,
             }),
         }
     }
@@ -809,8 +870,11 @@ impl<W: LayoutElement> TilingTree<W> {
                     .into_iter()
                     .map(|child| self.insert_detached_node(child, Some(id), remapped))
                     .collect();
-                let TreeNode::Split { children: slot, .. } =
-                    &mut self.nodes.get_mut(&id).unwrap().value
+                let TreeNode::Split { children: slot, .. } = &mut self
+                    .nodes
+                    .get_mut(&id)
+                    .expect("invariant: a freshly allocated split remains in the arena")
+                    .value
                 else {
                     unreachable!();
                 };
@@ -830,6 +894,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 old_id,
                 mut tile,
                 pending_mode,
+                mapped_under_fullscreen,
             } => {
                 tile.update_config(self.view_size, self.scale, self.options.clone());
                 let id = self.alloc(Node {
@@ -839,6 +904,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 remapped.push((old_id, id));
                 if let Some(mode) = pending_mode {
                     self.pending_modes.insert(id, mode);
+                }
+                if mapped_under_fullscreen {
+                    self.mapped_under_fullscreen.insert(id);
                 }
                 id
             }
@@ -894,6 +962,7 @@ impl<W: LayoutElement> TilingTree<W> {
         self.previous_split_layouts.remove(&id);
         self.title_formats.remove(&id);
         self.pending_modes.remove(&id);
+        self.mapped_under_fullscreen.remove(&id);
         self.tab_indicators.remove(&id);
         self.tab_active.remove(&id);
         self.tab_active.retain(|_, active| *active != id);
@@ -1057,8 +1126,14 @@ impl<W: LayoutElement> TilingTree<W> {
                 percents[index] = sibling_percent;
             }
         }
-        self.nodes.get_mut(&sibling).unwrap().parent = Some(wrapper);
-        self.nodes.get_mut(&id).unwrap().parent = Some(wrapper);
+        self.nodes
+            .get_mut(&sibling)
+            .expect("invariant: a sibling child remains in the arena while it is wrapped")
+            .parent = Some(wrapper);
+        self.nodes
+            .get_mut(&id)
+            .expect("invariant: the consumed node remains in the arena while it is wrapped")
+            .parent = Some(wrapper);
         self.compact_tree();
         self.animate_geometry_changes(old, None);
         self.request_window_sizes();
@@ -1098,6 +1173,10 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     fn insert_child_at(&mut self, parent: NodeId, child: NodeId, index: usize) {
+        if !self.nodes.contains_key(&child) {
+            debug_assert!(false, "inserted child must be present in the arena");
+            return;
+        }
         let Some(Node {
             value: TreeNode::Split {
                 children, percents, ..
@@ -1113,7 +1192,10 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         children.insert(index.min(children.len()), child);
         percents.insert(index.min(percents.len()), percent);
-        self.nodes.get_mut(&child).unwrap().parent = Some(parent);
+        self.nodes
+            .get_mut(&child)
+            .expect("invariant: the validated inserted child remains in the arena")
+            .parent = Some(parent);
     }
 
     fn child_index(&self, parent: NodeId, child: NodeId) -> Option<usize> {
@@ -1130,6 +1212,10 @@ impl<W: LayoutElement> TilingTree<W> {
         index: usize,
         split_share_of: NodeId,
     ) {
+        if !self.nodes.contains_key(&child) {
+            debug_assert!(false, "inserted child must be present in the arena");
+            return;
+        }
         let Some(Node {
             value: TreeNode::Split {
                 children, percents, ..
@@ -1147,7 +1233,10 @@ impl<W: LayoutElement> TilingTree<W> {
         let index = index.min(children.len());
         children.insert(index, child);
         percents.insert(index, percent);
-        self.nodes.get_mut(&child).unwrap().parent = Some(parent);
+        self.nodes
+            .get_mut(&child)
+            .expect("invariant: the validated inserted child remains in the arena")
+            .parent = Some(parent);
     }
 
     fn detach_subtree_only(&mut self, id: NodeId) -> Option<NodeId> {
@@ -1163,7 +1252,11 @@ impl<W: LayoutElement> TilingTree<W> {
             Direction::Up | Direction::Down => Layout::SplitV,
         };
         let old_value = std::mem::replace(
-            &mut self.nodes.get_mut(&self.root).unwrap().value,
+            &mut self
+                .nodes
+                .get_mut(&self.root)
+                .expect("invariant: the root is always present in the arena")
+                .value,
             TreeNode::Split {
                 layout,
                 children: Vec::new(),
@@ -1174,20 +1267,37 @@ impl<W: LayoutElement> TilingTree<W> {
             parent: Some(self.root),
             value: old_value,
         });
-        if let TreeNode::Split { children, .. } = &self.nodes.get(&old).unwrap().value {
+        if let TreeNode::Split { children, .. } = &self
+            .nodes
+            .get(&old)
+            .expect("invariant: the freshly allocated old root remains in the arena")
+            .value
+        {
             for child in children.clone() {
-                self.nodes.get_mut(&child).unwrap().parent = Some(old);
+                self.nodes
+                    .get_mut(&child)
+                    .expect("invariant: every split child is present in the arena")
+                    .parent = Some(old);
             }
         }
-        self.nodes.get_mut(&old).unwrap().parent = Some(self.root);
+        self.nodes
+            .get_mut(&old)
+            .expect("invariant: the freshly allocated old root remains in the arena")
+            .parent = Some(self.root);
         let moving_first = matches!(direction, Direction::Left | Direction::Up);
         let (children, percents) = if moving_first {
             (vec![id, old], vec![0.5, 0.5])
         } else {
             (vec![old, id], vec![0.5, 0.5])
         };
-        self.nodes.get_mut(&id).unwrap().parent = Some(self.root);
-        self.nodes.get_mut(&self.root).unwrap().value = TreeNode::Split {
+        self.nodes
+            .get_mut(&id)
+            .expect("invariant: a node detached for a root wrap remains in the arena")
+            .parent = Some(self.root);
+        self.nodes
+            .get_mut(&self.root)
+            .expect("invariant: the root is always present in the arena")
+            .value = TreeNode::Split {
             layout,
             children,
             percents,
@@ -1283,7 +1393,10 @@ impl<W: LayoutElement> TilingTree<W> {
                 return;
             };
             children[index] = child;
-            self.nodes.get_mut(&child).unwrap().parent = Some(parent);
+            self.nodes
+                .get_mut(&child)
+                .expect("invariant: a split's only child is present in the arena")
+                .parent = Some(parent);
             if let Some(fullscreen) = self.pending_modes.get(&id).and_then(|mode| mode.fullscreen) {
                 self.pending_modes
                     .entry(child)
@@ -1399,7 +1512,10 @@ impl<W: LayoutElement> TilingTree<W> {
             percents.insert(index + offset, percent * child_percent);
         }
         for grandchild in &grandchildren {
-            self.nodes.get_mut(grandchild).unwrap().parent = Some(parent);
+            self.nodes
+                .get_mut(grandchild)
+                .expect("invariant: every squashed grandchild is present in the arena")
+                .parent = Some(parent);
         }
         let replacement = grandchildren.first().copied().unwrap_or(parent);
         if let Some(fullscreen) = [id, child]

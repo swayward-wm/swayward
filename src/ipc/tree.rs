@@ -138,7 +138,7 @@ pub(crate) fn describe_workspaces_with_marks(
                 workspace,
                 monitor.output_name(),
                 index,
-                workspace_rect(global_space, monitor.output()),
+                workspace_rect(global_space, monitor.output(), workspace),
                 output_rect(global_space, monitor.output()),
                 marks,
                 container_marks,
@@ -214,6 +214,11 @@ pub fn describe_outputs_with_power(
     global_space: &Space<Window>,
     output_power: &std::collections::HashMap<String, bool>,
 ) -> Vec<Output> {
+    let root_width = layout
+        .monitors()
+        .filter_map(|monitor| global_space.output_geometry(monitor.output()))
+        .reduce(|a, b| a.merge(b))
+        .map_or(0, |rect| rect.size.w);
     layout
         .monitors()
         .map(|monitor| {
@@ -292,7 +297,9 @@ pub fn describe_outputs_with_power(
                 nodes: vec![],
                 non_desktop: false,
                 orientation: "none".into(),
-                percent: Some(1.),
+                percent: (root_width != 0).then(|| {
+                    f64::from(output_rect(global_space, output).width) / f64::from(root_width)
+                }),
                 power: powered,
                 primary: false,
                 rect: output_rect(global_space, output),
@@ -327,7 +334,11 @@ fn describe_output_node(
     // sway/sway-ipc.7.scd, where the output is y=0 h=1080 while its workspace
     // is y=23 h=1057 under a 23px bar. Scripts size floating windows from this
     // rect, so reporting the full output puts them under the bar.
-    let workspace_rect = workspace_rect(global_space, monitor.output());
+    let workspace_rect = workspace_rect(
+        global_space,
+        monitor.output(),
+        monitor.active_workspace_ref(),
+    );
     let workspaces = layout
         .workspaces()
         .filter(|(candidate, _, workspace)| {
@@ -347,23 +358,11 @@ fn describe_output_node(
             )
         })
         .collect::<Vec<_>>();
-    let active_workspace_id = workspace_id(monitor.active_workspace_ref().id().get());
-    let previous_workspace_id = monitor
-        .previous_workspace_id()
-        .map(|id| workspace_id(id.get()));
-    let mut focus = workspaces
-        .iter()
-        .map(|workspace| workspace.id)
-        .collect::<Vec<_>>();
-    focus.sort_by_key(|id| {
-        if *id == active_workspace_id {
-            0
-        } else if Some(*id) == previous_workspace_id {
-            1
-        } else {
-            2
-        }
-    });
+    let focus = monitor
+        .workspace_focus_history()
+        .map(|id| workspace_id(id.get()))
+        .filter(|id| workspaces.iter().any(|workspace| workspace.id == *id))
+        .collect();
     let output = describe_outputs(layout, global_space)
         .into_iter()
         .find(|output| output.name == *monitor.output_name())
@@ -401,9 +400,8 @@ fn describe_output_node(
             transform: output.transform,
         }),
     );
-    let root_area = i64::from(root_rect.width) * i64::from(root_rect.height);
-    let output_area = i64::from(rect.width) * i64::from(rect.height);
-    node.percent = (root_area != 0).then(|| output_area as f64 / root_area as f64);
+    node.percent =
+        (root_rect.width != 0).then(|| f64::from(rect.width) / f64::from(root_rect.width));
     node
 }
 
@@ -522,9 +520,15 @@ fn describe_workspace_node(
     } else {
         focus.extend(floating_focus);
     }
-    let representation = (!nodes.is_empty()).then(|| tree_representation(layout, &nodes));
+    let representation = workspace
+        .tiling_has_had_window()
+        .then(|| tree_representation(layout, &nodes));
     let mut nodes = nodes;
-    for node in nodes.iter_mut().chain(&mut floating_nodes) {
+    set_tabbed_percentages(layout, &mut nodes, rect);
+    if !apply_fullscreen_state(&mut nodes, workspace_visible) {
+        set_child_windows_visible(layout, &focus, &mut nodes, workspace_visible);
+    }
+    for node in &mut floating_nodes {
         set_windows_visible(node, workspace_visible);
     }
     let mut node = common_node(
@@ -551,6 +555,37 @@ fn describe_workspace_node(
     node
 }
 
+fn set_tabbed_percentages(layout: NodeLayout, children: &mut [Node], parent_rect: Rect) {
+    // Percent is computed from sway's pending container boxes, before the
+    // serializer exposes the content rectangles below nested titlebars.
+    let titlebar_height = children
+        .iter()
+        .flat_map(|child| child.nodes.iter())
+        .map(|child| child.deco_rect.height)
+        .chain(children.iter().map(|child| child.deco_rect.height))
+        .max()
+        .unwrap_or_default();
+    let offset = match layout {
+        NodeLayout::Tabbed => titlebar_height,
+        NodeLayout::Stacked => titlebar_height * children.len() as i32,
+        _ => 0,
+    };
+    let parent_area = f64::from(parent_rect.width * parent_rect.height);
+    for child in children {
+        let mut pending_rect = parent_rect;
+        if offset > 0 && !child.nodes.is_empty() {
+            pending_rect.y += offset;
+            pending_rect.height = (pending_rect.height - offset).max(0);
+            child.percent = Some(if parent_area == 0. {
+                1.
+            } else {
+                f64::from(pending_rect.width * pending_rect.height) / parent_area
+            });
+        }
+        set_tabbed_percentages(child.layout, &mut child.nodes, pending_rect);
+    }
+}
+
 fn clear_focused(node: &mut Node) {
     node.focused = false;
     for child in node.nodes.iter_mut().chain(&mut node.floating_nodes) {
@@ -562,7 +597,7 @@ fn clear_focused(node: &mut Node) {
 ///
 /// Sway reports `visible` per window: a window on a workspace that is not its
 /// output's active one is not visible (`sway/tree/container.c`, and the
-/// captured `tests/fixtures/sway/two_workspaces.tree.json` shows
+/// captured `sway-ipc/fixtures/two_workspaces.tree.json` in the pinned oracle shows
 /// `visible: false` for the window on the background workspace). Waybar's
 /// `hasFlag` recurses into child nodes, so a window wrongly claiming to be
 /// visible marks its whole workspace button visible.
@@ -576,26 +611,53 @@ fn set_windows_visible(node: &mut Node, visible: bool) {
     if let swayward_ipc::NodeProperties::View(properties) = &mut node.properties {
         properties.visible = visible;
     }
-    let active_tab = matches!(
-        node.layout,
-        swayward_ipc::NodeLayout::Tabbed | swayward_ipc::NodeLayout::Stacked
-    )
-    .then(|| {
-        let tiling: std::collections::HashSet<i64> =
-            node.nodes.iter().map(|child| child.id).collect();
-        node.focus
-            .iter()
-            .copied()
-            .find(|id| tiling.contains(id))
-            .or_else(|| node.nodes.first().map(|child| child.id))
-    })
-    .flatten();
-    for child in &mut node.nodes {
-        let shown = active_tab.is_none_or(|active| active == child.id);
-        set_windows_visible(child, visible && shown);
-    }
+    set_child_windows_visible(node.layout, &node.focus, &mut node.nodes, visible);
     for child in &mut node.floating_nodes {
         set_windows_visible(child, visible);
+    }
+}
+
+fn apply_fullscreen_state(nodes: &mut [Node], workspace_visible: bool) -> bool {
+    let Some(fullscreen) = nodes.iter().position(contains_fullscreen) else {
+        return false;
+    };
+    for (index, node) in nodes.iter_mut().enumerate() {
+        if index == fullscreen {
+            node.percent = Some(1.);
+            if node.fullscreen_mode == 0 {
+                apply_fullscreen_state(&mut node.nodes, workspace_visible);
+            } else {
+                set_windows_visible(node, workspace_visible);
+            }
+        } else {
+            set_windows_visible(node, false);
+        }
+    }
+    true
+}
+
+fn contains_fullscreen(node: &Node) -> bool {
+    node.fullscreen_mode != 0 || node.nodes.iter().any(contains_fullscreen)
+}
+
+fn set_child_windows_visible(
+    layout: NodeLayout,
+    focus: &[i64],
+    children: &mut [Node],
+    visible: bool,
+) {
+    let active_tab = matches!(layout, NodeLayout::Tabbed | NodeLayout::Stacked)
+        .then(|| {
+            focus
+                .iter()
+                .copied()
+                .find(|id| children.iter().any(|child| child.id == *id))
+                .or_else(|| children.first().map(|child| child.id))
+        })
+        .flatten();
+    for child in children {
+        let shown = active_tab.is_none_or(|active| active == child.id);
+        set_windows_visible(child, visible && shown);
     }
 }
 
@@ -658,7 +720,9 @@ pub(crate) fn describe_tiling<'a, I>(
                 focused,
                 NodeProperties::None {},
             );
+            node.floating = Some("auto_off".into());
             node.percent = percent;
+            node.scratchpad_state = Some("none".into());
             node.fullscreen_mode = fullscreen_mode;
             node.marks = container_marks
                 .get(&(workspace_id, id))
@@ -675,6 +739,8 @@ pub(crate) fn describe_tiling<'a, I>(
             deco_rect,
             border,
             border_edges,
+            sticky,
+            mapped_under_fullscreen,
             ..
         } => {
             let Some(mapped) = find_window(&window) else {
@@ -692,14 +758,25 @@ pub(crate) fn describe_tiling<'a, I>(
                 true,
             );
             node.border = ipc_border(border.0);
-            node.current_border_width = i32::from(border.1);
-            node.percent = percent;
+            node.current_border_width = ipc_border_width(border);
+            if mapped_under_fullscreen {
+                node.border = NodeBorder::None;
+                node.current_border_width = 0;
+                node.percent = Some(0.);
+            } else {
+                node.percent = percent;
+            }
             node.focused = focused;
             node.fullscreen_mode = fullscreen_mode;
-            let has_titlebar = deco_rect.is_some();
-            node.deco_rect = deco_rect.map_or_else(Rect::default, |rect| {
-                rect_from(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h)
-            });
+            node.sticky = sticky;
+            let has_titlebar = deco_rect.is_some() && fullscreen_mode == 0;
+            node.deco_rect = if fullscreen_mode != 0 {
+                Rect::default()
+            } else {
+                deco_rect.map_or_else(Rect::default, |rect| {
+                    rect_from(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h)
+                })
+            };
             let border_width = match (node.border, has_titlebar) {
                 (NodeBorder::Normal | NodeBorder::Pixel, true) | (NodeBorder::Pixel, false) => {
                     node.current_border_width
@@ -739,6 +816,13 @@ fn empty_tiling_node(rect: Rect) -> Node {
         false,
         NodeProperties::None {},
     )
+}
+
+fn ipc_border_width(border: (swayward_ipc::command::BorderStyle, u16)) -> i32 {
+    match border.0 {
+        swayward_ipc::command::BorderStyle::None => 2,
+        _ => i32::from(border.1),
+    }
 }
 
 fn ipc_border(style: swayward_ipc::command::BorderStyle) -> NodeBorder {
@@ -1017,18 +1101,19 @@ fn output_rect(global_space: &Space<Window>, output: &smithay::output::Output) -
 
 /// The output's usable area, in global coordinates.
 ///
-/// This is the output rect minus every layer-shell exclusive zone, which is
-/// what sway reports as a workspace's rect. Outer gaps are deliberately not
-/// applied: sway's own example shows a window sharing its workspace's rect
-/// exactly, so gaps live inside this area rather than shrinking it.
-fn workspace_rect(global_space: &Space<Window>, output: &smithay::output::Output) -> Rect {
+/// This is the output rect minus layer-shell exclusive zones and the
+/// workspace's effective outer gaps. Sway includes the edge half of the inner
+/// gap in this inset as well.
+fn workspace_rect(
+    global_space: &Space<Window>,
+    output: &smithay::output::Output,
+    workspace: &crate::layout::workspace::Workspace<Mapped>,
+) -> Rect {
     let Some(geometry) = global_space.output_geometry(output) else {
         return Rect::default();
     };
-    let usable = crate::layout::workspace::compute_working_area(output);
-    rect_from_rectangle(
-        Rectangle::new(geometry.loc.to_f64() + usable.loc, usable.size).to_i32_round(),
-    )
+    let area = workspace.working_area();
+    rect_from_rectangle(Rectangle::new(geometry.loc.to_f64() + area.loc, area.size).to_i32_round())
 }
 
 #[cfg(test)]

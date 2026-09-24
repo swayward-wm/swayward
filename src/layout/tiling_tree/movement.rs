@@ -154,11 +154,7 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     fn move_direction_inner(&mut self, id: NodeId, direction: Direction) -> bool {
-        if !self.nodes.contains_key(&id)
-            || id == self.root
-            || self.windows().nth(1).is_none()
-            || self.split_len(self.root) == Some(1) && self.root_branch(id) == Some(id)
-        {
+        if !self.nodes.contains_key(&id) || id == self.root {
             return false;
         }
         if self
@@ -172,6 +168,12 @@ impl<W: LayoutElement> TilingTree<W> {
             Direction::Left | Direction::Right => Layout::SplitH,
             Direction::Up | Direction::Down => Layout::SplitV,
         };
+        if self.windows().nth(1).is_none()
+            || self.split_len(self.root) == Some(1) && self.root_branch(id) == Some(id)
+        {
+            self.set_layout(self.root, wanted_layout);
+            return false;
+        }
         let backwards = matches!(direction, Direction::Left | Direction::Up);
         let mut branch = id;
         let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
@@ -394,19 +396,7 @@ impl<W: LayoutElement> TilingTree<W> {
             .is_some_and(|id| self.move_subtree_to_index(id, index))
     }
 
-    pub fn move_column_to_first(&mut self) {
-        self.move_focused_to_first();
-    }
-
-    pub fn move_column_to_last(&mut self) {
-        self.move_focused_to_last();
-    }
-
-    pub fn move_column_to_index(&mut self, index: usize) {
-        self.move_focused_to_index(index.saturating_sub(1));
-    }
-
-    pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
+    pub fn nest_or_unnest_window_left(&mut self, window: Option<&W::Id>) {
         let id = window
             .and_then(|window| self.node_for_window(window))
             .or(self.focus);
@@ -418,7 +408,7 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
+    pub fn nest_or_unnest_window_right(&mut self, window: Option<&W::Id>) {
         let id = window
             .and_then(|window| self.node_for_window(window))
             .or(self.focus);
@@ -430,26 +420,23 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    pub fn consume_into_column(&mut self) {
+    pub fn nest_focused_window(&mut self) {
         if let Some(id) = self.focus {
             self.consume(id, true);
         }
     }
 
-    pub fn expel_from_column(&mut self) {
+    pub fn unnest_focused_window(&mut self) {
         if let Some(id) = self.focus {
             self.expel(id, true);
         }
     }
 
-    pub fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
-        match direction {
-            ScrollDirection::Left => {
-                self.move_left();
-            }
-            ScrollDirection::Right => {
-                self.move_right();
-            }
+    pub fn swap_window_horizontal(&mut self, right: bool) {
+        if right {
+            self.move_right();
+        } else {
+            self.move_left();
         }
     }
 }

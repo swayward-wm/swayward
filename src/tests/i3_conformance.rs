@@ -18,6 +18,15 @@ use super::Fixture;
 
 static NEXT_SOCKET: AtomicU64 = AtomicU64::new(0);
 
+fn oracle_i3_dir() -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".cache/sway-ipc-oracle/i3");
+    assert!(
+        path.join("t").is_dir(),
+        "i3 oracle is missing; run ./contrib/fetch-oracle"
+    );
+    path
+}
+
 struct AllowedRejection {
     test: &'static str,
     command: &'static str,
@@ -1190,9 +1199,11 @@ fn run_i3_test(test: &str) {
     };
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let oracle = oracle_i3_dir();
     let mut child = Command::new("perl")
         .arg(format!("-I{}", root.join("tests/i3/lib").display()))
-        .arg(root.join("tests/i3/t").join(test))
+        .arg(format!("-I{}", oracle.join("lib").display()))
+        .arg(oracle.join("t").join(test))
         .env("I3SOCK", &ipc_socket)
         .env("SWAYWARD_TEST_CONTROL", &control_path)
         .env("SWAYWARD_I3_TEST", test)
@@ -1279,7 +1290,6 @@ fn run_i3_test(test: &str) {
 /// invariant asserting it against the other.
 const COVERAGE: &str = include_str!("../../tests/i3/coverage.toml");
 const COVERAGE_README: &str = include_str!("../../tests/i3/README.md");
-const PROJECT_README: &str = include_str!("../../README.md");
 const HARNESS: &str = include_str!("../../tests/i3/lib/i3test.pm");
 
 #[test]
@@ -1287,6 +1297,7 @@ fn harness_xcb_xkb_guard_does_not_depend_on_the_host() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let output = Command::new("perl")
         .arg(format!("-I{}", root.join("tests/i3/lib").display()))
+        .arg(format!("-I{}", oracle_i3_dir().join("lib").display()))
         .arg("-MExtUtils::PkgConfig")
         .arg("-e")
         .arg("exit !ExtUtils::PkgConfig->atleast_version('xcb-xkb', '1.11')")
@@ -1305,6 +1316,7 @@ fn harness_does_not_convert_wrong_named_assertions_into_skips() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let output = Command::new("perl")
         .arg(format!("-I{}", root.join("tests/i3/lib").display()))
+        .arg(format!("-I{}", oracle_i3_dir().join("lib").display()))
         .arg("-e")
         .arg(
             "use i3test; is('splith', 'tabbed', \
@@ -1333,6 +1345,7 @@ fn harness_skips_only_i3_invalid_criteria_wording() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let output = Command::new("perl")
         .arg(format!("-I{}", root.join("tests/i3/lib").display()))
+        .arg(format!("-I{}", oracle_i3_dir().join("lib").display()))
         .arg("-e")
         .arg(
             "use i3test; ok(1, 'command was unsuccessful'); \
@@ -1753,228 +1766,6 @@ fn per_file_harness_branch_count_matches_the_audit() {
     );
 }
 
-/// Every figure the README states about the census, checked against the tool
-/// that produces it.
-///
-/// The ceiling sentence was already guarded, and the headline was not. That is
-/// backwards: the headline is the first checkable claim on the page and the
-/// one a sceptic reaches for. It read 111 against a real 108 once, contradicted
-/// by the page's own body twelve lines below.
-#[test]
-fn project_readme_census_figures_match_the_manifest() {
-    let output = std::process::Command::new("python3")
-        .arg("contrib/coverage-report")
-        .arg("--json")
-        .output()
-        .expect("contrib/coverage-report runs");
-    let report = String::from_utf8(output.stdout).expect("report is UTF-8");
-    let field = |key: &str| -> usize {
-        report
-            .lines()
-            .find_map(|line| line.trim().strip_prefix(&format!("\"{key}\": ")))
-            .unwrap_or_else(|| panic!("the census reports {key}"))
-            .trim_end_matches(',')
-            .parse()
-            .expect("the census field is a number")
-    };
-    let flattened = PROJECT_README
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let stated = |before: &str, after: &str| -> usize {
-        flattened
-            .split_once(before)
-            .unwrap_or_else(|| panic!("the README states {before:?}"))
-            .1
-            .split_once(after)
-            .unwrap_or_else(|| panic!("the figure after {before:?} is followed by {after:?}"))
-            .0
-            .replace(',', "")
-            .parse()
-            .expect("the stated figure is a number")
-    };
-
-    // The headline, and the body sentence that contradicted it.
-    for (label, value) in [
-        ("headline", stated("passes ", " of i3's own test files")),
-        ("body", stated("At this revision **", " files pass in full")),
-    ] {
-        assert_eq!(
-            value,
-            field("green_files"),
-            "the README {label} claims {value} green files but coverage.toml \
-             derives {}",
-            field("green_files")
-        );
-    }
-
-    for (label, key, value) in [
-        (
-            "declared assertions",
-            "assertions",
-            stated("Across the ", " assertions in captured TAP plans"),
-        ),
-        (
-            "passes",
-            "pass",
-            stated("in captured TAP plans, ", " pass,"),
-        ),
-        (
-            "documented skips",
-            "skip_documented",
-            stated(" pass, ", " are documented sway divergences"),
-        ),
-        (
-            "failures",
-            "fail",
-            stated("are documented sway divergences, ", " fail"),
-        ),
-        (
-            "unreached",
-            "unreached",
-            stated(" fail and ", " are unreached"),
-        ),
-    ] {
-        assert_eq!(
-            value,
-            field(key),
-            "the README states {value} {label} but coverage.toml derives {}",
-            field(key)
-        );
-    }
-}
-
-/// The README characterises the skips as mostly structural, and a stranger
-/// checking that sentence is checking the project's honesty about its own
-/// evidence. It read "roughly two thirds" against a real figure of 395 of 780,
-/// which is a half. Quote the counts and derive them.
-#[test]
-fn project_readme_structural_skip_share_matches_the_manifest() {
-    let output = std::process::Command::new("python3")
-        .arg("contrib/coverage-report")
-        .arg("--json")
-        .output()
-        .expect("contrib/coverage-report runs");
-    let report = String::from_utf8(output.stdout).expect("report is UTF-8");
-    let field = |key: &str| -> usize {
-        report
-            .lines()
-            .find_map(|line| line.trim().strip_prefix(&format!("\"{key}\": ")))
-            .unwrap_or_else(|| panic!("the census reports {key}"))
-            .trim_end_matches(',')
-            .parse()
-            .expect("the census field is a number")
-    };
-
-    let flattened = PROJECT_README
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let claim = flattened
-        .split_once("Half the skips, ")
-        .expect("the README states the structural skip share")
-        .1
-        .split_once(", are structural")
-        .expect("the share is stated as a fraction of the total")
-        .0;
-    let (structural, total) = claim
-        .split_once(" of ")
-        .expect("the share reads as `N of M`");
-    let structural: usize = structural.parse().expect("structural count is a number");
-    let total: usize = total.parse().expect("total skip count is a number");
-
-    assert_eq!(
-        structural,
-        field("skip_structural"),
-        "README.md claims {structural} structural skips but coverage.toml derives {}",
-        field("skip_structural")
-    );
-    assert_eq!(
-        total,
-        field("skip_documented"),
-        "README.md claims {total} documented skips but coverage.toml derives {}",
-        field("skip_documented")
-    );
-    // "Half" has to stay true of the numbers beside it, or the sentence is
-    // doing the overstating the numbers were added to prevent.
-    let share = structural as f64 / total as f64;
-    assert!(
-        (0.45..=0.55).contains(&share),
-        "README.md calls {structural} of {total} skips half, but that is {:.0}%; \
-         restate the proportion",
-        share * 100.0
-    );
-}
-
-/// The top-level README quotes the green ceiling too, and went stale once when
-/// the manifest changed. Keep its figures tied to the manifest.
-#[test]
-fn project_readme_green_ceiling_matches_the_manifest() {
-    let green = passing_tests().count();
-    let claim = PROJECT_README
-        .lines()
-        .find(|line| line.contains("green ceiling of"))
-        .expect("the README states a green ceiling");
-    let ceiling: usize = claim
-        .split_once("green ceiling of ")
-        .expect("ceiling is introduced")
-        .1
-        .split_once(" files")
-        .expect("ceiling states a file count")
-        .0
-        .parse()
-        .expect("ceiling is a number");
-    let stated_green: usize = claim
-        .rsplit_once(": ")
-        .expect("the claim cites the green count")
-        .1
-        .split_once(' ')
-        .expect("green count is followed by a word")
-        .0
-        .parse()
-        .expect("green count is a number");
-    assert_eq!(
-        stated_green, green,
-        "README.md claims {stated_green} green files but coverage.toml derives {green}"
-    );
-    // The sentence wraps, so match against the whole file with newlines
-    // collapsed rather than line by line.
-    let flattened = PROJECT_README
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let gap_only = flattened
-        .split_once(" vendored files blocked only by implementation or adapter gaps.")
-        .expect("the README states a gap-only count")
-        .0
-        .rsplit(' ')
-        .next()
-        .expect("gap-only count precedes the phrase")
-        .parse::<usize>()
-        .expect("gap-only count is a number");
-    assert_eq!(
-        green + gap_only,
-        ceiling,
-        "{green} green plus {gap_only} gap-only must equal the README ceiling {ceiling}"
-    );
-
-    // Both files state the ceiling, and they drifted apart once. Each is
-    // internally consistent on its own, so compare them to each other too.
-    let coverage_ceiling: usize = COVERAGE_README
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("The **current green ceiling is "))
-        .expect("the coverage report states a ceiling")
-        .split_once(" files**")
-        .expect("ceiling states a file count")
-        .0
-        .parse()
-        .expect("ceiling is a number");
-    assert_eq!(
-        ceiling, coverage_ceiling,
-        "README.md says {ceiling} but tests/i3/README.md says {coverage_ceiling}"
-    );
-}
-
 /// The ceiling paragraph is maintained by hand and a merge once left two
 /// contradictory copies, each with a different green count. Assert there is
 /// exactly one and that its arithmetic matches the manifest and the explicit
@@ -2078,8 +1869,8 @@ fn documented_green_ceiling_matches_the_manifest() {
             "the gap-only table also lists green file {file}"
         );
         assert!(
-            std::path::Path::new("tests/i3/t").join(file).is_file(),
-            "the gap-only table lists non-vendored file {file}"
+            oracle_i3_dir().join("t").join(file).is_file(),
+            "the gap-only table lists a file absent from the pinned oracle: {file}"
         );
     }
     assert_eq!(

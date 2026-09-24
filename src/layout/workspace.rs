@@ -16,7 +16,6 @@ use swayward_config::{CornerRadius, OutputName, PresetSize, Workspace as Workspa
 use swayward_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 
 use super::floating::{apply_position_change, FloatingSpace, FloatingSpaceRenderElement};
-use super::scrolling::{ColumnWidth, ScrollDirection};
 use super::shadow::Shadow;
 use super::tile::{Tile, TileRenderSnapshot};
 use super::tiling_tree::{
@@ -24,7 +23,7 @@ use super::tiling_tree::{
 };
 use super::{
     ActivateWindow, HitType, InsertPosition, InteractiveResizeData, LayoutElement, Options,
-    RemovedTile, SizeFrac,
+    RemovedTile, SizeFrac, TiledWidth,
 };
 use crate::animation::Clock;
 use crate::layout::RenderLayer;
@@ -654,6 +653,10 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiles().map(Tile::window)
     }
 
+    pub fn tiling_has_had_window(&self) -> bool {
+        self.tiling.has_had_tile()
+    }
+
     pub fn windows_mut(&mut self) -> impl Iterator<Item = &mut W> + '_ {
         self.tiles_mut().map(Tile::window_mut)
     }
@@ -924,7 +927,7 @@ impl<W: LayoutElement> Workspace<W> {
         mut tile: Tile<W>,
         target: WorkspaceAddWindowTarget<W>,
         activate: ActivateWindow,
-        width: ColumnWidth,
+        width: TiledWidth,
         is_full_width: bool,
         is_floating: bool,
         anim: Option<swayward_config::Animation>,
@@ -1107,7 +1110,7 @@ impl<W: LayoutElement> Workspace<W> {
             let is_floating = tile.restore_to_floating;
             RemovedTile {
                 tile,
-                width: ColumnWidth::Proportion(0.5),
+                width: TiledWidth::Proportion(0.5),
                 is_full_width: false,
                 is_floating,
                 floating_working_area: None,
@@ -1119,6 +1122,9 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
+        if self.tiling.is_empty() {
+            self.tiling.reset_empty_layout();
+        }
 
         removed
     }
@@ -1312,22 +1318,22 @@ impl<W: LayoutElement> Workspace<W> {
         &self,
         window: &W,
         width: Option<PresetSize>,
-    ) -> ColumnWidth {
+    ) -> TiledWidth {
         let width = width.unwrap_or_else(|| PresetSize::Fixed(window.size().w));
         match width {
             PresetSize::Fixed(fixed) => {
                 let mut fixed = f64::from(fixed);
 
-                // Add border width since ColumnWidth includes borders.
+                // Add border width since TiledWidth includes borders.
                 let rules = window.rules();
                 let border = self.options.layout.border.merged_with(&rules.border);
                 if !border.off {
                     fixed += border.width * 2.;
                 }
 
-                ColumnWidth::Fixed(fixed)
+                TiledWidth::Fixed(fixed)
             }
-            PresetSize::Proportion(prop) => ColumnWidth::Proportion(prop),
+            PresetSize::Proportion(prop) => TiledWidth::Proportion(prop),
         }
     }
 
@@ -1507,46 +1513,46 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn focus_column_first(&mut self) {
+    pub fn focus_first_root_child(&mut self) {
         if self.floating_is_active.get() {
             self.floating.focus_leftmost();
         } else {
-            self.tiling.focus_column_first();
+            self.tiling.focus_first_root_child();
         }
     }
 
-    pub fn focus_column_last(&mut self) {
+    pub fn focus_last_root_child(&mut self) {
         if self.floating_is_active.get() {
             self.floating.focus_rightmost();
         } else {
-            self.tiling.focus_column_last();
+            self.tiling.focus_last_root_child();
         }
     }
 
-    pub fn focus_column_right_or_first(&mut self) {
+    pub fn focus_right_or_first_root_child(&mut self) {
         if !self.focus_right() {
-            self.focus_column_first();
+            self.focus_first_root_child();
         }
     }
 
-    pub fn focus_column_left_or_last(&mut self) {
+    pub fn focus_left_or_last_root_child(&mut self) {
         if !self.focus_left() {
-            self.focus_column_last();
+            self.focus_last_root_child();
         }
     }
 
-    pub fn focus_column(&mut self, index: usize) {
+    pub fn focus_root_child(&mut self, index: usize) {
         if self.floating_is_active.get() {
             self.focus_tiling();
         }
-        self.tiling.focus_column(index);
+        self.tiling.focus_root_child(index);
     }
 
-    pub fn focus_window_in_column(&mut self, index: u8) {
+    pub fn focus_window_in_parent(&mut self, index: u8) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.focus_window_in_column(index);
+        self.tiling.focus_window_in_parent(index);
     }
 
     pub fn focus_down(&mut self) -> bool {
@@ -1688,25 +1694,25 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.move_node_direction(node, direction)
     }
 
-    pub fn move_column_to_first(&mut self) {
+    pub fn move_focused_root_child_to_first(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.move_column_to_first();
+        self.tiling.move_focused_to_first();
     }
 
-    pub fn move_column_to_last(&mut self) {
+    pub fn move_focused_root_child_to_last(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.move_column_to_last();
+        self.tiling.move_focused_to_last();
     }
 
-    pub fn move_column_to_index(&mut self, index: usize) {
+    pub fn move_focused_root_child_to_index(&mut self, index: usize) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.move_column_to_index(index);
+        self.tiling.move_focused_to_index(index.saturating_sub(1));
     }
 
     pub fn move_down(&mut self) -> bool {
@@ -1727,50 +1733,50 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
+    pub fn nest_or_unnest_window_left(&mut self, window: Option<&W::Id>) {
         if window.map_or(self.floating_is_active.get(), |id| {
             self.floating.has_window(id)
         }) {
             return;
         }
-        self.tiling.consume_or_expel_window_left(window);
+        self.tiling.nest_or_unnest_window_left(window);
     }
 
-    pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
+    pub fn nest_or_unnest_window_right(&mut self, window: Option<&W::Id>) {
         if window.map_or(self.floating_is_active.get(), |id| {
             self.floating.has_window(id)
         }) {
             return;
         }
-        self.tiling.consume_or_expel_window_right(window);
+        self.tiling.nest_or_unnest_window_right(window);
     }
 
-    pub fn consume_into_column(&mut self) {
+    pub fn nest_focused_window(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.consume_into_column();
+        self.tiling.nest_focused_window();
     }
 
-    pub fn expel_from_column(&mut self) {
+    pub fn unnest_focused_window(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.expel_from_column();
+        self.tiling.unnest_focused_window();
     }
 
-    pub fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
+    pub fn swap_window_horizontal(&mut self, right: bool) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.swap_window_in_direction(direction);
+        self.tiling.swap_window_horizontal(right);
     }
 
-    pub fn toggle_column_tabbed_display(&mut self) {
+    pub fn toggle_focused_tabbed_display(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.toggle_column_tabbed_display();
+        self.tiling.toggle_focused_tabbed_display();
     }
 
     pub fn set_focused_layout(
@@ -1846,19 +1852,11 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn set_column_display(&mut self, display: ColumnDisplay) {
+    pub fn set_focused_display(&mut self, display: ColumnDisplay) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.set_column_display(display);
-    }
-
-    pub fn center_column(&mut self) {
-        if self.floating_is_active.get() {
-            self.floating.center_window(None);
-        } else {
-            self.tiling.center_column();
-        }
+        self.tiling.set_focused_display(display);
     }
 
     pub fn center_window(&mut self, id: Option<&W::Id>) {
@@ -1866,16 +1864,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.has_window(id)
         }) {
             self.floating.center_window(id);
-        } else {
-            self.tiling.center_window(id);
         }
-    }
-
-    pub fn center_visible_columns(&mut self) {
-        if self.floating_is_active.get() {
-            return;
-        }
-        self.tiling.center_visible_columns();
     }
 
     pub fn toggle_width(&mut self, forwards: bool) {
@@ -1895,7 +1884,7 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.toggle_full_width();
     }
 
-    pub fn set_column_width(&mut self, change: SizeChange) {
+    pub fn set_focused_width(&mut self, change: SizeChange) {
         if self.floating_is_active.get() {
             self.floating
                 .set_window_width(None, change, true, self.view_size.to_i32_round());
@@ -2029,11 +2018,11 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn expand_column_to_available_width(&mut self) {
+    pub fn expand_focused_to_available_width(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.expand_column_to_available_width();
+        self.tiling.expand_focused_to_available_width();
     }
 
     pub fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) {
@@ -2355,6 +2344,10 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.activate_window_without_raising(&recent);
             self.floating_is_active = FloatingActive::Yes;
         }
+    }
+
+    pub(super) fn focus_workspace_node(&mut self) {
+        self.floating_is_active = FloatingActive::No;
     }
 
     pub fn focus_tiling(&mut self) {

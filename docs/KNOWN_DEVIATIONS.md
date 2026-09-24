@@ -146,7 +146,8 @@ mode as `smart-borders`, so later `smart_borders` directives can override the
 smart flag without changing the edge mode. The translator accepts all six
 `hide_edge_borders` values and sway's `smart_borders` values. It keeps every
 `--i3` form fail-loud because the titlebar model has no singleton suppression
-setting. Swayward's shipped 4 px border and 16 px gaps remain unchanged.
+setting. Swayward's shipped 4 px border remains unchanged. Gaps now default to zero,
+matching sway; set `layout { gaps 16; }` to restore the older swayward default.
 
 ## Bars
 
@@ -198,7 +199,7 @@ GTK backend as documented in [Important software](https://github.com/martintroje
 `GET_VERSION` uses sway's six-field reply schema: `human_readable`, `variant`,
 `major`, `minor`, `patch`, and `loaded_config_file_name`. Sway defines that
 schema in sway 1.12's `sway/sway/ipc-json.c:225-238`; the target tag and exact
-commit are recorded in `tests/fixtures/sway/schema-version.json`.
+commit are recorded in `sway-ipc/fixtures/schema-version.json` in the pinned oracle.
 Swayward reports its own variant and package version in those fields rather than
 claiming to be sway or i3. Therefore, i3's `193-ipc-version.t` assertion that
 the major version is always 4 does not apply.
@@ -251,6 +252,23 @@ no-op. Swayward follows sway and reports a command error.
 Swayward has no scrollable-tiling mode. It uses an i3-style nested container tree.
 Niri's horizontal viewport and overview animations were retired because their
 layout no longer exists.
+
+### Retired niri column actions
+
+**Config format.**
+
+The typed KDL actions inherited from niri still use their old spellings, but
+the nested tree gives them sway-style tree meanings: left/right focus and move
+are directional tree operations; column index and first/last operations target
+the workspace root's children; consume and expel nest or unnest a node; column
+workspace and output moves move the focused node; and column width actions
+resize the focused node. Column display actions select the focused tree
+container's layout.
+
+The viewport-only `center-column` and `center-visible-columns` actions have no
+sway equivalent. They are accepted as no-ops for configuration compatibility.
+`center-window` still centers a floating window and is a no-op for tiled
+windows.
 
 ### Layout restoration
 
@@ -434,7 +452,7 @@ output and its workspaces. The i3 IPC guide shows this hierarchy at
 Sway has no equivalent node. Its node types are root, output, workspace, and
 container (`sway/include/sway/tree/node.h:18-23`). Its `GET_TREE` serializer
 adds workspaces directly to output nodes (`sway/sway/ipc-json.c:854-894`). None
-of the 14 trees captured from real sway in `tests/fixtures/sway/*.tree.json`
+of the 14 trees captured from real sway in `sway-ipc/fixtures/*.tree.json` in the pinned oracle
 contains a `content` node. Swayward therefore follows sway, as required by the
 IPC compatibility decisions Q1 and Q8.
 

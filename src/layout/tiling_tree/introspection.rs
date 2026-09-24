@@ -95,6 +95,13 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn ipc_tree(&self) -> IpcNode<W::Id> {
+        fn inset_split_by_parent_titlebar<I>(node: &mut IpcNode<I>, height: f64) {
+            if let IpcNode::Split { rect, .. } = node {
+                rect.loc.y += height;
+                rect.size.h = (rect.size.h - height).max(0.);
+            }
+        }
+
         fn snapshot<W: LayoutElement>(
             tree: &TilingTree<W>,
             id: NodeId,
@@ -133,7 +140,68 @@ impl<W: LayoutElement> TilingTree<W> {
                     children: children
                         .iter()
                         .zip(percents)
-                        .map(|(child, percent)| snapshot(tree, *child, Some(*percent), geometries))
+                        .enumerate()
+                        .map(|(index, (child, stored_percent))| {
+                            let percent = match layout {
+                                Layout::Tabbed | Layout::Stacked => 1.,
+                                Layout::SplitH | Layout::SplitV
+                                    if tree.fullscreen_node().is_some() =>
+                                {
+                                    *stored_percent
+                                }
+                                Layout::SplitH | Layout::SplitV => {
+                                    let rounded_extent =
+                                        |rect: Rectangle<f64, Logical>| match layout {
+                                            Layout::SplitH => rect.size.w.round(),
+                                            Layout::SplitV => rect.size.h.round(),
+                                            _ => unreachable!(),
+                                        };
+                                    let parent_extent = geometries
+                                        .ipc_nodes
+                                        .get(&id)
+                                        .copied()
+                                        .map(rounded_extent)
+                                        .unwrap_or_default();
+                                    let raw_extent = |rect: Rectangle<f64, Logical>| match layout {
+                                        Layout::SplitH => rect.size.w,
+                                        Layout::SplitV => rect.size.h,
+                                        _ => unreachable!(),
+                                    };
+                                    let available = children
+                                        .iter()
+                                        .filter_map(|child| {
+                                            geometries.ipc_nodes.get(child).copied()
+                                        })
+                                        .map(raw_extent)
+                                        .sum::<f64>();
+                                    let allocated = if index + 1 == children.len() {
+                                        available.round()
+                                            - percents[..index]
+                                                .iter()
+                                                .map(|percent| (available * percent).round())
+                                                .sum::<f64>()
+                                    } else {
+                                        (available * stored_percent).round()
+                                    };
+                                    if parent_extent > 0. {
+                                        allocated / parent_extent
+                                    } else {
+                                        *stored_percent
+                                    }
+                                }
+                            };
+                            let mut node = snapshot(tree, *child, Some(percent), geometries);
+                            let titlebar_rows = match layout {
+                                Layout::Tabbed => 1,
+                                Layout::Stacked => children.len(),
+                                Layout::SplitH | Layout::SplitV => 0,
+                            };
+                            inset_split_by_parent_titlebar(
+                                &mut node,
+                                tree.titlebar_height * titlebar_rows as f64,
+                            );
+                            node
+                        })
                         .collect(),
                 },
                 TreeNode::Leaf { tile } => IpcNode::Leaf {
@@ -151,13 +219,34 @@ impl<W: LayoutElement> TilingTree<W> {
                         .titlebars
                         .get(&id)
                         .filter(|bar| bar.visible)
-                        .map(|bar| bar.ipc_rect),
+                        .map(|bar| bar.ipc_rect)
+                        .or_else(|| {
+                            (tree.fullscreen_node().is_some()
+                                && tree.fullscreen_mode(id).is_none()
+                                && !tree.mapped_under_fullscreen.contains(&id)
+                                && tile.has_sway_titlebar())
+                            .then(|| {
+                                Rectangle::new(
+                                    Point::default(),
+                                    (
+                                        geometries
+                                            .leaf_ipc_rects
+                                            .get(&id)
+                                            .map_or(0., |rect| rect.size.w),
+                                        tree.titlebar_height,
+                                    )
+                                        .into(),
+                                )
+                            })
+                        }),
                     border: tile.sway_border(),
                     border_edges: geometries
                         .border_edges
                         .get(&id)
                         .copied()
                         .unwrap_or_else(ResizeEdge::all),
+                    sticky: tile.is_sticky,
+                    mapped_under_fullscreen: tree.mapped_under_fullscreen.contains(&id),
                 },
             }
         }
