@@ -37,6 +37,14 @@ pub struct Input {
     pub workspace_auto_back_and_forth: bool,
     pub tiling_drag: bool,
     pub tiling_drag_threshold: u32,
+    /// Resize windows by left-dragging their border without a modifier, as
+    /// sway always does (`sway/sway/input/seatop_default.c:396-410,468-474`).
+    /// Sway has no switch for this; swayward adds one because some users
+    /// prefer the inherited modifier-only drag.
+    pub border_resize: bool,
+    /// Resize tiled windows by left-dragging the gap between them. Sway has
+    /// no such handle; this serves borderless setups with `gaps` above zero.
+    pub gap_resize: bool,
     pub mod_key: Option<ModKey>,
     pub mod_key_nested: Option<ModKey>,
 }
@@ -59,6 +67,8 @@ impl Default for Input {
             workspace_auto_back_and_forth: false,
             tiling_drag: true,
             tiling_drag_threshold: 9,
+            border_resize: true,
+            gap_resize: false,
             mod_key: None,
             mod_key_nested: None,
         }
@@ -95,6 +105,10 @@ pub struct InputPart {
     pub tiling_drag: Option<Flag>,
     #[knuffel(child, unwrap(argument))]
     pub tiling_drag_threshold: Option<u32>,
+    #[knuffel(child)]
+    pub border_resize: Option<Flag>,
+    #[knuffel(child)]
+    pub gap_resize: Option<Flag>,
     #[knuffel(child, unwrap(argument, str))]
     pub mod_key: Option<ModKey>,
     #[knuffel(child, unwrap(argument, str))]
@@ -109,6 +123,8 @@ impl MergeWith<InputPart> for Input {
             disable_power_key_handling,
             workspace_auto_back_and_forth,
             tiling_drag,
+            border_resize,
+            gap_resize,
         );
 
         merge_clone!(

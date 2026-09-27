@@ -19,7 +19,7 @@ use super::floating::{apply_position_change, FloatingSpace, FloatingSpaceRenderE
 use super::shadow::Shadow;
 use super::tile::{Tile, TileRenderSnapshot};
 use super::tiling_tree::{
-    DetachedSubtree, Direction, InsertTarget, NodeId, TilingTree, TilingTreeRenderElement,
+    DetachedSubtree, Direction, InsertTarget, Layout, NodeId, TilingTree, TilingTreeRenderElement,
 };
 use super::{
     ActivateWindow, HitType, InsertPosition, InteractiveResizeData, LayoutElement, Options,
@@ -657,6 +657,15 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.has_had_tile()
     }
 
+    pub fn tiling_representation_layout(&self) -> Layout {
+        self.tiling.representation_layout()
+    }
+
+    pub(super) fn reset_empty_tiling_layout(&mut self) {
+        assert!(!self.has_windows());
+        self.tiling.reset_empty_layout();
+    }
+
     pub fn windows_mut(&mut self) -> impl Iterator<Item = &mut W> + '_ {
         self.tiles_mut().map(Tile::window_mut)
     }
@@ -749,16 +758,6 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.fullscreen_window()
     }
 
-    pub fn set_fullscreen_restore_to_floating(&mut self, window: &W::Id) {
-        if let Some(tile) = self
-            .tiling
-            .tiles_mut()
-            .find(|tile| tile.window().id() == window)
-        {
-            tile.restore_to_floating = true;
-        }
-    }
-
     pub fn set_window_fullscreen(
         &mut self,
         window: &W::Id,
@@ -791,6 +790,14 @@ impl<W: LayoutElement> Workspace<W> {
             return false;
         };
         self.tiling.set_node_fullscreen(id, mode)
+    }
+
+    pub fn preserve_empty_auto_layout(&mut self) {
+        self.tiling.preserve_empty_auto_layout();
+    }
+
+    pub fn track_empty_auto_layout(&mut self) {
+        self.tiling.track_empty_auto_layout();
     }
 
     pub fn set_output(&mut self, output: Option<Output>) {
@@ -1122,9 +1129,6 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        if self.tiling.is_empty() {
-            self.tiling.reset_empty_layout();
-        }
 
         removed
     }
@@ -1830,9 +1834,9 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn restore_focused_split_layout(&mut self) -> Vec<(NodeId, NodeId)> {
+    pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
         if self.floating_is_active.get() {
-            Vec::new()
+            None
         } else {
             self.tiling.restore_focused_split_layout()
         }
@@ -1898,14 +1902,14 @@ impl<W: LayoutElement> Workspace<W> {
         window: Option<&W::Id>,
         change: SizeChange,
         automatic_maximum: Size<i32, Logical>,
-    ) {
+    ) -> bool {
         if window.map_or(self.floating_is_active.get(), |id| {
             self.floating.has_window(id)
         }) {
             self.floating
-                .set_window_width(window, change, true, automatic_maximum);
+                .set_window_width(window, change, true, automatic_maximum)
         } else {
-            self.tiling.set_window_width(window, change);
+            self.tiling.set_window_width(window, change)
         }
     }
 
@@ -1914,9 +1918,9 @@ impl<W: LayoutElement> Workspace<W> {
         node: crate::layout::tiling_tree::NodeId,
         width: bool,
         change: SizeChange,
-    ) {
+    ) -> bool {
         self.tiling
-            .resize_node_dimension_command(node, width, change);
+            .resize_node_dimension_command(node, width, change)
     }
 
     pub fn resize_tiling_node_edge(
@@ -1963,14 +1967,14 @@ impl<W: LayoutElement> Workspace<W> {
         window: Option<&W::Id>,
         change: SizeChange,
         automatic_maximum: Size<i32, Logical>,
-    ) {
+    ) -> bool {
         if window.map_or(self.floating_is_active.get(), |id| {
             self.floating.has_window(id)
         }) {
             self.floating
-                .set_window_height(window, change, true, automatic_maximum);
+                .set_window_height(window, change, true, automatic_maximum)
         } else {
-            self.tiling.set_window_height(window, change);
+            self.tiling.set_window_height(window, change)
         }
     }
 
@@ -2720,21 +2724,100 @@ impl<W: LayoutElement> Workspace<W> {
                 if tile.hit(pos_within_tile).is_some() {
                     let size = tile.tile_size().to_f64();
 
-                    let mut edges = ResizeEdge::empty();
-                    if pos_within_tile.x < size.w / 3. {
-                        edges |= ResizeEdge::LEFT;
-                    } else if 2. * size.w / 3. < pos_within_tile.x {
-                        edges |= ResizeEdge::RIGHT;
-                    }
-                    if pos_within_tile.y < size.h / 3. {
-                        edges |= ResizeEdge::TOP;
-                    } else if 2. * size.h / 3. < pos_within_tile.y {
-                        edges |= ResizeEdge::BOTTOM;
-                    }
+                    // Sway's modifier resize picks the corner of the quadrant
+                    // under the pointer, split at the strict half
+                    // (`sway/sway/input/seatop_default.c:413-417,477-481`).
+                    let mut edges = if pos_within_tile.x > size.w / 2. {
+                        ResizeEdge::RIGHT
+                    } else {
+                        ResizeEdge::LEFT
+                    };
+                    edges |= if pos_within_tile.y > size.h / 2. {
+                        ResizeEdge::BOTTOM
+                    } else {
+                        ResizeEdge::TOP
+                    };
                     return Some(edges);
                 }
 
                 None
+            })
+    }
+
+    /// The topmost window under `pos` and the border edges a plain left drag
+    /// resizes there, following sway's `find_resize_edge`
+    /// (`sway/sway/input/seatop_default.c:111-118`): floating windows resize
+    /// from any border edge, tiled windows only from an edge shared with a
+    /// sibling.
+    pub fn border_resize_edges_under(&self, pos: Point<f64, Logical>) -> Option<(&W, ResizeEdge)> {
+        let (tile, pos_within_tile, hit) =
+            self.tiles_with_render_positions()
+                .find_map(|(tile, tile_pos, visible)| {
+                    // Consistent with window_under(): the first visible hit wins.
+                    if !visible {
+                        return None;
+                    }
+                    let pos_within_tile = pos - tile_pos;
+                    let hit = tile.hit(pos_within_tile)?;
+                    Some((tile, pos_within_tile, hit))
+                })?;
+        // The client surface keeps its own clicks.
+        if !matches!(hit, HitType::Activate { .. }) {
+            return None;
+        }
+        let edges = tile.border_edges_at(pos_within_tile);
+        if edges.is_empty() {
+            return None;
+        }
+        let window = tile.window();
+        if !self.floating.has_window(window.id())
+            && !self.tiling.is_internal_edge(window.id(), edges)
+        {
+            return None;
+        }
+        Some((window, edges))
+    }
+
+    /// The tiled window and edge a plain left press in the gap at `pos`
+    /// resizes, for `input { gap-resize }`. Sway has no such handle: its gaps
+    /// belong to the workspace. The rules are its border drag's
+    /// (`sway/sway/input/seatop_default.c:111-118`): only an edge shared
+    /// with a sibling counts, so outer gaps never resize.
+    pub fn gap_resize_edges_under(&self, pos: Point<f64, Logical>) -> Option<(&W, ResizeEdge)> {
+        let gap = self.options.layout.gaps;
+        if gap <= 0. || self.window_under(pos).is_some() {
+            return None;
+        }
+        self.tiling
+            .tiles_with_render_positions()
+            .filter(|(tile, _, visible)| *visible && tile.sizing_mode().is_normal())
+            .find_map(|(tile, tile_pos, _)| {
+                let size = tile.tile_size();
+                let grown = Rectangle::new(
+                    tile_pos - Point::from((gap, gap)),
+                    size + Size::from((gap * 2., gap * 2.)),
+                );
+                if !grown.contains(pos) {
+                    return None;
+                }
+                let local = pos - tile_pos;
+                // One edge per press, and only the edge the point lies
+                // beyond: a gap corner between four windows resizes nothing.
+                let edges = [
+                    (local.x < 0., ResizeEdge::LEFT),
+                    (local.x >= size.w, ResizeEdge::RIGHT),
+                    (local.y < 0., ResizeEdge::TOP),
+                    (local.y >= size.h, ResizeEdge::BOTTOM),
+                ];
+                let mut beyond = edges.iter().filter(|(hit, _)| *hit).map(|(_, edge)| *edge);
+                let edge = beyond.next()?;
+                if beyond.next().is_some() {
+                    return None;
+                }
+                let window = tile.window();
+                self.tiling
+                    .is_internal_edge(window.id(), edge)
+                    .then_some((window, edge))
             })
     }
 

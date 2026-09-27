@@ -39,6 +39,7 @@ pub(crate) fn compute<W: LayoutElement>(
     gaps_to_edge: bool,
     titlebar_height: f64,
     fullscreen: &HashSet<NodeId>,
+    mapped_under_fullscreen: &HashSet<NodeId>,
     hide_edge_borders: HideEdgeBorders,
     smart_borders: SmartBorders,
     visible_leaves: &HashSet<NodeId>,
@@ -61,18 +62,13 @@ pub(crate) fn compute<W: LayoutElement>(
         uncovered_top_borders: HashMap::new(),
     };
     let gaps = gaps.max(0.);
-    let area = if fullscreen.is_empty() {
-        let mut area = apply_struts(parent_area, scale, struts);
-        if !outer_gaps_configured {
-            area.loc.x += gaps;
-            area.loc.y += gaps;
-            area.size.w = (area.size.w - gaps * 2.).max(0.);
-            area.size.h = (area.size.h - gaps * 2.).max(0.);
-        }
-        area
-    } else {
-        Rectangle::from_size(view_size)
-    };
+    let mut area = apply_struts(parent_area, scale, struts);
+    if !outer_gaps_configured {
+        area.loc.x += gaps;
+        area.loc.y += gaps;
+        area.size.w = (area.size.w - gaps * 2.).max(0.);
+        area.size.h = (area.size.h - gaps * 2.).max(0.);
+    }
     let fullscreen_root = fullscreen.iter().copied().next();
     let workspace_area = area;
     assign(
@@ -82,7 +78,8 @@ pub(crate) fn compute<W: LayoutElement>(
         area,
         gaps,
         titlebar_height,
-        fullscreen,
+        &HashSet::new(),
+        mapped_under_fullscreen,
         None,
         false,
         DecoratedCorners::ALL,
@@ -97,6 +94,7 @@ pub(crate) fn compute<W: LayoutElement>(
         &mut result,
     );
     if let Some(fullscreen_root) = fullscreen_root {
+        let area = Rectangle::from_size(view_size);
         assign(
             nodes,
             title_formats,
@@ -105,6 +103,7 @@ pub(crate) fn compute<W: LayoutElement>(
             gaps,
             titlebar_height,
             fullscreen,
+            mapped_under_fullscreen,
             None,
             false,
             DecoratedCorners::NONE,
@@ -118,6 +117,21 @@ pub(crate) fn compute<W: LayoutElement>(
             draw_uncovered_top_border,
             &mut result,
         );
+        result
+            .titlebars
+            .retain(|id, _| !contains_node(nodes, fullscreen_root, *id));
+        result
+            .titlebar_attached
+            .retain(|id| !contains_node(nodes, fullscreen_root, *id));
+        result
+            .titlebar_owned_by_parent
+            .retain(|id| !contains_node(nodes, fullscreen_root, *id));
+    }
+    for id in mapped_under_fullscreen {
+        result.titlebars.remove(id);
+        result.titlebar_leaves.remove(id);
+        result.titlebar_attached.remove(id);
+        result.titlebar_owned_by_parent.remove(id);
     }
     result.border_visible.extend(
         result
@@ -170,6 +184,20 @@ fn is_strip_entry<W: LayoutElement>(nodes: &HashMap<NodeId, Node<W>>, id: NodeId
         })
 }
 
+fn contains_node<W: LayoutElement>(
+    nodes: &HashMap<NodeId, Node<W>>,
+    root: NodeId,
+    id: NodeId,
+) -> bool {
+    root == id
+        || match nodes.get(&root).map(|node| &node.value) {
+            Some(TreeNode::Split { children, .. }) => children
+                .iter()
+                .any(|child| contains_node(nodes, *child, id)),
+            _ => false,
+        }
+}
+
 fn subtree_has_visible_leaf<W: LayoutElement>(
     nodes: &HashMap<NodeId, Node<W>>,
     id: NodeId,
@@ -216,6 +244,7 @@ fn assign<W: LayoutElement>(
     gaps: f64,
     titlebar_height: f64,
     fullscreen: &HashSet<NodeId>,
+    mapped_under_fullscreen: &HashSet<NodeId>,
     covering_titlebar: Option<Rectangle<f64, Logical>>,
     decorated_by_parent: bool,
     decorated_corners: DecoratedCorners,
@@ -374,7 +403,20 @@ fn assign<W: LayoutElement>(
                     Layout::SplitV => rect.loc.y,
                     _ => unreachable!(),
                 };
+                let visible_total = children
+                    .iter()
+                    .zip(percents)
+                    .filter(|(child, _)| !mapped_under_fullscreen.contains(child))
+                    .map(|(_, percent)| percent)
+                    .sum::<f64>();
                 for (index, (child, percent)) in children.iter().zip(percents).enumerate() {
+                    let percent = if mapped_under_fullscreen.contains(child) {
+                        0.
+                    } else if mapped_under_fullscreen.is_empty() {
+                        *percent
+                    } else {
+                        *percent / visible_total
+                    };
                     let extent = available.max(0.) * percent;
                     let child_rect = match layout {
                         Layout::SplitH => Rectangle::new(
@@ -411,6 +453,7 @@ fn assign<W: LayoutElement>(
                         gaps,
                         titlebar_height,
                         fullscreen,
+                        mapped_under_fullscreen,
                         None,
                         false,
                         child_corners,
@@ -503,6 +546,7 @@ fn assign<W: LayoutElement>(
                         gaps,
                         titlebar_height,
                         fullscreen,
+                        mapped_under_fullscreen,
                         result.titlebars.get(child).map(|titlebar| titlebar.rect),
                         true,
                         DecoratedCorners {

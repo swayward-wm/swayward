@@ -635,7 +635,7 @@ fn nested_container_titlebars_show_the_tree_and_update_after_close() {
         t.remove_tile_node(inner_second);
         assert_eq!(
             t.compute_geometry().titlebars[&outer].title,
-            "V[window 2 window 3]"
+            "V[window 2 T[window 3]]"
         );
     }
 }
@@ -1190,6 +1190,93 @@ fn configured_default_orientations_set_the_root_at_creation() {
 }
 
 #[test]
+fn empty_auto_tree_tracks_output_orientation_changes() {
+    let mut t = tree_with_options((1280., 720.), 0., |options| {
+        options.layout.default_orientation = swayward_config::DefaultOrientation::Auto;
+    });
+
+    t.update_config(
+        (720., 1280.).into(),
+        Rectangle::from_size((720., 1280.).into()),
+        false,
+        1.,
+        t.options.clone(),
+    );
+
+    assert!(matches!(
+        t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::SplitV,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn explicit_empty_layout_survives_output_orientation_changes() {
+    let mut t = tree_with_options((1280., 720.), 0., |options| {
+        options.layout.default_orientation = swayward_config::DefaultOrientation::Auto;
+    });
+    t.set_focused_layout(Layout::Stacked);
+
+    t.update_config(
+        (720., 1280.).into(),
+        Rectangle::from_size((720., 1280.).into()),
+        false,
+        1.,
+        t.options.clone(),
+    );
+
+    assert!(matches!(
+        t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::Stacked,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn emptied_initial_tree_keeps_its_pre_mode_orientation() {
+    let mut t = tree_with_options((1280., 720.), 0., |options| {
+        options.layout.default_orientation = swayward_config::DefaultOrientation::Auto;
+    });
+    t.preserve_empty_auto_layout();
+    t.update_config(
+        (720., 1280.).into(),
+        Rectangle::from_size((720., 1280.).into()),
+        false,
+        1.,
+        t.options.clone(),
+    );
+    let window = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+
+    t.remove_tile_node(window).unwrap();
+    t.reset_empty_layout();
+
+    assert!(matches!(
+        t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::SplitH,
+            ..
+        }
+    ));
+    assert_eq!(t.representation_layout(), Layout::SplitH);
+}
+
+#[test]
+fn removing_the_last_window_resets_the_reported_layout() {
+    let mut t = tree((1200., 800.), 0.);
+    let window = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    assert!(!t.move_direction(window, Direction::Down));
+
+    t.remove_tile_node(window).unwrap();
+    t.reset_empty_layout();
+
+    assert_eq!(t.representation_layout(), Layout::SplitH);
+}
+
+#[test]
 fn moving_a_single_window_sets_the_workspace_split_axis() {
     let mut t = tree_with_options((800., 1200.), 0., |options| {
         options.layout.default_orientation = swayward_config::DefaultOrientation::Auto;
@@ -1207,6 +1294,44 @@ fn moving_a_single_window_sets_the_workspace_split_axis() {
 }
 
 #[test]
+fn splitting_a_fullscreen_leaf_transfers_fullscreen_to_its_wrapper() {
+    let mut t = tree((1200., 800.), 0.);
+    let window = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.set_focus(window);
+    assert!(t.set_node_fullscreen(window, Some(FullscreenMode::Workspace)));
+
+    t.split_focused(Layout::SplitV);
+
+    let wrapper = t.nodes[&window].parent.unwrap();
+    assert_eq!(t.fullscreen_node(), Some(wrapper));
+    assert_eq!(t.fullscreen_mode(window), None);
+    t.check_invariants();
+}
+
+#[test]
+fn split_on_an_emptied_tree_updates_layout_but_retains_its_representation() {
+    let mut t = tree((1200., 800.), 0.);
+    let window = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    t.remove_tile_node(window).unwrap();
+
+    t.split_focused(Layout::SplitV);
+
+    assert!(matches!(
+        t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::SplitV,
+            ..
+        }
+    ));
+    assert_eq!(t.representation_layout(), Layout::SplitH);
+
+    t.set_focused_layout(Layout::Stacked);
+    assert_eq!(t.representation_layout(), Layout::Stacked);
+    t.check_invariants();
+}
+
+#[test]
 fn layout_on_an_empty_tree_sets_the_root_layout() {
     let mut t = tree((1200., 800.), 0.);
 
@@ -1220,6 +1345,18 @@ fn layout_on_an_empty_tree_sets_the_root_layout() {
         }
     ));
     t.check_invariants();
+}
+
+#[test]
+fn layout_on_an_empty_tree_initializes_representation_only_when_it_changes() {
+    let mut t = tree((1200., 800.), 0.);
+    assert!(!t.has_had_tile());
+
+    t.set_focused_layout(Layout::SplitH);
+    assert!(!t.has_had_tile());
+
+    t.set_focused_layout(Layout::Stacked);
+    assert!(t.has_had_tile());
 }
 
 #[test]
@@ -1346,6 +1483,38 @@ fn stacked_layout_wraps_a_single_workspace_leaf() {
         assert_eq!(t.focus(), Some(leaf));
         t.check_invariants();
     }
+}
+
+#[test]
+fn layout_split_wraps_a_single_workspace_leaf_when_changing_axis() {
+    let mut t = tree((1200., 800.), 0.);
+    let leaf = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+
+    t.set_focused_layout(Layout::SplitV);
+
+    let TreeNode::Split {
+        layout: root_layout,
+        children,
+        ..
+    } = &t.nodes[&t.root].value
+    else {
+        panic!("root must be a split");
+    };
+    assert_eq!(*root_layout, Layout::SplitH);
+    let [wrapper] = children.as_slice() else {
+        panic!("workspace must contain one wrapper");
+    };
+    assert!(matches!(
+        &t.nodes[wrapper].value,
+        TreeNode::Split {
+            layout: Layout::SplitV,
+            children,
+            ..
+        } if children == &[leaf]
+    ));
+    assert_eq!(t.nodes[&leaf].parent, Some(*wrapper));
+    assert_eq!(t.focus(), Some(leaf));
+    t.check_invariants();
 }
 
 #[test]
@@ -1631,6 +1800,18 @@ fn move_subtree_to_node_inserts_beside_a_leaf_and_into_a_split() {
 }
 
 #[test]
+fn moving_a_subtree_to_its_existing_position_preserves_focus_order() {
+    let mut t = tree((1200., 800.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let second = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+
+    assert!(t.move_subtree_to_node(second, first));
+
+    assert_eq!(t.focused_child_in(t.root), Some(second));
+    t.check_invariants();
+}
+
+#[test]
 fn move_subtree_to_ancestor_appends_after_existing_children() {
     let mut t = tree((1200., 800.), 0.);
     let a = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
@@ -1887,6 +2068,26 @@ fn layout_default_restores_the_same_previous_split_as_toggle() {
         ));
         direct.check_invariants();
     }
+}
+
+#[test]
+fn bare_layout_toggle_restores_the_previous_split() {
+    let mut t = tree((1200., 800.), 0.);
+    t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.set_layout(t.root, Layout::SplitV);
+    t.set_focused_layout(Layout::Tabbed);
+
+    t.toggle_focused_layout(&swayward_ipc::command::LayoutToggle::Default);
+
+    assert!(matches!(
+        t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::SplitV,
+            ..
+        }
+    ));
+    t.check_invariants();
 }
 
 #[test]
@@ -2253,6 +2454,72 @@ fn directional_move_squashes_the_whole_tree() {
 }
 
 #[test]
+fn directional_move_escapes_a_singleton_parallel_parent() {
+    let mut t = tree((1200., 800.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let second = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(second, Layout::SplitV);
+
+    assert!(t.move_direction(second, Direction::Down));
+
+    let IpcNode::Split {
+        layout, children, ..
+    } = t.ipc_tree()
+    else {
+        panic!("root must be a split");
+    };
+    assert_eq!(layout, Layout::SplitV);
+    assert!(matches!(
+        &children[..],
+        [IpcNode::Leaf { id: top, .. }, IpcNode::Leaf { id: bottom, .. }]
+            if *top == first && *bottom == second
+    ));
+    t.check_invariants();
+}
+
+#[test]
+fn directional_move_keeps_an_explicit_split_left_with_one_child() {
+    let mut t = tree((1200., 800.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let moved = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(moved, Layout::SplitV);
+    let remaining = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+    t.set_focus(moved);
+
+    assert!(t.move_direction(moved, Direction::Down));
+    assert!(t.move_direction(moved, Direction::Down));
+
+    let IpcNode::Split {
+        layout, children, ..
+    } = t.ipc_tree()
+    else {
+        panic!("root must be a split");
+    };
+    assert_eq!(layout, Layout::SplitV);
+    assert!(matches!(
+        &children[..],
+        [
+            IpcNode::Split {
+                layout: Layout::SplitH,
+                children: horizontal,
+                ..
+            },
+            IpcNode::Leaf { id, .. },
+        ] if matches!(&horizontal[..], [
+            IpcNode::Leaf { id: left, .. },
+            IpcNode::Split {
+                layout: Layout::SplitV,
+                children: vertical,
+                ..
+            },
+        ] if *left == first
+            && matches!(&vertical[..], [IpcNode::Leaf { id, .. }] if *id == remaining))
+            && *id == moved
+    ));
+    t.check_invariants();
+}
+
+#[test]
 fn directional_move_squashes_after_reordering_siblings() {
     let mut t = tree((1200., 800.), 0.);
     let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
@@ -2614,6 +2881,39 @@ fn resizing_adjacent_siblings_changes_only_that_boundary() {
 }
 
 #[test]
+fn mapping_under_fullscreen_preserves_focus_and_sibling_percents() {
+    let mut t = tree((1920., 1080.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let fullscreen = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    assert!(t.set_node_fullscreen(fullscreen, Some(FullscreenMode::Workspace)));
+
+    let mapped = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+
+    assert_eq!(t.focus(), Some(fullscreen));
+    let first_geometry = t.geometry(first).unwrap();
+    assert_eq!(first_geometry.size.w, t.view_size().w / 2.);
+    assert_eq!(t.ipc_decoration_rect(&3), None);
+    let TreeNode::Split { percents, .. } = &t.nodes[&t.root].value else {
+        panic!("root must be a split");
+    };
+    assert_eq!(percents.len(), 3);
+    assert_eq!(t.nodes[&first].parent, Some(t.root));
+    assert_eq!(t.nodes[&mapped].parent, Some(t.root));
+    let IpcNode::Split { children, .. } = t.ipc_tree() else {
+        panic!("IPC root must be a split");
+    };
+    assert!(matches!(
+        &children[..],
+        [
+            IpcNode::Leaf { percent: Some(first), .. },
+            IpcNode::Leaf { percent: Some(second), .. },
+            IpcNode::Leaf { percent: Some(mapped), .. },
+        ] if *first == 0.5 && *second == 0.5 && *mapped == 0.
+    ));
+    t.check_invariants();
+}
+
+#[test]
 fn mapping_fullscreen_window_replaces_existing_fullscreen() {
     let mut t = tree((1920., 1080.), 0.);
     let first_window = TestWindow::new(1);
@@ -2645,6 +2945,35 @@ fn mapping_fullscreen_window_replaces_existing_fullscreen() {
     assert_eq!(t.fullscreen_mode(first), None);
     assert_eq!(t.fullscreen_mode(second), Some(FullscreenMode::Workspace));
     t.check_invariants();
+}
+
+#[test]
+fn moving_a_fullscreen_leaf_reveals_later_windows_in_the_source_tree() {
+    let mut source = tree((1920., 1080.), 0.);
+    let first = source.add_tile(tile(1, source.view_size()), InsertTarget::Focused);
+    let fullscreen = source.add_tile(tile(2, source.view_size()), InsertTarget::Focused);
+    assert!(source.set_node_fullscreen(fullscreen, Some(FullscreenMode::Workspace)));
+    let mapped = source.add_tile(tile(3, source.view_size()), InsertTarget::Focused);
+    source.remove_tile_node(fullscreen).unwrap();
+
+    let IpcNode::Split { children, .. } = source.ipc_tree() else {
+        panic!("root must be a split");
+    };
+    assert!(matches!(
+        &children[..],
+        [
+            IpcNode::Leaf {
+                id,
+                mapped_under_fullscreen: false,
+                ..
+            },
+            IpcNode::Leaf {
+                id: revealed,
+                mapped_under_fullscreen: false,
+                ..
+            },
+        ] if *id == first && *revealed == mapped
+    ));
 }
 
 #[test]
@@ -2762,6 +3091,51 @@ fn interactive_resize_uses_the_adjacent_sibling_boundary() {
         .get()
         .is_none());
     t.check_invariants();
+}
+
+#[test]
+fn corner_interactive_resize_moves_both_boundaries() {
+    // [1 | [2 / 3]]: window 2's bottom-left corner borders 1 horizontally and
+    // 3 vertically, so a diagonal drag moves both, as sway does.
+    let mut t = tree((1000., 800.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let second = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(second, Layout::SplitV);
+    let third = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+
+    assert!(t.interactive_resize_begin(2, crate::utils::ResizeEdge::BOTTOM_LEFT));
+    assert!(t.interactive_resize_update(&2, Point::from((-100., 80.))));
+
+    assert_eq!(t.geometry(first).unwrap().size.w, 400.);
+    assert_eq!(t.geometry(second).unwrap().size.w, 600.);
+    assert_eq!(t.geometry(second).unwrap().size.h, 480.);
+    assert_eq!(t.geometry(third).unwrap().size.h, 320.);
+    t.check_invariants();
+}
+
+#[test]
+fn corner_interactive_resize_skips_an_axis_without_a_neighbour() {
+    // Side by side, a top-right corner has no vertical neighbour: the drag
+    // still resizes horizontally and ignores the vertical motion.
+    let mut t = tree((1000., 800.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+
+    assert!(t.interactive_resize_begin(1, crate::utils::ResizeEdge::TOP_RIGHT));
+    assert!(t.interactive_resize_update(&1, Point::from((100., -50.))));
+
+    assert_eq!(t.geometry(first).unwrap().size.w, 600.);
+    assert_eq!(t.geometry(first).unwrap().size.h, 800.);
+    t.check_invariants();
+}
+
+#[test]
+fn a_lone_window_has_no_interactive_resize() {
+    let mut t = tree((1000., 800.), 0.);
+    t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+
+    assert!(!t.interactive_resize_begin(1, crate::utils::ResizeEdge::BOTTOM_RIGHT));
+    assert!(t.interactive_resize.is_none());
 }
 
 #[test]
@@ -3116,6 +3490,33 @@ fn tabbed_split_only_exposes_the_focused_branch() {
 }
 
 #[test]
+fn leaves_nested_below_a_tab_or_stack_report_their_own_titlebars() {
+    for layout in [Layout::Tabbed, Layout::Stacked] {
+        let mut t = tree((1000., 800.), 0.);
+        let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+        t.set_layout(t.root, layout);
+        t.split(first, Layout::SplitH);
+        t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+        t.set_focus(t.root);
+        t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+
+        let IpcNode::Split { children, .. } = t.ipc_tree() else {
+            panic!("workspace root is not a split");
+        };
+        let IpcNode::Split { children, .. } = &children[0] else {
+            panic!("tab or stack child is not a split");
+        };
+        assert!(children.iter().all(|child| matches!(
+            child,
+            IpcNode::Leaf {
+                deco_rect: Some(_),
+                ..
+            }
+        )));
+    }
+}
+
+#[test]
 fn stacked_split_reserves_one_titlebar_row_per_child() {
     let mut t = tree((1000., 800.), 0.);
     let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
@@ -3191,6 +3592,22 @@ fn tab_indicator_focus_target_is_the_focused_descendant() {
             Some(3)
         );
     }
+}
+
+#[test]
+fn stacked_siblings_keep_their_geometry_while_one_is_fullscreen() {
+    let mut t = tree((1000., 800.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let second = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.set_layout(t.root, Layout::Stacked);
+
+    assert!(t.set_node_fullscreen(second, Some(FullscreenMode::Workspace)));
+
+    assert_eq!(t.geometry(first).unwrap().loc.y, t.titlebar_height * 2.);
+    assert_eq!(
+        t.geometry(second),
+        Some(Rectangle::from_size(t.view_size()))
+    );
 }
 
 #[test]

@@ -56,6 +56,8 @@ pub struct Monitor<W: LayoutElement> {
     working_area: Rectangle<f64, Logical>,
     // Must always contain at least one.
     pub(super) workspaces: Vec<Workspace<W>>,
+    /// Workspace IDs in sway's output child order, separate from spatial storage.
+    sway_workspace_order: Vec<WorkspaceId>,
     /// Index of the currently active workspace.
     pub(super) active_workspace_idx: usize,
     /// Workspaces ordered from most to least recently focused.
@@ -300,6 +302,7 @@ impl<W: LayoutElement> Monitor<W> {
         ws_id_to_activate: Option<WorkspaceId>,
         initial_workspace_name: Option<String>,
         initial_workspace_number: Option<i32>,
+        preserve_initial_auto_layout: bool,
         clock: Clock,
         base_options: Rc<Options>,
         layout_config: Option<LayoutPart>,
@@ -317,6 +320,9 @@ impl<W: LayoutElement> Monitor<W> {
         for (idx, ws) in workspaces.iter_mut().enumerate() {
             assert!(ws.must_be_kept());
 
+            if preserve_initial_auto_layout {
+                ws.preserve_empty_auto_layout();
+            }
             ws.set_output(Some(output.clone()));
             ws.update_config(options.clone());
 
@@ -330,6 +336,12 @@ impl<W: LayoutElement> Monitor<W> {
         // trailing placeholder is an affordance of its scrolling strip.
         if workspaces.is_empty() {
             let mut ws = Workspace::new(output.clone(), clock.clone(), options.clone());
+            // Sway creates the compositor's first workspace from the first
+            // output's pre-configuration mode, then keeps that split when the
+            // configured mode is applied. Later outputs use their configured mode.
+            if preserve_initial_auto_layout {
+                ws.preserve_empty_auto_layout();
+            }
             if let Some(name) = initial_workspace_name {
                 let (name, number) =
                     super::sway_workspace_identity(crate::command::WorkspaceTarget::Name(name))
@@ -341,6 +353,7 @@ impl<W: LayoutElement> Monitor<W> {
             workspaces.push(ws);
         }
 
+        let sway_workspace_order = workspaces.iter().map(Workspace::id).collect();
         let workspace_focus_history = workspaces.iter().map(Workspace::id).rev().collect();
 
         Self {
@@ -350,6 +363,7 @@ impl<W: LayoutElement> Monitor<W> {
             view_size,
             working_area,
             workspaces,
+            sway_workspace_order,
             active_workspace_idx,
             workspace_focus_history,
             previous_workspace_id: None,
@@ -412,6 +426,10 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn active_workspace(&mut self) -> &mut Workspace<W> {
         &mut self.workspaces[self.active_workspace_idx]
+    }
+
+    pub fn refresh_empty_auto_layout(&mut self, idx: usize) {
+        self.workspaces[idx].track_empty_auto_layout();
     }
 
     pub fn idx_of_ws(&self, id: WorkspaceId) -> Option<usize> {
@@ -479,30 +497,48 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn sort_sway_workspaces(&mut self) {
-        let active = self.active_workspace_ref().id();
-        // Sway orders numeric workspaces ahead of non-numeric workspaces and
-        // preserves creation order among equal-ranked entries
+        // Sway sorts the output's child list, not compositor spatial storage.
+        // Its stable sort preserves current order among equal-ranked entries
         // (sway/sway/tree/output.c:387-405).
-        let keys = (0..self.workspaces.len())
-            .map(|index| {
-                let workspace = &self.workspaces[index];
+        let keys = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(index, workspace)| {
                 let key = if !workspace.has_sway_identity() {
-                    (2u8, 0, workspace.id())
+                    (2u8, 0)
                 } else if workspace.number().is_some() {
-                    (0, self.sway_workspace_number(index), workspace.id())
+                    (0, self.sway_workspace_number(index))
                 } else {
-                    // Named but non-numeric: after every number.
-                    (1, 0, workspace.id())
+                    (1, 0)
                 };
                 (workspace.id(), key)
             })
             .collect::<Vec<_>>();
-        self.workspaces.sort_by_key(|workspace| {
+        self.sway_workspace_order
+            .retain(|id| keys.iter().any(|(candidate, _)| candidate == id));
+        self.sway_workspace_order.sort_by_key(|id| {
             keys.iter()
+                .find(|(candidate, _)| candidate == id)
+                .map_or((2, 0), |(_, key)| *key)
+        });
+
+        let active = self.active_workspace_ref().id();
+        self.workspaces.sort_by_key(|workspace| {
+            let key = keys
+                .iter()
                 .find(|(id, _)| *id == workspace.id())
-                .map_or((2u8, 0, workspace.id()), |(_, key)| *key)
+                .map_or((2, 0), |(_, key)| *key);
+            (key.0, key.1, workspace.id())
         });
         self.active_workspace_idx = self.idx_of_ws(active).unwrap();
+    }
+
+    pub(crate) fn sway_workspaces(&self) -> impl Iterator<Item = (usize, &Workspace<W>)> {
+        self.sway_workspace_order.iter().filter_map(|id| {
+            let index = self.idx_of_ws(*id)?;
+            Some((index, &self.workspaces[index]))
+        })
     }
 
     /// Create a workspace, applying the per-name configuration for `name` when
@@ -530,10 +566,24 @@ impl<W: LayoutElement> Monitor<W> {
         ws.set_sway_identity(name, number);
         let id = ws.id();
         self.insert_new_workspace_at(idx, ws);
+        self.sway_workspace_order
+            .retain(|candidate| *candidate != id);
+        self.sway_workspace_order.push(id);
         id
     }
 
     fn insert_new_workspace_at(&mut self, idx: usize, ws: Workspace<W>) {
+        let order_index = self
+            .workspaces
+            .get(idx)
+            .and_then(|next| {
+                self.sway_workspace_order
+                    .iter()
+                    .position(|id| *id == next.id())
+            })
+            .unwrap_or(self.sway_workspace_order.len());
+        self.sway_workspace_order.insert(order_index, ws.id());
+        self.workspace_focus_history.push(ws.id());
         self.workspaces.insert(idx, ws);
         if idx <= self.active_workspace_idx {
             self.active_workspace_idx += 1;
@@ -573,6 +623,9 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let prev_active_idx = self.active_workspace_idx;
+        if prev_active_idx != idx && !self.workspaces[prev_active_idx].has_windows() {
+            self.workspaces[prev_active_idx].reset_empty_tiling_layout();
+        }
         self.active_workspace_idx = idx;
         let active = self.active_workspace_ref().id();
         self.workspace_focus_history.retain(|id| *id != active);
@@ -781,7 +834,8 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        self.workspaces.remove(idx);
+        let removed = self.workspaces.remove(idx);
+        self.sway_workspace_order.retain(|id| *id != removed.id());
         if idx < self.active_workspace_idx {
             self.active_workspace_idx -= 1;
         }
@@ -817,6 +871,8 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn detach_workspace(&mut self, id: WorkspaceId) -> Option<Workspace<W>> {
         let idx = self.idx_of_ws(id)?;
         let mut ws = self.workspaces.remove(idx);
+        self.sway_workspace_order
+            .retain(|candidate| *candidate != id);
         ws.set_output(None);
 
         // For monitor current workspace removal, we focus previous rather than next (<= rather
@@ -835,6 +891,17 @@ impl<W: LayoutElement> Monitor<W> {
         ws.update_config(self.options.clone());
 
         idx = idx.min(self.workspaces.len());
+        let order_index = self
+            .workspaces
+            .get(idx)
+            .and_then(|next| {
+                self.sway_workspace_order
+                    .iter()
+                    .position(|id| *id == next.id())
+            })
+            .unwrap_or(self.sway_workspace_order.len());
+        self.sway_workspace_order.insert(order_index, ws.id());
+        self.workspace_focus_history.push(ws.id());
         self.workspaces.insert(idx, ws);
 
         if idx <= self.active_workspace_idx {
@@ -879,7 +946,8 @@ impl<W: LayoutElement> Monitor<W> {
             .collect::<Vec<_>>();
         for idx in doomed.into_iter().rev() {
             if idx != self.active_workspace_idx {
-                self.workspaces.remove(idx);
+                let removed = self.workspaces.remove(idx);
+                self.sway_workspace_order.retain(|id| *id != removed.id());
                 if idx < self.active_workspace_idx {
                     self.active_workspace_idx -= 1;
                 }
@@ -908,6 +976,8 @@ impl<W: LayoutElement> Monitor<W> {
 
         let active = self.active_workspace_ref().id();
 
+        self.sway_workspace_order
+            .extend(workspaces.iter().map(Workspace::id));
         self.workspaces.extend(workspaces);
         self.reap_empty_workspaces();
         self.active_workspace_idx = self.idx_of_ws(active).unwrap();
@@ -1045,7 +1115,6 @@ impl<W: LayoutElement> Monitor<W> {
         );
         if let (Some(fullscreen), Some(fullscreen_window)) = (fullscreen, fullscreen_window) {
             self.workspaces[new_idx].set_window_fullscreen(&fullscreen_window, Some(fullscreen));
-            self.workspaces[new_idx].set_fullscreen_restore_to_floating(&fullscreen_window);
         }
 
         if self.workspace_switch.is_none() {
@@ -1210,6 +1279,20 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub(super) fn previous_workspace_name(&self) -> Option<&str> {
         self.previous_workspace_name.as_deref()
+    }
+
+    pub fn finish_workspace_switch(&mut self, target: Option<WorkspaceId>) {
+        let Some(WorkspaceSwitch::Animation(_)) = self.workspace_switch else {
+            return;
+        };
+        if !self.active_workspace_ref().has_windows() {
+            return;
+        }
+        self.workspace_switch = None;
+        if let Some(previous) = self.previous_workspace_id.filter(|id| Some(*id) != target) {
+            self.consider_destroy_workspace(previous);
+        }
+        self.clean_up_workspaces();
     }
 
     pub fn switch_workspace(&mut self, idx: usize) {
@@ -1776,6 +1859,30 @@ impl<W: LayoutElement> Monitor<W> {
 
         let (ws, geo) = self.workspace_under(pos_within_output)?;
         ws.resize_edges_under(pos_within_output - geo.loc)
+    }
+
+    pub fn border_resize_edges_under(
+        &self,
+        pos_within_output: Point<f64, Logical>,
+    ) -> Option<(&W, ResizeEdge)> {
+        if self.overview_progress.is_some() {
+            return None;
+        }
+
+        let (ws, geo) = self.workspace_under(pos_within_output)?;
+        ws.border_resize_edges_under(pos_within_output - geo.loc)
+    }
+
+    pub fn gap_resize_edges_under(
+        &self,
+        pos_within_output: Point<f64, Logical>,
+    ) -> Option<(&W, ResizeEdge)> {
+        if self.overview_progress.is_some() {
+            return None;
+        }
+
+        let (ws, geo) = self.workspace_under(pos_within_output)?;
+        ws.gap_resize_edges_under(pos_within_output - geo.loc)
     }
 
     pub(super) fn insert_position(

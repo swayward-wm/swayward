@@ -1,4 +1,67 @@
 #[test]
+fn get_tree_reports_sway_default_floating_rules() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+
+    for (name, min_size, max_size, expected_floating) in [
+        ("fixed-width", (300, 100), (300, 200), true),
+        ("fixed-height-zero-width", (0, 200), (0, 200), false),
+        ("fixed-both", (300, 200), (300, 200), true),
+    ] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(name.into());
+        window.set_min_size(min_size.0, min_size.1);
+        window.set_max_size(max_size.0, max_size.1);
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+        let node = find_json_node_with_app_id(&tree, name).unwrap();
+        assert_eq!(
+            node["floating"],
+            if expected_floating { "user_on" } else { "auto_off" },
+            "GET_TREE floating state for {name}"
+        );
+    }
+
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_surface = parent.surface.clone();
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let dialog = f.client(client).create_window();
+    dialog.xdg_toplevel.set_app_id("dialog".into());
+    dialog.set_parent(Some(&parent_toplevel));
+    let dialog_surface = dialog.surface.clone();
+    dialog.commit();
+    f.roundtrip(client);
+    let dialog = f.client(client).window(&dialog_surface);
+    dialog.attach_new_buffer();
+    dialog.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "dialog").unwrap()["floating"],
+        "user_on"
+    );
+}
+
+#[test]
 fn live_ipc_descriptions_match_sway_schema_and_values() {
     let config = swayward_config::Config::parse_mem(
         "layout { gaps 0; outer-gaps { left 0; right 0; top 0; bottom 0; }; border { on; width 2; }; }",
@@ -146,7 +209,73 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
 }
 
 #[test]
-fn workspace_with_only_floating_windows_reports_empty_tiling_representation() {
+fn moved_workspace_keeps_destination_output_focus_order() {
+    let config = swayward_config::Config::parse_mem(
+        r#"
+        output "headless-1" { mode custom=true "1270x1408@60"; scale 1; }
+        output "headless-2" { mode custom=true "1270x1408@60"; scale 1; }
+        "#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    let handle = f.swayward().event_loop.clone();
+    let ipc_server =
+        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
+    let socket = ipc_server.socket_path.clone().unwrap();
+    f.swayward().ipc_server = Some(ipc_server);
+    f.niri_state().ipc_keyboard_layouts_changed();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    assert!(crate::command::execute(f.niri_state(), "workspace __fixture_reset")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "workspace 1")[0].success);
+    let client = f.add_client();
+
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "move workspace to output right")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "workspace 2")[0].success);
+    map_test_window(&mut f, client, "fixture-2");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let output_focus = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .skip(1)
+        .map(|output| {
+            let workspaces = output["nodes"].as_array().unwrap();
+            let workspace_names = workspaces
+                .iter()
+                .map(|workspace| workspace["name"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            let focused_names = output["focus"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| {
+                    workspaces
+                        .iter()
+                        .find(|workspace| workspace["id"] == *id)
+                        .unwrap()["name"]
+                        .as_str()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            (workspace_names, focused_names)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        output_focus,
+        [
+            (vec!["3"], vec!["3"]),
+            (vec!["1", "2"], vec!["2", "1"]),
+        ]
+    );
+}
+
+#[test]
+fn active_emptied_workspace_retains_its_layout_and_representation() {
     let mut f = Fixture::new();
     let handle = f.swayward().event_loop.clone();
     let ipc_server =
@@ -154,7 +283,7 @@ fn workspace_with_only_floating_windows_reports_empty_tiling_representation() {
     let socket = ipc_server.socket_path.clone().unwrap();
     f.swayward().ipc_server = Some(ipc_server);
     f.niri_state().ipc_keyboard_layouts_changed();
-    f.add_output(1, (1270, 1408));
+    f.add_output(1, (1280, 720));
     let client = f.add_client();
 
     let window = f.client(client).create_window();
@@ -165,11 +294,46 @@ fn workspace_with_only_floating_windows_reports_empty_tiling_representation() {
     window.attach_new_buffer();
     window.ack_last_and_commit();
     f.double_roundtrip(client);
-    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move down")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
 
     let mut stream = UnixStream::connect(socket).unwrap();
     let workspaces = query_ipc(&mut f, &mut stream, MessageType::GetWorkspaces);
+    assert_eq!(workspaces[0]["layout"], "splitv");
     assert_eq!(workspaces[0]["representation"], "V[]");
+}
+
+#[test]
+fn scratchpad_tree_preserves_insertion_order() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+
+    for app_id in ["first", "second"] {
+        map_test_window(&mut f, client, app_id);
+        assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    }
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let scratchpad = tree["nodes"][0]["nodes"][0]["floating_nodes"]
+        .as_array()
+        .unwrap();
+    let app_ids = scratchpad
+        .iter()
+        .map(|node| node["app_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(app_ids, ["first", "second"]);
+    assert_eq!(
+        tree["nodes"][0]["nodes"][0]["focus"],
+        serde_json::json!([scratchpad[1]["id"], scratchpad[0]["id"]])
+    );
 }
 
 #[test]
@@ -427,6 +591,54 @@ fn split_containers_report_sway_container_state_fields() {
 }
 
 #[test]
+fn initial_workspace_keeps_pre_mode_orientation_and_later_workspace_uses_configured_mode() {
+    let config = swayward_config::Config::parse_mem(
+        r#"output "headless-1" { mode custom=true "1270x1408@60"; }"#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+
+    assert!(crate::command::execute(f.niri_state(), "workspace 1")[0].success);
+    for (workspace, app_id) in [(None, "initial"), (Some("2"), "later")] {
+        if let Some(workspace) = workspace {
+            assert!(crate::command::execute(
+                f.niri_state(),
+                &format!("workspace {workspace}")
+            )[0]
+            .success);
+        }
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        find_json_parent_of_app_id(&tree, "initial").unwrap()["layout"],
+        "splith"
+    );
+    assert_eq!(
+        find_json_parent_of_app_id(&tree, "later").unwrap()["layout"],
+        "splitv"
+    );
+}
+
+#[test]
 fn emptied_workspace_is_recreated_with_default_layout() {
     let mut config = swayward_config::Config::default();
     config.animations.off = true;
@@ -479,6 +691,37 @@ fn emptied_workspace_is_recreated_with_default_layout() {
     assert_eq!(workspace["type"], "workspace");
     assert_eq!(workspace["name"], "1");
     assert_eq!(workspace["layout"], "splitv");
+}
+
+#[test]
+fn configured_workspace_layout_uses_sways_layout_field_without_an_i3_alias() {
+    let mut config = swayward_config::Config::default();
+    config.layout.workspace_layout = swayward_config::WorkspaceLayout::Tabbed;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["nodes"][0]["layout"], "tabbed");
+    assert!(workspace.get("workspace_layout").is_none());
 }
 
 #[test]
@@ -548,6 +791,186 @@ fn layout_on_a_focused_nested_split_does_not_promote_to_the_workspace_root() {
         assert_eq!(inner["y"], if expected_inner == "stacked" { 110 } else { 66 });
         assert_eq!(inner["height"], if expected_inner == "stacked" { 970 } else { 1014 });
     }
+}
+
+#[test]
+fn layout_splitv_wraps_a_single_window_without_changing_the_workspace_axis() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixture-1".into());
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    assert!(crate::command::execute(f.niri_state(), "layout splitv")[0].success);
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["orientation"], "horizontal");
+    assert_eq!(workspace["representation"], "H[V[fixture-1]]");
+    assert_eq!(workspace["nodes"][0]["layout"], "splitv");
+    assert_eq!(workspace["nodes"][0]["nodes"][0]["app_id"], "fixture-1");
+}
+
+#[test]
+fn splitting_a_focused_container_keeps_it_nested() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    assert!(crate::command::execute(f.niri_state(), "workspace resize-levels")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "split h")[0].success);
+    let client = f.add_client();
+    map_test_window(&mut f, client, "first");
+    map_test_window(&mut f, client, "second");
+    map_test_window(&mut f, client, "third");
+    map_test_window(&mut f, client, "fourth");
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "split h")[0].success);
+    map_test_window(&mut f, client, "fifth");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["representation"], "H[H[first second third fourth] fifth]");
+    assert_eq!(workspace["nodes"][0]["layout"], "splith");
+}
+
+#[test]
+fn removing_one_of_two_split_windows_preserves_the_wrapper() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "layout splitv")[0].success);
+    map_test_window(&mut f, client, "fixture-2");
+
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["representation"], "H[V[fixture-1]]");
+    assert_eq!(workspace["nodes"][0]["layout"], "splitv");
+    assert_eq!(workspace["nodes"][0]["nodes"][0]["app_id"], "fixture-1");
+}
+
+#[test]
+fn moving_a_single_window_in_its_split_direction_reaps_the_old_wrapper() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixture-1".into());
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    assert!(crate::command::execute(f.niri_state(), "layout splitv")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move down")[0].success);
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splitv");
+    assert_eq!(workspace["representation"], "V[fixture-1]");
+    assert_eq!(workspace["nodes"][0]["layout"], "none");
+    assert_eq!(workspace["nodes"][0]["app_id"], "fixture-1");
+}
+
+#[test]
+fn moving_a_single_window_across_its_split_direction_rewraps_the_workspace_children() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixture-1".into());
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    assert!(crate::command::execute(f.niri_state(), "layout splitv")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move right")[0].success);
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["representation"], "H[V[fixture-1]]");
+    assert_eq!(workspace["nodes"][0]["layout"], "splitv");
+    assert_eq!(workspace["nodes"][0]["nodes"][0]["app_id"], "fixture-1");
+}
+
+#[test]
+fn fullscreen_floating_window_keeps_sways_raw_focus() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixture-1".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "fixture-1").unwrap()["focused"],
+        true
+    );
 }
 
 #[test]
@@ -681,7 +1104,7 @@ fn focused_container_can_be_marked_and_targeted_by_con_id() {
         "tabbed"
     );
 
-    let outcome = crate::command::execute(f.niri_state(), "[con_id=__focused__] layout stacked");
+    let outcome = crate::command::execute(f.niri_state(), "[con_id=__focused__] layout stacking");
     assert!(outcome[0].success);
     let swayward = f.swayward();
     let tree = serde_json::to_value(describe_tree(
@@ -790,7 +1213,7 @@ fn split_none_flattens_only_a_singleton_parent_and_preserves_focus() {
         [swayward_ipc::CommandOutcome {
             success: false,
             error: Some("Can only flatten a child container with no siblings".into()),
-            parse_error: None,
+            parse_error: Some(false),
         }]
     );
     let workspace = f.swayward().layout.active_workspace().unwrap();
@@ -862,6 +1285,16 @@ fn criteria_split_command_applies_to_a_matched_split_container() {
     let parent = find_parent(&tree, marked["id"].as_i64().unwrap()).unwrap();
     assert_eq!(parent["layout"], "splitv");
     assert_eq!(parent["nodes"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn layout_default_without_previous_split_is_a_parse_error() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let outcome = crate::command::execute(f.niri_state(), "layout default");
+    assert!(!outcome[0].success);
+    assert_eq!(outcome[0].parse_error, Some(true));
 }
 
 #[test]

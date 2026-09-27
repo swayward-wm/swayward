@@ -98,9 +98,13 @@ pub(crate) fn describe_workspaces_with_marks(
     container_marks: &std::collections::HashMap<(WorkspaceId, NodeId), Vec<String>>,
 ) -> Vec<Workspace> {
     layout
-        .workspaces()
+        .monitors()
+        .flat_map(|monitor| {
+            monitor
+                .sway_workspaces()
+                .map(move |(index, workspace)| (monitor, index, workspace))
+        })
         .filter_map(|(monitor, index, workspace)| {
-            let monitor = monitor?;
             if !workspace.must_be_kept() && monitor.active_workspace_ref().id() != workspace.id() {
                 return None;
             }
@@ -339,13 +343,12 @@ fn describe_output_node(
         monitor.output(),
         monitor.active_workspace_ref(),
     );
-    let workspaces = layout
-        .workspaces()
-        .filter(|(candidate, _, workspace)| {
-            (workspace.must_be_kept() || monitor.active_workspace_ref().id() == workspace.id())
-                && candidate.is_some_and(|candidate| candidate.output() == monitor.output())
+    let workspaces = monitor
+        .sway_workspaces()
+        .filter(|(_, workspace)| {
+            workspace.must_be_kept() || monitor.active_workspace_ref().id() == workspace.id()
         })
-        .map(|(_, index, workspace)| {
+        .map(|(index, workspace)| {
             describe_workspace_node(
                 layout,
                 workspace,
@@ -486,8 +489,7 @@ fn describe_workspace_node(
                 compositor_layout.is_scratchpad_window(&tile.window().window),
                 true,
             );
-            node.focused =
-                workspace.floating_is_active() && active_window == Some(tile.window().id());
+            node.focused = active_window == Some(tile.window().id());
             let border = tile.sway_border();
             node.border = ipc_border(border.0);
             node.current_border_width = i32::from(border.1);
@@ -520,9 +522,28 @@ fn describe_workspace_node(
     } else {
         focus.extend(floating_focus);
     }
+    if !workspace.floating_is_active() {
+        let focus_timestamps = workspace
+            .windows()
+            .filter_map(|window| {
+                window
+                    .focus_timestamp()
+                    .map(|timestamp| (window_id(window.id()), timestamp))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let children = nodes.iter().chain(&floating_nodes).collect::<Vec<_>>();
+        focus.sort_by_key(|id| {
+            Reverse(
+                children
+                    .iter()
+                    .find(|child| child.id == *id)
+                    .and_then(|child| newest_focus_timestamp(child, &focus_timestamps)),
+            )
+        });
+    }
     let representation = workspace
         .tiling_has_had_window()
-        .then(|| tree_representation(layout, &nodes));
+        .then(|| tree_representation(ipc_layout(workspace.tiling_representation_layout()), &nodes));
     let mut nodes = nodes;
     set_tabbed_percentages(layout, &mut nodes, rect);
     if !apply_fullscreen_state(&mut nodes, workspace_visible) {
@@ -553,6 +574,18 @@ fn describe_workspace_node(
     node.fullscreen_mode = 1;
     node.urgent = workspace.is_urgent();
     node
+}
+
+fn newest_focus_timestamp(
+    node: &Node,
+    focus_timestamps: &std::collections::HashMap<i64, std::time::Duration>,
+) -> Option<std::time::Duration> {
+    node.nodes
+        .iter()
+        .chain(&node.floating_nodes)
+        .filter_map(|child| newest_focus_timestamp(child, focus_timestamps))
+        .chain(focus_timestamps.get(&node.id).copied())
+        .max()
 }
 
 fn set_tabbed_percentages(layout: NodeLayout, children: &mut [Node], parent_rect: Rect) {
@@ -618,22 +651,28 @@ fn set_windows_visible(node: &mut Node, visible: bool) {
 }
 
 fn apply_fullscreen_state(nodes: &mut [Node], workspace_visible: bool) -> bool {
-    let Some(fullscreen) = nodes.iter().position(contains_fullscreen) else {
-        return false;
-    };
-    for (index, node) in nodes.iter_mut().enumerate() {
-        if index == fullscreen {
-            node.percent = Some(1.);
-            if node.fullscreen_mode == 0 {
-                apply_fullscreen_state(&mut node.nodes, workspace_visible);
+    fn apply(nodes: &mut [Node], workspace_visible: bool, set_full_percent: bool) -> bool {
+        let Some(fullscreen) = nodes.iter().position(contains_fullscreen) else {
+            return false;
+        };
+        for (index, node) in nodes.iter_mut().enumerate() {
+            if index == fullscreen {
+                if set_full_percent {
+                    node.percent = Some(1.);
+                }
+                if node.fullscreen_mode == 0 {
+                    apply(&mut node.nodes, workspace_visible, false);
+                } else {
+                    set_windows_visible(node, workspace_visible);
+                }
             } else {
-                set_windows_visible(node, workspace_visible);
+                set_windows_visible(node, false);
             }
-        } else {
-            set_windows_visible(node, false);
         }
+        true
     }
-    true
+
+    apply(nodes, workspace_visible, true)
 }
 
 fn contains_fullscreen(node: &Node) -> bool {
@@ -763,6 +802,7 @@ pub(crate) fn describe_tiling<'a, I>(
                 node.border = NodeBorder::None;
                 node.current_border_width = 0;
                 node.percent = Some(0.);
+                node.rect = Rect::default();
             } else {
                 node.percent = percent;
             }
@@ -980,10 +1020,8 @@ fn scratch_output(
     rect: Rect,
     marks: &std::collections::HashMap<MappedId, Vec<String>>,
 ) -> Node {
-    let mut scratchpad_windows = layout.scratchpad_windows().collect::<Vec<_>>();
-    scratchpad_windows.reverse();
-    let floating_nodes = scratchpad_windows
-        .into_iter()
+    let floating_nodes = layout
+        .scratchpad_windows()
         .map(|mapped| {
             let mut node = describe_window(
                 mapped,
@@ -1002,7 +1040,7 @@ fn scratch_output(
             node
         })
         .collect::<Vec<_>>();
-    let focus = floating_nodes.iter().map(|node| node.id).collect();
+    let focus = floating_nodes.iter().rev().map(|node| node.id).collect();
     let mut workspace = common_node(
         SCRATCH_WORKSPACE_ID,
         NodeType::Workspace,
@@ -1132,5 +1170,47 @@ mod tests {
             ipc_border(swayward_ipc::command::BorderStyle::Toggle),
             NodeBorder::None
         );
+    }
+
+    #[test]
+    fn fullscreen_descendants_keep_percentages() {
+        let leaf = |id, percent, fullscreen_mode| {
+            let mut node = common_node(
+                id,
+                NodeType::Con,
+                NodeLayout::None,
+                "none",
+                None,
+                Rect::default(),
+                vec![],
+                vec![],
+                vec![],
+                false,
+                NodeProperties::None {},
+            );
+            node.percent = percent;
+            node.fullscreen_mode = fullscreen_mode;
+            node
+        };
+        let mut branch = common_node(
+            1,
+            NodeType::Con,
+            NodeLayout::SplitH,
+            "horizontal",
+            None,
+            Rect::default(),
+            vec![leaf(2, Some(0.4), 0), leaf(3, Some(0.6), 1)],
+            vec![],
+            vec![],
+            false,
+            NodeProperties::None {},
+        );
+        branch.percent = Some(0.5);
+        let mut nodes = vec![branch, leaf(4, Some(0.5), 0)];
+
+        assert!(apply_fullscreen_state(&mut nodes, true));
+        assert_eq!(nodes[0].percent, Some(1.));
+        assert_eq!(nodes[0].nodes[0].percent, Some(0.4));
+        assert_eq!(nodes[0].nodes[1].percent, Some(0.6));
     }
 }

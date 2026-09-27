@@ -68,14 +68,71 @@ fn mark_event_matches_captured_sway_schema() {
 
     assert!(crate::command::execute(fixture.niri_state(), "mark event-mark")[0].success);
     fixture.niri_state().ipc_refresh_layout();
-    let (event_type, payload) = read_ipc_reply(&mut fixture, &mut subscriber);
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    assert_eq!(event_type, (1 << 31) | 3);
+    let cleared = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(cleared["change"], "mark");
+    assert_eq!(cleared["container"]["marks"], serde_json::json!([]));
+
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
     assert_eq!(event_type, (1 << 31) | 3);
     let expected: Value = serde_json::from_str(sway_fixture!("events/window.mark.json")).unwrap();
-    assert_event_shape(
-        &expected,
-        &serde_json::from_str(&payload).unwrap(),
-        "$window",
-    );
+    let marked = serde_json::from_str(&payload).unwrap();
+    assert_event_shape(&expected, &marked, "$window");
+    assert_eq!(marked["container"]["marks"], serde_json::json!(["event-mark"]));
+    assert!(remainder.is_empty());
+}
+
+#[test]
+fn plain_mark_on_container_emits_clear_then_add_events() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (800, 600));
+    let client = fixture.add_client();
+    for index in 0..3 {
+        let window = fixture.client(client).create_window();
+        window.xdg_toplevel.set_app_id(format!("event-{index}"));
+        window.set_title(&format!("event-{index}"));
+        let surface = window.surface.clone();
+        window.commit();
+        fixture.roundtrip(client);
+        let window = fixture.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        fixture.double_roundtrip(client);
+        if index == 0 {
+            assert!(crate::command::execute(fixture.niri_state(), "splitv")[0].success);
+        }
+        if index == 1 {
+            assert!(crate::command::execute(fixture.niri_state(), "splith")[0].success);
+        }
+    }
+    assert!(crate::command::execute(fixture.niri_state(), "focus parent")[0].success);
+
+    let mut subscriber = UnixStream::connect(socket).unwrap();
+    subscriber
+        .write_all(&swayward_ipc::wire::encode(
+            MessageType::Subscribe,
+            r#"["window"]"#,
+        ))
+        .unwrap();
+    let _ = read_ipc_reply(&mut fixture, &mut subscriber);
+
+    assert!(crate::command::execute(fixture.niri_state(), "mark containermark")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+    let ((_, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    let cleared = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(cleared["change"], "mark");
+    assert_eq!(cleared["container"]["marks"], serde_json::json!([]));
+
+    let ((_, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
+    let marked = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(marked["change"], "mark");
+    assert_eq!(marked["container"]["marks"], serde_json::json!(["containermark"]));
+    assert!(remainder.is_empty());
 }
 
 #[test]
@@ -1943,6 +2000,23 @@ fn translated_keysym_uses_post_transition_consumed_modifiers() {
         .swayward()
         .layout
         .find_workspace_by_name("translated")
+        .is_some());
+}
+
+#[test]
+fn consumed_shift_still_matches_an_unchanged_raw_keysym() {
+    let config = swayward_config::Config::parse_mem(
+        r#"binds { Super+Shift+BackSpace { command "rename workspace to shifted-backspace"; }; }"#,
+    )
+    .unwrap();
+    let mut fixture = Fixture::with_config(config);
+    fixture.add_output(1, (1280, 720));
+
+    type_key_chords(&mut fixture, &[&[133, 50, 22]]);
+    assert!(fixture
+        .swayward()
+        .layout
+        .find_workspace_by_name("shifted-backspace")
         .is_some());
 }
 

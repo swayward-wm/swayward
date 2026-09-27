@@ -30,23 +30,35 @@ enum CommandTarget {
 }
 
 pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
+    state.ipc_begin_workspace_transaction();
     // Sway expands variables before dispatch, for every argument except the
     // name being defined by `set` (`sway/sway/commands.c:283-285`). This is the
     // single choke point for both IPC commands and key bindings, matching
     // sway, where a binding re-enters execute_command at press time
     // (`sway/sway/commands/bind.c:635`).
     let mut parsed = parse_with_variables(input, &state.swayward.sway_variables);
-    if state.swayward.layout.focus().is_none()
-        && input
-            .split_whitespace()
-            .next()
-            .is_some_and(|name| name.eq_ignore_ascii_case("resize"))
-        && parsed.first().is_some_and(Result::is_err)
-    {
-        parsed[0] = Err(swayward_ipc::command::parse_error("Cannot resize nothing"));
+    if state.swayward.layout.focus().is_none() {
+        for parsed in &mut parsed {
+            if matches!(parsed, Ok(parsed) if matches!(parsed.command, Command::Border(_))) {
+                *parsed = Err(swayward_ipc::command::parse_error(
+                    "Only views can have borders",
+                ));
+                continue;
+            }
+            if let Err(error) = parsed {
+                let message = error.error.as_deref().unwrap_or_default();
+                if message.starts_with("Expected 'border ") {
+                    *error = swayward_ipc::command::parse_error("Only views can have borders");
+                } else if message.starts_with("Expected 'resize ")
+                    || message.starts_with("Invalid resize ")
+                {
+                    *error = swayward_ipc::command::parse_error("Cannot resize nothing");
+                }
+            }
+        }
     }
     let mut retained_targets = None;
-    parsed
+    let outcomes = parsed
         .into_iter()
         .map(|parsed| match parsed {
             Ok(parsed) => {
@@ -57,7 +69,9 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
             }
             Err(error) => error,
         })
-        .collect()
+        .collect();
+    state.ipc_commit_workspace_transaction();
+    outcomes
 }
 
 fn execute_one(
@@ -123,7 +137,7 @@ fn execute_one(
             }
             None
         }
-        Command::Focus => None,
+        Command::Focus => return command_failure("No container to focus was specified."),
         Command::FocusWorkspace => return failure("No container to focus was specified."),
         Command::FocusDirection(direction) => focus::direction(state, direction),
         Command::FocusOutput(identifier) => {
@@ -183,7 +197,11 @@ fn execute_one(
             let Some(workspace) = state.swayward.layout.active_workspace() else {
                 return failure("Cannot move workspaces in a direction");
             };
-            if focused_target(state).is_none() {
+            let target = focused_target(state);
+            if target.is_none()
+                || matches!(target, Some(CommandTarget::Container(workspace, node))
+                    if state.swayward.layout.is_tiling_root(workspace, node))
+            {
                 return command_failure("Cannot move workspaces in a direction");
             };
             let fullscreen_floating = workspace.active_floating_is_fullscreen();
@@ -207,8 +225,8 @@ fn execute_one(
                 state.swayward.queue_redraw_all();
                 None
             } else {
-                let Some(target) = focused_target(state) else {
-                    return success();
+                let Some(target) = target else {
+                    unreachable!();
                 };
                 let outcome = move_direction(
                     state,
@@ -456,6 +474,12 @@ fn execute_one(
             target,
             auto_back_and_forth,
         } => {
+            if target != WorkspaceTarget::BackAndForth {
+                // Sway completes focus changes synchronously. Finish a prior
+                // render-only transition before resolving the next named or
+                // numbered command so its inactive empty workspace is gone.
+                state.swayward.layout.finish_sway_workspace_switch(&target);
+            }
             let auto_back_and_forth = auto_back_and_forth
                 && state
                     .swayward
@@ -490,7 +514,7 @@ fn execute_one(
         }
         Command::RenameWorkspace { old, new_name } => {
             if let Err(error) = state.swayward.layout.rename_sway_workspace(old, new_name) {
-                return failure(error);
+                return swayward_ipc::command::parse_error(error);
             }
             state.swayward.queue_redraw_all();
             None
@@ -535,6 +559,14 @@ fn execute_one(
             first,
             second,
         } => {
+            if state
+                .swayward
+                .layout
+                .active_workspace()
+                .is_some_and(|workspace| workspace.is_workspace_focused())
+            {
+                return swayward_ipc::command::parse_error("Cannot resize nothing");
+            }
             let Some(target) = focused_target(state) else {
                 return swayward_ipc::command::parse_error("Cannot resize nothing");
             };
@@ -591,6 +623,12 @@ fn execute_one(
             None
         }
         Command::Output { target, actions } => {
+            if actions
+                .iter()
+                .any(|action| matches!(action, swayward_ipc::OutputAction::Off))
+            {
+                state.ipc_suppress_workspace_moves();
+            }
             let targets = if target == "*" {
                 state
                     .swayward
@@ -601,9 +639,14 @@ fn execute_one(
             } else {
                 vec![target]
             };
-            let has_power_action = actions
-                .iter()
-                .any(|action| matches!(action, swayward_ipc::OutputAction::Power { .. }));
+            let has_output_event = actions.iter().any(|action| {
+                matches!(
+                    action,
+                    swayward_ipc::OutputAction::On
+                        | swayward_ipc::OutputAction::Off
+                        | swayward_ipc::OutputAction::Power { .. }
+                )
+            });
             for target in targets {
                 for action in &actions {
                     if let swayward_ipc::OutputAction::Power { power } = action {
@@ -645,7 +688,7 @@ fn execute_one(
                     state.apply_transient_output_config(&target, &config_actions);
                 }
             }
-            if has_power_action {
+            if has_output_event {
                 state.swayward.ipc_output_changed();
             }
             None
@@ -1443,7 +1486,7 @@ fn execute_targeted(state: &mut State, command: &Command, target: CommandTarget)
                 },
             };
             if let Err(error) = resolved {
-                return failure(error);
+                return swayward_ipc::command::parse_error(error);
             }
             state.swayward.queue_redraw_all();
         }
@@ -1529,7 +1572,26 @@ fn mark_target(state: &mut State, target: CommandTarget, mark: &str, add: bool, 
             .is_some_and(|marks| marks.iter().any(|existing| existing == mark)),
     };
     if !add {
+        let node_id = match target {
+            CommandTarget::Window(window) => crate::ipc::tree::window_id(window),
+            CommandTarget::Container(_, node) => crate::ipc::tree::container_id(node),
+        };
+        let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+            &state.swayward.layout,
+            &state.swayward.global_space,
+            &state.swayward.marks_by_window,
+            &state.swayward.marks_by_container,
+        ))
+        .unwrap_or_default();
+        let container = crate::ipc::server::find_node_by_id(&tree, node_id).cloned();
         unmark_target(state, target, None);
+        if let (Some(server), Some(mut container)) = (&state.swayward.ipc_server, container) {
+            container["marks"] = serde_json::json!([]);
+            server.send_event(swayward_ipc::legacy::Event::SwayWindowChanged {
+                change: "mark".into(),
+                container,
+            });
+        }
     }
     unmark_globally(state, Some(mark));
     if !toggle || !had_mark {
@@ -1541,6 +1603,24 @@ fn mark_target(state: &mut State, target: CommandTarget, mark: &str, add: bool, 
                 .entry((workspace, node))
                 .or_default()
                 .push(mark.to_owned()),
+        }
+    }
+    if let CommandTarget::Container(_, node) = target {
+        let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+            &state.swayward.layout,
+            &state.swayward.global_space,
+            &state.swayward.marks_by_window,
+            &state.swayward.marks_by_container,
+        ))
+        .unwrap_or_default();
+        if let (Some(server), Some(container)) = (
+            &state.swayward.ipc_server,
+            crate::ipc::server::find_node_by_id(&tree, crate::ipc::tree::container_id(node)),
+        ) {
+            server.send_event(swayward_ipc::legacy::Event::SwayWindowChanged {
+                change: "mark".into(),
+                container: container.clone(),
+            });
         }
     }
     refresh_titlebar_marks(state);
@@ -2338,16 +2418,12 @@ fn failure(error: impl Into<String>) -> CommandOutcome {
     CommandOutcome {
         success: false,
         error: Some(error.into()),
-        parse_error: None,
+        parse_error: Some(false),
     }
 }
 
 fn command_failure(error: impl Into<String>) -> CommandOutcome {
-    CommandOutcome {
-        success: false,
-        error: Some(error.into()),
-        parse_error: Some(false),
-    }
+    failure(error)
 }
 
 #[cfg(test)]
@@ -2377,11 +2453,37 @@ mod tests {
             }
         );
         assert_eq!(
+            command("rename workspace 5 to 5: foo"),
+            Command::RenameWorkspace {
+                old: Some(WorkspaceTarget::Name("5".into())),
+                new_name: "5: foo".into(),
+            }
+        );
+        assert_eq!(
             command("rename workspace to mail"),
             Command::RenameWorkspace {
                 old: None,
                 new_name: "mail".into(),
             }
+        );
+    }
+
+    #[test]
+    fn empty_layout_command_failures_match_sway() {
+        let mut fixture = crate::tests::fixture::Fixture::new();
+        fixture.add_output(1, (1920, 1080));
+        let outcome = execute(fixture.niri_state(), "nop before; focus");
+        assert!(outcome[0].success);
+        assert_eq!(
+            outcome[1],
+            command_failure("No container to focus was specified.")
+        );
+
+        let outcome = execute(fixture.niri_state(), "workspace fuzz; resize");
+        assert!(outcome[0].success);
+        assert_eq!(
+            outcome[1],
+            swayward_ipc::command::parse_error("Cannot resize nothing")
         );
     }
 
@@ -2704,7 +2806,11 @@ mod tests {
                 "{input}"
             );
         }
-        assert_eq!(command("layout stacked"), Command::Layout(Layout::Stacked));
+        let stacked = parse("layout stacked");
+        assert_eq!(
+            stacked[0].as_ref().unwrap_err().error.as_deref(),
+            Some("Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'")
+        );
         assert_eq!(command("layout default"), Command::LayoutDefault);
         assert_eq!(
             command("layout toggle split"),

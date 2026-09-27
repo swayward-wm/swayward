@@ -66,6 +66,8 @@ impl<W: LayoutElement> TilingTree<W> {
                 {
                     *current = layout;
                 }
+            } else if siblings <= 1 && parent != self.root {
+                self.wrap_node(id, layout);
             } else if siblings <= 1 {
                 if let Some(Node {
                     value:
@@ -100,8 +102,20 @@ impl<W: LayoutElement> TilingTree<W> {
                 children[index] = wrapper;
                 percents[index] = old_percent;
                 self.nodes.get_mut(&id).unwrap().parent = Some(wrapper);
+                if let Some(fullscreen) = self
+                    .pending_modes
+                    .get_mut(&id)
+                    .and_then(|mode| mode.fullscreen.take())
+                {
+                    self.pending_modes
+                        .entry(wrapper)
+                        .or_insert(PendingMode {
+                            fullscreen: None,
+                            maximized: false,
+                        })
+                        .fullscreen = Some(fullscreen);
+                }
             }
-            self.compact_tree();
             self.request_window_sizes();
         }
     }
@@ -141,22 +155,28 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn set_focused_layout(&mut self, layout: Layout) -> Vec<(NodeId, NodeId)> {
+        let root_layout = match self.nodes.get(&self.root).map(|node| &node.value) {
+            Some(TreeNode::Split { layout, .. }) => *layout,
+            Some(TreeNode::Leaf { .. }) | None => unreachable!(),
+        };
+        // Sway initializes or refreshes an empty workspace representation only
+        // when the command changes its layout.
+        if layout != root_layout {
+            self.has_had_tile = true;
+            self.empty_representation_layout = None;
+        }
         let focus = self.focus;
         let (target, remapped) = self.focused_layout_target();
         let Some(target) = target else {
             self.set_layout(self.root, layout);
             return remapped;
         };
-        let grouped_root = matches!(
-            self.nodes.get(&self.root).map(|node| &node.value),
-            Some(TreeNode::Split {
-                layout: Layout::Tabbed | Layout::Stacked,
-                ..
-            })
-        );
         if target == self.root
-            && focus.is_some_and(|focus| self.tile(focus).is_some() || grouped_root)
-            && matches!(layout, Layout::Tabbed | Layout::Stacked)
+            && focus.is_some_and(|focus| {
+                self.tile(focus).is_some()
+                    || matches!(root_layout, Layout::Tabbed | Layout::Stacked)
+            })
+            && layout != root_layout
         {
             self.wrap_root_children(layout);
             self.request_window_sizes();
@@ -256,16 +276,7 @@ impl<W: LayoutElement> TilingTree<W> {
             swayward_ipc::command::Layout::ToggleSplit => None,
         };
         let next = match toggle {
-            LayoutToggle::Default => match current {
-                Layout::SplitH | Layout::SplitV => Layout::Stacked,
-                Layout::Stacked => Layout::Tabbed,
-                Layout::Tabbed => self
-                    .previous_split_layouts
-                    .get(&target)
-                    .copied()
-                    .unwrap_or(Layout::SplitH),
-            },
-            LayoutToggle::Split => {
+            LayoutToggle::Default | LayoutToggle::Split => {
                 self.toggle_layout_split(target);
                 return true;
             }
@@ -309,13 +320,13 @@ impl<W: LayoutElement> TilingTree<W> {
         true
     }
 
-    pub fn restore_focused_split_layout(&mut self) -> Vec<(NodeId, NodeId)> {
+    pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
         let (target, remapped) = self.focused_layout_target();
-        let Some(target) = target else {
-            return remapped;
-        };
-        self.restore_node_layout(target);
-        remapped
+        let target = target?;
+        self.previous_split_layouts.contains_key(&target).then(|| {
+            self.restore_node_layout(target);
+            remapped
+        })
     }
 
     pub fn restore_target_layout(&mut self, id: NodeId) -> bool {
@@ -410,6 +421,19 @@ impl<W: LayoutElement> TilingTree<W> {
         children[index] = wrapper;
         percents[index] = old_percent;
         self.nodes.get_mut(&id).unwrap().parent = Some(wrapper);
+        if let Some(fullscreen) = self
+            .pending_modes
+            .get_mut(&id)
+            .and_then(|mode| mode.fullscreen.take())
+        {
+            self.pending_modes
+                .entry(wrapper)
+                .or_insert(PendingMode {
+                    fullscreen: None,
+                    maximized: false,
+                })
+                .fullscreen = Some(fullscreen);
+        }
         wrapper
     }
 

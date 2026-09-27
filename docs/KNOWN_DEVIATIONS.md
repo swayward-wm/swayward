@@ -2,7 +2,20 @@ This reference lists user-visible differences from sway. It does not list
 internal changes inherited from the niri fork. See
 [Divergence from upstream niri](DIVERGENCE.md) for that engineering ledger.
 
-Each entry is one of three kinds, because they need different things from you:
+Start here. If a row sounds relevant to your setup, its details include the
+exact behaviour, the reason for it, and the sway source citations.
+
+| Deviation | What you will notice | Details |
+|-----------|----------------------|---------|
+| KDL configuration | Sway config files need translation. A few settings and defaults have no exact KDL spelling. | [Configuration](#configuration) |
+| No managed bar | Swayward does not launch swaybar or read a `bar {}` block. Configure a layer-shell bar directly. | [Bars](#bars) |
+| GNOME portal backend | The GNOME backend is the default, with `xdg-desktop-portal-wlr` available as a fallback. | [Desktop integration](#desktop-integration) |
+| Reload keeps display changes | A display change made by a protocol client survives `reload` unless the file changes the output settings. | [Reload and transient output configuration](#reload-and-transient-output-configuration) |
+| Layout and Xwayland limits | Scrollable tiling, some i3-only structures, and full X11 identity are not available. | [Layout and Xwayland](#layout-and-xwayland) |
+| No floating split containers | Swayward can float windows, but not a whole split container. | [Floating split containers](#floating-split-containers) |
+
+The details use three labels, because each kind needs something different from
+you:
 
 - **Config format.** The behaviour exists; the way you ask for it differs,
   because swayward is configured in KDL rather than sway's format. The
@@ -109,6 +122,21 @@ Swayward now defaults XDG activation requests to `urgent`, matching sway. Users
 who relied on the previous fallback, which focused requests carrying a valid
 serial, can restore it with `focus-on-window-activation "smart"`.
 
+### Resizing from the gap between windows
+
+**Deliberate.**
+
+Sway resizes a window when you left-drag its border
+(`sway/input/seatop_default.c:396-410`), and so does swayward, under
+`input { border-resize }`, on by default. A borderless sway setup has nothing to
+drag: the gap between windows belongs to the workspace and ignores the press.
+
+Swayward adds `input { gap-resize }`, off by default, which makes the gap
+between two tiled windows a resize handle as well. It follows the border
+drag's rules: left button with no modifier, only an edge shared with a
+neighbour (outer gaps never resize), and the same resize cursor. It serves
+setups that use niri's focus ring instead of sway borders.
+
 ### Client titlebar colors
 
 **Command gap.**
@@ -200,9 +228,15 @@ GTK backend as documented in [Important software](https://github.com/martintroje
 `major`, `minor`, `patch`, and `loaded_config_file_name`. Sway defines that
 schema in sway 1.12's `sway/sway/ipc-json.c:225-238`; the target tag and exact
 commit are recorded in `sway-ipc/fixtures/schema-version.json` in the pinned oracle.
-Swayward reports its own variant and package version in those fields rather than
-claiming to be sway or i3. Therefore, i3's `193-ipc-version.t` assertion that
-the major version is always 4 does not apply.
+Swayward reports its own variant and public version rather than claiming to be
+sway or i3. `human_readable` contains `swayward beta0-dev` until beta1 is tagged,
+followed by `git describe` in parentheses; the description retains the niri base
+tag. The numeric fields are `1.0.0`: i3ipc and similar bindings deserialize them
+as integers, while swaymsg displays only `human_readable` and Waybar does not
+request `GET_VERSION`. Major 1 identifies the sway protocol family without
+claiming support for features introduced by a later sway minor release. Therefore,
+i3's `193-ipc-version.t` assertion that the major version is always 4 does not
+apply.
 
 `GET_INPUTS` reports sway's scalar `scroll_factor` when swayward's horizontal
 and vertical factors agree; when they differ, it reports sway's default 1.0
@@ -215,6 +249,20 @@ Commands outside the implemented subset return a sway-shaped `RUN_COMMAND`
 failure. See
 the [compatibility matrix](SWAY_COMPATIBILITY.md) for the supported subset and
 the [IPC oracle coverage](IPC_ORACLE_COVERAGE.md) for its test boundary.
+
+### Per-view rendering and idle policy commands
+
+**Command gap.**
+
+Swayward refuses `opacity`, `inhibit_idle`, `allow_tearing`, and
+`max_render_time`. Sway stores each value on the target container or view and
+exposes all but opacity in `GET_TREE` (`sway/commands/opacity.c:9-40`,
+`sway/commands/inhibit_idle.c:8-50`, `sway/commands/allow_tearing.c:6-25`, and
+`sway/commands/max_render_time.c:6-32`). Swayward has no equivalent mutable
+per-view state. Its window-rule opacity is computed from configuration, idle
+inhibition comes from client protocol objects, and its frame clock has no
+per-view tearing or render-deadline controls. Returning success would therefore
+report state that the compositor does not apply.
 
 ### Reload and transient output configuration
 
@@ -497,12 +545,17 @@ command loop and its targeted clear operation
 
 X11 applications run through `xwayland-satellite`. Swayward does not include
 sway's in-process Xwayland window manager. The satellite presents X11 clients as
-ordinary `xdg_toplevel` surfaces. The xdg-shell protocol exposes one `app_id`
-and one title, but no separate X11 class, instance, or `WM_WINDOW_ROLE` values
-(`xdg-shell.xml`, `xdg_toplevel.set_app_id`). Swayward therefore cannot evaluate
-those X11-only criteria unless the satellite supplies a metadata protocol and
-swayward stores and exposes the metadata. Sway's in-process Xwayland path does
-both (`sway/criteria.c:355-410`; `sway/sway/ipc-json.c:670-700`).
+ordinary `xdg_toplevel` surfaces and forwards `WM_TRANSIENT_FOR` as an xdg
+parent and fixed `WM_NORMAL_HINTS` as minimum and maximum sizes. Dialogs and
+fixed-size X11 windows therefore float by default like sway.
+
+The xdg-shell protocol exposes one `app_id` and one title, but no separate X11
+class, instance, `WM_WINDOW_ROLE`, window type, or window ID values
+(`xdg-shell.xml`, `xdg_toplevel.set_app_id`). Except for the satellite's own
+splash handling, swayward cannot evaluate those X11-only properties unless the
+satellite supplies a metadata protocol and swayward stores and exposes the
+metadata. Sway's in-process Xwayland path does both (`sway/criteria.c:355-410`;
+`sway/sway/ipc-json.c:670-700`).
 
 The same boundary applies to `swap container with id`. Sway resolves `id` only
 against an Xwayland view's XCB `window_id` (`sway/commands/swap.c:19-24,49-54`).
@@ -537,9 +590,13 @@ Swayward floats windows, not containers. `FloatingSpace` stores a
 (`src/layout/floating.rs:36-38`), and `Workspace::toggle_window_floating`
 accepts a single window id (`src/layout/workspace.rs:1641`). Commands whose
 result needs floating split-container state (`floating enable` or `toggle`,
-`move scratchpad`, and `sticky` with a split focused) therefore fail with
-`floating container groups are not supported` before changing state.
-`floating disable` on an already tiled split remains a successful no-op.
+`move scratchpad`, `sticky`, or moving to a floating or scratchpad mark with a
+split focused) therefore fail before changing state. Direct floating, sticky,
+and scratchpad commands report `floating container groups are not supported`;
+mark moves report the unsupported subtree destination. `floating disable` on
+an already tiled split remains a successful no-op. Moving a fullscreen leaf
+does not need a group: swayward keeps the leaf tiled and preserves its
+fullscreen state, matching sway's single-window behavior.
 
 Supporting it needs a floating container representation plus coordinated
 rendering, geometry, focus, IPC, toggle-back, workspace-move, scratchpad and

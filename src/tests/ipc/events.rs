@@ -71,6 +71,31 @@ fn get_config_reports_not_implemented_rather_than_returning_kdl() {
 }
 
 #[test]
+fn subscribing_to_all_sway_event_families_succeeds() {
+    let (mut fixture, socket) = ipc_fixture();
+    let mut subscriber = UnixStream::connect(&socket).unwrap();
+    subscriber
+        .write_all(&swayward_ipc::wire::encode(
+            MessageType::Subscribe,
+            r#"["workspace","output","mode","window","barconfig_update","binding","shutdown","tick","input"]"#,
+        ))
+        .unwrap();
+
+    let ((msg_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    assert_eq!(msg_type, MessageType::Subscribe as u32);
+    assert_eq!(payload, r#"{"success": true}"#);
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
+    assert_eq!(event_type, (1 << 31) | 7);
+    assert_eq!(
+        serde_json::from_str::<Value>(&payload).unwrap(),
+        serde_json::json!({"first": true, "payload": ""})
+    );
+    assert!(remainder.is_empty());
+}
+
+#[test]
 fn input_subscription_emits_added_and_removed_with_get_inputs_payload() {
     let (mut fixture, socket) = ipc_fixture();
     let mut subscriber = UnixStream::connect(&socket).unwrap();
@@ -690,6 +715,19 @@ fn map_test_window(fixture: &mut Fixture, client: super::client::ClientId, app_i
     fixture.double_roundtrip(client);
 }
 
+fn map_titled_test_window(fixture: &mut Fixture, client: super::client::ClientId, app_id: &str) {
+    let window = fixture.client(client).create_window();
+    window.xdg_toplevel.set_app_id(app_id.into());
+    window.set_title(app_id);
+    window.commit();
+    let surface = window.surface.clone();
+    fixture.roundtrip(client);
+    let window = fixture.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    fixture.double_roundtrip(client);
+}
+
 #[test]
 fn captured_window_map_sequences_pin_focus_order_and_multiplicity() {
     for (fixture, expected) in [
@@ -714,14 +752,23 @@ fn captured_window_map_sequences_pin_focus_order_and_multiplicity() {
 }
 
 #[test]
-fn mapping_a_focused_window_emits_new_then_focus() {
+fn mapping_a_focused_window_emits_new_title_then_focus() {
     let (mut fixture, socket) = ipc_fixture();
     fixture.add_output(1, (1920, 1080));
     fixture.niri_state().ipc_refresh_layout();
     let client = fixture.add_client();
     let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
 
-    map_test_window(&mut fixture, client, "focused-map");
+    let window = fixture.client(client).create_window();
+    window.xdg_toplevel.set_app_id("focused-map".into());
+    window.set_title("focused-map");
+    window.commit();
+    let surface = window.surface.clone();
+    fixture.roundtrip(client);
+    let window = fixture.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    fixture.double_roundtrip(client);
     fixture.niri_state().update_keyboard_focus();
     assert!(fixture
         .swayward()
@@ -731,19 +778,79 @@ fn mapping_a_focused_window_emits_new_then_focus() {
     fixture.niri_state().ipc_refresh_layout();
 
     let mut remainder = Vec::new();
-    let changes = (0..2)
+    let events = (0..3)
         .map(|_| {
             let ((event_type, payload), next) =
                 read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder.clone());
             remainder = next;
             assert_eq!(event_type, (1 << 31) | 3);
-            serde_json::from_str::<Value>(&payload).unwrap()["change"]
-                .as_str()
-                .unwrap()
-                .to_owned()
+            serde_json::from_str::<Value>(&payload).unwrap()
         })
         .collect::<Vec<_>>();
-    assert_eq!(changes, ["new", "focus"]);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["change"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["new", "title", "focus"]
+    );
+    for event in &events[..2] {
+        assert_eq!(event["container"]["border"], "none");
+        assert_eq!(event["container"]["current_border_width"], 0);
+        assert_eq!(event["container"]["focused"], false);
+        assert_eq!(event["container"]["percent"], 0.0);
+        assert_eq!(event["container"]["rect"], serde_json::json!({"x":0,"y":0,"width":0,"height":0}));
+    }
+    assert_eq!(events[0]["container"]["name"], Value::Null);
+    assert_eq!(events[1]["container"]["name"], "focused-map");
+    assert_eq!(events[2]["container"]["border"], "none");
+    assert_eq!(events[2]["container"]["current_border_width"], 0);
+}
+
+#[test]
+fn map_events_keep_a_new_tab_hidden_until_its_focus_event() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    assert!(crate::command::execute(fixture.niri_state(), "layout tabbed")[0].success);
+    let client = fixture.add_client();
+    let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
+
+    map_titled_test_window(&mut fixture, client, "first-tab");
+    fixture.niri_state().update_keyboard_focus();
+    fixture.niri_state().ipc_refresh_layout();
+    let mut remainder = Vec::new();
+    for _ in 0..3 {
+        let ((_, _), next) =
+            read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
+        remainder = next;
+    }
+
+    map_titled_test_window(&mut fixture, client, "second-tab");
+    fixture.niri_state().update_keyboard_focus();
+    fixture.niri_state().ipc_refresh_layout();
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        let ((event_type, payload), next) =
+            read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
+        remainder = next;
+        assert_eq!(event_type, (1 << 31) | 3);
+        events.push(serde_json::from_str::<Value>(&payload).unwrap());
+    }
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["change"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["new", "title", "focus"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["container"]["visible"].as_bool().unwrap())
+            .collect::<Vec<_>>(),
+        [false, false, true]
+    );
+    assert!(remainder.is_empty());
 }
 
 #[test]
@@ -1030,7 +1137,7 @@ fn workspace_focus_events_mark_only_the_new_workspace_focused() {
     window.ack_last_and_commit();
     fixture.double_roundtrip(client);
 
-    let mut subscriber = UnixStream::connect(socket).unwrap();
+    let mut subscriber = UnixStream::connect(&socket).unwrap();
     subscriber
         .write_all(&swayward_ipc::wire::encode(
             MessageType::Subscribe,
@@ -1040,11 +1147,16 @@ fn workspace_focus_events_mark_only_the_new_workspace_focused() {
     let (_, reply) = read_ipc_reply(&mut fixture, &mut subscriber);
     assert_eq!(reply, r#"{"success": true}"#);
 
+    let mut command = UnixStream::connect(&socket).unwrap();
     let mut remainder = Vec::new();
     for name in ["2", "3", "1"] {
-        assert!(
-            crate::command::execute(fixture.niri_state(), &format!("workspace {name}"))[0].success
+        let reply = query_ipc_with_payload(
+            &mut fixture,
+            &mut command,
+            MessageType::RunCommand,
+            &format!("workspace {name}"),
         );
+        assert_eq!(reply[0]["success"], true);
         loop {
             let ((event_type, payload), next) =
                 read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
@@ -1055,6 +1167,13 @@ fn workspace_focus_events_mark_only_the_new_workspace_focused() {
                 assert_eq!(event["current"]["name"], name);
                 assert_eq!(event["current"]["focused"], true, "{event}");
                 assert_eq!(event["old"]["focused"], false, "{event}");
+                if name == "2" {
+                    assert_eq!(
+                        event["old"]["nodes"][0]["focused"], false,
+                        "the old workspace snapshot must reflect the completed focus mutation: {event}"
+                    );
+                    assert_eq!(event["old"]["nodes"][0]["visible"], false, "{event}");
+                }
                 break;
             }
         }

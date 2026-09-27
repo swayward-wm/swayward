@@ -135,6 +135,8 @@ fn empty_workspace_command_parse_errors_match_sway() {
     fixture.add_output(1, (1920, 1080));
 
     for (command, parse_error, error) in [
+        ("border 1pixel", true, "Only views can have borders"),
+        ("border none", true, "Only views can have borders"),
         ("resize grow width 10 px", true, "Cannot resize nothing"),
         ("scratchpad show", true, "Scratchpad is empty"),
         ("sticky toggle", false, "No current container"),
@@ -162,7 +164,7 @@ fn criteria_with_no_matches_returns_sway_failure() {
         [swayward_ipc::CommandOutcome {
             success: false,
             error: Some("No matching node.".into()),
-            parse_error: None,
+            parse_error: Some(false),
         }]
     );
 }
@@ -369,7 +371,7 @@ fn criteria_global_settings_require_matches_and_run_once_per_match() {
         [swayward_ipc::CommandOutcome {
             success: false,
             error: Some("No matching node.".into()),
-            parse_error: None,
+            parse_error: Some(false),
         }]
     );
     assert_eq!(
@@ -485,11 +487,11 @@ fn layout_and_split_commands_preserve_a_focused_floating_window_and_the_tree() {
         ("split v", r#"[{"success":true}]"#),
         (
             "layout tabbed",
-            r#"[{"success":false,"error":"Unable to change layout of floating windows"}]"#,
+            r#"[{"success":false,"error":"Unable to change layout of floating windows","parse_error":false}]"#,
         ),
         (
             "layout toggle split",
-            r#"[{"success":false,"error":"Unable to change layout of floating windows"}]"#,
+            r#"[{"success":false,"error":"Unable to change layout of floating windows","parse_error":false}]"#,
         ),
     ] {
         let before = fixture
@@ -545,7 +547,7 @@ fn criteria_lifecycle_commands_fail_without_changing_state() {
                 Some(expected.as_str()),
                 "{input}"
             );
-            assert_eq!(outcome[0].parse_error, None, "{input}");
+            assert_eq!(outcome[0].parse_error, Some(false), "{input}");
             assert!(!fixture.swayward().shutdown_requested, "{input}");
             assert_eq!(fixture.swayward().config.borrow().layout, before, "{input}");
             assert_eq!(fixture.swayward().for_window.len(), for_window, "{input}");
@@ -905,7 +907,7 @@ fn reload_reports_malformed_config_in_the_command_reply() {
         [swayward_ipc::CommandOutcome {
             success: false,
             error: Some("Error(s) reloading config.".into()),
-            parse_error: None,
+            parse_error: Some(false),
         }]
     );
 
@@ -1038,12 +1040,32 @@ fn title_format_updates_get_tree_and_titlebar_after_client_title_change() {
     fixture.double_roundtrip(client);
 
     assert!(crate::command::execute(fixture.niri_state(), "border normal")[0].success);
+    let mut subscriber = UnixStream::connect(&socket).unwrap();
+    subscriber
+        .write_all(&swayward_ipc::wire::encode(
+            MessageType::Subscribe,
+            r#"["window"]"#,
+        ))
+        .unwrap();
+    let _ = read_ipc_reply(&mut fixture, &mut subscriber);
+
     let outcome = crate::command::execute(
         fixture.niri_state(),
         r#"[app_id="format-app"] title_format [%app_id|%shell|%class|%instance|%sandbox_engine|%sandbox_app_id|%sandbox_instance_id] %title"#,
     );
     assert!(outcome[0].success);
-
+    fixture.niri_state().ipc_refresh_layout();
+    let (event_type, event) = read_ipc_reply(&mut fixture, &mut subscriber);
+    assert_eq!(event_type, (1 << 31) | 3);
+    let event: Value = serde_json::from_str(&event).unwrap();
+    assert_eq!(event["change"], "title");
+    assert_eq!(event["container"]["name"], "before");
+    subscriber.set_nonblocking(true).unwrap();
+    let mut byte = [0];
+    assert!(matches!(
+        subscriber.read(&mut byte),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
     let mut stream = UnixStream::connect(socket).unwrap();
     let tree = query_ipc(&mut fixture, &mut stream, MessageType::GetTree);
     assert_eq!(

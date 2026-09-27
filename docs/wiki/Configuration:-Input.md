@@ -104,6 +104,8 @@ input {
     // focus-follows-mouse max-scroll-amount="0%"
     // workspace-auto-back-and-forth
     // floating-modifier "Super" inverse=false
+    // border-resize false
+    // gap-resize
 
     // mod-key "Super"
     // mod-key-nested "Alt"
@@ -369,6 +371,34 @@ disable modifier drags.
 ```kdl
 input {
     floating-modifier "Super" inverse=true
+}
+```
+
+#### `border-resize`
+
+Left-drag a window border to resize, with no modifier held, as sway does.
+On by default. A tiled window resizes only from a border it shares with a
+neighbour; a floating window resizes from any border. The border must be
+visible: `default-border "none"` or a client-side-decorated window has no
+handle. Set `border-resize false` to resize only with the modifier drag.
+
+```kdl
+input {
+    border-resize false
+}
+```
+
+#### `gap-resize`
+
+Left-drag the gap between two tiled windows to resize them, like a border.
+Off by default, since sway has no such handle; it is meant for borderless
+setups, such as ones that rely on the focus ring, with `gaps` above zero. Only
+a gap shared by two windows is a handle: outer gaps, floating windows and a
+gap corner where four windows meet do nothing.
+
+```kdl
+input {
+    gap-resize
 }
 ```
 

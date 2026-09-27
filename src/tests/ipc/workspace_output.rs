@@ -349,8 +349,30 @@ fn workspace_back_and_forth_without_history_uses_sway_error() {
     let (_, reply) = read_ipc_reply(&mut f, &mut stream);
     assert_eq!(
         reply,
-        r#"[{"success":false,"error":"There is no previous workspace"}]"#
+        r#"[{"success":false,"error":"There is no previous workspace","parse_error":false}]"#
     );
+}
+
+#[test]
+fn interrupted_workspace_switch_reaps_its_empty_source() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1270, 1408));
+
+    for workspace in ["/tmp/first", "/tmp/second", "/tmp/third"] {
+        assert!(crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success);
+    }
+    f.swayward().clock.set_complete_instantly(true);
+    f.swayward().layout.advance_animations();
+
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let workspaces = query_ipc(&mut f, &mut stream, MessageType::GetWorkspaces);
+    let names = workspaces
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["/tmp/third"]);
 }
 
 #[test]
@@ -497,6 +519,34 @@ fn move_to_workspace_creates_the_target_and_moves_the_window() {
 }
 
 #[test]
+fn moving_fullscreen_away_from_a_window_mapped_under_it_keeps_the_moved_leaf_tiled() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+
+    assert!(crate::command::execute(f.niri_state(), "workspace source")[0].success);
+    map_test_window(&mut f, client, "left");
+    map_test_window(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    map_test_window(&mut f, client, "mapped-under-fullscreen");
+
+    assert!(crate::command::execute(f.niri_state(), "move workspace destination")[0].success);
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let moved = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(moved["type"], "con");
+    assert_eq!(moved["floating"], "auto_off");
+    assert_eq!(moved["fullscreen_mode"], 1);
+}
+
+#[test]
 fn move_workspace_focuses_the_moved_window_in_the_destination_reply() {
     let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1920, 1080));
@@ -547,7 +597,7 @@ fn nested_tabbed_and_stacked_splits_survive_output_unplug() {
             .find_map(|child| output_holding(child, app_id))
     }
 
-    for layout in ["tabbed", "stacked"] {
+    for (command_layout, ipc_layout) in [("tabbed", "tabbed"), ("stacking", "stacked")] {
         let (mut f, socket) = ipc_fixture();
         f.add_output(1, (1280, 720));
         f.add_output(2, (1920, 1080));
@@ -560,7 +610,7 @@ fn nested_tabbed_and_stacked_splits_survive_output_unplug() {
         map_test_window(&mut f, client, "nested-1");
         assert!(crate::command::execute(f.niri_state(), "split vertical")[0].success);
         map_test_window(&mut f, client, "nested-2");
-        assert!(crate::command::execute(f.niri_state(), &format!("layout {layout}"))[0].success);
+        assert!(crate::command::execute(f.niri_state(), &format!("layout {command_layout}"))[0].success);
 
         let removed = f.niri_output(1);
         f.swayward().remove_output(&removed);
@@ -568,25 +618,25 @@ fn nested_tabbed_and_stacked_splits_survive_output_unplug() {
         let mut stream = UnixStream::connect(&socket).unwrap();
         let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
         let output = output_holding(&tree, "outside").unwrap();
-        assert_eq!(output["name"], fallback_name, "{layout}: evacuation");
+        assert_eq!(output["name"], fallback_name, "{command_layout}: evacuation");
         let workspace = find_json_parent_of_app_id(output, "outside").unwrap();
-        assert_eq!(workspace["layout"], "splith", "{layout}: outer split");
+        assert_eq!(workspace["layout"], "splith", "{command_layout}: outer split");
         assert_eq!(workspace["nodes"].as_array().unwrap().len(), 2);
         assert_eq!(workspace["nodes"][0]["app_id"], "outside");
         let nested = &workspace["nodes"][1];
-        assert_eq!(nested["layout"], layout, "{layout}: nested split");
+        assert_eq!(nested["layout"], ipc_layout, "{command_layout}: nested split");
         assert_eq!(nested["nodes"][0]["app_id"], "nested-1");
         assert_eq!(nested["nodes"][1]["app_id"], "nested-2");
         assert_eq!(nested["focus"][0], nested["nodes"][1]["id"]);
-        assert_eq!(nested["nodes"][1]["focused"], true, "{layout}: focus");
+        assert_eq!(nested["nodes"][1]["focused"], true, "{command_layout}: focus");
 
         f.add_named_output_at(unplugged_name.clone(), (1280, 720), None);
         let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
         let output = output_holding(&tree, "outside").unwrap();
-        assert_eq!(output["name"], unplugged_name, "{layout}: restoration");
+        assert_eq!(output["name"], unplugged_name, "{command_layout}: restoration");
         let workspace = find_json_parent_of_app_id(output, "outside").unwrap();
         assert_eq!(workspace["layout"], "splith");
-        assert_eq!(workspace["nodes"][1]["layout"], layout);
+        assert_eq!(workspace["nodes"][1]["layout"], ipc_layout);
         assert_eq!(workspace["nodes"][1]["nodes"][0]["app_id"], "nested-1");
         assert_eq!(workspace["nodes"][1]["nodes"][1]["app_id"], "nested-2");
         assert_eq!(
@@ -866,6 +916,46 @@ fn workspace_focus_spans_tiled_and_floating_children() {
     assert_eq!(workspace["nodes"].as_array().unwrap().len(), 1);
     assert_eq!(workspace["floating_nodes"].as_array().unwrap().len(), 1);
     assert_eq!(workspace["focus"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn newly_focused_tiled_window_precedes_floating_children_in_workspace_focus() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "first");
+    map_test_window(&mut f, client, "floating");
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    map_test_window(&mut f, client, "newest");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let children = workspace["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(workspace["floating_nodes"].as_array().unwrap());
+    let focus = workspace["focus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            children
+                .clone()
+                .find(|node| node["id"] == *id)
+                .unwrap()["app_id"]
+                .as_str()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(focus, ["newest", "floating", "first"]);
 }
 
 fn floating_order(tree: &Value) -> (Vec<&str>, Vec<&str>) {

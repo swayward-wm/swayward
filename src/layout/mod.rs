@@ -158,6 +158,14 @@ pub trait LayoutElement {
     /// The point is relative to the element's visual geometry.
     fn is_in_input_region(&self, point: Point<f64, Logical>) -> bool;
 
+    /// Checks whether a point is in the input region of one of the element's popups.
+    ///
+    /// The point is relative to the element's visual geometry. Popups are not clipped to a
+    /// tiled container, unlike the toplevel surface.
+    fn is_in_popup_input_region(&self, _point: Point<f64, Logical>) -> bool {
+        false
+    }
+
     /// Renders the element at the given visual location.
     ///
     /// The element should be rendered in such a way that its visual geometry ends up at the given
@@ -1189,6 +1197,7 @@ impl<W: LayoutElement> Layout<W> {
                     .1
             })
             .flatten();
+        let preserve_initial_auto_layout = self.workspaces().next().is_none();
         self.monitor_set = match mem::take(&mut self.monitor_set) {
             MonitorSet::Normal {
                 mut monitors,
@@ -1265,6 +1274,7 @@ impl<W: LayoutElement> Layout<W> {
                     ws_id_to_activate,
                     initial_workspace_name.clone(),
                     initial_workspace_number,
+                    preserve_initial_auto_layout,
                     self.clock.clone(),
                     self.options.clone(),
                     layout_config,
@@ -1303,6 +1313,7 @@ impl<W: LayoutElement> Layout<W> {
                     ws_id_to_activate,
                     initial_workspace_name,
                     initial_workspace_number,
+                    preserve_initial_auto_layout,
                     self.clock.clone(),
                     self.options.clone(),
                     layout_config,
@@ -3071,6 +3082,16 @@ impl<W: LayoutElement> Layout<W> {
         monitor.switch_workspace(idx);
     }
 
+    pub fn finish_sway_workspace_switch(&mut self, target: &crate::command::WorkspaceTarget) {
+        let target = self
+            .workspaces()
+            .find(|(_, _, workspace)| workspace_matches_target(workspace, target))
+            .map(|(_, _, workspace)| workspace.id());
+        if let Some(monitor) = self.active_monitor() {
+            monitor.finish_workspace_switch(target);
+        }
+    }
+
     pub fn switch_workspace_auto_back_and_forth(&mut self, idx: usize) {
         let previous_name = {
             let Some(monitor) = self.active_monitor() else {
@@ -3219,6 +3240,14 @@ impl<W: LayoutElement> Layout<W> {
             .map(|(output, index, _)| (output, index));
 
         if let Some((output, index)) = existing {
+            if let Some(output) = output.as_ref() {
+                let monitor = self.monitor_for_output_mut(output).unwrap();
+                if index != monitor.active_workspace_idx()
+                    && !monitor.workspaces[index].tiling_has_had_window()
+                {
+                    monitor.refresh_empty_auto_layout(index);
+                }
+            }
             self.activate_workspace_at(output.as_ref(), index);
             return Ok(());
         }
@@ -3252,6 +3281,10 @@ impl<W: LayoutElement> Layout<W> {
         let layout_config = layout_config_for(&self.workspace_configs, name.as_deref());
         let monitor = &mut monitors[monitor_idx];
         let index = monitor.workspaces_len().saturating_sub(1);
+        if monitor.workspaces_len() == 1 && !monitor.active_workspace_ref().tiling_has_had_window()
+        {
+            monitor.refresh_empty_auto_layout(0);
+        }
         let id = monitor.add_sway_workspace_at(index, name, number, layout_config);
         // Sway sorts on every creation: workspace_create calls
         // output_sort_workspaces (sway/sway/tree/workspace.c:259), which orders
@@ -3279,7 +3312,12 @@ impl<W: LayoutElement> Layout<W> {
         let id = match old {
             Some(ref target) => self
                 .workspaces()
-                .find(|(_, _, workspace)| workspace_matches_target(workspace, target))
+                .find(|(monitor, index, workspace)| {
+                    workspace_matches_target(workspace, target)
+                        && (workspace.has_windows()
+                            || monitor
+                                .is_none_or(|monitor| monitor.active_workspace_idx() == *index))
+                })
                 .map(|(_, _, workspace)| workspace.id()),
             None => self.active_workspace().map(Workspace::id),
         }
@@ -3401,14 +3439,19 @@ impl<W: LayoutElement> Layout<W> {
         let current = positions
             .iter()
             .position(|(_, _, id, _)| *id == active.id())?;
+        let mut order = (0..positions.len()).collect::<Vec<_>>();
+        if !next {
+            order.reverse();
+        }
+        let ordered = || order.iter().map(|index| (*index, &positions[*index]));
 
+        // Sway scans outputs and each output's stored workspace list forwards
+        // for next and backwards for prev. Numeric comparison chooses the next
+        // distinct number, but scan order breaks ties between names with the
+        // same numeric prefix (sway/sway/tree/workspace.c:548-677).
         let target = if let Some(number) = current_number {
-            let numbered = positions
-                .iter()
-                .filter(|(_, _, _, candidate)| candidate.is_some());
-            let relative = numbered
-                .clone()
-                .filter(|(_, _, _, candidate)| {
+            let relative = ordered()
+                .filter(|(_, (_, _, _, candidate))| {
                     candidate.is_some_and(|candidate| {
                         if next {
                             candidate > number
@@ -3417,53 +3460,47 @@ impl<W: LayoutElement> Layout<W> {
                         }
                     })
                 })
-                .min_by_key(|(_, _, _, candidate)| {
+                .min_by_key(|(_, (_, _, _, candidate))| {
                     candidate.map(|candidate| candidate.abs_diff(number))
-                });
-            relative.or_else(|| {
-                let named = positions
-                    .iter()
-                    .filter(|(_, _, _, candidate)| candidate.is_none());
-                let other = if next {
-                    named.clone().next()
-                } else {
-                    named.clone().next_back()
-                };
-                other.or_else(|| {
-                    if next {
-                        numbered.min_by_key(|(_, _, _, candidate)| *candidate)
-                    } else {
-                        numbered.max_by_key(|(_, _, _, candidate)| *candidate)
-                    }
                 })
+                .map(|(_, position)| position);
+            relative.or_else(|| {
+                ordered()
+                    .find(|(_, (_, _, _, candidate))| candidate.is_none())
+                    .map(|(_, position)| position)
+                    .or_else(|| {
+                        ordered()
+                            .filter(|(_, (_, _, _, candidate))| candidate.is_some())
+                            .min_by_key(|(_, (_, _, _, candidate))| {
+                                candidate.map(|candidate| if next { candidate } else { -candidate })
+                            })
+                            .map(|(_, position)| position)
+                    })
             })
         } else {
-            let named = positions
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, _, _, number))| number.is_none());
-            let relative = if next {
-                named.clone().find(|(index, _)| *index > current)
-            } else {
-                named.clone().rev().find(|(index, _)| *index < current)
-            };
-            relative.map(|(_, position)| position).or_else(|| {
-                let numbered = positions
-                    .iter()
-                    .filter(|(_, _, _, number)| number.is_some());
-                if next {
-                    numbered.min_by_key(|(_, _, _, number)| *number)
-                } else {
-                    numbered.max_by_key(|(_, _, _, number)| *number)
-                }
-                .or_else(|| {
-                    if next {
-                        named.map(|(_, position)| position).next()
-                    } else {
-                        named.map(|(_, position)| position).next_back()
-                    }
+            ordered()
+                .find(|(index, (_, _, _, number))| {
+                    number.is_none()
+                        && if next {
+                            *index > current
+                        } else {
+                            *index < current
+                        }
                 })
-            })
+                .map(|(_, position)| position)
+                .or_else(|| {
+                    ordered()
+                        .filter(|(_, (_, _, _, number))| number.is_some())
+                        .min_by_key(|(_, (_, _, _, number))| {
+                            number.map(|number| if next { number } else { -number })
+                        })
+                        .map(|(_, position)| position)
+                })
+                .or_else(|| {
+                    ordered()
+                        .find(|(_, (_, _, _, number))| number.is_none())
+                        .map(|(_, position)| position)
+                })
         }?;
         Some((target.0.clone(), target.1))
     }
@@ -4416,7 +4453,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn restore_focused_split_layout(&mut self) -> Option<(WorkspaceId, Vec<(NodeId, NodeId)>)> {
         let workspace = self.active_workspace_mut()?;
         let id = workspace.id();
-        Some((id, workspace.restore_focused_split_layout()))
+        Some((id, workspace.restore_focused_split_layout()?))
     }
 
     pub fn toggle_focused_layout_split(&mut self) -> Option<(WorkspaceId, Vec<(NodeId, NodeId)>)> {
@@ -4527,6 +4564,24 @@ impl<W: LayoutElement> Layout<W> {
     ) -> Option<ResizeEdge> {
         let mon = self.monitor_for_output(output)?;
         mon.resize_edges_under(pos_within_output)
+    }
+
+    pub fn border_resize_edges_under(
+        &self,
+        output: &Output,
+        pos_within_output: Point<f64, Logical>,
+    ) -> Option<(&W, ResizeEdge)> {
+        let mon = self.monitor_for_output(output)?;
+        mon.border_resize_edges_under(pos_within_output)
+    }
+
+    pub fn gap_resize_edges_under(
+        &self,
+        output: &Output,
+        pos_within_output: Point<f64, Logical>,
+    ) -> Option<(&W, ResizeEdge)> {
+        let mon = self.monitor_for_output(output)?;
+        mon.gap_resize_edges_under(pos_within_output)
     }
 
     pub fn workspace_under(
@@ -5263,13 +5318,13 @@ impl<W: LayoutElement> Layout<W> {
         workspace.set_focused_width(change);
     }
 
-    pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
+    pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) -> Option<bool> {
         if window.is_some_and(|window| self.is_scratchpad_hidden(window)) {
-            return;
+            return None;
         }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
-                return;
+                return None;
             }
         }
 
@@ -5282,12 +5337,9 @@ impl<W: LayoutElement> Layout<W> {
             )
         } else {
             self.active_workspace_mut()
-        };
+        }?;
 
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.set_window_width(window, change, automatic_maximum);
+        Some(workspace.set_window_width(window, change, automatic_maximum))
     }
 
     pub fn resize_tiling_node(
@@ -5296,13 +5348,10 @@ impl<W: LayoutElement> Layout<W> {
         node: tiling_tree::NodeId,
         width: bool,
         change: SizeChange,
-    ) {
-        if let Some(workspace) = self
-            .workspaces_mut()
+    ) -> Option<bool> {
+        self.workspaces_mut()
             .find(|workspace| workspace.id() == workspace_id)
-        {
-            workspace.resize_tiling_node(node, width, change);
-        }
+            .map(|workspace| workspace.resize_tiling_node(node, width, change))
     }
 
     pub fn resize_tiling_node_edge(
@@ -5348,13 +5397,17 @@ impl<W: LayoutElement> Layout<W> {
         workspace.set_window_size_sway(window, width, height, automatic_maximum);
     }
 
-    pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
+    pub fn set_window_height(
+        &mut self,
+        window: Option<&W::Id>,
+        change: SizeChange,
+    ) -> Option<bool> {
         if window.is_some_and(|window| self.is_scratchpad_hidden(window)) {
-            return;
+            return None;
         }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
-                return;
+                return None;
             }
         }
 
@@ -5367,12 +5420,9 @@ impl<W: LayoutElement> Layout<W> {
             )
         } else {
             self.active_workspace_mut()
-        };
+        }?;
 
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.set_window_height(window, change, automatic_maximum);
+        Some(workspace.set_window_height(window, change, automatic_maximum))
     }
 
     pub fn resize_window_edge(
@@ -5484,7 +5534,27 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = workspace else {
             return;
         };
+        let target = window
+            .cloned()
+            .or_else(|| workspace.active_window().map(|win| win.id().clone()));
         workspace.toggle_window_floating(window);
+        if let Some(target) = target {
+            self.forget_scratchpad_window_if_tiled(&target);
+        }
+    }
+
+    /// Returning a container to tiling removes it from the scratchpad
+    /// (sway/tree/container.c:990-994).
+    fn forget_scratchpad_window_if_tiled(&mut self, window: &W::Id) {
+        if !self.scratchpad_windows.contains(window) {
+            return;
+        }
+        let tiled = self
+            .workspaces()
+            .any(|(_, _, ws)| ws.has_window(window) && !ws.is_floating(window));
+        if tiled {
+            self.scratchpad_windows.retain(|id| id != window);
+        }
     }
 
     pub fn set_window_floating(&mut self, window: Option<&W::Id>, floating: bool) {
@@ -5513,7 +5583,13 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = workspace else {
             return;
         };
+        let target = window
+            .cloned()
+            .or_else(|| workspace.active_window().map(|win| win.id().clone()));
         workspace.set_window_floating(window, floating);
+        if let Some(target) = target {
+            self.forget_scratchpad_window_if_tiled(&target);
+        }
     }
 
     pub fn focus_floating(&mut self) {
@@ -6934,6 +7010,8 @@ impl<W: LayoutElement> Layout<W> {
                 );
             }
         }
+
+        self.forget_scratchpad_window_if_tiled(window);
     }
 
     pub fn interactive_move_is_moving_above_output(&self, output: &Output) -> bool {

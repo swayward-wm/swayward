@@ -526,7 +526,7 @@ pub fn parse_with_variables(
     for (text, delimiter) in split_commands(input) {
         let mut text = text.trim();
         if text.is_empty() {
-            if delimiter == Some(';') {
+            if matches!(delimiter, Some(';') | Some('\0')) {
                 criteria = None;
             }
             criteria_allowed = delimiter != Some(',');
@@ -547,13 +547,28 @@ pub fn parse_with_variables(
                     text = text[end + 1..].trim_start();
                 }
                 None => {
-                    results.push(Err(parse_error("unterminated criteria")));
+                    // Sway's criteria parser reports a more specific token or
+                    // quote error before noticing a missing closing bracket.
+                    let completed = format!("{text}]");
+                    let error = crate::criteria::Criteria::parse(&completed, None)
+                        .err()
+                        .unwrap_or_else(|| "No closing brace found in criteria".into());
+                    results.push(Err(parse_error(error)));
                     break;
                 }
             }
         }
 
-        let parsed = if variables.is_empty() {
+        let parsed = if text
+            .split_ascii_whitespace()
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("nop"))
+        {
+            // Sway's nop handler ignores its raw tail, including malformed
+            // quoting, instead of asking the generic argument parser to
+            // tokenize it (`sway/sway/commands/nop.c`).
+            Ok(Command::Nop)
+        } else if variables.is_empty() {
             // Preserve the exact old path for commands such as `exec` and
             // `for_window`, whose parsers intentionally consume their raw
             // tails rather than a reconstructed argv.
@@ -594,7 +609,7 @@ pub fn parse_with_variables(
                 break;
             }
         }
-        if delimiter == Some(';') {
+        if matches!(delimiter, Some(';') | Some('\0')) {
             criteria = None;
         }
         criteria_allowed = delimiter != Some(',');
@@ -676,7 +691,7 @@ fn split_commands(input: &str) -> Vec<(&str, Option<char>)> {
             '\'' | '"' => quote = Some(ch),
             '[' => brackets += 1,
             ']' => brackets = (brackets - 1).max(0),
-            ';' | ',' if brackets == 0 => {
+            ';' | ',' | '\0' if brackets == 0 => {
                 commands.push((&input[start..index], Some(ch)));
                 start = index + ch.len_utf8();
             }
@@ -1882,6 +1897,8 @@ fn parse_border(args: &[&str]) -> Result<Border, String> {
     Ok(Border { style, width })
 }
 
+const FOCUS_USAGE: &str = "Expected 'focus <direction|next|prev|parent|child|mode_toggle|floating|tiling>' or 'focus output <direction|name>'";
+
 fn parse_focus(args: &[&str]) -> Result<Command, String> {
     if args.is_empty() {
         return Ok(Command::Focus);
@@ -1917,12 +1934,11 @@ fn parse_focus(args: &[&str]) -> Result<Command, String> {
         "tiling" => Ok(Command::FocusTiling),
         "mode_toggle" => Ok(Command::FocusModeToggle),
         "workspace" => Ok(Command::FocusWorkspace),
-        _ => Err(
-            "Expected 'focus <left|right|up|down|parent|child|next|prev|floating|tiling|mode_toggle>'"
-                .into(),
-        ),
+        _ => Err(FOCUS_USAGE.into()),
     }
 }
+
+const MOVE_USAGE: &str = "Expected 'move left|right|up|down [<amount> [px]]' or 'move [--no-auto-back-and-forth] [window|container] [to] workspace  <name>|next|prev|next_on_output|prev_on_output|current|(number <num>)' or 'move [window|container] [to] output <name/id>|left|right|up|down' or 'move [window|container] [to] mark <mark>' or 'move [window|container] [to] scratchpad' or 'move workspace to [output] <name/id>|left|right|up|down' or 'move [window|container] [to] [absolute] position <x> [px] <y> [px]' or 'move [window|container] [to] [absolute] position center' or 'move [window|container] [to] position mouse|cursor|pointer'";
 
 fn parse_move(args: &[&str]) -> Result<Command, String> {
     let (no_auto_back_and_forth, args) = match args {
@@ -1994,11 +2010,7 @@ fn parse_move(args: &[&str]) -> Result<Command, String> {
         {
             parse_workspace(rest)?
         }
-        _ => {
-            return Err(
-                "Expected 'move <direction> [px]' or 'move to workspace <name|number>'".into(),
-            )
-        }
+        _ => return Err(MOVE_USAGE.into()),
     };
     Ok(Command::MoveToWorkspace {
         target,
@@ -2057,12 +2069,14 @@ fn parse_output(args: &[&str]) -> Result<OutputTarget, String> {
     ))
 }
 
+const LAYOUT_USAGE: &str = "Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'";
+
 fn parse_layout(args: &[&str]) -> Result<Command, String> {
     let direct = |layout: &str| match layout.to_ascii_lowercase().as_str() {
         "splith" => Some(Layout::SplitH),
         "splitv" => Some(Layout::SplitV),
         "tabbed" => Some(Layout::Tabbed),
-        "stacked" | "stacking" => Some(Layout::Stacked),
+        "stacking" => Some(Layout::Stacked),
         _ => None,
     };
     if let [layout] = args {
@@ -2074,10 +2088,10 @@ fn parse_layout(args: &[&str]) -> Result<Command, String> {
         }
     }
     let [toggle, rest @ ..] = args else {
-        return Err("Expected 'layout <splith|splitv|tabbed|stacking|toggle>'".into());
+        return Err("Invalid layout command (expected at least 1 argument, got 0)".into());
     };
     if !toggle.eq_ignore_ascii_case("toggle") {
-        return Err("Expected 'layout <splith|splitv|tabbed|stacking|toggle>'".into());
+        return Err(LAYOUT_USAGE.into());
     }
     let toggle = match rest {
         [] => LayoutToggle::Default,
@@ -2163,8 +2177,16 @@ fn parse_rename(args: &[&str]) -> Result<Command, String> {
     if to + 1 == rest.len() {
         return Err(SYNTAX.into());
     }
+    let old = if rest[..to]
+        .first()
+        .is_some_and(|name| name.eq_ignore_ascii_case("number"))
+    {
+        parse_workspace(&rest[..to])?
+    } else {
+        WorkspaceTarget::Name(join_words(&rest[..to]))
+    };
     Ok(Command::RenameWorkspace {
-        old: Some(parse_workspace(&rest[..to])?),
+        old: Some(old),
         new_name: join_words(&rest[to + 1..]),
     })
 }
@@ -2282,7 +2304,7 @@ fn parse_workspace(args: &[&str]) -> Result<WorkspaceTarget, String> {
             }
             Ok(WorkspaceTarget::Number(name))
         }
-        [] => Err("Expected 'workspace [number] <name>'".into()),
+        [] => Err("Invalid workspace command (expected at least 1 argument, got 0)".into()),
         names => Ok(WorkspaceTarget::Name(join_words(names))),
     }
 }
@@ -2665,6 +2687,48 @@ mod workspace_number_tests {
 #[cfg(test)]
 mod command_list_tests {
     use super::*;
+
+    #[test]
+    fn malformed_command_errors_match_sway() {
+        for (input, expected) in [
+            (r#"[app_id="foot" focus"#, "Token 'focus' is not recognized"),
+            (
+                "workspace",
+                "Invalid workspace command (expected at least 1 argument, got 0)",
+            ),
+            (
+                "layout",
+                "Invalid layout command (expected at least 1 argument, got 0)",
+            ),
+            ("layout invalid", LAYOUT_USAGE),
+            ("focus invalid", FOCUS_USAGE),
+            ("move invalid", MOVE_USAGE),
+        ] {
+            assert_eq!(
+                parse(input)[0].as_ref().unwrap_err().error.as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn nul_starts_a_new_command_like_sway() {
+        let parsed = parse("nop before\0after");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].as_ref().unwrap().command, Command::Nop);
+        assert_eq!(
+            parsed[1].as_ref().unwrap_err().error.as_deref(),
+            Some("Unknown/invalid command 'after'")
+        );
+    }
+
+    #[test]
+    fn unterminated_nop_argument_is_ignored_like_sway() {
+        let parsed = parse("nop \"unterminated");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].as_ref().unwrap().command, Command::Nop);
+    }
 
     #[test]
     fn comma_does_not_start_new_criteria() {

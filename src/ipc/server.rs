@@ -30,7 +30,7 @@ use swayward_ipc::{
 use crate::ipc::tree::{describe_tree, describe_workspaces_with_marks};
 use crate::layout::workspace::WorkspaceId;
 use crate::swayward::State;
-use crate::utils::{version, with_toplevel_role};
+use crate::utils::{version, with_toplevel_role, SWAYWARD_IPC_VERSION};
 use crate::window::Mapped;
 
 const INITIAL_WRITE_BUFFER_SIZE: usize = 128;
@@ -44,6 +44,7 @@ pub struct IpcServer {
     event_streams: Rc<RefCell<Vec<EventStreamSender>>>,
     event_stream_state: Rc<RefCell<EventStreamState>>,
     query_state: Rc<RefCell<QueryState>>,
+    workspace_events: RefCell<Option<WorkspaceEventTransaction>>,
     commands: channel::Sender<CommandRequest>,
 }
 
@@ -59,6 +60,19 @@ struct QueryState {
     binding_state: String,
     inputs: String,
     seats: String,
+}
+
+#[derive(Default)]
+struct WorkspaceEventTransaction {
+    events: Vec<Event>,
+    suppress_workspace_moves: bool,
+    scratchpad: Option<ScratchpadEventOrder>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ScratchpadEventOrder {
+    Hide,
+    Show,
 }
 
 struct EventStreamClient {
@@ -165,6 +179,7 @@ impl IpcServer {
             event_streams: Rc::new(RefCell::new(Vec::new())),
             event_stream_state: Rc::new(RefCell::new(EventStreamState::default())),
             query_state: Rc::new(RefCell::new(QueryState::default())),
+            workspace_events: RefCell::new(None),
             commands,
         })
     }
@@ -187,6 +202,14 @@ impl IpcServer {
     }
 
     pub(crate) fn send_event(&self, event: Event) {
+        if let Some(transaction) = self.workspace_events.borrow_mut().as_mut() {
+            transaction.events.push(event);
+            return;
+        }
+        self.send_event_now(event);
+    }
+
+    fn send_event_now(&self, event: Event) {
         let event_type = match &event {
             Event::WorkspacesChanged { .. } => "workspaces_changed",
             Event::WorkspaceEmptied { .. } => "workspace_empty",
@@ -222,7 +245,7 @@ impl IpcServer {
             Event::CastStartedOrChanged { .. } => "cast_started_or_changed",
             Event::CastStopped { .. } => "cast_stopped",
         };
-        debug!(event_type, "emitting IPC event");
+        trace!(event_type, "emitting IPC event");
         let mut streams = self.event_streams.borrow_mut();
         let mut to_remove = Vec::new();
         for (idx, stream) in streams.iter_mut().enumerate() {
@@ -336,7 +359,7 @@ async fn handle_client(ctx: ClientCtx, stream: Async<'static, UnixStream>) -> an
             );
         })?;
         let msg_type = MessageType::try_from(raw_type).ok();
-        debug!(?msg_type, raw_type, payload_len, "received IPC request");
+        trace!(?msg_type, raw_type, payload_len, "received IPC request");
         if payload_len > MAX_PAYLOAD_SIZE {
             anyhow::bail!("IPC payload exceeds {MAX_PAYLOAD_SIZE} bytes");
         }
@@ -430,6 +453,7 @@ fn parse_subscriptions(payload: &[u8]) -> Option<Vec<String>> {
                     | "mode"
                     | "shutdown"
                     | "window"
+                    | "barconfig_update"
                     | "binding"
                     | "tick"
                     | "input"
@@ -491,11 +515,11 @@ async fn dispatch(ctx: &ClientCtx, msg_type: MessageType, payload: &[u8]) -> Str
     }
     match msg_type {
         MessageType::GetVersion => serde_json::to_string(&Version {
-            human_readable: version(),
+            human_readable: format!("swayward {}", version()),
             variant: "swayward".into(),
-            major: env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap_or(0),
-            minor: env!("CARGO_PKG_VERSION_MINOR").parse().unwrap_or(0),
-            patch: env!("CARGO_PKG_VERSION_PATCH").parse().unwrap_or(0),
+            major: SWAYWARD_IPC_VERSION.0,
+            minor: SWAYWARD_IPC_VERSION.1,
+            patch: SWAYWARD_IPC_VERSION.2,
             loaded_config_file_name: ctx.query_state.borrow().loaded_config_file_name.clone(),
         })
         .unwrap_or_else(|_| r#"{"success":false,"error":"serialization failed"}"#.into()),
@@ -695,16 +719,22 @@ fn refresh_input_query_state(swayward: &crate::swayward::Swayward, state: &mut Q
     let devices = describe_inputs(swayward);
     state.inputs = serde_json::to_string(&devices).unwrap_or_else(|_| "[]".into());
 
-    let capabilities = u32::from(swayward.seat.get_pointer().is_some())
-        | (u32::from(swayward.seat.get_keyboard().is_some()) << 1)
-        | (u32::from(swayward.seat.get_touch().is_some()) << 2);
+    let capabilities = devices.iter().fold(0, |capabilities, device| {
+        capabilities
+            | match device["type"].as_str() {
+                Some("pointer") => 1,
+                Some("keyboard") => 2,
+                Some("touch") => 4,
+                _ => 0,
+            }
+    });
     let focus = swayward
         .layout
         .focus()
         .map(|window| crate::ipc::tree::window_id(window.id()))
         .unwrap_or(0);
     state.seats = serde_json::to_string(&[IpcSeat {
-        name: &swayward.seat_name,
+        name: "seat0",
         capabilities,
         focus,
         devices: &devices,
@@ -723,6 +753,55 @@ pub(crate) fn find_node_by_id(value: &serde_json::Value, id: i64) -> Option<&ser
             .iter()
             .find_map(|child| find_node_by_id(child, id))
     })
+}
+
+fn find_parent_of_node(value: &serde_json::Value, id: i64) -> Option<&serde_json::Value> {
+    ["nodes", "floating_nodes"].into_iter().find_map(|key| {
+        let children = value.get(key)?.as_array()?;
+        if children
+            .iter()
+            .any(|child| child.get("id").and_then(serde_json::Value::as_i64) == Some(id))
+        {
+            return Some(value);
+        }
+        children
+            .iter()
+            .find_map(|child| find_parent_of_node(child, id))
+    })
+}
+
+fn find_workspace_by_tree_id(node: &swayward_ipc::Node, id: i64) -> Option<&swayward_ipc::Node> {
+    if node.node_type == swayward_ipc::NodeType::Workspace && node.id == id {
+        return Some(node);
+    }
+    node.nodes
+        .iter()
+        .chain(&node.floating_nodes)
+        .find_map(|child| find_workspace_by_tree_id(child, id))
+}
+
+fn find_focused_node(node: &swayward_ipc::Node) -> Option<&swayward_ipc::Node> {
+    if node.focused && node.node_type != swayward_ipc::NodeType::Workspace {
+        return Some(node);
+    }
+    node.nodes
+        .iter()
+        .chain(&node.floating_nodes)
+        .find_map(find_focused_node)
+}
+
+fn clear_workspace_focus(node: &mut swayward_ipc::Node, hide: bool) {
+    node.focused = false;
+    if hide {
+        if let swayward_ipc::NodeProperties::View(properties) = &mut node.properties {
+            if !node.sticky {
+                properties.visible = false;
+            }
+        }
+    }
+    for child in node.nodes.iter_mut().chain(&mut node.floating_nodes) {
+        clear_workspace_focus(child, hide);
+    }
 }
 
 fn find_workspace_by_id(node: &swayward_ipc::Node, id: u64) -> Option<&swayward_ipc::Node> {
@@ -1074,9 +1153,10 @@ fn make_ipc_window(
     workspace_id: Option<WorkspaceId>,
     layout: WindowLayout,
 ) -> swayward_ipc::Window {
+    let title = mapped.formatted_title();
     with_toplevel_role(mapped.toplevel(), |role| swayward_ipc::Window {
         id: mapped.id().get(),
-        title: role.title.clone(),
+        title: Some(title),
         app_id: role.app_id.clone(),
         pid: mapped.credentials().map(|c| c.pid),
         workspace_id: workspace_id.map(|id| id.get()),
@@ -1194,6 +1274,255 @@ impl State {
             return;
         }
         self.ipc_initialize_event_state();
+    }
+
+    pub(crate) fn ipc_begin_workspace_transaction(&mut self) {
+        let Some(server) = &self.swayward.ipc_server else {
+            return;
+        };
+        if server.has_event_streams() && server.workspace_events.borrow().is_none() {
+            *server.workspace_events.borrow_mut() = Some(WorkspaceEventTransaction::default());
+        }
+    }
+
+    pub(crate) fn ipc_order_scratchpad_events(&mut self, order: ScratchpadEventOrder) {
+        let Some(server) = &self.swayward.ipc_server else {
+            return;
+        };
+        if let Some(transaction) = server.workspace_events.borrow_mut().as_mut() {
+            transaction.scratchpad = Some(order);
+        }
+    }
+
+    pub(crate) fn ipc_suppress_workspace_moves(&mut self) {
+        let Some(server) = &self.swayward.ipc_server else {
+            return;
+        };
+        if let Some(transaction) = server.workspace_events.borrow_mut().as_mut() {
+            transaction.suppress_workspace_moves = true;
+        }
+    }
+
+    pub(crate) fn ipc_commit_workspace_transaction(&mut self) {
+        let Some(server) = &self.swayward.ipc_server else {
+            return;
+        };
+        let Some(transaction) = server.workspace_events.borrow_mut().take() else {
+            return;
+        };
+        let current_tree = crate::ipc::tree::describe_tree(
+            &self.swayward.layout,
+            &self.swayward.global_space,
+            &self.swayward.marks_by_window,
+            &self.swayward.marks_by_container,
+        );
+        let mut events = transaction.events;
+        if let Some(order) = transaction.scratchpad {
+            let scratchpad_snapshots = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::SwayWindowChanged { change, container }
+                        if matches!(change.as_str(), "floating" | "move" | "focus") =>
+                    {
+                        Some(container.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let hidden = scratchpad_snapshots
+                .iter()
+                .find(|container| container["scratchpad_state"] == "fresh")
+                .cloned();
+            let visible = scratchpad_snapshots
+                .iter()
+                .find(|container| container["scratchpad_state"] == "none")
+                .cloned();
+            let mut scratchpad_events = events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| match event {
+                    Event::SwayWindowChanged { change, .. }
+                        if matches!(change.as_str(), "floating" | "move" | "focus") =>
+                    {
+                        Some(index)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let positions = scratchpad_events.clone();
+            scratchpad_events.sort_by_key(|index| match (&order, &events[*index]) {
+                (ScratchpadEventOrder::Hide, Event::SwayWindowChanged { change, .. })
+                    if change == "floating" =>
+                {
+                    0
+                }
+                (ScratchpadEventOrder::Show, Event::SwayWindowChanged { change, .. })
+                    if change == "focus" =>
+                {
+                    0
+                }
+                _ => 1,
+            });
+            let reordered = scratchpad_events
+                .iter()
+                .map(|index| events[*index].clone())
+                .collect::<Vec<_>>();
+            for (index, mut event) in positions.into_iter().zip(reordered) {
+                if let Event::SwayWindowChanged { change, container } = &mut event {
+                    match order {
+                        ScratchpadEventOrder::Hide if change == "floating" => {
+                            if let Some(visible) = &visible {
+                                *container = visible.clone();
+                            }
+                            container["scratchpad_state"] = "none".into();
+                            container["focused"] = true.into();
+                            container["visible"] = true.into();
+                        }
+                        ScratchpadEventOrder::Hide if change == "move" => {
+                            if let Some(hidden) = &hidden {
+                                *container = hidden.clone();
+                            }
+                            container["focused"] = false.into();
+                            container["visible"] = false.into();
+                        }
+                        _ => {}
+                    }
+                }
+                events[index] = event;
+            }
+        }
+
+        // Sway emits these at their tree mutation sites. Swayward's fallback
+        // diff may discover an adjacent pair in the opposite order, so restore
+        // the mutation order before flushing the operation-local transaction.
+        let mut index = 0;
+        while index + 1 < events.len() {
+            let reverse_workspace_move = matches!(events[index], Event::WorkspaceMoved { .. })
+                && matches!(events[index + 1], Event::WorkspaceEmptied { .. });
+            let reverse_urgency = matches!(events[index], Event::WorkspaceUrgencyChanged { .. })
+                && matches!(events[index + 1], Event::SwayWindowChanged { ref change, .. } if change == "urgent");
+            if reverse_workspace_move || reverse_urgency {
+                events.swap(index, index + 1);
+            }
+            index += 1;
+        }
+
+        let has_workspace_move = events
+            .iter()
+            .any(|event| matches!(event, Event::WorkspaceMoved { .. }));
+        let sticky_move = events.iter().find_map(|event| match event {
+            Event::SwayWindowChanged { change, container }
+                if change == "move" && container["sticky"] == true =>
+            {
+                Some(container.clone())
+            }
+            _ => None,
+        });
+        if transaction.suppress_workspace_moves {
+            if let Some(output_event) = events
+                .iter()
+                .position(|event| matches!(event, Event::OutputChanged))
+            {
+                let event = events.remove(output_event);
+                if let Some(empty) = events
+                    .iter()
+                    .rposition(|event| matches!(event, Event::WorkspaceEmptied { .. }))
+                {
+                    events.insert(empty + 1, event);
+                } else {
+                    events.push(event);
+                }
+            }
+        }
+
+        let mut moved_workspaces = HashSet::new();
+        let mut output = Vec::new();
+        for mut event in events {
+            match &mut event {
+                Event::WorkspaceMoved { current } => {
+                    if transaction.suppress_workspace_moves || !moved_workspaces.insert(current.id)
+                    {
+                        continue;
+                    }
+                    let focused = find_focused_node(current).cloned();
+                    clear_workspace_focus(current, false);
+                    output.push(event);
+                    if let Some(container) = focused {
+                        output.push(Event::SwayWindowChanged {
+                            change: "focus".into(),
+                            container: serde_json::to_value(container).unwrap_or_default(),
+                        });
+                    }
+                    continue;
+                }
+                Event::WorkspaceInitialized { current } => {
+                    if let Some(settled) = find_workspace_by_tree_id(&current_tree, current.id) {
+                        **current = settled.clone();
+                        current.focused = false;
+                    }
+                    if sticky_move.is_some() {
+                        current.floating_nodes.clear();
+                        current.focus.clear();
+                    }
+                }
+                Event::WorkspaceFocusChanged { old, current } => {
+                    if let Some(old) = old {
+                        if let Some(settled) = find_workspace_by_tree_id(&current_tree, old.id) {
+                            **old = settled.clone();
+                            old.focused = false;
+                        } else {
+                            clear_workspace_focus(old, true);
+                        }
+                        if sticky_move.is_some() {
+                            for child in &mut old.floating_nodes {
+                                clear_workspace_focus(child, true);
+                            }
+                        }
+                    }
+                    if let Some(settled) = find_workspace_by_tree_id(&current_tree, current.id) {
+                        **current = settled.clone();
+                        current.focused = true;
+                    }
+                    if sticky_move.is_some() {
+                        current.floating_nodes.clear();
+                        current.focus.clear();
+                    }
+                }
+                Event::WorkspaceEmptied { current } => {
+                    current.nodes.clear();
+                    current.floating_nodes.clear();
+                    current.focus.clear();
+                    if sticky_move.is_none() {
+                        if has_workspace_move && !transaction.suppress_workspace_moves {
+                            current.layout = swayward_ipc::NodeLayout::SplitH;
+                            current.orientation = "horizontal".into();
+                        }
+                        if let swayward_ipc::NodeProperties::Workspace(properties) =
+                            &mut current.properties
+                        {
+                            properties.representation = None;
+                        }
+                    } else if let swayward_ipc::NodeProperties::Workspace(properties) =
+                        &mut current.properties
+                    {
+                        properties.representation = Some("V[]".into());
+                    }
+                    current.focused = false;
+                }
+                Event::SwayWindowChanged { change, container }
+                    if change == "move"
+                        && (transaction.suppress_workspace_moves
+                            || container["sticky"] == true) =>
+                {
+                    continue;
+                }
+                _ => {}
+            }
+            output.push(event);
+        }
+        for event in output {
+            server.send_event_now(event);
+        }
     }
 
     fn ipc_initialize_event_state(&mut self) {
@@ -1470,19 +1799,60 @@ impl State {
             let previous_node = previous_tree.and_then(|tree| find_node_by_id(tree, node_id));
             let Some(ipc_win) = state.windows.get(&id) else {
                 if let Some(mut container) = current_node.clone() {
-                    // Sway emits the map event before the independent seat-focus transition.
+                    // Sway emits `new` from view_map before arranging, applying
+                    // borders or setting the view title, then emits `title`
+                    // when that metadata arrives (`sway/tree/view.c:902,1138`).
+                    // Our diff first sees the already-settled window, so
+                    // reconstruct those two map-time snapshots.
+                    container["border"] = "none".into();
+                    container["current_border_width"] = 0.into();
                     container["focused"] = false.into();
+                    let hidden_before_focus = find_parent_of_node(&current_tree, node_id)
+                        .is_some_and(|parent| {
+                            parent["layout"]
+                                .as_str()
+                                .is_some_and(|layout| matches!(layout, "tabbed" | "stacked"))
+                                && parent["nodes"]
+                                    .as_array()
+                                    .is_some_and(|nodes| nodes.len() > 1)
+                        });
+                    if hidden_before_focus {
+                        container["visible"] = false.into();
+                    }
+                    container["name"] = serde_json::Value::Null;
+                    container["percent"] = 0.0.into();
+                    for rect in ["deco_rect", "rect", "window_rect"] {
+                        container[rect] = serde_json::json!({
+                            "x": 0,
+                            "y": 0,
+                            "width": 0,
+                            "height": 0,
+                        });
+                    }
                     events.push(Event::SwayWindowChanged {
                         change: "new".into(),
-                        container,
+                        container: container.clone(),
                     });
+                    let title = with_toplevel_role(mapped.toplevel(), |role| role.title.clone());
+                    if let Some(title) = title {
+                        container["name"] = title.into();
+                        events.push(Event::SwayWindowChanged {
+                            change: "title".into(),
+                            container,
+                        });
+                    }
                 }
                 let window = make_ipc_window(mapped, ws_id, window_layout);
                 events.push(Event::WindowOpenedOrChanged {
                     window: window.clone(),
                 });
                 if window.is_focused {
-                    if let Some(container) = current_node {
+                    if let Some(mut container) = current_node {
+                        // Focus is delivered before sway commits the configured
+                        // default border (`sway/input/seat.c:1197`, after
+                        // `view_map` emitted the map-time events).
+                        container["border"] = "none".into();
+                        container["current_border_width"] = 0.into();
                         events.push(Event::SwayWindowChanged {
                             change: "focus".into(),
                             container,
@@ -1497,12 +1867,18 @@ impl State {
             let moved = ipc_win.workspace_id != workspace_id;
             let shown_from_scratchpad =
                 moved && previous_node.is_some_and(|node| node["scratchpad_state"] == "fresh");
+            // root_scratchpad_remove_container emits `move` (sway/tree/root.c:150-154).
+            let left_scratchpad =
+                previous_node
+                    .zip(current_node.as_ref())
+                    .is_some_and(|(old, current)| {
+                        old["scratchpad_state"] == "fresh" && current["scratchpad_state"] == "none"
+                    });
             let floating_changed = ipc_win.is_floating != mapped.is_floating();
             let sway_floating_changed = previous_node
                 .zip(current_node.as_ref())
                 .is_some_and(|(old, current)| old["type"] != current["type"]);
-            let title_changed =
-                with_toplevel_role(mapped.toplevel(), |role| ipc_win.title != role.title);
+            let title_changed = ipc_win.title.as_deref() != Some(&mapped.formatted_title());
             let fullscreen_changed = previous_node
                 .zip(current_node.as_ref())
                 .is_some_and(|(old, current)| old["fullscreen_mode"] != current["fullscreen_mode"]);
@@ -1512,7 +1888,7 @@ impl State {
 
             if let Some(container) = current_node.clone() {
                 for change in [
-                    moved.then_some("move"),
+                    (moved || left_scratchpad).then_some("move"),
                     sway_floating_changed.then_some("floating"),
                     title_changed.then_some("title"),
                     fullscreen_changed.then_some("fullscreen_mode"),

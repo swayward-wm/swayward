@@ -85,16 +85,14 @@ impl<W: LayoutElement> TilingTree<W> {
         true
     }
 
-    pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
-        if let Some(id) = self.resolve_node(window) {
-            self.resize_node_dimension(id, true, change);
-        }
+    pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) -> bool {
+        self.resolve_node(window)
+            .is_some_and(|id| self.resize_node_dimension(id, true, change))
     }
 
-    pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
-        if let Some(id) = self.resolve_node(window) {
-            self.resize_node_dimension(id, false, change);
-        }
+    pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) -> bool {
+        self.resolve_node(window)
+            .is_some_and(|id| self.resize_node_dimension(id, false, change))
     }
 
     pub fn set_window_size_sway(
@@ -109,8 +107,13 @@ impl<W: LayoutElement> TilingTree<W> {
         self.set_node_size_sway(id, width, height);
     }
 
-    pub fn resize_node_dimension_command(&mut self, id: NodeId, width: bool, change: SizeChange) {
-        self.resize_node_dimension(id, width, change);
+    pub fn resize_node_dimension_command(
+        &mut self,
+        id: NodeId,
+        width: bool,
+        change: SizeChange,
+    ) -> bool {
+        self.resize_node_dimension(id, width, change)
     }
 
     pub fn resize_node_edge_command(
@@ -144,7 +147,8 @@ impl<W: LayoutElement> TilingTree<W> {
             }
             SizeChange::SetFixed(_) | SizeChange::SetProportion(_) => return false,
         };
-        self.resize_adjacent(first, second, delta)
+        let changed = self.resize_adjacent(first, second, delta);
+        changed && first == id
     }
 
     pub fn set_node_size_sway(
@@ -222,30 +226,43 @@ impl<W: LayoutElement> TilingTree<W> {
         {
             return false;
         }
-        let horizontal = edges.intersects(ResizeEdge::LEFT_RIGHT);
-        let vertical = edges.intersects(ResizeEdge::TOP_BOTTOM);
-        let wanted_layout = if horizontal {
-            Layout::SplitH
-        } else if vertical {
-            Layout::SplitV
-        } else {
+        // A corner resizes both axes, each against its own sibling boundary,
+        // as sway's seatop_begin_resize_tiling does
+        // (`sway/sway/input/seatop_resize_tiling.c:106-127`). An axis with no
+        // boundary in that direction is skipped, not fatal.
+        let axes: Vec<_> = [
+            (true, edges.intersection(ResizeEdge::LEFT_RIGHT)),
+            (false, edges.intersection(ResizeEdge::TOP_BOTTOM)),
+        ]
+        .into_iter()
+        .filter(|(_, edge)| !edge.is_empty())
+        .filter_map(|(horizontal, edge)| {
+            let layout = if horizontal {
+                Layout::SplitH
+            } else {
+                Layout::SplitV
+            };
+            let toward_before = edge.intersects(ResizeEdge::LEFT | ResizeEdge::TOP);
+            let (first, second, initial_first, initial_second, axis_size, sign) =
+                self.resize_boundary(id, layout, toward_before)?;
+            Some(ResizeAxis {
+                horizontal,
+                first,
+                second,
+                initial_first,
+                initial_second,
+                axis_size,
+                sign,
+            })
+        })
+        .collect();
+        if axes.is_empty() {
             return false;
-        };
-        let toward_before = edges.intersects(ResizeEdge::LEFT | ResizeEdge::TOP);
-        let Some((first, second, first_percent, second_percent, axis_size, sign)) =
-            self.resize_boundary(id, wanted_layout, toward_before)
-        else {
-            return false;
-        };
+        }
         self.interactive_resize = Some(InteractiveResize {
             window,
             target: id,
-            first,
-            second,
-            initial_first: first_percent,
-            initial_second: second_percent,
-            axis_size,
-            sign,
+            axes,
             data: InteractiveResizeData { edges },
         });
         true
@@ -262,26 +279,29 @@ impl<W: LayoutElement> TilingTree<W> {
         if &resize.window != window {
             return false;
         }
-        let amount = if resize.data.edges.intersects(ResizeEdge::LEFT_RIGHT) {
-            delta.x
-        } else {
-            delta.y
-        } * resize.sign
-            / resize.axis_size.max(1.);
-        let (first, second) = (resize.first, resize.second);
-        let current = self.sibling_percents(first, second);
-        let Some((current_first, current_second)) = current else {
-            return false;
-        };
-        let target_first = resize.initial_first + amount;
-        let target_second = resize.initial_second - amount;
-        let change = target_first - current_first;
-        if target_first <= 0. || target_second <= 0. {
-            return false;
-        }
+        let axes = resize.axes.clone();
         let old = self.compute_geometry();
-        let changed = self.resize_adjacent_inner(first, second, change);
-        debug_assert!((current_second - change - target_second).abs() <= 1e-6);
+        let mut changed = false;
+        for axis in axes {
+            let moved = if axis.horizontal { delta.x } else { delta.y };
+            let amount = moved * axis.sign / axis.axis_size.max(1.);
+            let Some((current_first, current_second)) =
+                self.sibling_percents(axis.first, axis.second)
+            else {
+                continue;
+            };
+            let target_first = axis.initial_first + amount;
+            let target_second = axis.initial_second - amount;
+            // Each axis stops at its own limit without holding up the other.
+            if target_first <= 0. || target_second <= 0. {
+                continue;
+            }
+            let change = target_first - current_first;
+            if self.resize_adjacent_inner(axis.first, axis.second, change) {
+                debug_assert!((current_second - change - target_second).abs() <= 1e-6);
+                changed = true;
+            }
+        }
         if changed {
             self.animate_geometry_changes(old, None);
         }
@@ -325,7 +345,7 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    fn resize_node_dimension(&mut self, id: NodeId, width: bool, change: SizeChange) {
+    fn resize_node_dimension(&mut self, id: NodeId, width: bool, change: SizeChange) -> bool {
         let wanted = if width {
             Layout::SplitH
         } else {
@@ -341,7 +361,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 },
             }) = self.nodes.get(&parent_id)
             else {
-                return;
+                return false;
             };
             if *layout == wanted && children.len() > 1 {
                 let geometries = self.compute_geometry();
@@ -353,11 +373,11 @@ impl<W: LayoutElement> TilingTree<W> {
                     }
                 };
                 let Some(parent_extent) = geometries.ipc_nodes.get(&parent_id).map(extent) else {
-                    return;
+                    return false;
                 };
                 let child_extent = |child| geometries.ipc_nodes.get(child).map(extent);
                 let Some(current) = child_extent(&branch) else {
-                    return;
+                    return false;
                 };
                 let available = children
                     .iter()
@@ -372,12 +392,13 @@ impl<W: LayoutElement> TilingTree<W> {
                         ((parent_extent * value / 100.).trunc() - current) / available
                     }
                 };
-                self.resize_across_siblings(parent_id, branch, delta);
-                return;
+                let changed = self.resize_across_siblings(parent_id, branch, delta);
+                return changed && branch == id;
             }
             branch = parent_id;
             parent = *grandparent;
         }
+        false
     }
 
     fn resize_node_dimension_sway(&mut self, id: NodeId, width: bool, change: SizeChange) {
@@ -423,6 +444,47 @@ impl<W: LayoutElement> TilingTree<W> {
         true
     }
 
+    /// Whether `edge` of `window` borders a sibling rather than the
+    /// workspace, following sway's `edge_is_external`
+    /// (`sway/sway/input/seatop_default.c:39-74`): some ancestor with exactly
+    /// the parallel split layout has a sibling on that side. A combined edge
+    /// matches no layout in sway, so corners are always external.
+    pub fn is_internal_edge(&self, window: &W::Id, edge: ResizeEdge) -> bool {
+        let (wanted, before) = if edge == ResizeEdge::LEFT {
+            (Layout::SplitH, true)
+        } else if edge == ResizeEdge::RIGHT {
+            (Layout::SplitH, false)
+        } else if edge == ResizeEdge::TOP {
+            (Layout::SplitV, true)
+        } else if edge == ResizeEdge::BOTTOM {
+            (Layout::SplitV, false)
+        } else {
+            return false;
+        };
+        let Some(mut id) = self.node_for_window(window) else {
+            return false;
+        };
+        while let Some(parent) = self.nodes.get(&id).and_then(|node| node.parent) {
+            if let Some(Node {
+                value: TreeNode::Split {
+                    layout, children, ..
+                },
+                ..
+            }) = self.nodes.get(&parent)
+            {
+                if *layout == wanted {
+                    if let Some(index) = children.iter().position(|child| *child == id) {
+                        if (before && index > 0) || (!before && index + 1 < children.len()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            id = parent;
+        }
+        false
+    }
+
     fn resize_boundary(
         &self,
         id: NodeId,
@@ -441,7 +503,10 @@ impl<W: LayoutElement> TilingTree<W> {
             else {
                 return None;
             };
-            if Self::layouts_parallel(*parent_layout, layout) {
+            // Only a split of exactly the resized orientation has a boundary
+            // to move: tabs and stacks share one box, so their siblings are
+            // not neighbours (`sway/sway/commands/resize.c:45-64`).
+            if *parent_layout == layout {
                 let index = children.iter().position(|child| *child == branch)?;
                 let neighbor_index = if toward_before {
                     index.checked_sub(1)

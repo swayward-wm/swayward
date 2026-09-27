@@ -171,6 +171,7 @@ fn scratchpad_hides_focused_window_and_show_cycles_windows() {
         tree.nodes[0].nodes[0]
             .floating_nodes
             .iter()
+            .rev()
             .map(|node| node.id)
             .collect::<Vec<_>>()
     );
@@ -278,7 +279,7 @@ fn scratchpad_show_moves_visible_window_to_current_workspace_and_focuses_it() {
     tiled.ack_last_and_commit();
     f.double_roundtrip(client);
 
-    let mut subscriber = UnixStream::connect(socket).unwrap();
+    let mut subscriber = UnixStream::connect(&socket).unwrap();
     subscriber
         .write_all(&swayward_ipc::wire::encode(
             MessageType::Subscribe,
@@ -287,7 +288,14 @@ fn scratchpad_show_moves_visible_window_to_current_workspace_and_focuses_it() {
         .unwrap();
     let _ = read_ipc_reply(&mut f, &mut subscriber);
 
-    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    let mut command = UnixStream::connect(&socket).unwrap();
+    let reply = query_ipc_with_payload(
+        &mut f,
+        &mut command,
+        MessageType::RunCommand,
+        "scratchpad show",
+    );
+    assert_eq!(reply[0]["success"], true);
     let focused = f.swayward().layout.focus().unwrap();
     assert_eq!(focused.id(), scratchpad_id);
     let focused_window = focused.window.clone();
@@ -295,18 +303,21 @@ fn scratchpad_show_moves_visible_window_to_current_workspace_and_focuses_it() {
     assert_eq!(workspace.sway_name().as_deref(), Some("target"));
     assert!(workspace.has_window(&focused_window));
     let mut events = Vec::new();
+    let mut remainder = Vec::new();
     for _ in 0..2 {
-        let (event_type, payload) = read_ipc_reply(&mut f, &mut subscriber);
+        let ((event_type, payload), next) =
+            read_ipc_reply_with_remainder(&mut f, &mut subscriber, remainder);
+        remainder = next;
         assert_eq!(event_type, (1 << 31) | 3);
         events.push(serde_json::from_str::<Value>(&payload).unwrap());
     }
-    assert_eq!(events[0]["change"], "move");
+    assert_eq!(events[0]["change"], "focus");
     assert_eq!(
         events[0]["container"]["id"],
         crate::ipc::tree::window_id(scratchpad_id)
     );
     assert_eq!(events[0]["container"]["type"], "floating_con");
-    assert_eq!(events[1]["change"], "focus");
+    assert_eq!(events[1]["change"], "move");
 }
 
 #[test]
@@ -886,6 +897,23 @@ fn output_workspaces_and_move_replacements_use_next_free_numbers() {
 }
 
 #[test]
+fn rename_ignores_an_empty_inactive_source_sway_would_have_destroyed() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    for command in ["workspace 5", "open", "workspace 6", "open", "workspace 6"] {
+        let _ = crate::command::execute(f.niri_state(), command);
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "rename workspace 5 to 5: foo");
+    assert!(!outcome[0].success, "{outcome:?}");
+    assert_eq!(outcome[0].parse_error, Some(true));
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("There is no workspace with that name")
+    );
+}
+
+#[test]
 fn rename_workspace_updates_name_number_and_rejects_collisions() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
@@ -902,6 +930,7 @@ fn rename_workspace_updates_name_number_and_rejects_collisions() {
     }
     let collision = crate::command::execute(f.niri_state(), "rename workspace mail to 7: web");
     assert!(!collision[0].success);
+    assert_eq!(collision[0].parse_error, Some(true));
     for command in [
         "rename workspace mail to chat",
         "rename workspace chat to CHAT",
@@ -1650,6 +1679,48 @@ fn cross_workspace_swap_exchanges_positions_marks_and_fullscreen() {
 }
 
 #[test]
+fn moving_a_container_tree_to_an_empty_workspace_unwraps_its_children() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    for app_id in ["first", "second"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "mark group")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "workspace target")[0].success);
+
+    let outcome = crate::command::execute(f.niri_state(), "[con_mark=group] move workspace target");
+    assert!(outcome[0].success, "{outcome:?}");
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let target = tree["nodes"][1]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["name"] == "target")
+        .unwrap();
+    assert_eq!(target["layout"], "splith");
+    assert_eq!(target["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(target["nodes"][0]["app_id"], "first");
+    assert_eq!(target["nodes"][1]["app_id"], "second");
+}
+
+#[test]
 fn criteria_targeted_move_workspace_preserves_a_container_subtree() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
@@ -1931,4 +2002,55 @@ fn fullscreen_parent_after_child_map(
             .is_some(),
         f.swayward().layout.focus().unwrap().id() != parent_id,
     )
+}
+
+// sway/tree/container.c:990-994 removes the container from the scratchpad
+// before returning it to tiling. root_scratchpad_remove_container emits
+// `move` (sway/tree/root.c:150-154) and container_set_floating then emits
+// `floating` (sway/tree/container.c:1029).
+#[test]
+fn unfloating_a_scratchpad_window_emits_move_then_floating() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let id = f.swayward().layout.focus().unwrap().id();
+
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    f.niri_state().refresh_and_flush_clients();
+
+    let mut subscriber = UnixStream::connect(socket).unwrap();
+    subscriber
+        .write_all(&swayward_ipc::wire::encode(
+            MessageType::Subscribe,
+            r#"["window"]"#,
+        ))
+        .unwrap();
+    let _ = read_ipc_reply(&mut f, &mut subscriber);
+
+    assert!(crate::command::execute(f.niri_state(), "floating disable")[0].success);
+    let mut events = Vec::new();
+    let mut remainder = Vec::new();
+    for _ in 0..2 {
+        let ((event_type, payload), rest) =
+            read_ipc_reply_with_remainder(&mut f, &mut subscriber, remainder);
+        remainder = rest;
+        assert_eq!(event_type, (1 << 31) | 3);
+        events.push(serde_json::from_str::<Value>(&payload).unwrap());
+    }
+    for event in &events {
+        assert_eq!(event["container"]["id"], crate::ipc::tree::window_id(id));
+        assert_eq!(event["container"]["type"], "con");
+        assert_eq!(event["container"]["scratchpad_state"], "none");
+    }
+    assert_eq!(events[0]["change"], "move");
+    assert_eq!(events[1]["change"], "floating");
 }

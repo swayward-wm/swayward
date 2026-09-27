@@ -154,7 +154,7 @@ fn create_output_rejects_unsupported_backends_without_changing_output_state() {
         swayward_ipc::CommandOutcome {
             success: false,
             error: Some("Can only create outputs for Wayland, X11 or headless backends".into()),
-            parse_error: None,
+            parse_error: Some(false),
         }
     );
     assert_eq!(snapshot(&mut f), before);
@@ -432,6 +432,95 @@ fn focused_split_rejects_border_and_resizes_as_one_container() {
 }
 
 #[test]
+fn tiled_axis_resize_without_parallel_siblings_reports_failure() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["resize grow width 10 px", "resize shrink height 10 px"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert_eq!(
+            outcome,
+            [swayward_ipc::CommandOutcome {
+                success: false,
+                error: Some("Cannot resize any further".into()),
+                parse_error: Some(true),
+            }],
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn tiled_axis_resize_with_workspace_focus_reports_no_target() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+
+    let outcome = crate::command::execute(f.niri_state(), "resize shrink height 10 px");
+    assert_eq!(
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize nothing".into()),
+            parse_error: Some(true),
+        }]
+    );
+}
+
+#[test]
+fn tiled_resize_that_only_changes_an_ancestor_reports_failure() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "split v")[0].success);
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    assert!(crate::command::execute(f.niri_state(), "split h")[0].success);
+
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        "resize grow up 10 px or 25 ppt",
+    );
+    assert_eq!(
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize any further".into()),
+            parse_error: Some(true),
+        }]
+    );
+}
+
+#[test]
 fn tiled_grow_at_workspace_edge_reports_failure() {
     let mut f = Fixture::new();
     f.add_output(1, (1280, 800));
@@ -447,16 +536,26 @@ fn tiled_grow_at_workspace_edge_reports_failure() {
 
     let outcome = crate::command::execute(f.niri_state(), "resize grow right 10 px");
 
-    assert!(!outcome[0].success);
+    // sway answers CMD_INVALID here (sway/commands/resize.c:217,278), so the
+    // reply carries parse_error = true.
     assert_eq!(
-        outcome[0].error.as_deref(),
-        Some("Cannot resize any further")
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize any further".into()),
+            parse_error: Some(true),
+        }]
     );
 }
 
 #[test]
 fn floating_grow_edges_change_origin_and_size_like_sway() {
-    let config = swayward_config::Config::parse_mem("animations { off; }").unwrap();
+    let mut config = swayward_config::Config::default();
+    config.animations.off = true;
+    config.layout.floating_maximum_size = swayward_config::FloatingSize {
+        width: 1280,
+        height: 800,
+    };
     let mut f = Fixture::with_config(config);
     f.add_output_at(1, (1280, 800), Some((100, 50)));
     let client = f.add_client();
@@ -561,11 +660,47 @@ fn floating_grow_edges_change_origin_and_size_like_sway() {
     let before = rect(&mut f);
     assert_eq!(before["width"], 1280);
     assert_eq!(before["height"], 800);
-    let outcome = crate::command::execute(f.niri_state(), "resize grow right 10 px or 25 ppt");
-    assert!(!outcome[0].success);
+    for command in [
+        "resize grow right 10 px or 25 ppt",
+        "resize grow width 10 px or 25 ppt",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert_eq!(
+            outcome,
+            [swayward_ipc::CommandOutcome {
+                success: false,
+                error: Some("Cannot resize any further".into()),
+                parse_error: Some(true),
+            }],
+            "{command}"
+        );
+        assert_eq!(rect(&mut f), before, "{command}");
+    }
+
+    assert!(crate::command::execute(f.niri_state(), "resize set 1 px 1 px")[0].success);
+    let requested = f
+        .swayward()
+        .layout
+        .focus()
+        .unwrap()
+        .expected_size()
+        .unwrap();
+    let window = f.client(client).window(&surface);
+    window.set_size(
+        requested.w.try_into().unwrap(),
+        requested.h.try_into().unwrap(),
+    );
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let before = rect(&mut f);
+    let outcome = crate::command::execute(f.niri_state(), "resize shrink height 10 px");
     assert_eq!(
-        outcome[0].error.as_deref(),
-        Some("Cannot resize any further")
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize any further".into()),
+            parse_error: Some(true),
+        }]
     );
     assert_eq!(rect(&mut f), before);
 }
@@ -1392,7 +1527,7 @@ fn directional_focus_prefers_an_adjacent_output_over_local_wrapping() {
         ),
         (
             (0, 600),
-            "layout stacked",
+            "layout stacking",
             "focus down",
             swayward_config::FocusWrapping::Yes,
             "target",
@@ -1589,7 +1724,7 @@ fn focus_output_reports_sway_errors() {
         [swayward_ipc::CommandOutcome {
             success: false,
             error: Some("No focused workspace to base directions off of.".into()),
-            parse_error: None,
+            parse_error: Some(false),
         }]
     );
 }
@@ -1653,4 +1788,44 @@ fn move_output_accepts_direction_name_and_workspace_forms() {
         .success
     );
     assert!(crate::command::execute(f.niri_state(), "move workspace output right")[0].success);
+}
+
+// sway/tree/container.c:990-994: returning a container to tiling removes it
+// from the scratchpad, so a later `scratchpad show` finds nothing to toggle.
+#[test]
+fn unfloating_a_shown_scratchpad_window_removes_it_from_the_scratchpad() {
+    for unfloat in ["floating disable", "floating toggle"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        let id = f.swayward().layout.focus().unwrap().window.clone();
+
+        assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+        assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+        assert!(f.swayward().layout.is_scratchpad_window(&id));
+
+        let outcome = crate::command::execute(f.niri_state(), unfloat);
+        assert!(outcome[0].success, "{unfloat}: {outcome:?}");
+        assert!(
+            !f.swayward().layout.is_scratchpad_window(&id),
+            "{unfloat}"
+        );
+        assert!(!f.swayward().layout.focus().unwrap().is_floating(), "{unfloat}");
+        assert_eq!(
+            crate::command::execute(f.niri_state(), "scratchpad show")[0]
+                .error
+                .as_deref(),
+            Some("Scratchpad is empty"),
+            "{unfloat}"
+        );
+        assert_eq!(f.swayward().layout.focus().map(|w| w.window.clone()), Some(id));
+    }
 }

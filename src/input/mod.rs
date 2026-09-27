@@ -14,6 +14,7 @@ use smithay::backend::input::{
     TabletToolTipState, TouchEvent,
 };
 use smithay::backend::libinput::LibinputInputBackend;
+use smithay::desktop::Window;
 use smithay::input::dnd::DnDGrab;
 use smithay::input::keyboard::xkb::keysym_get_name;
 use smithay::input::keyboard::{keysyms, FilterResult, Keysym, Layout, ModifiersState};
@@ -21,7 +22,8 @@ use smithay::input::pointer::{
     AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, Focus, GestureHoldBeginEvent,
     GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
     GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
-    GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab, RelativeMotionEvent,
+    GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab, PointerHandle,
+    RelativeMotionEvent,
 };
 use smithay::input::tablet::tool::GrabStartData as TabletToolGrabStartData;
 use smithay::input::tablet::{TabletDescriptor, TabletSeatHandler, TabletSeatTrait};
@@ -32,7 +34,7 @@ use smithay::input::{tablet, SeatHandler};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Point, Rectangle, Transform, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Rectangle, Serial, Transform, SERIAL_COUNTER};
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 use swayward_config::{
@@ -54,7 +56,7 @@ use crate::swayward::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
-use crate::utils::{center, get_monotonic_time, CastSessionId, ResizeEdge};
+use crate::utils::{center, CastSessionId, ResizeEdge};
 
 pub mod backend_ext;
 pub mod click_grab;
@@ -2950,6 +2952,8 @@ impl State {
             self.swayward.pointer_inside_hot_corner = true;
         }
 
+        self.update_border_resize_cursor(&pointer);
+
         // Activate a new confinement if necessary.
         self.swayward.maybe_activate_pointer_constraint();
 
@@ -3043,6 +3047,8 @@ impl State {
             self.swayward.pointer_inside_hot_corner = true;
         }
 
+        self.update_border_resize_cursor(&pointer);
+
         self.swayward.maybe_activate_pointer_constraint();
 
         // We moved the pointer, show it.
@@ -3069,6 +3075,114 @@ impl State {
         // Redraw to update the cursor position.
         // FIXME: redraw only outputs overlapping the cursor.
         self.swayward.queue_redraw_all();
+    }
+
+    /// Shows sway's resize cursor over a resizable border
+    /// (`sway/sway/input/cursor.c`, `cursor_update_image`): directional for
+    /// floating windows, `col-resize` or `row-resize` for tiled ones.
+    fn update_border_resize_cursor(&mut self, pointer: &PointerHandle<State>) {
+        if pointer.is_grabbed() {
+            return;
+        }
+        let icon = self
+            .border_resize_edges_under_pointer(pointer)
+            .or_else(|| {
+                self.gap_resize_edges_under_pointer(pointer)
+                    .map(|(_, edges, _)| (false, edges))
+            })
+            .map(|(floating, edges)| {
+                if floating {
+                    edges.cursor_icon()
+                } else if edges.intersects(ResizeEdge::LEFT_RIGHT) {
+                    CursorIcon::ColResize
+                } else {
+                    CursorIcon::RowResize
+                }
+            });
+        if let Some(icon) = icon {
+            self.swayward.border_resize_cursor = true;
+            self.swayward
+                .cursor_manager
+                .set_cursor_image(CursorImageStatus::Named(icon));
+        } else if std::mem::take(&mut self.swayward.border_resize_cursor)
+            && self.swayward.pointer_contents.surface.is_none()
+        {
+            // A surface under the pointer sets its own cursor on enter.
+            self.swayward
+                .cursor_manager
+                .set_cursor_image(CursorImageStatus::default_named());
+        }
+    }
+
+    /// Activates `window` and starts a pointer resize of `edges`, shared by
+    /// the border and gap handles.
+    fn begin_edge_resize(
+        &mut self,
+        pointer: &PointerHandle<State>,
+        window: Window,
+        edges: ResizeEdge,
+        location: Point<f64, Logical>,
+        button_code: u32,
+        serial: Serial,
+    ) {
+        self.swayward.layout.activate_window(&window);
+        if !self
+            .swayward
+            .layout
+            .interactive_resize_begin(window.clone(), edges)
+        {
+            return;
+        }
+        let start_data = PointerGrabStartData {
+            focus: None,
+            button: button_code,
+            location,
+        };
+        let grab = ResizeGrab::new(AnyStartData::Pointer(start_data), window);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+        self.swayward
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::Named(edges.cursor_icon()));
+    }
+
+    /// The tiled window, edge and pointer location a plain left press in the
+    /// gap under the pointer resizes, when `input { gap-resize }` is on.
+    fn gap_resize_edges_under_pointer(
+        &self,
+        pointer: &PointerHandle<State>,
+    ) -> Option<(Window, ResizeEdge, Point<f64, Logical>)> {
+        if !self.swayward.config.borrow().input.gap_resize
+            || self.swayward.pointer_contents.window.is_some()
+            || self.swayward.pointer_contents.layer.is_some()
+            || self.swayward.layout.is_overview_open()
+        {
+            return None;
+        }
+        let location = pointer.current_location();
+        let (output, pos) = self.swayward.output_under(location)?;
+        let (mapped, edges) = self.swayward.layout.gap_resize_edges_under(output, pos)?;
+        Some((mapped.window.clone(), edges, location))
+    }
+
+    /// Whether the pointer is over a border a plain left press resizes, and
+    /// whether that window floats.
+    fn border_resize_edges_under_pointer(
+        &self,
+        pointer: &PointerHandle<State>,
+    ) -> Option<(bool, ResizeEdge)> {
+        if !self.swayward.config.borrow().input.border_resize
+            || self.swayward.pointer_contents.surface.is_some()
+            || self.swayward.layout.is_overview_open()
+        {
+            return None;
+        }
+        let (window, _) = self.swayward.pointer_contents.window.as_ref()?;
+        let (output, pos) = self.swayward.output_under(pointer.current_location())?;
+        let (mapped, edges) = self
+            .swayward
+            .layout
+            .border_resize_edges_under(output, pos)?;
+        (&mapped.window == window).then_some((mapped.is_floating(), edges))
     }
 
     fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
@@ -3314,7 +3428,33 @@ impl State {
                     } else {
                         button == Some(drag_move_button) && drag_mod_down
                     };
-                if (overview_move || regular_move) && !pointer.is_grabbed() {
+                // Sway resizes from a border on a plain left press, tiled before any modifier
+                // move and floating after one (`sway/sway/input/seatop_default.c:396-474`).
+                let border_resize = (!is_overview_open
+                    && button == Some(MouseButton::Left)
+                    && !pointer.is_grabbed()
+                    && self.swayward.config.borrow().input.border_resize
+                    && (is_tiling || !regular_move))
+                    .then(|| {
+                        let location = pointer.current_location();
+                        let (output, pos) = self.swayward.output_under(location)?;
+                        let (target, edges) = self
+                            .swayward
+                            .layout
+                            .border_resize_edges_under(output, pos)?;
+                        (target.window == window).then_some((location, edges))
+                    })
+                    .flatten();
+                if let Some((location, edges)) = border_resize {
+                    self.begin_edge_resize(
+                        &pointer,
+                        window.clone(),
+                        edges,
+                        location,
+                        button_code,
+                        serial,
+                    );
+                } else if (overview_move || regular_move) && !pointer.is_grabbed() {
                     let location = pointer.current_location();
 
                     if !is_overview_open {
@@ -3377,62 +3517,17 @@ impl State {
                         .resize_edges_under(output, pos_within_output)
                         .unwrap_or(ResizeEdge::empty());
 
+                    // Sway has no double-click gestures here: every press
+                    // resizes from the corner under the pointer.
                     if !edges.is_empty() {
-                        // See if we got a double resize-click gesture.
-                        // FIXME: deduplicate with resize_request in xdg-shell somehow.
-                        let time = get_monotonic_time();
-                        let last_cell = mapped.last_interactive_resize_start();
-                        let mut last = last_cell.get();
-                        last_cell.set(Some((time, edges)));
-
-                        // Floating windows don't have either of the double-resize-click
-                        // gestures, so just allow it to resize.
-                        if mapped.is_floating() {
-                            last = None;
-                            last_cell.set(None);
-                        }
-
-                        if let Some((last_time, last_edges)) = last {
-                            if time.saturating_sub(last_time) <= DOUBLE_CLICK_TIME {
-                                // Allow quick resize after a triple click.
-                                last_cell.set(None);
-
-                                let intersection = edges.intersection(last_edges);
-                                if intersection.intersects(ResizeEdge::LEFT_RIGHT) {
-                                    // FIXME: don't activate once we can pass specific windows
-                                    // to actions.
-                                    self.swayward.layout.activate_window(&window);
-                                    self.swayward.layout.toggle_full_width();
-                                }
-                                if intersection.intersects(ResizeEdge::TOP_BOTTOM) {
-                                    self.swayward.layout.activate_window(&window);
-                                    self.swayward.layout.reset_window_height(Some(&window));
-                                }
-                                // FIXME: granular.
-                                self.swayward.queue_redraw_all();
-                                return;
-                            }
-                        }
-
-                        self.swayward.layout.activate_window(&window);
-
-                        if self
-                            .swayward
-                            .layout
-                            .interactive_resize_begin(window.clone(), edges)
-                        {
-                            let start_data = PointerGrabStartData {
-                                focus: None,
-                                button: button_code,
-                                location,
-                            };
-                            let start_data = AnyStartData::Pointer(start_data);
-                            let grab = ResizeGrab::new(start_data, window.clone());
-                            pointer.set_grab(self, grab, serial, Focus::Clear);
-                            self.swayward
-                                .cursor_manager
-                                .set_cursor_image(CursorImageStatus::Named(edges.cursor_icon()));
-                        }
+                        self.begin_edge_resize(
+                            &pointer,
+                            window.clone(),
+                            edges,
+                            location,
+                            button_code,
+                            serial,
+                        );
                     }
                 }
 
@@ -3456,6 +3551,14 @@ impl State {
                 self.swayward.layout.focus_output(&output);
                 self.swayward.layout.toggle_overview_to_workspace(ws_idx);
 
+                // FIXME: granular.
+                self.swayward.queue_redraw_all();
+            } else if let Some((window, edges, location)) = (button == Some(MouseButton::Left)
+                && !pointer.is_grabbed())
+            .then(|| self.gap_resize_edges_under_pointer(&pointer))
+            .flatten()
+            {
+                self.begin_edge_resize(&pointer, window, edges, location, button_code, serial);
                 // FIXME: granular.
                 self.swayward.queue_redraw_all();
             } else if let Some(output) = self.swayward.output_under_cursor() {
@@ -5264,31 +5367,30 @@ fn find_bind<'a>(
         return modified_bind;
     }
 
-    raw.filter(|raw| *raw != modified)
-        .and_then(|raw| {
-            find_configured_bind_with_context(
-                bindings.clone(),
-                mod_key,
-                &[Trigger::Keysym(raw)],
-                raw_modifiers,
-                input_device,
-                group,
-                locked,
-                inhibited,
-            )
-        })
-        .or_else(|| {
-            find_configured_bind_with_context(
-                bindings,
-                mod_key,
-                &[Trigger::Keycode(key_code.raw())],
-                code_modifiers,
-                input_device,
-                group,
-                locked,
-                inhibited,
-            )
-        })
+    raw.and_then(|raw| {
+        find_configured_bind_with_context(
+            bindings.clone(),
+            mod_key,
+            &[Trigger::Keysym(raw)],
+            raw_modifiers,
+            input_device,
+            group,
+            locked,
+            inhibited,
+        )
+    })
+    .or_else(|| {
+        find_configured_bind_with_context(
+            bindings,
+            mod_key,
+            &[Trigger::Keycode(key_code.raw())],
+            code_modifiers,
+            input_device,
+            group,
+            locked,
+            inhibited,
+        )
+    })
 }
 
 fn mouse_regions_match(

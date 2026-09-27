@@ -844,6 +844,31 @@ fn move_split_container_to_output_preserves_the_subtree() {
 }
 
 #[test]
+fn moving_a_workspace_fails_like_sway() {
+    let mut f = Fixture::new();
+    f.add_output(1, (800, 600));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "move right"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot move workspaces in a direction".into()),
+            parse_error: Some(false),
+        }]
+    );
+}
+
+#[test]
 fn move_split_container_direction_crosses_output_as_a_subtree() {
     let mut f = Fixture::new();
     f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
@@ -1112,6 +1137,57 @@ fn workspace_next_and_prev_on_output_wrap_in_stored_order() {
     assert_eq!(
         f.swayward().layout.active_workspace().unwrap().sway_name(),
         Some("6:b".into())
+    );
+}
+
+#[test]
+fn workspace_next_and_prev_follow_global_output_order_for_equal_numbers() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1920, 1080));
+    let first_output = f.niri_output(1).name();
+    let second_output = f.niri_output(2).name();
+    let client = f.add_client();
+    for (workspace, output) in [
+        ("1", &first_output),
+        ("2", &second_output),
+        ("6:c", &second_output),
+        ("5", &first_output),
+        ("6:a", &first_output),
+        ("6:b", &first_output),
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success
+        );
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        assert!(
+            crate::command::execute(
+                f.niri_state(),
+                &format!("workspace {workspace} output {output}")
+            )[0]
+            .success
+        );
+    }
+
+    assert!(crate::command::execute(f.niri_state(), "workspace 5")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "workspace next")[0].success);
+    assert_eq!(
+        f.swayward().layout.active_workspace().unwrap().sway_name(),
+        Some("6:a".into())
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "workspace 7")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "workspace prev")[0].success);
+    assert_eq!(
+        f.swayward().layout.active_workspace().unwrap().sway_name(),
+        Some("6:c".into())
     );
 }
 
@@ -1516,7 +1592,9 @@ fn negative_and_unnumbered_workspace_names_report_minus_one_without_affecting_or
             crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success
         );
     }
-    assert!(crate::command::execute(f.niri_state(), "rename workspace mail to inbox")[0].success);
+    let rename = crate::command::execute(f.niri_state(), "rename workspace mail to inbox");
+    assert!(!rename[0].success, "{rename:?}");
+    assert_eq!(rename[0].parse_error, Some(true));
     f.niri_state().ipc_refresh_layout();
 
     let swayward = f.swayward();

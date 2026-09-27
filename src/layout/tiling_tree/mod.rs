@@ -226,13 +226,21 @@ struct PendingMode {
 struct InteractiveResize<I> {
     window: I,
     target: NodeId,
+    /// One sibling boundary per resized axis, like sway's separate `h_con`
+    /// and `v_con` (`sway/sway/input/seatop_resize_tiling.c:12-27`).
+    axes: Vec<ResizeAxis>,
+    data: InteractiveResizeData,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeAxis {
+    horizontal: bool,
     first: NodeId,
     second: NodeId,
     initial_first: f64,
     initial_second: f64,
     axis_size: f64,
     sign: f64,
-    data: InteractiveResizeData,
 }
 
 swayward_render_elements! {
@@ -261,6 +269,7 @@ pub struct TilingTree<W: LayoutElement> {
     root: NodeId,
     focus: Option<NodeId>,
     has_had_tile: bool,
+    empty_representation_layout: Option<Layout>,
     focus_history: Vec<NodeId>,
     previous_split_layouts: HashMap<NodeId, Layout>,
     title_formats: HashMap<NodeId, String>,
@@ -279,6 +288,7 @@ pub struct TilingTree<W: LayoutElement> {
     clock: Clock,
     options: Rc<Options>,
     gaps: f64,
+    preserved_auto_layout: Option<Layout>,
 }
 
 impl<W: LayoutElement> TilingTree<W> {
@@ -315,6 +325,7 @@ impl<W: LayoutElement> TilingTree<W> {
             root,
             focus: None,
             has_had_tile: false,
+            empty_representation_layout: None,
             focus_history: Vec::new(),
             previous_split_layouts: HashMap::new(),
             title_formats: HashMap::new(),
@@ -333,6 +344,7 @@ impl<W: LayoutElement> TilingTree<W> {
             clock,
             gaps: options.layout.gaps,
             options,
+            preserved_auto_layout: None,
         }
     }
 
@@ -344,17 +356,79 @@ impl<W: LayoutElement> TilingTree<W> {
         self.has_had_tile
     }
 
+    pub fn representation_layout(&self) -> Layout {
+        let TreeNode::Split { layout, .. } = self.nodes[&self.root].value else {
+            unreachable!()
+        };
+        if self.is_empty() {
+            self.empty_representation_layout.unwrap_or(layout)
+        } else {
+            layout
+        }
+    }
+
     pub fn reset_empty_layout(&mut self) {
         assert!(self.is_empty());
-        let layout = match self.options.layout.default_orientation {
-            swayward_config::DefaultOrientation::Horizontal => Layout::SplitH,
-            swayward_config::DefaultOrientation::Vertical => Layout::SplitV,
-            swayward_config::DefaultOrientation::Auto if self.view_size.h > self.view_size.w => {
-                Layout::SplitV
-            }
-            swayward_config::DefaultOrientation::Auto => Layout::SplitH,
+        let layout = match self.preserved_auto_layout {
+            Some(layout) => layout,
+            None => match self.options.layout.default_orientation {
+                swayward_config::DefaultOrientation::Horizontal => Layout::SplitH,
+                swayward_config::DefaultOrientation::Vertical => Layout::SplitV,
+                swayward_config::DefaultOrientation::Auto
+                    if self.view_size.h > self.view_size.w =>
+                {
+                    Layout::SplitV
+                }
+                swayward_config::DefaultOrientation::Auto => Layout::SplitH,
+            },
         };
         self.set_layout(self.root, layout);
+        self.empty_representation_layout = Some(layout);
+    }
+
+    pub fn preserve_empty_auto_layout(&mut self) {
+        let TreeNode::Split { layout, .. } = self.nodes[&self.root].value else {
+            unreachable!();
+        };
+        self.preserved_auto_layout = Some(layout);
+    }
+
+    pub fn track_empty_auto_layout(&mut self) {
+        let Some(preserved) = self.preserved_auto_layout.take() else {
+            return;
+        };
+        if self.is_empty()
+            && self.options.layout.default_orientation == swayward_config::DefaultOrientation::Auto
+            && matches!(
+                self.nodes[&self.root].value,
+                TreeNode::Split { layout, .. } if layout == preserved
+            )
+        {
+            self.reset_empty_layout();
+        }
+    }
+
+    fn update_empty_auto_layout(&mut self, view_size: Size<f64, Logical>) {
+        let old_auto_layout = if self.view_size.h > self.view_size.w {
+            Layout::SplitV
+        } else {
+            Layout::SplitH
+        };
+        let new_auto_layout = if view_size.h > view_size.w {
+            Layout::SplitV
+        } else {
+            Layout::SplitH
+        };
+        if self.preserved_auto_layout.is_none()
+            && self.is_empty()
+            && self.options.layout.default_orientation == swayward_config::DefaultOrientation::Auto
+            && matches!(
+                self.nodes[&self.root].value,
+                TreeNode::Split { layout, .. } if layout == old_auto_layout
+            )
+        {
+            self.set_layout(self.root, new_auto_layout);
+        }
     }
 
     pub fn update_config(
@@ -371,6 +445,7 @@ impl<W: LayoutElement> TilingTree<W> {
         for indicator in self.tab_indicators.values_mut() {
             indicator.update_config(options.layout.tab_indicator);
         }
+        self.update_empty_auto_layout(view_size);
         self.view_size = view_size;
         self.parent_area = parent_area;
         self.gaps_to_edge = gaps_to_edge;
@@ -576,12 +651,16 @@ impl<W: LayoutElement> TilingTree<W> {
                 self.wrap_node(id, layout);
             }
         }
-        if activate {
+        if activate && !mapped_under_fullscreen {
             self.set_focus_id(Some(id));
         } else if let Some(previous_focus) = previous_focus {
             self.focus_history.retain(|candidate| *candidate != id);
-            self.focus_history
-                .insert(1.min(self.focus_history.len()), id);
+            if mapped_under_fullscreen {
+                self.focus_history.push(id);
+            } else {
+                self.focus_history
+                    .insert(1.min(self.focus_history.len()), id);
+            }
             self.focus = Some(previous_focus);
         } else {
             self.set_focus_id(Some(id));
@@ -707,6 +786,7 @@ impl<W: LayoutElement> TilingTree<W> {
             let parent = self.detach_subtree_only(id)?;
             Some(parent)
         };
+        let moved_fullscreen = self.fullscreen_node() == Some(id);
         let node = if id == self.root {
             let TreeNode::Split {
                 layout,
@@ -723,6 +803,7 @@ impl<W: LayoutElement> TilingTree<W> {
             else {
                 return None;
             };
+            self.set_layout(self.root, layout);
             let children = children
                 .into_iter()
                 .map(|child| self.take_detached_node(child))
@@ -739,6 +820,9 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             self.take_detached_node(id)?
         };
+        if moved_fullscreen {
+            self.mapped_under_fullscreen.clear();
+        }
         self.focus = self.focused_leaf_in(self.root);
         self.request_window_sizes();
         Some((
@@ -765,7 +849,38 @@ impl<W: LayoutElement> TilingTree<W> {
     ) -> (NodeId, Vec<(NodeId, NodeId)>) {
         let focus_history = subtree.focus_history;
         let mut remapped = Vec::new();
-        let id = self.insert_detached_node(subtree.node, None, &mut remapped);
+        let node = if self.is_empty() {
+            match subtree.node {
+                DetachedNode::Split {
+                    children,
+                    percents: detached_percents,
+                    ..
+                } => {
+                    self.set_layout(self.root, Layout::SplitH);
+                    let ids = children
+                        .into_iter()
+                        .map(|child| {
+                            self.insert_detached_node(child, Some(self.root), &mut remapped)
+                        })
+                        .collect::<Vec<_>>();
+                    let TreeNode::Split {
+                        children, percents, ..
+                    } = &mut self.nodes.get_mut(&self.root).unwrap().value
+                    else {
+                        unreachable!();
+                    };
+                    *percents = detached_percents;
+                    *children = ids;
+                    self.restore_transferred_focus(focus_history);
+                    self.request_window_sizes();
+                    return (self.root, remapped);
+                }
+                node => node,
+            }
+        } else {
+            subtree.node
+        };
+        let id = self.insert_detached_node(node, None, &mut remapped);
         let (parent, after) =
             match target.and_then(|target| self.nodes.get(&target).map(|node| (target, node))) {
                 Some((
@@ -785,6 +900,15 @@ impl<W: LayoutElement> TilingTree<W> {
                 _ => (self.root, None),
             };
         self.insert_child(parent, id, after);
+        self.restore_transferred_focus(focus_history);
+        if self.focus.is_none() {
+            self.set_focus_id(self.focused_leaf_in(id));
+        }
+        self.request_window_sizes();
+        (id, remapped)
+    }
+
+    fn restore_transferred_focus(&mut self, focus_history: Vec<W::Id>) {
         let insertion = usize::from(self.focus.is_some());
         for window in focus_history.into_iter().rev() {
             if let Some(leaf) = self.node_for_window(&window) {
@@ -794,10 +918,8 @@ impl<W: LayoutElement> TilingTree<W> {
             }
         }
         if self.focus.is_none() {
-            self.set_focus_id(self.focused_leaf_in(id));
+            self.set_focus_id(self.focused_leaf_in(self.root));
         }
-        self.request_window_sizes();
-        (id, remapped)
     }
 
     pub fn finish_subtree_detach(&mut self, old_parent: Option<NodeId>) {
@@ -914,14 +1036,6 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn remove_tile_node(&mut self, id: NodeId) -> Option<Tile<W>> {
-        self.remove_tile_node_inner(id, true)
-    }
-
-    fn remove_tile_node_preserving_parent(&mut self, id: NodeId) -> Option<Tile<W>> {
-        self.remove_tile_node_inner(id, false)
-    }
-
-    fn remove_tile_node_inner(&mut self, id: NodeId, collapse: bool) -> Option<Tile<W>> {
         let old_geometries = self.compute_geometry();
         if !matches!(
             self.nodes.get(&id).map(|node| &node.value),
@@ -929,21 +1043,25 @@ impl<W: LayoutElement> TilingTree<W> {
         ) {
             return None;
         }
+        let removed_fullscreen = self.fullscreen_node() == Some(id);
         let node = self.remove_node(id)?;
-        let TreeNode::Leaf { tile } = node.value else {
+        if removed_fullscreen {
+            self.mapped_under_fullscreen.clear();
+        }
+        let TreeNode::Leaf { mut tile } = node.value else {
             unreachable!();
         };
+        tile.clear_tiled_content_size();
         self.interactive_resize = None;
         if let Some(parent) = node.parent {
             self.remove_child(parent, id);
-            if collapse {
-                self.collapse_from(parent);
-                self.compact_tree();
-            } else {
-                self.reap_empty_from(parent);
-            }
+            self.reap_empty_from(parent);
         }
         if self.windows().next().is_none() {
+            let TreeNode::Split { layout, .. } = self.nodes[&self.root].value else {
+                unreachable!()
+            };
+            self.empty_representation_layout = Some(layout);
             self.pending_modes.clear();
             self.set_focus_id(None);
         } else if self.focus == Some(id) {
@@ -955,6 +1073,10 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         self.animate_geometry_changes(old_geometries, None);
         Some(*tile)
+    }
+
+    fn remove_tile_node_preserving_parent(&mut self, id: NodeId) -> Option<Tile<W>> {
+        self.remove_tile_node(id)
     }
 
     fn remove_node(&mut self, id: NodeId) -> Option<Node<W>> {
@@ -1051,6 +1173,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.gaps_to_edge,
             self.titlebar_height,
             &fullscreen,
+            &self.mapped_under_fullscreen,
             self.options.layout.hide_edge_borders,
             self.options.layout.smart_borders,
             &visible_leaves,
@@ -1714,11 +1837,13 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     fn cancel_resize_for(&mut self, id: NodeId) {
-        if self
-            .interactive_resize
-            .as_ref()
-            .is_some_and(|resize| resize.target == id || resize.first == id || resize.second == id)
-        {
+        if self.interactive_resize.as_ref().is_some_and(|resize| {
+            resize.target == id
+                || resize
+                    .axes
+                    .iter()
+                    .any(|axis| axis.first == id || axis.second == id)
+        }) {
             self.interactive_resize = None;
         }
     }

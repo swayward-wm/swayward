@@ -97,6 +97,18 @@ impl<W: LayoutElement> TilingTree<W> {
             } => (destination, None),
             _ => return false,
         };
+        let already_there = self.nodes[&id].parent == Some(parent)
+            && self.child_index(parent, id)
+                == after
+                    .and_then(|node| self.child_index(parent, node))
+                    .map(|index| index + 1);
+        if already_there
+            && self
+                .focus
+                .is_some_and(|focus| self.contains_node(id, focus))
+        {
+            return true;
+        }
         let old = self.compute_geometry();
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
@@ -168,16 +180,32 @@ impl<W: LayoutElement> TilingTree<W> {
             Direction::Left | Direction::Right => Layout::SplitH,
             Direction::Up | Direction::Down => Layout::SplitV,
         };
-        if self.windows().nth(1).is_none()
-            || self.split_len(self.root) == Some(1) && self.root_branch(id) == Some(id)
-        {
+        if self.windows().nth(1).is_none() {
+            let root_layout = match self.nodes[&self.root].value {
+                TreeNode::Split { layout, .. } => layout,
+                TreeNode::Leaf { .. } => unreachable!(),
+            };
+            if !Self::layouts_parallel(root_layout, wanted_layout) {
+                self.set_layout(self.root, wanted_layout);
+                let old_parent = self.nodes[&id].parent;
+                if let Some(parent) = old_parent.filter(|parent| *parent != self.root) {
+                    self.detach_subtree_only(id);
+                    self.insert_child_at(self.root, id, 0);
+                    self.reap_empty_from(parent);
+                    self.finish_directional_move(id);
+                }
+            }
+            return false;
+        }
+        if self.split_len(self.root) == Some(1) && self.root_branch(id) == Some(id) {
             self.set_layout(self.root, wanted_layout);
             return false;
         }
         let backwards = matches!(direction, Direction::Left | Direction::Up);
         let mut branch = id;
         let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
-        let mut found_axis = false;
+        let mut exhausted_axis = false;
+        let mut vacated_explicit_split = false;
         while let Some(parent_id) = parent {
             let Some(Node {
                 parent: grandparent,
@@ -189,7 +217,8 @@ impl<W: LayoutElement> TilingTree<W> {
                 return false;
             };
             if Self::layouts_parallel(*layout, wanted_layout) {
-                found_axis = true;
+                exhausted_axis = true;
+                vacated_explicit_split |= branch == id && children.len() > 1;
                 let Some(index) = children.iter().position(|child| *child == branch) else {
                     return false;
                 };
@@ -216,7 +245,10 @@ impl<W: LayoutElement> TilingTree<W> {
                         false,
                     );
                 }
-                if parent_id == self.root && branch != id {
+                if parent_id == self.root {
+                    if branch == id {
+                        return false;
+                    }
                     let Some(boundary) = children
                         .get(if backwards { 0 } else { children.len() - 1 })
                         .copied()
@@ -237,14 +269,15 @@ impl<W: LayoutElement> TilingTree<W> {
             branch = parent_id;
             parent = *grandparent;
         }
-        if found_axis {
-            return false;
-        }
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
         };
         self.wrap_root_for_direction(id, direction);
-        self.reap_empty_from(old_parent);
+        if exhausted_axis && !vacated_explicit_split {
+            self.collapse_from(old_parent);
+        } else {
+            self.reap_empty_from(old_parent);
+        }
         self.compact_tree();
         self.finish_directional_move(id);
         true

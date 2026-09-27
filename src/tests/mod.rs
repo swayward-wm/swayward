@@ -4,6 +4,7 @@ mod client;
 pub(crate) mod fixture;
 mod server;
 
+mod border_resize;
 mod ext_workspace;
 mod floating;
 mod foreign_toplevel;
@@ -16,6 +17,7 @@ mod output_management;
 mod remove_output;
 mod screencopy;
 mod session_lock;
+mod tiling_clip;
 mod virtual_pointer;
 mod window_opening;
 mod xdg_shell;

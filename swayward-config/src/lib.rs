@@ -908,6 +908,8 @@ mod tests {
             input {
                 tiling-drag false
                 tiling-drag-threshold 17
+                border-resize false
+                gap-resize
             }
             "#,
         )
@@ -918,6 +920,8 @@ mod tests {
         assert_eq!(config.layout.titlebar.alignment, TitleAlignment::Right);
         assert!(!config.input.tiling_drag);
         assert_eq!(config.input.tiling_drag_threshold, 17);
+        assert!(!config.input.border_resize);
+        assert!(config.input.gap_resize);
     }
 
     #[test]
@@ -995,6 +999,13 @@ mod tests {
             .unwrap();
         assert_eq!(default_rule.geometry_corner_radius, Some(12_f32.into()));
         assert_eq!(default_rule.clip_to_geometry, Some(true));
+    }
+
+    #[test]
+    fn default_config_disables_hot_corners_and_recent_windows() {
+        let config = Config::load_default();
+        assert!(config.gestures.hot_corners.off);
+        assert!(!config.recent_windows.on);
     }
 
     #[test]
@@ -1751,6 +1762,8 @@ mod tests {
                 workspace_auto_back_and_forth: true,
                 tiling_drag: true,
                 tiling_drag_threshold: 9,
+                border_resize: true,
+                gap_resize: false,
                 mod_key: Some(
                     IsoLevel3Shift,
                 ),
@@ -3432,6 +3445,12 @@ mod tests {
 
         -    prefer_no_csd: false,
         +    prefer_no_csd: true,
+
+        -            off: false,
+        +            off: true,
+
+        -        on: true,
+        +        on: false,
         "#,
         );
     }

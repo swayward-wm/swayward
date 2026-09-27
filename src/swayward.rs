@@ -422,6 +422,8 @@ pub struct Swayward {
     /// resolution mice.
     pub notified_activity_this_iteration: bool,
     pub pointer_inside_hot_corner: bool,
+    /// The cursor currently shows a border-resize icon set by the compositor.
+    pub border_resize_cursor: bool,
     pub pointer_constraint_position_hint: Option<Point<f64, Logical>>,
     pub tablet_cursor_location: Option<Point<f64, Logical>>,
     pub gesture_swipe_3f_cumulative: Option<(f64, f64)>,
@@ -2683,8 +2685,9 @@ impl Swayward {
             )
             .unwrap();
 
-        let socket_name = create_wayland_socket.then(|| {
-            let socket_source = ListeningSocketSource::new_auto().unwrap();
+        let socket_name = if create_wayland_socket {
+            let socket_source =
+                ListeningSocketSource::new_auto().context("unable to open Wayland socket")?;
             let socket_name = socket_source.socket_name().to_os_string();
             event_loop
                 .insert_source(socket_source, move |client, _, state| {
@@ -2695,9 +2698,11 @@ impl Swayward {
                         security_context: None,
                     });
                 })
-                .unwrap();
-            socket_name
-        });
+                .context("unable to register Wayland socket")?;
+            Some(socket_name)
+        } else {
+            None
+        };
 
         #[cfg(not(test))]
         let ipc_server = if socket_name.is_some() {
@@ -2850,6 +2855,7 @@ impl Swayward {
             pointer_inactivity_timer_got_reset: false,
             notified_activity_this_iteration: false,
             pointer_inside_hot_corner: false,
+            border_resize_cursor: false,
             pointer_constraint_position_hint: None,
             tablet_cursor_location: None,
             gesture_swipe_3f_cumulative: None,

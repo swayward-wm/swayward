@@ -334,7 +334,7 @@ why = ""
 [[edit]]
 migrated = true
 paths = ["src/layout/tiling_tree/mod.rs", "src/layout/tiling_tree/movement.rs", "src/layout/tiling_tree/focus.rs"]
-what = "match sway's tree behavior for split, layout, focus, resize, and movement commands:\n- apply split and layout commands to an empty workspace root, expose workspace-root focus and active tile state, retain intentional singleton wrappers, and assign new siblings equal shares;\n- use parent layout axes for directional focus and resize, defer the innermost focus-wrap candidate while searching ancestors, and insert directional moves by the destination branch axis and inactive child;\n- preserve a moved child's ancestor-relative position, MRU focus, and source wrappers through removal and reinsertion, then squash the completed tree and restore its recorded split axis for `layout default`."
+what = "match sway's tree behavior for split, layout, focus, resize, and movement commands:\n- apply split and layout commands to an empty workspace root, expose workspace-root focus and active tile state, retain intentional singleton wrappers, and assign new siblings equal shares;\n- use parent layout axes for directional focus and resize, defer the innermost focus-wrap candidate while searching ancestors, and insert directional moves by the destination branch axis and inactive child;\n- preserve a moved child's ancestor-relative position, MRU focus, and source wrappers through removal and reinsertion, keep walking past exhausted singleton parents before reorienting the workspace, collapse obsolete source wrappers, then squash the completed tree and restore its recorded split axis for `layout default`."
 why = ""
 
 [[edit]]
@@ -436,7 +436,7 @@ why = ""
 [[edit]]
 migrated = true
 paths = ["src/layout/mod.rs", "src/layout/monitor.rs"]
-what = "preserve sway workspace identity and lifecycle across focus, reparenting, content moves, and drags:\n- retain the previous name beside the live ID for `workspace back_and_forth`, and assign each new or newly focused output the globally next-free identity;\n- reparent by stable ID, create a next-free source replacement before detaching the last visible workspace, retain the trailing empty workspace when attaching content, and sort before cleanup;\n- prepare content-move destinations before detaching, carry stable IDs through every mutation, and defer source cleanup until attachment;\n- keep prospective drag destinations as monitor-owned previews until drop, then use one sway-compatible empty-and-inactive destruction check without un-naming attached workspaces."
+what = "preserve sway workspace identity and lifecycle across focus, reparenting, content moves, and drags:\n- retain the previous name beside the live ID for `workspace back_and_forth`, and assign each new or newly focused output the globally next-free identity;\n- reparent by stable ID, create a next-free source replacement before detaching the last visible workspace, retain the trailing empty workspace when attaching content, and sort before cleanup;\n- prepare content-move destinations before detaching, carry stable IDs through every mutation, and defer source cleanup until attachment;\n- keep prospective drag destinations as monitor-owned previews until drop, then use one sway-compatible empty-and-inactive destruction check without un-naming attached workspaces;\n- commit an interrupted render-only workspace transition before starting its replacement, so the prior empty source is destroyed when sway would have completed the first focus change synchronously."
 why = ""
 
 [[edit]]
@@ -1096,7 +1096,7 @@ why = ""
 [[edit]]
 migrated = true
 paths = ["src/layout/tiling_tree/geometry.rs", "src/layout/tiling_tree/tests.rs"]
-what = "arrange fullscreen containers over the complete output without applying implicit outer gaps, matching sway's fullscreen workspace arrangement."
+what = "arrange the fullscreen subtree over the complete output without applying implicit outer gaps while retaining the ordinary workspace geometry for obscured siblings, matching sway's separate workspace and fullscreen arrangement passes."
 why = ""
 
 [[edit]]
@@ -1255,9 +1255,9 @@ why = "The active layout is an i3-style nested tree, so carrying niri's column v
 
 [[edit]]
 migrated = false
-paths = ["src/layout/tiling_tree/mod.rs", "src/layout/workspace.rs", "src/tests/ipc/tree_commands.rs"]
-what = "reset an emptied tiling tree to the configured default orientation and cover recreation of an emptied workspace with the default layout."
-why = "Sway destroys an empty workspace and its container tree (`sway/tree/workspace.c:274-332`), so later selecting its name creates a fresh default-layout tree rather than retaining the previous stacking mode."
+paths = ["src/layout/monitor.rs", "src/layout/tiling_tree/mod.rs", "src/layout/workspace.rs", "src/tests/ipc/tree_commands.rs"]
+what = "reset an empty tiling tree's insertion and reported layouts only when recreating its workspace lifecycle state."
+why = "Sway retains the current layout while the active workspace is empty, but destroys an empty inactive workspace and creates a fresh default-layout tree if its name is selected again (`sway/tree/workspace.c:212-225,274-332`; `sway/commands/move.c:301-354`)."
 
 [[edit]]
 migrated = false
@@ -1273,9 +1273,21 @@ why = "Sway hides views outside the active child of every tabbed or stacked ance
 
 [[edit]]
 migrated = false
-paths = ["src/ipc/tree.rs", "src/layout/tiling_tree/fullscreen.rs", "src/layout/tiling_tree/introspection.rs", "src/layout/tiling_tree/mod.rs", "src/tests/ipc/tree_commands.rs", "src/tests/ipc/workspace_output.rs"]
-what = "retain and serialize sway's fullscreen map-time tree state, including focus, visibility, percent, border, and decoration fields."
+paths = ["src/ipc/tree.rs", "src/layout/tiling_tree/fullscreen.rs", "src/layout/tiling_tree/geometry.rs", "src/layout/tiling_tree/introspection.rs", "src/layout/tiling_tree/mod.rs", "src/layout/tiling_tree/tests.rs", "src/tests/ipc/tree_commands.rs", "src/tests/ipc/workspace_output.rs"]
+what = "retain and serialize sway's fullscreen map-time tree state, including focus, visibility, percent, border, decoration, and pre-fullscreen geometry fields."
 why = "Sway leaves windows mapped under workspace fullscreen unfocused and reports their pre-transaction border state while arranging only the fullscreen branch (`sway/tree/view.c:698-710`, `sway/ipc-json.c:710-761`)."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/tree.rs"]
+what = "preserve arranged percentages within a fullscreen branch while assigning the full workspace percentage only to the branch root."
+why = "Sway serializes every container percentage from its own pending box and its immediate parent's box, so nested descendants retain numeric percentages under fullscreen (`sway/ipc-json.c:746-755`)."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/tree.rs"]
+what = "serialize the active workspace window as focused after a floating window enters fullscreen and moves into the tiling tree."
+why = "Sway preserves raw seat focus while fullscreening a floating container (`sway/tree/container.c:1187-1210`), so the resulting floating IPC node remains focused even though swayward's internal floating/tiling focus selector changes during the move."
 
 [[edit]]
 migrated = false
@@ -1303,6 +1315,12 @@ why = "Sway initializes a workspace representation only after inserting a tiling
 
 [[edit]]
 migrated = false
+paths = ["src/ipc/tree.rs", "src/tests/ipc/workspace_output.rs"]
+what = "merge tiled and floating workspace children into one focus array ordered by their windows' focus timestamps."
+why = "Sway builds every IPC node's focus array from the seat's single MRU node stack, so mapping a tiled window after focusing a floating window places the new tiled child before that floating child (`sway/ipc-json.c:784-834`)."
+
+[[edit]]
+migrated = false
 paths = ["src/layout/tiling_tree/tree_layout.rs", "src/tests/ipc/tree_commands.rs"]
 what = "wrap the workspace's children when tabbed or stacking layout is applied to a focused split whose command target is the workspace root."
 why = "Sway changes the workspace layout in place only when the workspace itself is focused; a focused child split at the root gains a nested layout container instead (`sway/commands/layout.c`; `sway/tree/container.c`)."
@@ -1327,6 +1345,198 @@ why = "Sway computes an output container's percentage from its horizontal share 
 
 [[edit]]
 migrated = false
+paths = ["src/layout/tiling_tree/introspection.rs", "src/layout/tiling_tree/tests.rs"]
+what = "report titlebar decoration rectangles for leaves in inactive nested tabbed or stacked branches even though those titlebars are not rendered."
+why = "Sway's GET_TREE serializes the pending decoration geometry independently of whether a tabbed or stacked ancestor currently makes the view visible (`sway/ipc-json.c:635-652`; `sway/tree/view.c:1180-1193`)."
+
+[[edit]]
+migrated = false
 paths = ["tests/i3/lib/i3test.pm", "tests/i3/coverage.toml"]
 what = "classify i3's sticky-focus assertions as skips while preserving the raw comparisons for all other assertions."
 why = "Sway focuses the destination before reparenting sticky containers, unlike i3's expectation that the sticky container retains focus (`sway/input/seat.c:1178-1222`)."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/tests/ipc/focus_and_move.rs"]
+what = "select global next and previous workspaces using forward or reverse output and workspace traversal to break equal-number ties."
+why = "Sway scans the root output list and each output's workspace list in command direction, so equal numeric prefixes retain stable per-output order (`sway/tree/workspace.c:548-677`)."
+
+[[edit]]
+migrated = false
+paths = ["src/tests/ipc/tree_commands.rs"]
+what = "verify configured workspace layout through sway's existing tree layout fields and reject an i3-only workspace_layout alias."
+why = "Sway serializes workspace nodes with the common `layout` field and does not define i3's separate `workspace_layout` member (`sway/ipc-json.c:502-540`)."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/monitor.rs", "src/ipc/tree.rs"]
+what = "track sway's stable output workspace order separately from the layout's spatial workspace vector and use it for IPC child traversal."
+why = "Sway appends workspaces to an output-owned list and stable-sorts that list, while swayward's inherited vector also drives active indices, animation, and workspace placement (`sway/tree/output.c:333-340,387-405`; `sway/tree/workspace.c:177-260`)."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/tree.rs", "src/tests/ipc/tree_commands.rs", "src/tests/ipc/workspace_commands.rs"]
+what = "serialize hidden scratchpad containers in insertion order while retaining newest-first focus order."
+why = "Sway appends containers to the scratchpad list and prepends each one to the seat focus stack (`sway/tree/root.c`, `sway/input/seat.c`), so GET_TREE reports oldest-first children and newest-first focus."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tiling_tree/movement.rs", "src/layout/tiling_tree/tests.rs"]
+what = "preserve focus history when a move-to-mark target is already the moved node's preceding sibling."
+why = "Sway leaves an already positioned container attached, so replaying move-to-mark does not reorder its focus stack (`sway/commands/move.c`)."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tiling_tree/tree_layout.rs", "src/layout/tiling_tree/tests.rs"]
+what = "make bare layout toggle use the same split-axis toggle as layout toggle split, initialize an empty workspace representation only when a layout command changes its layout, and transfer fullscreen state from a leaf to the split wrapper created around it."
+why = "Sway routes both toggle forms through toggle_split_layout, only calls workspace_update_representation inside the new_layout != old_layout branch, and container_split transfers the replaced container's fullscreen state to its replacement (`sway/commands/layout.c:24-60,164-193`; `sway/tree/container.c:1514-1563`)."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tile.rs", "src/layout/tiling_tree/mod.rs", "src/tests/client.rs", "src/tests/mod.rs"]
+what = "crop a tiled window's surface, and its input region, to its container's content box when the client commits a size larger than the container, and forget the box when the tile leaves the tiling tree or goes maximized or fullscreen."
+why = "Sway clips every tiled view to `con->current.content_width/height` whatever size the client commits (`sway/sway/tree/view.c:1032-1062`), so a client that will not shrink below its minimum size, or has not yet answered a configure, cannot paint over its neighbour."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/layout/tests.rs", "src/ipc/server.rs"]
+what = "remove a window from the scratchpad when it returns to tiling through floating disable, floating toggle or a drag toggled to tiling, and emit sway's `move` window event before `floating`."
+why = "Sway's container_set_floating calls root_scratchpad_remove_container before re-tiling, and that function emits `move` (`sway/tree/container.c:990-994`, `sway/tree/root.c:145-155`). Without this, a scratchpad window could not leave the scratchpad."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/server.rs"]
+what = "log each emitted IPC event and each received IPC request at `trace` instead of `debug`."
+why = "The default filter is `swayward=debug`, inherited from niri. A sway-shaped event stream and bars that poll GET_TREE make these two lines about 90% of `session.log`, which buries the debug output worth reading. `RUST_LOG=swayward::ipc::server=trace` brings them back."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/server.rs", "src/tests/ipc/wire.rs"]
+what = "report sway's default `seat0` name in GET_SEATS instead of exposing the backend implementation name, and derive its capability bits from attached IPC devices rather than Smithay's always-present keyboard and pointer handlers."
+why = "Sway creates `seat0` as its default seat regardless of the active backend and updates its capability bits from attached input devices (`sway/sway/input/input-manager.c:28`, `sway/sway/server.c:711`, `sway/sway/input/seat.c:604-635`). It serializes that seat's protocol name and capabilities directly (`sway/sway/ipc-json.c:1231-1242`)."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/server.rs", "src/tests/ipc/events.rs"]
+what = "accept sway's `barconfig_update` event family in subscriptions, including an all-family subscription used with SEND_TICK as an event-stream barrier."
+why = "Sway accepts all nine event names even when no bar configuration exists (`sway/sway/ipc-server.c`, IPC_SUBSCRIBE), so rejecting the unimplemented event family also rejected otherwise supported families in the same request."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/server.rs", "src/tests/ipc/events.rs", "tests/i3/lib/i3test.pm", "tests/i3/README.md"]
+what = "reconstruct sway's pre-layout `window::new` and metadata-time `window::title` events when a mapped window first appears in the event-state diff, while filtering sway's extra title transition from i3's unchanged two-event map assertion."
+why = "Sway emits `new` before arranging, applying borders or receiving the title, then emits `title` when metadata arrives (`sway/sway/tree/view.c:902,1138`). Swayward first observes the window after layout settles, so emitting only that snapshot lost one event and gave the other the wrong payload."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/server.rs", "src/tests/ipc/events.rs"]
+what = "keep a newly mapped window hidden in its pre-focus `new` and `title` event snapshots when another window already exists."
+why = "Sway emits both map-time events before `seat_set_focus_container` makes the new tab active (`sway/sway/tree/view.c:902,942-947`; `sway/sway/input/seat.c:1197`), so the new window remains invisible until its later focus event."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/tests/ipc/bindings.rs", "tests/i3/lib/i3test.pm", "tests/i3/README.md"]
+what = "emit both `window::mark` snapshots when replacing a view's or split container's marks, while filtering sway's extra view pre-clear event from i3's unchanged one-event assertion."
+why = "Sway's default mark command calls `container_clear_marks`, which emits even for an already empty list, before `container_add_mark` emits again with the new mark (`sway/sway/tree/container.c:1657-1679`)."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/ipc/server.rs", "src/tests/ipc/events.rs"]
+what = "buffer workspace-related IPC events for each command, normalize their mutation-time order and snapshots before flushing, and keep the settled-tree diff as the event source for unmigrated paths."
+why = "Sway emits workspace events from tree mutation sites, so a settled diff alone loses workspace focus snapshots and reverses move, empty, urgency, sticky, and output-removal events."
+
+[[edit]]
+migrated = false
+paths = ["src/command/scratchpad.rs", "src/ipc/server.rs", "src/tests/ipc/workspace_commands.rs"]
+what = "mark scratchpad command transactions so IPC emits hide as `floating`, then `move`, and show as `focus`, then `move`, with each event's mutation-time snapshot."
+why = "Sway emits scratchpad events at separate mutation phases (`sway/tree/container.c`, `sway/tree/root.c`, `sway/input/seat.c`); settled diffs reversed both transitions and mixed their snapshots."
+
+[[edit]]
+migrated = false
+paths = ["resources/default-config.kdl", "swayward-config/src/lib.rs"]
+what = "ship active `gestures { hot-corners { off; } }` and `recent-windows { off; }` stanzas, with the remaining options commented out, so the default config neither opens the overview from a screen corner nor binds Alt/Mod+Tab and Alt/Mod+grave to the recent-windows switcher."
+why = "Sway has no hot corners and no Alt-Tab switcher. niri enables both by default, so a sway user loses the top-left corner to the overview and has Mod+Tab taken. Putting the stanzas in the file keeps both features one line away from being turned on."
+
+[[edit]]
+migrated = false
+paths = ["src/input/mod.rs", "src/swayward.rs", "src/layout/mod.rs", "src/layout/monitor.rs", "src/layout/workspace.rs", "src/layout/tile.rs", "swayward-config/src/input.rs", "swayward-config/src/lib.rs", "resources/default-config.kdl", "docs/wiki/Configuration:-Input.md"]
+what = "start an interactive resize on a plain left press on a window border, tiled only across an edge shared with a sibling and floating from any border edge, show sway's resize cursor while hovering such a border, and gate both behind `input { border-resize }`, on by default."
+why = "Sway resizes from the border with no modifier held and changes the cursor over a resizable edge (`sway/sway/input/seatop_default.c:39-118,396-410,468-474`, `sway/sway/input/cursor.c` `cursor_update_image`). niri only resized with Mod+right-drag, so a sway user could not grab a border. Sway has no switch for this; the toggle is swayward's."
+
+[[edit]]
+migrated = false
+paths = ["src/input/mod.rs", "src/layout/mod.rs", "src/layout/monitor.rs", "src/layout/workspace.rs", "swayward-config/src/input.rs", "swayward-config/src/lib.rs", "resources/default-config.kdl", "docs/wiki/Configuration:-Input.md"]
+what = "add `input { gap-resize }`, off by default: a plain left press in the gap between two tiled windows starts the border drag's interactive resize on the shared edge, with the same hover cursor; outer gaps, floating windows and gap corners are not handles."
+why = "Sway's only no-modifier resize handle is a visible border, so a borderless setup that marks focus with niri's focus ring could not drag-resize at all. The gap is where that ring is drawn. Sway has no equivalent, so the option is off by default and recorded in docs/KNOWN_DEVIATIONS.md."
+
+[[edit]]
+migrated = false
+paths = ["src/input/mod.rs", "src/layout/workspace.rs"]
+what = "make the modifier resize drag pick the corner of the quadrant under the pointer, split at the half, resize a tiled window on both axes at once, and drop niri's double-click full-width and reset-height gestures from that path."
+why = "Sway's floating_modifier resize always starts from a corner chosen by halves (`sway/sway/input/seatop_default.c:413-435,477-487`) and moves the horizontal and vertical boundaries independently (`sway/sway/input/seatop_resize_tiling.c:52-127`). niri chose edges by thirds and resized one axis, and its double-click gestures would fire on every corner once every press is a corner. Sway has neither gesture."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tile.rs", "src/layout/mod.rs", "src/window/mapped.rs"]
+what = "clip a tiled toplevel's pointer input to its window geometry in all cases, not only when the surface is oversized, while leaving its popups unclipped through a new `LayoutElement::is_in_popup_input_region`."
+why = "Sway clips every tiled view to its content box, input included (`sway/sway/tree/view.c:1032-1062`). A client drawing its own decorations keeps an input margin outside its geometry for resizing; unclipped, it took the pointer from the gap and the neighbour, showing the client's resize cursor and swallowing gap-resize and focus clicks there."
+
+[[edit]]
+migrated = false
+paths = ["src/input/mod.rs", "src/tests/ipc/bindings.rs"]
+what = "match a raw keysym with the unconsumed modifier state even when XKB resolves it to the same modified keysym."
+why = "Shift is consumed for BackSpace even though its symbol remains BackSpace, so `Shift+BackSpace` bindings otherwise never fire."
+
+[[edit]]
+migrated = false
+paths = ["src/cli.rs", "src/ipc/server.rs", "src/utils/mod.rs", "src/tests/ipc/misc_commands.rs"]
+what = "report the public swayward version and git description through the command line and GET_VERSION instead of exposing Cargo's niri merge-base package version; use numeric IPC version 1.0.0."
+why = "Swayward and niri have separate release identities. Major 1 identifies the sway protocol family without claiming support for features from a later sway minor release; i3ipc only deserializes the fields, swaymsg displays human_readable, and Waybar does not request GET_VERSION."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/command/window.rs", "src/layout/floating.rs", "src/layout/mod.rs", "src/layout/tiling_tree/resize.rs", "src/layout/workspace.rs", "src/tests/i3_conformance.rs", "src/tests/ipc/floating_commands.rs", "src/tests/ipc/focus_and_move.rs", "src/tests/ipc/misc_commands.rs", "src/tests/ipc/workspace_commands.rs", "swayward-ipc/src/command.rs"]
+what = "propagate whether floating and tiled width/height resize commands changed the effective target size, return sway's CMD_INVALID-shaped refusal when min/max constraints, a missing parallel boundary, or an ancestor-only change leaves that target unchanged, preserve sway's no-target resize error when the workspace itself is focused, and parse bare numeric rename sources as names, ignore inactive empty rename sources that sway has destroyed, and classify rename-workspace failures as CMD_INVALID."
+why = "Sway rejects no-op resize adjustments with `Cannot resize any further` after clamping floating deltas and comparing the target container's fractions (`sway/commands/resize.c:180-280`), rejects resize with `Cannot resize nothing` when the command target is a workspace (`sway/commands/resize.c:559-576`), and returns CMD_INVALID for invalid rename requests (`sway/commands/rename.c:22-92`); swayward previously compared floating tile sizes before pending requests were applied, discarded width and height layout results, credited ancestor-only changes to the target, treated the focused workspace's root split as a container target, and omitted `parse_error` from rename failures."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tiling_tree/tree_layout.rs", "src/tests/ipc/tree_commands.rs"]
+what = "preserve a focused nested split when `split` changes its pending child insertion axis instead of retargeting or compacting away the selected container."
+why = "Sway's `cmd_split` changes the selected container's pending layout, so the next child remains below that container (`sway/commands/split.c`); swayward previously changed the singleton parent and flattened the branch into the workspace."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/tests/ipc/config_commands.rs", "src/tests/ipc/floating_commands.rs", "src/tests/ipc/tree_commands.rs", "src/tests/ipc/workspace_output.rs"]
+what = "include `parse_error = false` in every failed runtime command reply, reserving true for parser failures."
+why = "Sway serializes `parse_error` whenever a command result has an error (`sway/commands.c:509-523`); swayward's generic failure constructor omitted the field."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/server.rs", "src/tests/ipc/config_commands.rs"]
+what = "track a window's formatted title in IPC event state and emit one `window::title` event when the `title_format` command changes only compositor-rendered title text."
+why = "Sway emits `window::title` when `title_format` recomputes the container title (`sway/sway/commands/title_format.c:25-28`; `sway/sway/tree/view.c:1117-1138`). Swayward's event state tracked only the client's raw title, so the command produced no event."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/tests/ipc/config_commands.rs"]
+what = "return sway's `Only views can have borders` parse error for every border command on an empty workspace, including malformed border syntax."
+why = "Sway checks for a focused container before dispatching to the border command parser (`sway/sway/commands.c`; `sway/sway/commands/border.c`), while swayward parsed first and exposed the syntax error instead."
+
+[[edit]]
+migrated = false
+paths = ["src/swayward.rs"]
+what = "propagate Wayland listening-socket creation and event-loop registration errors instead of panicking during compositor startup."
+why = "A long XDG_RUNTIME_DIR makes the Wayland Unix-socket path exceed SUN_LEN; this is a user-environment error that must produce a clear non-zero startup failure, not panic on unwrap."
+
+[[edit]]
+migrated = false
+paths = ["src/window/mod.rs", "src/tests/window_opening.rs", "src/tests/ipc/tree_commands.rs", "docs/KNOWN_DEVIATIONS.md"]
+what = "match sway's default floating predicate for xdg parents and windows fixed on either axis, and document that xwayland-satellite forwards the corresponding X11 transient and size hints."
+why = "Sway requires both minimum dimensions to be nonzero and either axis to have equal minimum and maximum (`sway/desktop/xdg_shell.c:228-235`). The inherited niri predicate checked only fixed height, missing fixed-width windows and floating zero-width fixed-height windows that sway tiles."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tiling_tree/mod.rs", "src/layout/tiling_tree/movement.rs", "src/layout/tiling_tree/tests.rs", "src/tests/ipc/tree_commands.rs"]
+what = "preserve non-empty singleton split containers when a child window closes, moves to the scratchpad, or is vacated by an outward directional move; only reap containers made empty by the removal, and resolve a one-window directional move's source parent after root compaction."
+why = "Sway's container detach path calls `container_reap_empty`, which removes empty ancestors but retains a split with one surviving child (`sway/tree/container.c`). Swayward instead collapsed every singleton ancestor and changed the IPC tree shape; after retaining it, the one-window move path could keep a stale pre-compaction parent ID and leave its actual parent empty."

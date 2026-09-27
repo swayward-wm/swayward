@@ -8,6 +8,23 @@ fn ipc_refresh_without_a_seat_keyboard_does_not_panic() {
 }
 
 #[test]
+fn get_seats_reports_capabilities_from_attached_devices() {
+    let (mut fixture, socket) = ipc_fixture();
+    let mut stream = UnixStream::connect(socket).unwrap();
+
+    let seats = query_ipc(&mut fixture, &mut stream, MessageType::GetSeats);
+    assert_eq!(
+        seats,
+        serde_json::json!([{
+            "name": "seat0",
+            "capabilities": 0,
+            "focus": 0,
+            "devices": []
+        }])
+    );
+}
+
+#[test]
 fn get_inputs_and_seats_return_sway_schema_and_values() {
     let mut fixture = Fixture::new();
     let handle = fixture.swayward().event_loop.clone();
@@ -67,7 +84,7 @@ fn get_inputs_and_seats_return_sway_schema_and_values() {
     assert_eq!(
         seats,
         serde_json::json!([{
-            "name": "headless",
+            "name": "seat0",
             "capabilities": 3,
             "focus": focused,
             "devices": inputs
@@ -248,6 +265,68 @@ fn unknown_request_types_get_a_structured_reply_and_keep_the_connection() {
     // The connection survives both, so a normal request still answers.
     let version = query_ipc(&mut fixture, &mut stream, MessageType::GetVersion);
     assert_eq!(version["variant"], "swayward");
+}
+
+#[test]
+fn invalid_utf8_command_gets_a_structured_json_failure() {
+    let (mut fixture, socket) = ipc_fixture();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let mut frame = swayward_ipc::wire::encode_raw(0, "");
+    frame[6..10].copy_from_slice(&1u32.to_ne_bytes());
+    frame.push(0xff);
+    stream.write_all(&frame).unwrap();
+
+    let (reply_type, payload) = read_ipc_reply(&mut fixture, &mut stream);
+    assert_eq!(reply_type, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&payload).unwrap(),
+        serde_json::json!([{
+            "success": false,
+            "error": "command is not valid UTF-8",
+            "parse_error": true,
+        }])
+    );
+}
+
+#[test]
+fn malformed_frames_disconnect_instead_of_matching_sways_timeout() {
+    let (mut fixture, socket) = ipc_fixture();
+
+    for frame in [
+        b"i3-ipc\0\0".to_vec(),
+        {
+            let mut frame = swayward_ipc::wire::encode_raw(0, "nop");
+            frame[6..10].copy_from_slice(&10u32.to_ne_bytes());
+            frame
+        },
+        {
+            let mut frame = swayward_ipc::wire::encode_raw(0, "");
+            frame[6..10].copy_from_slice(&u32::MAX.to_ne_bytes());
+            frame
+        },
+    ] {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream.write_all(&frame).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        stream.set_nonblocking(true).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            fixture.dispatch();
+            let mut byte = [0; 1];
+            match stream.read(&mut byte) {
+                Ok(0) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Ok(_) => panic!("malformed frame unexpectedly received a reply"),
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("error reading malformed-frame response: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "malformed frame left the client hanging"
+            );
+        }
+    }
 }
 
 #[test]

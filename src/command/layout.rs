@@ -1,6 +1,6 @@
 use swayward_ipc::CommandOutcome;
 
-use super::{failure, tiling_target, CommandTarget, Layout, LayoutToggle, Toggle};
+use super::{command_failure, failure, tiling_target, CommandTarget, Layout, LayoutToggle, Toggle};
 use crate::layout::tiling_tree::NodeId;
 use crate::layout::workspace::WorkspaceId;
 use crate::swayward::State;
@@ -28,7 +28,9 @@ fn reject_floating(state: &State) -> Result<(), CommandOutcome> {
         .active_workspace()
         .is_some_and(|workspace| workspace.floating_is_active())
     {
-        Err(failure("Unable to change layout of floating windows"))
+        Err(command_failure(
+            "Unable to change layout of floating windows",
+        ))
     } else {
         Ok(())
     }
@@ -36,8 +38,12 @@ fn reject_floating(state: &State) -> Result<(), CommandOutcome> {
 
 pub(super) fn default(state: &mut State) -> Result<(), CommandOutcome> {
     reject_floating(state)?;
-    let remapped = state.swayward.layout.restore_focused_split_layout();
-    remap_marks(state, remapped);
+    let Some(remapped) = state.swayward.layout.restore_focused_split_layout() else {
+        return Err(swayward_ipc::command::parse_error(
+            "Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'",
+        ));
+    };
+    remap_marks(state, Some(remapped));
     state.swayward.queue_redraw_all();
     Ok(())
 }
