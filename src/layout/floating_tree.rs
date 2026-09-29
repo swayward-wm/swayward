@@ -1,5 +1,4 @@
 use std::cmp::max;
-use std::iter::zip;
 use std::rc::Rc;
 
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -10,7 +9,7 @@ use swayward_ipc::{PositionChange, SizeChange, WindowLayout};
 
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
-use super::tiling_tree::NodeId;
+use super::tiling_tree::{DetachedSubtree, Direction, NodeId, TilingTree, TilingTreeRenderElement};
 use super::titlebar::{self, Titlebar, TitlebarRenderer, TitlebarState};
 use super::workspace::{InteractiveResize, ResolvedSize};
 use super::{
@@ -32,6 +31,26 @@ use crate::window::ResolvedWindowRules;
 
 /// By how many logical pixels the directional move commands move floating windows.
 pub const DIRECTIONAL_MOVE_PX: f64 = 50.;
+
+fn remap_rect_center(
+    rect: Rectangle<f64, Logical>,
+    old_area: Rectangle<f64, Logical>,
+    new_area: Rectangle<f64, Logical>,
+) -> Rectangle<f64, Logical> {
+    if old_area.size.w <= 0. || old_area.size.h <= 0. {
+        return Rectangle::new(
+            new_area.loc + (new_area.size.to_point() - rect.size.to_point()).downscale(2.),
+            rect.size,
+        );
+    }
+    let old_center = rect.loc + rect.size.downscale(2.);
+    let relative = old_center - old_area.loc;
+    let new_center = Point::from((
+        new_area.loc.x + relative.x * new_area.size.w / old_area.size.w,
+        new_area.loc.y + relative.y * new_area.size.h / old_area.size.h,
+    ));
+    Rectangle::new(new_center - rect.size.downscale(2.), rect.size)
+}
 
 pub(super) fn apply_position_change(
     current: f64,
@@ -55,14 +74,14 @@ pub(super) fn apply_position_change(
     }
 }
 
-/// Space for floating windows.
+/// Ordered floating roots. Step 1 stores one window in each root.
 #[derive(Debug)]
-pub struct FloatingSpace<W: LayoutElement> {
-    /// Tiles in top-to-bottom order.
-    tiles: Vec<Tile<W>>,
+pub struct FloatingLayout<W: LayoutElement> {
+    /// Single-window root entries in top-to-bottom order.
+    entries: Vec<FloatingEntry<W>>,
 
-    /// Extra per-tile data.
-    data: Vec<Data>,
+    /// Nested container roots. Commands keep these internal until IPC serialization is complete.
+    tree_entries: Vec<FloatingTreeEntry<W>>,
 
     /// Id of the active window.
     ///
@@ -97,14 +116,70 @@ pub struct FloatingSpace<W: LayoutElement> {
 }
 
 swayward_render_elements! {
-    FloatingSpaceRenderElement<R> => {
+    FloatingLayoutRenderElement<R> => {
         Tile = TileRenderElement<R>,
         ClosingWindow = ClosingWindowRenderElement,
         Titlebar = crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement,
+        Tree = TilingTreeRenderElement<R>,
     }
 }
 
-/// Extra per-tile data.
+/// A single-window floating root.
+#[derive(Debug)]
+struct FloatingEntry<W: LayoutElement> {
+    tile: Tile<W>,
+    data: Data,
+}
+
+/// A nested container root resident in the floating layer.
+#[derive(Debug)]
+struct FloatingTreeEntry<W: LayoutElement> {
+    tree: TilingTree<W>,
+    root: NodeId,
+    rect: Rectangle<f64, Logical>,
+    pos: Point<f64, SizeFrac>,
+    sticky: bool,
+}
+
+/// A nested floating root detached for scratchpad or workspace transfer.
+#[derive(Debug)]
+pub struct RemovedFloatingTree<W: LayoutElement> {
+    pub(super) tree: TilingTree<W>,
+    root: NodeId,
+    window_ids: Vec<W::Id>,
+    rect: Rectangle<f64, Logical>,
+    working_area: Rectangle<f64, Logical>,
+    sticky: bool,
+}
+
+impl<W: LayoutElement> RemovedFloatingTree<W> {
+    pub fn ipc_tree(&self) -> super::tiling_tree::IpcNode<W::Id> {
+        self.tree.ipc_tree()
+    }
+
+    pub fn is_sticky(&self) -> bool {
+        self.sticky
+    }
+
+    pub fn contains_window(&self, window: &W::Id) -> bool {
+        self.window_ids.contains(window)
+    }
+
+    pub fn window_ids(&self) -> &[W::Id] {
+        &self.window_ids
+    }
+
+    pub fn windows(&self) -> impl Iterator<Item = &W> {
+        self.tree.windows().map(|(_, window)| window)
+    }
+
+    pub fn into_subtree(self) -> Option<DetachedSubtree<W>> {
+        let root = self.tree.resident_root()?;
+        self.tree.detach_resident_root(root)
+    }
+}
+
+/// Root geometry for a floating entry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Data {
     /// Position relative to the working area.
@@ -217,6 +292,13 @@ impl Data {
 
     #[cfg(test)]
     fn verify_invariants(&self) {
+        assert!(self.logical_pos.x.is_finite());
+        assert!(self.logical_pos.y.is_finite());
+        assert!(self.size.w.is_finite());
+        assert!(self.size.h.is_finite());
+        assert!(self.size.w >= 0.);
+        assert!(self.size.h >= 0.);
+
         let mut temp = *self;
         temp.recompute_logical_pos();
         assert_eq!(
@@ -273,7 +355,7 @@ fn constrain_floating_size(
     size
 }
 
-impl<W: LayoutElement> FloatingSpace<W> {
+impl<W: LayoutElement> FloatingLayout<W> {
     pub fn new(
         view_size: Size<f64, Logical>,
         working_area: Rectangle<f64, Logical>,
@@ -282,8 +364,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
         options: Rc<Options>,
     ) -> Self {
         Self {
-            tiles: Vec::new(),
-            data: Vec::new(),
+            entries: Vec::new(),
+            tree_entries: Vec::new(),
             active_window_id: None,
             interactive_resize: None,
             closing_windows: Vec::new(),
@@ -303,10 +385,20 @@ impl<W: LayoutElement> FloatingSpace<W> {
         scale: f64,
         options: Rc<Options>,
     ) {
-        for (tile, data) in zip(&mut self.tiles, &mut self.data) {
+        for (tile, data) in self
+            .entries
+            .iter_mut()
+            .map(|entry| (&mut entry.tile, &mut entry.data))
+        {
             tile.update_config(view_size, scale, options.clone());
             data.update(tile);
             data.update_config(view_size, working_area);
+        }
+        for entry in &mut self.tree_entries {
+            entry.rect.loc = Data::scale_by_working_area(working_area, entry.pos);
+            entry
+                .tree
+                .update_config(view_size, entry.rect, false, scale, options.clone());
         }
 
         self.view_size = view_size;
@@ -316,14 +408,20 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn update_shaders(&mut self) {
-        for tile in &mut self.tiles {
-            tile.update_shaders();
+        for entry in &mut self.entries {
+            entry.tile.update_shaders();
+        }
+        for entry in &mut self.tree_entries {
+            entry.tree.update_shaders();
         }
     }
 
     pub fn advance_animations(&mut self) {
-        for tile in &mut self.tiles {
-            tile.advance_animations();
+        for entry in &mut self.entries {
+            entry.tile.advance_animations();
+        }
+        for entry in &mut self.tree_entries {
+            entry.tree.advance_animations();
         }
 
         self.closing_windows.retain_mut(|closing| {
@@ -333,11 +431,25 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        self.tiles.iter().any(Tile::are_animations_ongoing) || !self.closing_windows.is_empty()
+        self.entries
+            .iter()
+            .any(|entry| entry.tile.are_animations_ongoing())
+            || self
+                .tree_entries
+                .iter()
+                .any(|entry| entry.tree.are_animations_ongoing())
+            || !self.closing_windows.is_empty()
     }
 
     pub fn are_transitions_ongoing(&self) -> bool {
-        self.tiles.iter().any(Tile::are_transitions_ongoing) || !self.closing_windows.is_empty()
+        self.entries
+            .iter()
+            .any(|entry| entry.tile.are_transitions_ongoing())
+            || self
+                .tree_entries
+                .iter()
+                .any(|entry| entry.tree.are_transitions_ongoing())
+            || !self.closing_windows.is_empty()
     }
 
     pub fn update_render_elements(
@@ -346,6 +458,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
         view_rect: Rectangle<f64, Logical>,
         layer: RenderLayer,
     ) {
+        for entry in &mut self.tree_entries {
+            entry.tree.update_render_elements(is_active, layer);
+        }
         let active = self.active_window_id.clone();
         for (tile, offset) in self.tiles_with_offsets_mut() {
             // Skip tiles belonging to a different render layer.
@@ -370,23 +485,33 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn tiles(&self) -> impl Iterator<Item = &Tile<W>> + '_ {
-        self.tiles.iter()
+        self.entries.iter().map(|entry| &entry.tile).chain(
+            self.tree_entries
+                .iter()
+                .flat_map(|entry| entry.tree.tiles()),
+        )
     }
 
     pub fn tiles_mut(&mut self) -> impl Iterator<Item = &mut Tile<W>> + '_ {
-        self.tiles.iter_mut()
+        self.entries.iter_mut().map(|entry| &mut entry.tile).chain(
+            self.tree_entries
+                .iter_mut()
+                .flat_map(|entry| entry.tree.tiles_mut()),
+        )
     }
 
     pub fn tiles_with_offsets(&self) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>)> + '_ {
-        let offsets = self.data.iter().map(|d| d.logical_pos);
-        zip(&self.tiles, offsets)
+        self.entries
+            .iter()
+            .map(|entry| (&entry.tile, entry.data.logical_pos))
     }
 
     pub fn tiles_with_offsets_mut(
         &mut self,
     ) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> + '_ {
-        let offsets = self.data.iter().map(|d| d.logical_pos);
-        zip(&mut self.tiles, offsets)
+        self.entries
+            .iter_mut()
+            .map(|entry| (&mut entry.tile, entry.data.logical_pos))
     }
 
     pub fn tiles_with_render_positions(
@@ -469,6 +594,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
     /// During animations, assumes the final tile position.
     pub fn active_window_visual_rectangle(&self) -> Option<Rectangle<f64, Logical>> {
         let active_id = self.active_window_id.as_ref()?;
+        if let Some(rect) = self.tree_entries.iter().find_map(|entry| {
+            entry
+                .tree
+                .node_for_window(active_id)
+                .and_then(|_| entry.tree.active_window_visual_rectangle())
+        }) {
+            return Some(rect);
+        }
         let (tile, offset) = self
             .tiles_with_offsets()
             .find(|(tile, _)| tile.window().id() == active_id)?;
@@ -481,6 +614,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, super::HitType)> {
+        for entry in self.tree_entries.iter().rev() {
+            if let Some(hit) = entry.tree.window_under(pos) {
+                return Some(hit);
+            }
+        }
         for (tile, tile_pos) in self.tiles_with_render_positions() {
             if self
                 .titlebar_rect(tile, tile_pos, tile.animated_tile_size().w)
@@ -501,6 +639,13 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn popup_target_rect(&self, id: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        if let Some(rect) = self
+            .tree_entries
+            .iter()
+            .find_map(|entry| entry.tree.popup_target_rect(id))
+        {
+            return Some(rect);
+        }
         for (tile, pos) in self.tiles_with_offsets() {
             if tile.window().id() == id {
                 // Position within the working area.
@@ -515,39 +660,414 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     fn idx_of(&self, id: &W::Id) -> Option<usize> {
-        self.tiles.iter().position(|tile| tile.window().id() == id)
+        self.entries
+            .iter()
+            .map(|entry| &entry.tile)
+            .position(|tile| tile.window().id() == id)
     }
 
     fn contains(&self, id: &W::Id) -> bool {
-        self.idx_of(id).is_some()
+        self.has_window(id)
     }
 
     pub fn active_window(&self) -> Option<&W> {
         let id = self.active_window_id.as_ref()?;
-        self.tiles
+        self.entries
             .iter()
+            .map(|entry| &entry.tile)
             .find(|tile| tile.window().id() == id)
             .map(Tile::window)
+            .or_else(|| {
+                self.tree_entries
+                    .iter()
+                    .find_map(|entry| entry.tree.windows().find(|(_, window)| window.id() == id))
+                    .map(|(_, window)| window)
+            })
     }
 
     pub fn active_window_mut(&mut self) -> Option<&mut W> {
         let id = self.active_window_id.as_ref()?;
-        self.tiles
+        if let Some(tile) = self
+            .entries
             .iter_mut()
+            .map(|entry| &mut entry.tile)
             .find(|tile| tile.window().id() == id)
-            .map(Tile::window_mut)
+        {
+            return Some(tile.window_mut());
+        }
+        self.tree_entries.iter_mut().find_map(|entry| {
+            entry
+                .tree
+                .tiles_mut()
+                .find(|tile| tile.window().id() == id)
+                .map(Tile::window_mut)
+        })
     }
 
     pub fn has_window(&self, id: &W::Id) -> bool {
-        self.tiles.iter().any(|tile| tile.window().id() == id)
+        self.entries
+            .iter()
+            .map(|entry| &entry.tile)
+            .any(|tile| tile.window().id() == id)
+            || self
+                .tree_entries
+                .iter()
+                .any(|entry| entry.tree.node_for_window(id).is_some())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tiles.is_empty()
+        self.entries.is_empty() && self.tree_entries.is_empty()
     }
 
     pub fn add_tile(&mut self, tile: Tile<W>, activate: bool) {
         self.add_tile_at(0, tile, activate);
+    }
+
+    pub fn add_tree(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        rect: Rectangle<f64, Logical>,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        let (tree, root, remapped) = TilingTree::from_detached_subtree(
+            self.view_size,
+            rect,
+            self.scale,
+            self.clock.clone(),
+            self.options.clone(),
+            subtree,
+        );
+        debug_assert!(!tree.is_empty());
+        debug_assert!(!self
+            .tree_entries
+            .iter()
+            .any(|entry| entry.tree.contains(root)));
+        self.active_window_id = tree.active_window().map(|window| window.id().clone());
+        self.tree_entries.insert(
+            0,
+            FloatingTreeEntry {
+                tree,
+                root,
+                rect,
+                pos: Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc),
+                sticky: false,
+            },
+        );
+        (root, remapped)
+    }
+
+    pub fn add_removed_tree(
+        &mut self,
+        removed: RemovedFloatingTree<W>,
+        remap_position: bool,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        let rect = if remap_position {
+            remap_rect_center(removed.rect, removed.working_area, self.working_area)
+        } else {
+            removed.rect
+        };
+        let mut tree = removed.tree;
+        tree.update_config(
+            self.view_size,
+            rect,
+            false,
+            self.scale,
+            self.options.clone(),
+        );
+        let root = removed.root;
+        self.active_window_id = tree.active_window().map(|window| window.id().clone());
+        self.tree_entries.insert(
+            0,
+            FloatingTreeEntry {
+                tree,
+                root,
+                rect,
+                pos: Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc),
+                sticky: removed.sticky,
+            },
+        );
+        (root, Vec::new())
+    }
+
+    pub fn remove_tree(&mut self, root: NodeId) -> Option<DetachedSubtree<W>> {
+        self.remove_tree_for_transfer(root)?.into_subtree()
+    }
+
+    pub fn remove_tree_for_transfer(&mut self, root: NodeId) -> Option<RemovedFloatingTree<W>> {
+        let index = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.root == root)?;
+        let entry = self.tree_entries.remove(index);
+        let window_ids: Vec<_> = entry
+            .tree
+            .windows()
+            .map(|(_, window)| window.id().clone())
+            .collect();
+        if self
+            .active_window_id
+            .as_ref()
+            .is_some_and(|active| window_ids.contains(active))
+        {
+            self.active_window_id = self
+                .tree_entries
+                .first()
+                .and_then(|entry| entry.tree.active_window())
+                .map(|window| window.id().clone())
+                .or_else(|| {
+                    self.entries
+                        .first()
+                        .map(|entry| entry.tile.window().id().clone())
+                });
+        }
+        Some(RemovedFloatingTree {
+            tree: entry.tree,
+            root,
+            window_ids,
+            rect: entry.rect,
+            working_area: self.working_area,
+            sticky: entry.sticky,
+        })
+    }
+
+    pub fn tree_rect(&self, root: NodeId) -> Option<Rectangle<f64, Logical>> {
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.root == root)
+            .map(|entry| entry.rect)
+    }
+
+    pub fn tree_root_for_window(&self, window: &W::Id) -> Option<NodeId> {
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.tree.node_for_window(window).is_some())
+            .map(|entry| entry.root)
+    }
+
+    pub fn tree_roots(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.tree_entries.iter().map(|entry| entry.root)
+    }
+
+    pub fn ipc_trees(
+        &self,
+    ) -> impl Iterator<Item = (NodeId, super::tiling_tree::IpcNode<W::Id>, bool)> + '_ {
+        self.tree_entries
+            .iter()
+            .map(|entry| (entry.root, entry.tree.ipc_tree(), entry.sticky))
+    }
+
+    pub fn tree_root_for_node(&self, node: NodeId) -> Option<NodeId> {
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.tree.contains(node))
+            .map(|entry| entry.root)
+    }
+
+    pub fn focused_leaf_is_only_child_of_tree_root(&self) -> bool {
+        let Some(active) = self.active_window_id.as_ref() else {
+            return false;
+        };
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.tree.node_for_window(active).is_some())
+            .is_some_and(|entry| entry.tree.focused_leaf_is_only_child_of_resident_root())
+    }
+
+    pub fn fullscreen_mode(&self) -> Option<super::tiling_tree::FullscreenMode> {
+        self.tree_entries.iter().find_map(|entry| {
+            let fullscreen = entry.tree.fullscreen_node()?;
+            entry.tree.fullscreen_mode(fullscreen)
+        })
+    }
+
+    pub fn fullscreen_mode_for_window(
+        &self,
+        window: &W::Id,
+    ) -> Option<super::tiling_tree::FullscreenMode> {
+        self.tree_entries.iter().find_map(|entry| {
+            let fullscreen = entry.tree.fullscreen_node()?;
+            let node = entry.tree.node_for_window(window)?;
+            entry
+                .tree
+                .contains_node(fullscreen, node)
+                .then(|| entry.tree.fullscreen_mode(fullscreen))
+                .flatten()
+        })
+    }
+
+    pub fn fullscreen_contains_window(&self, window: &W::Id) -> bool {
+        self.tree_entries.iter().any(|entry| {
+            entry
+                .tree
+                .fullscreen_node()
+                .zip(entry.tree.node_for_window(window))
+                .is_some_and(|(fullscreen, node)| entry.tree.contains_node(fullscreen, node))
+        })
+    }
+
+    pub fn fullscreen_window(&self) -> Option<&W::Id> {
+        self.tree_entries
+            .iter()
+            .find_map(|entry| entry.tree.fullscreen_window())
+    }
+
+    pub fn disable_fullscreen(&mut self) {
+        for entry in &mut self.tree_entries {
+            if let Some(fullscreen) = entry.tree.fullscreen_node() {
+                entry.tree.set_node_fullscreen(fullscreen, None);
+                return;
+            }
+        }
+    }
+
+    pub fn set_window_fullscreen(
+        &mut self,
+        window: &W::Id,
+        mode: Option<super::tiling_tree::FullscreenMode>,
+    ) -> bool {
+        let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(window).is_some())
+        else {
+            return false;
+        };
+        let Some(node) = entry.tree.node_for_window(window) else {
+            return false;
+        };
+        entry.tree.set_node_fullscreen(node, mode)
+    }
+
+    pub fn set_focused_fullscreen(
+        &mut self,
+        mode: Option<super::tiling_tree::FullscreenMode>,
+    ) -> bool {
+        let Some(active) = self.active_window_id.as_ref() else {
+            return false;
+        };
+        let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(active).is_some())
+        else {
+            return false;
+        };
+        let Some(focus) = entry.tree.focus() else {
+            return false;
+        };
+        entry.tree.set_node_fullscreen(focus, mode)
+    }
+
+    pub fn focused_container_node(&self) -> Option<NodeId> {
+        let active = self.active_window_id.as_ref()?;
+        let entry = self
+            .tree_entries
+            .iter()
+            .find(|entry| entry.tree.node_for_window(active).is_some())?;
+        entry.tree.focus().filter(|node| entry.tree.is_split(*node))
+    }
+
+    pub fn window_in_node(&self, node: NodeId) -> Option<&W::Id> {
+        self.tree_entries.iter().find_map(|entry| {
+            entry
+                .tree
+                .windows()
+                .find(|(leaf, _)| entry.tree.contains_node(node, *leaf))
+                .map(|(_, window)| window.id())
+        })
+    }
+
+    pub fn focus_parent(&mut self) -> bool {
+        let Some(active) = self.active_window_id.as_ref() else {
+            return false;
+        };
+        self.tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(active).is_some())
+            .is_some_and(|entry| entry.tree.focus_parent())
+    }
+
+    pub fn focus_child(&mut self) -> bool {
+        let Some(active) = self.active_window_id.as_ref() else {
+            return false;
+        };
+        self.tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(active).is_some())
+            .is_some_and(|entry| entry.tree.focus_child())
+    }
+
+    pub fn tree_window_ids(&self, root: NodeId) -> Option<Vec<W::Id>> {
+        self.tree(root).map(|tree| {
+            tree.windows()
+                .map(|(_, window)| window.id().clone())
+                .collect()
+        })
+    }
+
+    pub fn tree_is_sticky(&self, root: NodeId) -> bool {
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.root == root)
+            .is_some_and(|entry| entry.sticky)
+    }
+
+    pub fn set_tree_sticky(&mut self, root: NodeId, sticky: bool) -> bool {
+        let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.root == root)
+        else {
+            return false;
+        };
+        entry.sticky = sticky;
+        true
+    }
+
+    pub fn tree(&self, root: NodeId) -> Option<&TilingTree<W>> {
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.root == root)
+            .map(|entry| &entry.tree)
+    }
+
+    pub fn tree_mut(&mut self, root: NodeId) -> Option<&mut TilingTree<W>> {
+        self.tree_entries
+            .iter_mut()
+            .find(|entry| entry.root == root)
+            .map(|entry| &mut entry.tree)
+    }
+
+    pub fn take_sticky_trees(&mut self) -> Vec<RemovedFloatingTree<W>> {
+        let roots = self
+            .tree_entries
+            .iter()
+            .filter(|entry| entry.sticky)
+            .map(|entry| entry.root)
+            .collect::<Vec<_>>();
+        roots
+            .into_iter()
+            .filter_map(|root| self.remove_tree_for_transfer(root))
+            .collect()
+    }
+
+    pub fn move_tree(&mut self, root: NodeId, rect: Rectangle<f64, Logical>) -> bool {
+        let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.root == root)
+        else {
+            return false;
+        };
+        entry.rect = rect;
+        entry.pos = Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc);
+        entry.tree.update_config(
+            self.view_size,
+            rect,
+            false,
+            self.scale,
+            self.options.clone(),
+        );
+        true
     }
 
     fn add_tile_at(&mut self, mut idx: usize, mut tile: Tile<W>, activate: bool) {
@@ -586,12 +1106,18 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
         win.request_size_once(size, true);
 
-        if activate || self.tiles.is_empty() {
+        if activate || self.entries.is_empty() {
             self.active_window_id = Some(win.id().clone());
         }
 
         // Make sure the tile isn't inserted below its parent.
-        for (i, tile_above) in self.tiles.iter().enumerate().take(idx) {
+        for (i, tile_above) in self
+            .entries
+            .iter()
+            .map(|entry| &entry.tile)
+            .enumerate()
+            .take(idx)
+        {
             if win.is_child_of(tile_above.window()) {
                 idx = i;
                 break;
@@ -606,19 +1132,29 @@ impl<W: LayoutElement> FloatingSpace<W> {
         };
 
         let data = Data::new(self.view_size, self.working_area, &tile, pos);
-        self.data.insert(idx, data);
-        self.tiles.insert(idx, tile);
+        self.entries.insert(idx, FloatingEntry { tile, data });
 
         self.bring_up_descendants_of(idx);
     }
 
     pub fn add_tile_above(&mut self, above: &W::Id, mut tile: Tile<W>, activate: bool) {
-        let idx = self.idx_of(above).unwrap();
+        let (idx, above_rect) = if let Some(idx) = self.idx_of(above) {
+            let data = self.entries[idx].data;
+            (idx, Rectangle::new(data.logical_pos, data.size))
+        } else if let Some((idx, entry)) = self
+            .tree_entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.tree.node_for_window(above).is_some())
+        {
+            (idx.min(self.entries.len()), entry.rect)
+        } else {
+            return;
+        };
 
-        let above_pos = self.data[idx].logical_pos;
-        let above_size = self.data[idx].size;
         let tile_size = tile.tile_size();
-        let pos = above_pos + (above_size.to_point() - tile_size.to_point()).downscale(2.);
+        let pos =
+            above_rect.loc + (above_rect.size.to_point() - tile_size.to_point()).downscale(2.);
         let pos = self.clamp_within_working_area(pos, tile_size);
         tile.floating_pos = Some(self.logical_to_size_frac(pos));
 
@@ -626,18 +1162,25 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     fn bring_up_descendants_of(&mut self, idx: usize) {
-        let tile = &self.tiles[idx];
+        let tile = &self.entries[idx].tile;
         let win = tile.window();
 
         // We always maintain the correct stacking order, so walking descendants back to front
         // should give us all of them.
         let mut descendants: Vec<usize> = Vec::new();
-        for (i, tile_below) in self.tiles.iter().enumerate().skip(idx + 1).rev() {
+        for (i, tile_below) in self
+            .entries
+            .iter()
+            .map(|entry| &entry.tile)
+            .enumerate()
+            .skip(idx + 1)
+            .rev()
+        {
             let win_below = tile_below.window();
             if win_below.is_child_of(win)
                 || descendants
                     .iter()
-                    .any(|idx| win_below.is_child_of(self.tiles[*idx].window()))
+                    .any(|idx| win_below.is_child_of(self.entries[*idx].tile.window()))
             {
                 descendants.push(i);
             }
@@ -645,28 +1188,72 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
         // Now, descendants is in back-to-front order, and repositioning them in the front-to-back
         // order will preserve the subsequent indices and work out right.
-        let mut idx = idx;
-        #[allow(clippy::explicit_counter_loop)]
-        for descendant_idx in descendants.into_iter().rev() {
-            self.raise_window(descendant_idx, idx);
-            idx += 1;
+        for (offset, descendant_idx) in descendants.into_iter().rev().enumerate() {
+            self.raise_window(descendant_idx, idx + offset);
         }
     }
 
-    pub fn remove_tile(&mut self, id: &W::Id) -> RemovedTile<W> {
-        let idx = self.idx_of(id).unwrap();
-        self.remove_tile_by_idx(idx)
+    pub fn remove_tile(
+        &mut self,
+        id: &W::Id,
+        transaction: crate::utils::transaction::Transaction,
+    ) -> RemovedTile<W> {
+        if let Some(idx) = self.idx_of(id) {
+            return self.remove_tile_by_idx(idx);
+        }
+
+        let tree_idx = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.tree.node_for_window(id).is_some())
+            .expect("window must belong to a floating entry");
+        let mut tile = self.tree_entries[tree_idx]
+            .tree
+            .remove_tile(id, transaction)
+            .expect("floating tree window must remain present until removal");
+        if self.tree_entries[tree_idx].tree.is_empty() {
+            self.tree_entries.remove(tree_idx);
+        }
+        if Some(tile.window().id()) == self.active_window_id.as_ref() {
+            self.active_window_id = self
+                .tree_entries
+                .iter()
+                .flat_map(|entry| entry.tree.windows())
+                .map(|(_, window)| window.id().clone())
+                .next()
+                .or_else(|| {
+                    self.entries
+                        .first()
+                        .map(|entry| entry.tile.window().id().clone())
+                });
+        }
+        if let Some(size) = tile.window().expected_size() {
+            tile.floating_window_size = Some(size);
+        }
+        let width = TiledWidth::Fixed(tile.tile_expected_or_current_size().w);
+        RemovedTile {
+            tile,
+            width,
+            is_full_width: false,
+            is_floating: true,
+            floating_working_area: Some(self.working_area),
+        }
     }
 
     fn remove_tile_by_idx(&mut self, idx: usize) -> RemovedTile<W> {
-        let mut tile = self.tiles.remove(idx);
-        let data = self.data.remove(idx);
+        let FloatingEntry { mut tile, data } = self.entries.remove(idx);
 
-        if self.tiles.is_empty() {
-            self.active_window_id = None;
-        } else if Some(tile.window().id()) == self.active_window_id.as_ref() {
-            // The active tile was removed, make the topmost tile active.
-            self.active_window_id = Some(self.tiles[0].window().id().clone());
+        if Some(tile.window().id()) == self.active_window_id.as_ref() {
+            self.active_window_id = self
+                .entries
+                .first()
+                .map(|entry| entry.tile.window().id().clone())
+                .or_else(|| {
+                    self.tree_entries
+                        .first()
+                        .and_then(|entry| entry.tree.active_window())
+                        .map(|window| window.id().clone())
+                });
         }
 
         // Stop interactive resize.
@@ -699,10 +1286,23 @@ impl<W: LayoutElement> FloatingSpace<W> {
         id: &W::Id,
         blocker: TransactionBlocker,
     ) {
-        let (tile, tile_pos) = self
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(id).is_some())
+        {
+            entry
+                .tree
+                .start_close_animation_for_window(renderer, id, blocker);
+            return;
+        }
+
+        let Some((tile, tile_pos)) = self
             .tiles_with_render_positions_mut(false)
             .find(|(tile, _)| tile.window().id() == id)
-            .unwrap();
+        else {
+            return;
+        };
 
         let Some(snapshot) = tile.take_unmap_snapshot() else {
             return;
@@ -717,30 +1317,43 @@ impl<W: LayoutElement> FloatingSpace<W> {
         if !self.contains(id) {
             return false;
         }
-
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(id).is_some())
+        {
+            entry.tree.activate_window(id);
+        }
         self.active_window_id = Some(id.clone());
         true
     }
 
     pub fn activate_window(&mut self, id: &W::Id) -> bool {
-        let Some(idx) = self.idx_of(id) else {
+        if let Some(idx) = self.idx_of(id) {
+            self.raise_window(idx, 0);
+            self.active_window_id = Some(id.clone());
+            self.bring_up_descendants_of(0);
+            return true;
+        }
+        let Some(idx) = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.tree.node_for_window(id).is_some())
+        else {
             return false;
         };
-
-        self.raise_window(idx, 0);
+        let mut entry = self.tree_entries.remove(idx);
+        entry.tree.activate_window(id);
+        self.tree_entries.insert(0, entry);
         self.active_window_id = Some(id.clone());
-        self.bring_up_descendants_of(0);
-
         true
     }
 
     fn raise_window(&mut self, from_idx: usize, to_idx: usize) {
         assert!(to_idx <= from_idx);
 
-        let tile = self.tiles.remove(from_idx);
-        let data = self.data.remove(from_idx);
-        self.tiles.insert(to_idx, tile);
-        self.data.insert(to_idx, data);
+        let entry = self.entries.remove(from_idx);
+        self.entries.insert(to_idx, entry);
     }
 
     pub fn start_close_animation_for_tile(
@@ -783,12 +1396,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(id) = id.or(self.active_window_id.as_ref()).cloned() else {
             return;
         };
-        let idx = self.idx_of(&id).unwrap();
+        let Some(idx) = self.idx_of(&id) else {
+            return;
+        };
 
         let available_size = self.working_area.size.w;
 
         let len = self.options.layout.preset_column_widths.len();
-        let tile = &mut self.tiles[idx];
+        let tile = &mut self.entries[idx].tile;
         let preset_idx = if let Some(idx) = tile.floating_preset_width_idx {
             (idx + if forwards { 1 } else { len - 1 }) % len
         } else {
@@ -831,7 +1446,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
             self.view_size.to_i32_round(),
         );
 
-        self.tiles[idx].floating_preset_width_idx = Some(preset_idx);
+        self.entries[idx].tile.floating_preset_width_idx = Some(preset_idx);
 
         self.interactive_resize_end(Some(&id));
     }
@@ -841,7 +1456,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
             return false;
         };
 
-        self.tiles[idx].start_open_animation();
+        self.entries[idx].tile.start_open_animation();
         true
     }
 
@@ -849,12 +1464,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(id) = id.or(self.active_window_id.as_ref()).cloned() else {
             return;
         };
-        let idx = self.idx_of(&id).unwrap();
+        let Some(idx) = self.idx_of(&id) else {
+            return;
+        };
 
         let available_size = self.working_area.size.h;
 
         let len = self.options.layout.preset_window_heights.len();
-        let tile = &mut self.tiles[idx];
+        let tile = &mut self.entries[idx].tile;
         let preset_idx = if let Some(idx) = tile.floating_preset_height_idx {
             (idx + if forwards { 1 } else { len - 1 }) % len
         } else {
@@ -897,7 +1514,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
             self.view_size.to_i32_round(),
         );
 
-        let tile = &mut self.tiles[idx];
+        let tile = &mut self.entries[idx].tile;
         tile.floating_preset_height_idx = Some(preset_idx);
 
         self.interactive_resize_end(Some(&id));
@@ -912,10 +1529,10 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(index) = self.idx_of(id) else {
             return false;
         };
-        let tile = &mut self.tiles[index];
-        let changed = tile.set_sway_border(style, width, true).is_ok();
+        let entry = &mut self.entries[index];
+        let changed = entry.tile.set_sway_border(style, width, true).is_ok();
         if changed {
-            self.data[index].update(tile);
+            entry.data.update(&entry.tile);
         }
         changed
     }
@@ -930,9 +1547,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(id) = id.or(self.active_window_id.as_ref()) else {
             return false;
         };
-        let idx = self.idx_of(id).unwrap();
+        let Some(idx) = self.idx_of(id) else {
+            return false;
+        };
 
-        let tile = &mut self.tiles[idx];
+        let tile = &mut self.entries[idx].tile;
         tile.floating_preset_width_idx = None;
 
         let available_size = self.working_area.size.w;
@@ -986,12 +1605,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(idx) = self.idx_of(id) else { return };
         let change = match change {
             SizeChange::SetFixed(value) => SizeChange::SetFixed(
-                self.tiles[idx]
+                self.entries[idx]
+                    .tile
                     .window_width_for_tile_width(f64::from(value))
                     .round() as i32,
             ),
             SizeChange::SetProportion(value) => SizeChange::SetFixed(
-                self.tiles[idx]
+                self.entries[idx]
+                    .tile
                     .window_width_for_tile_width((self.working_area.size.w * value / 100.).trunc())
                     .round() as i32,
             ),
@@ -1009,12 +1630,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(idx) = self.idx_of(id) else { return };
         let change = match change {
             SizeChange::SetFixed(value) => SizeChange::SetFixed(
-                self.tiles[idx]
+                self.entries[idx]
+                    .tile
                     .window_height_for_tile_height(f64::from(value))
                     .round() as i32,
             ),
             SizeChange::SetProportion(value) => SizeChange::SetFixed(
-                self.tiles[idx]
+                self.entries[idx]
+                    .tile
                     .window_height_for_tile_height(
                         (self.working_area.size.h * value / 100.).trunc(),
                     )
@@ -1035,13 +1658,13 @@ impl<W: LayoutElement> FloatingSpace<W> {
             return false;
         };
         let idx = self.idx_of(&id).unwrap();
-        let old_size = self.tiles[idx].tile_expected_or_current_size();
+        let old_size = self.entries[idx].tile.tile_expected_or_current_size();
         if edge.intersects(ResizeEdge::LEFT_RIGHT) {
             self.set_window_width(Some(&id), change, true, self.view_size.to_i32_round());
         } else {
             self.set_window_height(Some(&id), change, true, self.view_size.to_i32_round());
         }
-        let new_size = self.tiles[idx].tile_expected_or_current_size();
+        let new_size = self.entries[idx].tile.tile_expected_or_current_size();
         if old_size == new_size {
             return false;
         }
@@ -1052,8 +1675,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
         if edge.contains(ResizeEdge::TOP) {
             offset.y = old_size.h - new_size.h;
         }
-        let pos = self.data[idx].logical_pos + offset;
-        self.data[idx].set_logical_pos(pos);
+        let pos = self.entries[idx].data.logical_pos + offset;
+        self.entries[idx].data.set_logical_pos(pos);
         true
     }
 
@@ -1067,9 +1690,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(id) = id.or(self.active_window_id.as_ref()) else {
             return false;
         };
-        let idx = self.idx_of(id).unwrap();
+        let Some(idx) = self.idx_of(id) else {
+            return false;
+        };
 
-        let tile = &mut self.tiles[idx];
+        let tile = &mut self.entries[idx].tile;
         tile.floating_preset_height_idx = None;
 
         let available_size = self.working_area.size.h;
@@ -1116,18 +1741,40 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
     fn focus_directional(
         &mut self,
+        direction: Direction,
         distance: impl Fn(Point<f64, Logical>, Point<f64, Logical>) -> f64,
     ) -> bool {
         let Some(active_id) = &self.active_window_id else {
             return false;
         };
-        let active_idx = self.idx_of(active_id).unwrap();
-        let center = self.data[active_idx].center();
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(active_id).is_some())
+        {
+            let moved = entry.tree.focus_direction(direction);
+            self.active_window_id = entry.tree.active_window().map(|window| window.id().clone());
+            return moved;
+        }
+        let Some(active_idx) = self.idx_of(active_id) else {
+            return false;
+        };
+        let center = self.entries[active_idx].data.center();
 
         let candidates = || {
-            zip(&self.tiles, &self.data)
-                .filter(|(tile, _)| tile.window().id() != active_id)
-                .map(|(tile, data)| (tile, distance(center, data.center())))
+            self.entries
+                .iter()
+                .map(|entry| (entry.tile.window().id(), entry.data.center()))
+                .chain(self.tree_entries.iter().filter_map(|entry| {
+                    entry.tree.active_window().map(|window| {
+                        (
+                            window.id(),
+                            entry.rect.loc + entry.rect.size.to_point().downscale(2.),
+                        )
+                    })
+                }))
+                .filter(|(id, _)| *id != active_id)
+                .map(|(id, other)| (id, distance(center, other)))
         };
         let result = candidates()
             .filter(|(_, dist)| *dist > 0.)
@@ -1137,8 +1784,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
                     .filter(|(_, dist)| *dist <= 0.)
                     .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b))
             });
-        if let Some((tile, _)) = result {
-            let id = tile.window().id().clone();
+        if let Some((id, _)) = result {
+            let id = id.clone();
             self.activate_window(&id);
             true
         } else {
@@ -1147,19 +1794,19 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn focus_left(&mut self) -> bool {
-        self.focus_directional(|focus, other| focus.x - other.x)
+        self.focus_directional(Direction::Left, |focus, other| focus.x - other.x)
     }
 
     pub fn focus_right(&mut self) -> bool {
-        self.focus_directional(|focus, other| other.x - focus.x)
+        self.focus_directional(Direction::Right, |focus, other| other.x - focus.x)
     }
 
     pub fn focus_up(&mut self) -> bool {
-        self.focus_directional(|focus, other| focus.y - other.y)
+        self.focus_directional(Direction::Up, |focus, other| focus.y - other.y)
     }
 
     pub fn focus_down(&mut self) -> bool {
-        self.focus_directional(|focus, other| other.y - focus.y)
+        self.focus_directional(Direction::Down, |focus, other| other.y - focus.y)
     }
 
     pub fn focus_leftmost(&mut self) {
@@ -1206,7 +1853,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         if animate {
             self.move_and_animate(idx, new_pos);
         } else {
-            self.data[idx].set_logical_pos(new_pos);
+            self.entries[idx].data.set_logical_pos(new_pos);
         }
 
         self.interactive_resize_end(None);
@@ -1216,9 +1863,26 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(active_id) = &self.active_window_id else {
             return;
         };
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(active_id).is_some())
+        {
+            entry.rect.loc += amount;
+            entry.pos =
+                Data::logical_to_size_frac_in_working_area(self.working_area, entry.rect.loc);
+            entry.tree.update_config(
+                self.view_size,
+                entry.rect,
+                false,
+                self.scale,
+                self.options.clone(),
+            );
+            return;
+        }
         let idx = self.idx_of(active_id).unwrap();
 
-        let new_pos = self.data[idx].logical_pos + amount;
+        let new_pos = self.entries[idx].data.logical_pos + amount;
         self.move_to(idx, new_pos, true)
     }
 
@@ -1248,9 +1912,30 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(id) = id.or(self.active_window_id.as_ref()) else {
             return;
         };
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(id).is_some())
+        {
+            let mut pos = entry.rect.loc;
+            pos.x =
+                apply_position_change(pos.x, x, self.working_area.size.w, self.working_area.loc.x);
+            pos.y =
+                apply_position_change(pos.y, y, self.working_area.size.h, self.working_area.loc.y);
+            entry.rect.loc = pos;
+            entry.pos = Data::logical_to_size_frac_in_working_area(self.working_area, pos);
+            entry.tree.update_config(
+                self.view_size,
+                entry.rect,
+                false,
+                self.scale,
+                self.options.clone(),
+            );
+            return;
+        }
         let idx = self.idx_of(id).unwrap();
 
-        let mut pos = self.data[idx].logical_pos;
+        let mut pos = self.entries[idx].data.logical_pos;
 
         let available_width = self.working_area.size.w;
         let available_height = self.working_area.size.h;
@@ -1266,9 +1951,29 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(id) = id.or(self.active_window_id.as_ref()).cloned() else {
             return;
         };
-        let idx = self.idx_of(&id).unwrap();
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(&id).is_some())
+        {
+            entry.rect.loc = center_preferring_top_left_in_area(self.working_area, entry.rect.size);
+            entry.pos =
+                Data::logical_to_size_frac_in_working_area(self.working_area, entry.rect.loc);
+            entry.tree.update_config(
+                self.view_size,
+                entry.rect,
+                false,
+                self.scale,
+                self.options.clone(),
+            );
+            return;
+        }
+        let Some(idx) = self.idx_of(&id) else {
+            return;
+        };
 
-        let new_pos = center_preferring_top_left_in_area(self.working_area, self.data[idx].size);
+        let new_pos =
+            center_preferring_top_left_in_area(self.working_area, self.entries[idx].data.size);
         self.move_to(idx, new_pos, true);
     }
 
@@ -1282,12 +1987,20 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn update_window(&mut self, id: &W::Id, serial: Option<Serial>) -> bool {
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.node_for_window(id).is_some())
+        {
+            return entry.tree.update_window(id, serial);
+        }
         let Some(tile_idx) = self.idx_of(id) else {
             return false;
         };
 
-        let tile = &mut self.tiles[tile_idx];
-        let data = &mut self.data[tile_idx];
+        let entry = &mut self.entries[tile_idx];
+        let tile = &mut entry.tile;
+        let data = &mut entry.data;
 
         let resize = tile.window_mut().interactive_resize_data();
 
@@ -1323,7 +2036,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         view_rect: Rectangle<f64, Logical>,
         focus_ring: bool,
         layer: RenderLayer,
-        push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
+        push: &mut dyn FnMut(FloatingLayoutRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
 
@@ -1337,10 +2050,17 @@ impl<W: LayoutElement> FloatingSpace<W> {
             }
         }
 
+        for entry in self.tree_entries.iter().rev() {
+            entry
+                .tree
+                .render(ctx.r(), xray_pos, focus_ring, layer, &mut |element| {
+                    push(element.into())
+                });
+        }
         let active = self.active_window_id.clone();
         let workspace_focused = focus_ring;
         self.titlebars
-            .retain((0..self.tiles.len()).map(|index| NodeId(index as u64)));
+            .retain((0..self.entries.len()).map(|index| NodeId(index as u64)));
         for (index, (tile, tile_pos)) in self.tiles_with_render_positions().enumerate() {
             // Skip tiles belonging to a different render layer.
             if layer.is_normal() == tile.is_moving_between_workspaces() {
@@ -1394,11 +2114,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
             return false;
         }
 
-        let tile = self
-            .tiles
+        let Some(tile) = self
+            .entries
             .iter_mut()
+            .map(|entry| &mut entry.tile)
             .find(|tile| tile.window().id() == &window)
-            .unwrap();
+        else {
+            return false;
+        };
 
         let original_window_size = tile.window_size();
 
@@ -1476,9 +2199,12 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
+        for entry in &mut self.tree_entries {
+            entry.tree.refresh_floating(is_active, is_focused);
+        }
         let active = self.active_window_id.clone();
-        for tile in &mut self.tiles {
-            let win = tile.window_mut();
+        for entry in &mut self.entries {
+            let win = entry.tile.window_mut();
 
             win.set_active_in_column(true);
             win.set_floating(true);
@@ -1541,8 +2267,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
         // Moves up to this logical pixel distance are not animated.
         const ANIMATION_THRESHOLD_SQ: f64 = 10. * 10.;
 
-        let tile = &mut self.tiles[idx];
-        let data = &mut self.data[idx];
+        let entry = &mut self.entries[idx];
+        let tile = &mut entry.tile;
+        let data = &mut entry.data;
 
         let prev_pos = data.logical_pos;
         data.set_logical_pos(new_pos);
@@ -1672,9 +2399,31 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn verify_invariants(&self) {
         assert!(self.scale > 0.);
         assert!(self.scale.is_finite());
-        assert_eq!(self.tiles.len(), self.data.len());
+        for entry in &self.tree_entries {
+            assert_eq!(entry.tree.parent_area(), entry.rect);
+            assert!(
+                !entry.tree.is_empty(),
+                "floating tree entry must not be empty"
+            );
+            assert!(entry.tree.contains(entry.root));
+            entry.tree.verify_invariants();
+        }
+        let mut node_ids = std::collections::HashSet::new();
+        for entry in &self.tree_entries {
+            for (id, _) in entry.tree.iter_depth_first() {
+                assert!(
+                    node_ids.insert(id),
+                    "a node must belong to exactly one floating tree"
+                );
+            }
+        }
 
-        for (i, (tile, data)) in zip(&self.tiles, &self.data).enumerate() {
+        for (i, (tile, data)) in self
+            .entries
+            .iter()
+            .map(|entry| (&entry.tile, &entry.data))
+            .enumerate()
+        {
             use crate::layout::SizingMode;
 
             assert!(Rc::ptr_eq(&self.options, &tile.options));
@@ -1703,19 +2452,24 @@ impl<W: LayoutElement> FloatingSpace<W> {
             data2.update_config(self.view_size, self.working_area);
             assert_eq!(data, &data2, "tile data must be up to date");
 
-            for tile_below in &self.tiles[i + 1..] {
+            for entry_below in &self.entries[i + 1..] {
+                assert_ne!(
+                    entry_below.tile.window().id(),
+                    tile.window().id(),
+                    "a window must belong to exactly one floating entry"
+                );
                 assert!(
-                    !tile_below.window().is_child_of(tile.window()),
+                    !entry_below.tile.window().is_child_of(tile.window()),
                     "children must be stacked above parents"
                 );
             }
         }
 
         if let Some(id) = &self.active_window_id {
-            assert!(!self.tiles.is_empty());
+            assert!(!self.is_empty());
             assert!(self.contains(id), "active window must be present in tiles");
         } else {
-            assert!(self.tiles.is_empty());
+            assert!(self.is_empty());
         }
 
         if let Some(resize) = &self.interactive_resize {

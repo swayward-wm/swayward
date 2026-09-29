@@ -336,6 +336,99 @@ fn move_no_auto_back_and_forth_changes_the_same_workspace_destination() {
 }
 
 #[test]
+fn initial_workspaces_keep_the_pre_config_output_orientation() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    for output in [f.niri_output(1), f.niri_output(2)] {
+        let mode = smithay::output::Mode {
+            size: (1270, 1408).into(),
+            refresh: 60_000,
+        };
+        output.change_current_state(Some(mode), None, None, None);
+        f.swayward().layout.update_output_size(&output);
+    }
+
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let workspaces = query_ipc(&mut f, &mut stream, MessageType::GetWorkspaces);
+    assert_eq!(workspaces.as_array().unwrap().len(), 2);
+    assert!(workspaces
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|workspace| workspace["layout"] == "splith"));
+}
+
+#[test]
+fn repeatedly_moving_a_workspace_does_not_duplicate_it_in_output_order() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (1270, 1408), Some((0, 0)));
+    f.add_named_output_at("right".into(), (1270, 1408), Some((1270, 0)));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "moved");
+
+    for _ in 0..100 {
+        assert!(crate::command::execute(f.niri_state(), "move workspace to output right")[0].success);
+        assert!(crate::command::execute(f.niri_state(), "output right disable")[0].success);
+        assert!(crate::command::execute(f.niri_state(), "output right enable")[0].success);
+        assert!(crate::command::execute(f.niri_state(), "move workspace to output left")[0].success);
+    }
+
+    let swayward = f.swayward();
+    let tree = describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    );
+    let workspace_ids = tree
+        .nodes
+        .iter()
+        .flat_map(|output| &output.nodes)
+        .map(|workspace| workspace.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        workspace_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        workspace_ids.len()
+    );
+}
+
+#[test]
+fn repeated_output_unplug_does_not_duplicate_a_restored_workspace() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (1270, 1408), Some((0, 0)));
+    f.add_named_output_at("right".into(), (1270, 1408), Some((1270, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    map_test_window(&mut f, client, "restored");
+
+    assert!(crate::command::execute(f.niri_state(), "output right disable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "output right enable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "output right disable")[0].success);
+
+    let swayward = f.swayward();
+    let tree = describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    );
+    let workspace_ids = tree
+        .nodes
+        .iter()
+        .flat_map(|output| &output.nodes)
+        .map(|workspace| workspace.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        workspace_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        workspace_ids.len()
+    );
+}
+
+#[test]
 fn workspace_back_and_forth_without_history_uses_sway_error() {
     let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1920, 1080));
@@ -826,8 +919,8 @@ fn ipc_output_rects_use_global_positions() {
     assert_eq!(rects[0].width, 1280);
     assert_eq!(rects[1].x, 1280);
     assert_eq!(rects[1].width, 1920);
-    assert_eq!(outputs[0].percent, Some(1280. / 3200.));
-    assert_eq!(outputs[1].percent, Some(1920. / 3200.));
+    assert_eq!(outputs[0].percent, Some((1280. * 720.) / (3200. * 1080.)));
+    assert_eq!(outputs[1].percent, Some((1920. * 1080.) / (3200. * 1080.)));
 
     let root = describe_tree(
         &swayward.layout,
@@ -837,8 +930,55 @@ fn ipc_output_rects_use_global_positions() {
     );
     assert_eq!(root.rect.width, 3200);
     assert_eq!(root.rect.height, 1080);
-    assert_eq!(root.nodes[1].percent, Some(1280. / 3200.));
-    assert_eq!(root.nodes[2].percent, Some(1920. / 3200.));
+    assert_eq!(
+        root.nodes[1].percent,
+        Some((1280. * 720.) / (3200. * 1080.))
+    );
+    assert_eq!(
+        root.nodes[2].percent,
+        Some((1920. * 1080.) / (3200. * 1080.))
+    );
+}
+
+#[test]
+fn configured_startup_outputs_use_reported_rects_for_percentages() {
+    let config = swayward_config::Config::parse_mem(
+        r#"
+        output "headless-1" { mode custom=true "1270x1408@60"; scale 1; }
+        output "headless-2" { mode custom=true "1270x1408@60"; scale 1; }
+        "#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    // The headless backend announces pre-created outputs in reverse order.
+    f.add_output(2, (1280, 720));
+    f.add_output(1, (1280, 720));
+
+    let swayward = f.swayward();
+    let outputs = describe_outputs(&swayward.layout, &swayward.global_space);
+    let first = outputs
+        .iter()
+        .find(|output| output.name == "headless-1")
+        .unwrap();
+    let second = outputs
+        .iter()
+        .find(|output| output.name == "headless-2")
+        .unwrap();
+    assert_eq!(first.rect.x, 0);
+    assert_eq!(first.rect.width, 1270);
+    assert_eq!(second.rect.x, 1270);
+    assert_eq!(second.rect.width, 1270);
+    assert_eq!(first.percent, Some(0.5));
+    assert_eq!(second.percent, Some(0.5));
+
+    let root = describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    );
+    assert_eq!(root.nodes[1].percent, Some(0.5));
+    assert_eq!(root.nodes[2].percent, Some(0.5));
 }
 
 #[test]

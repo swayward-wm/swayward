@@ -54,6 +54,45 @@ fn closing_last_window_focuses_workspace_node() {
 }
 
 #[test]
+fn fullscreen_with_a_focused_floating_window_does_not_target_the_tiling_parent() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "tiled");
+    map_test_window(&mut f, client, "floating");
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "focus tiling")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "focus floating")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen")[0].success);
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(find_json_node_with_app_id(&tree, "floating").unwrap()["fullscreen_mode"], 1);
+    assert_eq!(find_json_parent_of_app_id(&tree, "tiled").unwrap()["fullscreen_mode"], 0);
+
+    assert!(crate::command::execute(f.niri_state(), "fullscreen disable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "focus tiling")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(find_json_parent_of_app_id(&tree, "tiled").unwrap()["focused"], true);
+}
+
+#[test]
 fn get_tree_has_one_focused_node_after_scratchpad_cycle() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
@@ -1679,10 +1718,11 @@ fn cross_workspace_swap_exchanges_positions_marks_and_fullscreen() {
 }
 
 #[test]
-fn moving_a_container_tree_to_an_empty_workspace_unwraps_its_children() {
-    let mut f = Fixture::new();
+fn live_ipc_move_to_an_empty_workspace_preserves_the_container_layout() {
+    let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1270, 1408));
     let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
     for app_id in ["first", "second"] {
         let window = f.client(client).create_window();
         window.xdg_toplevel.set_app_id(app_id.into());
@@ -1694,30 +1734,38 @@ fn moving_a_container_tree_to_an_empty_workspace_unwraps_its_children() {
         window.ack_last_and_commit();
         f.double_roundtrip(client);
     }
-    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "mark group")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "workspace target")[0].success);
-
-    let outcome = crate::command::execute(f.niri_state(), "[con_mark=group] move workspace target");
-    assert!(outcome[0].success, "{outcome:?}");
-    let swayward = f.swayward();
-    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
-        &swayward.layout,
-        &swayward.global_space,
-        &Default::default(),
-        &Default::default(),
-    ))
-    .unwrap();
-    let target = tree["nodes"][1]["nodes"]
-        .as_array()
-        .unwrap()
+    f.swayward().layout.nest_or_unnest_window_left(None);
+    let mut stream = UnixStream::connect(socket).unwrap();
+    for command in [
+        "focus parent",
+        "mark group",
+        "workspace target",
+        "[con_mark=group] move workspace target",
+    ] {
+        let outcome = query_ipc_with_payload(
+            &mut f,
+            &mut stream,
+            MessageType::RunCommand,
+            command,
+        );
+        assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
+    }
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let target = workspaces
         .iter()
         .find(|workspace| workspace["name"] == "target")
         .unwrap();
-    assert_eq!(target["layout"], "splith");
+    assert_eq!(target["layout"], "splitv");
+    assert_eq!(target["representation"], "V[second first]");
     assert_eq!(target["nodes"].as_array().unwrap().len(), 2);
-    assert_eq!(target["nodes"][0]["app_id"], "first");
-    assert_eq!(target["nodes"][1]["app_id"], "second");
+    let app_ids = target["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["app_id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(app_ids, ["first", "second"].into());
 }
 
 #[test]
@@ -1737,6 +1785,7 @@ fn criteria_targeted_move_workspace_preserves_a_container_subtree() {
         window.ack_last_and_commit();
         f.double_roundtrip(client);
     }
+    f.swayward().layout.nest_or_unnest_window_left(None);
     assert!(crate::command::execute(f.niri_state(), r#"[app_id="first"] focus"#)[0].success);
     assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
     assert!(crate::command::execute(f.niri_state(), "mark group")[0].success);
@@ -2053,4 +2102,34 @@ fn unfloating_a_scratchpad_window_emits_move_then_floating() {
     }
     assert_eq!(events[0]["change"], "move");
     assert_eq!(events[1]["change"], "floating");
+}
+
+#[test]
+fn floating_toggle_after_moving_scratchpad_window_between_workspaces_does_not_panic() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for _ in 0..5 {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+
+    for command in [
+        "focus parent",
+        "move scratchpad",
+        "scratchpad show",
+        "move container to workspace 2",
+        "floating toggle",
+        "move container to workspace 2",
+        "workspace 2",
+        "floating toggle",
+    ] {
+        let _ = crate::command::execute(f.niri_state(), command);
+    }
 }

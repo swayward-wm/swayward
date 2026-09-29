@@ -729,6 +729,233 @@ fn map_titled_test_window(fixture: &mut Fixture, client: super::client::ClientId
 }
 
 #[test]
+fn floating_a_group_emits_one_recursive_floating_event() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "group-first");
+    assert!(crate::command::execute(fixture.niri_state(), "splitv")[0].success);
+    map_test_window(&mut fixture, client, "group-second");
+    assert!(crate::command::execute(fixture.niri_state(), "focus parent")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+    let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
+
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    assert_eq!(event_type, (1 << 31) | 3);
+    let event = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(event["change"], "floating");
+    assert_eq!(event["container"]["type"], "floating_con");
+    assert_eq!(event["container"]["floating"], "user_on");
+    assert_eq!(event["container"]["nodes"].as_array().unwrap().len(), 2);
+    assert!(remainder.is_empty(), "unexpected leaf events were buffered");
+    subscriber.set_nonblocking(true).unwrap();
+    fixture.dispatch();
+    let mut byte = [0];
+    assert!(matches!(
+        subscriber.read(&mut byte),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
+fn fullscreening_a_floating_group_emits_one_recursive_fullscreen_event() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "group-first");
+    assert!(crate::command::execute(fixture.niri_state(), "splitv")[0].success);
+    map_test_window(&mut fixture, client, "group-second");
+    assert!(crate::command::execute(fixture.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+    assert!(fixture
+        .swayward()
+        .layout
+        .active_workspace()
+        .unwrap()
+        .focused_container_node()
+        .is_some());
+    let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
+
+    assert!(crate::command::execute(fixture.niri_state(), "fullscreen enable")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    assert_eq!(event_type, (1 << 31) | 3);
+    let event = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(event["change"], "fullscreen_mode");
+    assert_eq!(event["container"]["type"], "floating_con");
+    assert_eq!(event["container"]["fullscreen_mode"], 1);
+    assert_eq!(event["container"]["nodes"].as_array().unwrap().len(), 2);
+    assert!(remainder.is_empty(), "unexpected leaf events were buffered");
+}
+
+#[test]
+fn moving_a_floating_group_to_scratchpad_emits_one_recursive_move_event() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "group-first");
+    assert!(crate::command::execute(fixture.niri_state(), "splitv")[0].success);
+    map_test_window(&mut fixture, client, "group-second");
+    assert!(crate::command::execute(fixture.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+    let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
+
+    assert!(crate::command::execute(fixture.niri_state(), "move scratchpad")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    assert_eq!(event_type, (1 << 31) | 3);
+    let event = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(event["change"], "move");
+    assert_eq!(event["container"]["type"], "floating_con");
+    assert_eq!(event["container"]["scratchpad_state"], "fresh");
+    assert_eq!(event["container"]["nodes"].as_array().unwrap().len(), 2);
+    assert!(remainder.is_empty(), "unexpected leaf events were buffered");
+
+    assert!(crate::command::execute(fixture.niri_state(), "scratchpad show")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    assert_eq!(event_type, (1 << 31) | 3);
+    let event = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(event["change"], "focus");
+    assert_eq!(event["container"]["type"], "con");
+    assert!(event["container"]["focused"].as_bool().unwrap());
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
+    assert_eq!(event_type, (1 << 31) | 3);
+    let event = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(event["change"], "move");
+    assert_eq!(event["container"]["type"], "floating_con");
+    assert_eq!(event["container"]["scratchpad_state"], "fresh");
+    assert_eq!(event["container"]["nodes"].as_array().unwrap().len(), 2);
+    assert!(event["container"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["focused"] == true));
+    assert!(remainder.is_empty(), "unexpected leaf events were buffered");
+}
+
+#[test]
+fn criteria_can_focus_a_resident_floating_group_leaf() {
+    let mut fixture = nested_split_fixture();
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+
+    let target = {
+        let workspace = fixture.swayward().layout.active_workspace().unwrap();
+        workspace
+            .windows()
+            .find(|window| {
+                workspace
+                    .floating_tree_root_for_window(&window.window)
+                    .is_some()
+            })
+            .unwrap()
+            .id()
+    };
+    let outcome = crate::command::execute(
+        fixture.niri_state(),
+        &format!("[con_id={}] focus", crate::ipc::tree::window_id(target)),
+    );
+
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(fixture.swayward().layout.focus().unwrap().id(), target);
+}
+
+#[test]
+fn focusing_a_resident_floating_group_leaf_emits_focus() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    for _ in 0..2 {
+        map_test_window(&mut fixture, client, "group");
+    }
+    fixture.swayward().layout.nest_or_unnest_window_left(None);
+    assert!(crate::command::execute(fixture.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+    let target = {
+        let workspace = fixture.swayward().layout.active_workspace().unwrap();
+        workspace
+            .windows()
+            .find(|window| {
+                workspace
+                    .floating_tree_root_for_window(&window.window)
+                    .is_some()
+            })
+            .unwrap()
+            .id()
+    };
+    fixture.niri_state().ipc_refresh_layout();
+    let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
+
+    let outcome = crate::command::execute(
+        fixture.niri_state(),
+        &format!("[con_id={}] focus", crate::ipc::tree::window_id(target)),
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+    fixture.niri_state().ipc_refresh_layout();
+
+    let ((event_type, payload), remainder) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    assert_eq!(event_type, (1 << 31) | 3);
+    let event = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(event["change"], "focus");
+    assert_eq!(event["container"]["id"], crate::ipc::tree::window_id(target));
+    assert!(remainder.is_empty(), "unexpected events were buffered");
+}
+
+#[test]
+fn moving_a_floating_group_to_new_workspace_emits_empty_init() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "group-first");
+    assert!(crate::command::execute(fixture.niri_state(), "splitv")[0].success);
+    map_test_window(&mut fixture, client, "group-second");
+    assert!(crate::command::execute(fixture.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+    fixture.niri_state().ipc_refresh_layout();
+
+    let mut subscriber = UnixStream::connect(&socket).unwrap();
+    subscriber
+        .write_all(&swayward_ipc::wire::encode(
+            MessageType::Subscribe,
+            r#"["workspace"]"#,
+        ))
+        .unwrap();
+    let (_, reply) = read_ipc_reply(&mut fixture, &mut subscriber);
+    assert_eq!(reply, r#"{"success": true}"#);
+
+    assert!(crate::command::execute(
+        fixture.niri_state(),
+        "move container to workspace 2",
+    )[0]
+    .success);
+    fixture.niri_state().ipc_refresh_layout();
+
+    let ((event_type, payload), _) =
+        read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
+    assert_eq!(event_type, 1 << 31);
+    let event = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!(event["change"], "init");
+    assert!(event["current"]["nodes"].as_array().unwrap().is_empty());
+    assert!(event["current"]["floating_nodes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn captured_window_map_sequences_pin_focus_order_and_multiplicity() {
     for (fixture, expected) in [
         (

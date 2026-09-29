@@ -18,18 +18,10 @@ Those are reasons to be curious, not evidence that sway made the wrong choices.
 
 ### Is this AI slop?
 
-Fair question. swayward was built largely with AI assistance. That is stated
-plainly because hiding it would be dishonest, not because it is a feature.
-
-The answer is executable evidence: i3's test files are pinned in sway-ipc-oracle without edits
-to their assertions, sway compatibility claims cite sway's C source, generated
-tree operations search for broken invariants, and release packages must install
-and run in clean distro containers. The Linux kernel's rule applies here too:
+Fair question. swayward was built largely with AI assistance. A human reviews
+every change and is responsible for it, following the Linux kernel's rule that
 [AI does not sign off](https://www.kernel.org/doc/html/next/process/coding-assistants.html).
-A human reviews the work and is responsible for it.
-
-Do not trust us because we say the process was careful. Check the evidence.
-“The agents seemed very confident” is not one of the checks.
+The [testing and conformance evidence](Testing-and-Conformance.md) is public.
 
 ### How can I trust a new compositor?
 
@@ -181,7 +173,9 @@ into a machine you need today.
 
 Enough of sway's IPC exists for real clients such as Waybar and `swaymsg`, but
 the surface is incomplete. Unsupported requests and commands return explicit
-failures rather than convincing-looking partial data.
+failures rather than convincing-looking partial data. Swayward supports sway's
+floating container groups: a split, tabbed, or stacked container can move,
+fullscreen, become sticky, or enter the scratchpad as one recursive root.
 
 Read [Sway compatibility](Sway-Compatibility.md) for the current boundary.
 Read [Differences from sway](Differences-from-Sway.md) before migrating a
@@ -254,20 +248,22 @@ Remote control and input injection are not implemented.
 
 ### Which distributions have packages?
 
-The release workflow builds an Ubuntu 24.04 `.deb`, one RPM for each supported
-Fedora release, and an Arch package, then installs each one in a clean
-container before drafting the release. It also builds an Ubuntu 24.04 binary
-tarball.
+No public beta release exists yet. The release workflow is ready to build an
+Ubuntu 24.04 `.deb`, one RPM for each supported Fedora release, an Arch package,
+and an Ubuntu 24.04 binary tarball. It installs each package in a clean container
+before drafting the release.
 
 The repository also provides a Nix flake. Install the current source with
 `nix profile install github:martintrojer/swayward`, or use the flake as a NixOS
 input. `nix flake check` runs the full test suite, including the pinned i3
 conformance oracle.
 
-No public beta release exists yet. COPR and AUR publication are deliberately
-waiting until the release-page packages have survived real installations. We
-would prefer the first package review not double as the first installation
-test, thrilling though that would be.
+Until beta 1 is published, use the Nix flake or [build from
+source](https://github.com/martintrojer/swayward/blob/main/docs/BUILDING.md).
+COPR and AUR publication are deliberately waiting until the release-page
+packages have survived real installations. We would prefer the first package
+review not double as the first installation test, thrilling though that would
+be.
 
 ### Where should I report a difference from sway?
 

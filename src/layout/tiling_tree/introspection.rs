@@ -108,6 +108,11 @@ impl<W: LayoutElement> TilingTree<W> {
             percent: Option<f64>,
             geometries: &geometry::Geometry<W::Id>,
         ) -> IpcNode<W::Id> {
+            let inside_pending_wrapper = tree.fullscreen_node().is_some()
+                && tree
+                    .fullscreen_layout_wrappers
+                    .iter()
+                    .any(|wrapper| tree.contains_node(*wrapper, id));
             match &tree.nodes[&id].value {
                 TreeNode::Split {
                     layout,
@@ -117,8 +122,17 @@ impl<W: LayoutElement> TilingTree<W> {
                     id,
                     layout: *layout,
                     title: tree.title_formats.get(&id).cloned(),
-                    percent,
-                    rect: geometries.ipc_nodes.get(&id).copied().unwrap_or_default(),
+                    percent: (tree.fullscreen_node().is_some()
+                        && tree.fullscreen_layout_wrappers.contains(&id))
+                    .then_some(0.)
+                    .or(percent),
+                    rect: if tree.fullscreen_node().is_some()
+                        && tree.fullscreen_layout_wrappers.contains(&id)
+                    {
+                        Rectangle::default()
+                    } else {
+                        geometries.ipc_nodes.get(&id).copied().unwrap_or_default()
+                    },
                     focus: tree
                         .focus_history
                         .iter()
@@ -143,11 +157,17 @@ impl<W: LayoutElement> TilingTree<W> {
                         .enumerate()
                         .map(|(index, (child, stored_percent))| {
                             let percent = match layout {
-                                Layout::Tabbed | Layout::Stacked => 1.,
+                                Layout::Tabbed | Layout::Stacked
+                                    if tree.fullscreen_node().is_some()
+                                        && tree.fullscreen_layout_wrappers.contains(&id) =>
+                                {
+                                    None
+                                }
+                                Layout::Tabbed | Layout::Stacked => Some(1.),
                                 Layout::SplitH | Layout::SplitV
                                     if tree.fullscreen_node().is_some() =>
                                 {
-                                    if tree.mapped_under_fullscreen.contains(child) {
+                                    Some(if tree.mapped_under_fullscreen.contains(child) {
                                         0.
                                     } else {
                                         let visible_total = children
@@ -159,7 +179,7 @@ impl<W: LayoutElement> TilingTree<W> {
                                             .map(|(_, percent)| percent)
                                             .sum::<f64>();
                                         *stored_percent / visible_total
-                                    }
+                                    })
                                 }
                                 Layout::SplitH | Layout::SplitV => {
                                     let rounded_extent =
@@ -195,15 +215,21 @@ impl<W: LayoutElement> TilingTree<W> {
                                     } else {
                                         (available * stored_percent).round()
                                     };
-                                    if parent_extent > 0. {
+                                    Some(if parent_extent > 0. {
                                         allocated / parent_extent
                                     } else {
                                         *stored_percent
-                                    }
+                                    })
                                 }
                             };
-                            let mut node = snapshot(tree, *child, Some(percent), geometries);
+                            let mut node = snapshot(tree, *child, percent, geometries);
                             let titlebar_rows = match layout {
+                                Layout::Tabbed | Layout::Stacked
+                                    if tree.fullscreen_node().is_some()
+                                        && tree.fullscreen_layout_wrappers.contains(&id) =>
+                                {
+                                    0
+                                }
                                 Layout::Tabbed => 1,
                                 Layout::Stacked => children.len(),
                                 Layout::SplitH | Layout::SplitV => 0,
@@ -216,54 +242,66 @@ impl<W: LayoutElement> TilingTree<W> {
                         })
                         .collect(),
                 },
-                TreeNode::Leaf { tile } => IpcNode::Leaf {
-                    id,
-                    window: tile.window().id().clone(),
-                    percent,
-                    focused: tree.focus == Some(id),
-                    fullscreen_mode: tree.fullscreen_mode(id).map_or(0, |mode| mode as i32),
-                    rect: geometries
-                        .leaf_ipc_rects
+                TreeNode::Leaf { tile } => {
+                    let fallback_titlebar = tree.fullscreen_node().is_some()
+                        && tree.fullscreen_mode(id).is_none()
+                        && !tree.mapped_under_fullscreen.contains(&id)
+                        && tile.has_configured_sway_titlebar()
+                        && (inside_pending_wrapper
+                            || !geometries.titlebars.contains_key(&id)
+                            || tree.pre_layout_ipc_rects.contains_key(&id));
+                    let mut rect = tree
+                        .pre_layout_ipc_rects
                         .get(&id)
                         .copied()
-                        .unwrap_or_default(),
-                    deco_rect: geometries
-                        .titlebars
-                        .get(&id)
-                        .map(|bar| bar.ipc_rect)
                         .or_else(|| {
-                            (tree.fullscreen_node().is_some()
-                                && tree.fullscreen_mode(id).is_none()
-                                && !tree.mapped_under_fullscreen.contains(&id)
-                                && tile.has_sway_titlebar())
-                            .then(|| {
-                                Rectangle::new(
-                                    Point::default(),
-                                    (
-                                        geometries
-                                            .leaf_ipc_rects
-                                            .get(&id)
-                                            .map_or(0., |rect| rect.size.w),
-                                        tree.titlebar_height,
+                            (!inside_pending_wrapper)
+                                .then(|| geometries.leaf_ipc_rects.get(&id).copied())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    if fallback_titlebar {
+                        rect.loc.y += tree.titlebar_height;
+                        if inside_pending_wrapper {
+                            rect.size.h -= tree.titlebar_height;
+                        } else {
+                            rect.size.h = (rect.size.h - tree.titlebar_height).max(0.);
+                        }
+                    }
+                    IpcNode::Leaf {
+                        id,
+                        window: tile.window().id().clone(),
+                        percent,
+                        focused: tree.focus == Some(id),
+                        fullscreen_mode: tree.fullscreen_mode(id).map_or(0, |mode| mode as i32),
+                        rect,
+                        deco_rect: (!inside_pending_wrapper)
+                            .then(|| geometries.titlebars.get(&id).map(|bar| bar.ipc_rect))
+                            .flatten()
+                            .or_else(|| {
+                                fallback_titlebar.then(|| {
+                                    Rectangle::new(
+                                        Point::default(),
+                                        (rect.size.w, tree.titlebar_height).into(),
                                     )
-                                        .into(),
-                                )
-                            })
-                        }),
-                    border: tile.sway_border(),
-                    border_edges: geometries
-                        .border_edges
-                        .get(&id)
-                        .copied()
-                        .unwrap_or_else(ResizeEdge::all),
-                    sticky: tile.is_sticky,
-                    mapped_under_fullscreen: tree.mapped_under_fullscreen.contains(&id),
-                },
+                                })
+                            }),
+                        border: tile.sway_border(),
+                        border_edges: geometries
+                            .border_edges
+                            .get(&id)
+                            .copied()
+                            .unwrap_or_else(ResizeEdge::all),
+                        sticky: tile.is_sticky,
+                        mapped_under_fullscreen: tree.mapped_under_fullscreen.contains(&id),
+                    }
+                }
             }
         }
 
         let geometries = self.compute_geometry();
-        snapshot(self, self.root, None, &geometries)
+        let root = self.resident_root().unwrap_or(self.root);
+        snapshot(self, root, None, &geometries)
     }
 
     /// Which decoration layers the tiling tree collects, front to back.

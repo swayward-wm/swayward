@@ -70,6 +70,12 @@ jobs:
       - run: ./contrib/fetch-oracle
       - run: cargo test --no-run --all --exclude swayward-visual-tests --release
       - run: cargo test --all --exclude swayward-visual-tests --release
+      - name: Upload proptest failure seeds
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proptest-regressions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: proptest-regressions/
 
   visual-tests:
     name: visual tests
@@ -147,7 +153,7 @@ jobs:
       - run: ./contrib/command-census --check
       - run: ./contrib/coverage-report --unvendored
       - run: ./contrib/coverage-report --check
-      - run: .cache/sway-ipc-oracle/contrib/coverage-report .cache/sway-ipc-oracle/i3/results/swayward.toml --check
+      - run: .cache/sway-ipc-oracle/contrib/coverage-report .cache/sway-ipc-oracle/i3/results/swayward-eb170906.toml --check
 
   release-consistency:
     name: release metadata agrees

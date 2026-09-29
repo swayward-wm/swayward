@@ -176,7 +176,17 @@ Run `./contrib/check-divergence` before committing.
   approximated.
 - The container tree stays well formed after every mutation.
 - A live-session path must not panic. An `ERROR` in the log is a bug.
+
+The `swayward-ipc` library parses untrusted IPC client input, so its non-test
+code must not use `unwrap`, `expect`, unchecked indexing or slicing, or explicit
+panics. Keep the crate-level Clippy warnings enabled and return a structured
+parse, wire, serialization, or I/O error instead of relying on parser progress
+or supposedly infallible data.
+
 - A feature needs executable evidence before it counts as working.
+- Every sway-compatibility fix names the exact oracle scenario/event row that proves it in
+  its commit message. If no focused row exists, add and capture one from pinned sway
+  before landing the fix.
 - Stability regressions outrank new features.
 - **An AI does not sign off.** A human reviews every change, checks the
   licensing and is responsible for the result, following the kernel's
@@ -226,9 +236,14 @@ RUN_SLOW_TESTS=1 PROPTEST_CASES=20000 cargo test --release -p swayward --lib ran
 ```
 
 `random_operations_dont_panic` searches fresh cases rather than replaying the
-checked-in seeds, so it finds defects a default run does not. Keep the seeds in
-`proptest-regressions/`: they reproduce in under a second what the search takes
-minutes to find.
+checked-in seeds, so it finds defects a default run does not. The randomized CI
+job uploads `proptest-regressions/` after a failure. Download its
+`proptest-regressions-<run>-<attempt>` artifact and copy the new `cc` line into
+the matching tracked seed file. Re-run the failing test to confirm the seed,
+then add a named regression test containing the shrunk operation sequence from
+the CI log. Commit both the seed and the regression test. The seed reproduces
+the generated case, while the named test records the minimal behavior that must
+remain fixed.
 
 ## Never reset a worktree that holds a live claim
 

@@ -80,7 +80,7 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
     let window = f.client(id).create_window();
     window.xdg_toplevel.set_app_id("fixture-1".into());
     window.set_title("fixture-1");
-    window.set_size(696, 491);
+    window.set_size(696, 496);
     let surface = window.surface.clone();
     window.commit();
     f.roundtrip(id);
@@ -111,7 +111,7 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
     let window = f.client(id).create_window();
     window.xdg_toplevel.set_app_id("fixture-2".into());
     window.set_title("fixture-2");
-    window.set_size(696, 491);
+    window.set_size(696, 496);
     let surface = window.surface.clone();
     window.commit();
     f.roundtrip(id);
@@ -521,6 +521,40 @@ fn toggling_fullscreen_updates_sibling_visibility_and_percent() {
     assert_eq!(second["visible"], true);
     assert_eq!(second["percent"], 1.0);
     assert_eq!(second["deco_rect"]["height"], 0);
+}
+
+#[test]
+fn layout_tabbed_preserves_fullscreen_pending_percentages() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+
+    for app_id in ["first", "second"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    for command in ["[app_id=\"^first$\"] focus", "fullscreen toggle"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let before = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let second_rect = find_json_node_with_app_id(&before, "second").unwrap()["rect"].clone();
+
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let wrapper = find_json_parent_of_app_id(&tree, "first").unwrap();
+    assert_eq!(wrapper["percent"], 0.0);
+    assert_eq!(wrapper["nodes"][0]["percent"], Value::Null);
+    assert_eq!(wrapper["nodes"][1]["percent"], Value::Null);
+    assert_eq!(wrapper["nodes"][1]["rect"], second_rect);
 }
 
 #[test]

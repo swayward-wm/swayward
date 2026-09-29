@@ -27,7 +27,14 @@ pub(super) fn sticky(
     target: CommandTarget,
     value: &str,
 ) -> Result<(), CommandOutcome> {
-    let window = target_window(state, target, "floating container groups are not supported")?;
+    let window = match target {
+        CommandTarget::Container(workspace, node) => state
+            .swayward
+            .layout
+            .window_in_node(workspace, node)
+            .ok_or_else(|| failure("No matching node."))?,
+        CommandTarget::Window(_) => target_window(state, target, "No matching node.")?,
+    };
     if state.swayward.layout.is_scratchpad_hidden(&window) {
         return Ok(());
     }
@@ -36,6 +43,45 @@ pub(super) fn sticky(
     }
     state.swayward.queue_redraw_all();
     Ok(())
+}
+
+pub(super) fn opacity(
+    state: &mut State,
+    target: CommandTarget,
+    value: f32,
+    relative: bool,
+) -> Result<(), CommandOutcome> {
+    let windows = match target {
+        CommandTarget::Window(target) => {
+            state.swayward.layout.windows().find_map(|(_, mapped)| {
+                (mapped.id() == target).then(|| vec![mapped.window.clone()])
+            })
+        }
+        CommandTarget::Container(workspace, node) => {
+            state.swayward.layout.tiling_node_windows(workspace, node)
+        }
+    }
+    .ok_or_else(|| failure("No matching node."))?;
+
+    let mut result = Ok(());
+    state.swayward.layout.with_windows_mut(|mapped, _| {
+        if windows.contains(&mapped.window) {
+            let opacity = if relative {
+                mapped.command_opacity() + value
+            } else {
+                value
+            };
+            if (0. ..=1.).contains(&opacity) {
+                mapped.set_command_opacity(opacity);
+            } else {
+                result = Err(failure("opacity value out of bounds"));
+            }
+        }
+    });
+    if result.is_ok() {
+        state.swayward.queue_redraw_all();
+    }
+    result
 }
 
 pub(super) fn title_format(
@@ -92,14 +138,50 @@ pub(super) fn floating(
     target: CommandTarget,
     mode: &Toggle,
 ) -> Result<(), CommandOutcome> {
-    if matches!(target, CommandTarget::Container(_, _)) {
-        return if *mode == Toggle::Disable {
-            Ok(())
-        } else {
-            Err(failure("floating container groups are not supported"))
+    if let CommandTarget::Container(workspace, node) = target {
+        let floating = match mode {
+            Toggle::Enable => true,
+            Toggle::Disable => false,
+            Toggle::Toggle => state
+                .swayward
+                .layout
+                .active_workspace()
+                .is_some_and(|workspace| workspace.contains_tiling_node(node)),
         };
+        let Some(root) = state
+            .swayward
+            .layout
+            .set_container_floating(workspace, node, floating)
+        else {
+            return Err(failure("No matching node."));
+        };
+        state.ipc_refresh_layout();
+        if let Some(server) = &state.swayward.ipc_server {
+            let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+                &state.swayward.layout,
+                &state.swayward.global_space,
+                &state.swayward.marks_by_window,
+                &state.swayward.marks_by_container,
+            ))
+            .unwrap_or_default();
+            if let Some(mut container) =
+                crate::ipc::server::find_node_by_id(&tree, crate::ipc::tree::container_id(root))
+                    .cloned()
+            {
+                if floating {
+                    container["type"] = "floating_con".into();
+                    container["floating"] = "user_on".into();
+                }
+                server.send_event(swayward_ipc::legacy::Event::SwayWindowChanged {
+                    change: "floating".into(),
+                    container,
+                });
+            }
+        }
+        state.swayward.queue_redraw_all();
+        return Ok(());
     }
-    let window = target_window(state, target, "floating container groups are not supported")?;
+    let window = target_window(state, target, "No matching node.")?;
     if state.swayward.layout.is_scratchpad_hidden(&window) {
         return Err(failure(
             "Can't change floating on hidden scratchpad container",

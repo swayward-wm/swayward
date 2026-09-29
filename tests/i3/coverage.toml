@@ -2046,7 +2046,7 @@ assertions = 1
 tap_plan = 1
 pass = 1
 citation = "sway/sway/commands/floating.c:23-55; sway/sway/commands/resize.c:273-279"
-note = "Fresh unchanged measurement reaches `1..1`: swayward explicitly rejects the unsupported floating-group creation, then the compositor remains live after the tiled resize is rejected with `Cannot resize any further`. Sway floats the selected split as one unit; swayward has no floating-group representation. The assertion remains vacuous: removing both relevant commands still leaves this liveness assertion green."
+note = "Fresh unchanged measurement reaches `1..1`: swayward floats the selected split as one group, then remains live after the grouped resize is rejected with `Cannot resize any further`. The assertion remains a liveness check rather than proof of either state transition."
 
 [files."185-scratchpad.t"]
 plan_unknown = true
@@ -4016,9 +4016,20 @@ citation = "sway/sway/commands/swap.c:13-14,37-49"
 [files."303-regress-move-floating.t"]
 assertions = 3
 tap_plan = 3
-pass = 3
+pass = 1
+reason = "i3_only_semantics"
+reason_verified = true
+note = "The liveness assertion passes after the grouped float and child move. The other assertions require i3's historical no-op result, while sway creates a floating split container."
+[[files."303-regress-move-floating.t".skip]]
+n = 2
+desc = "i3 leaves no floating nodes after moving the only child of a floating container"
+reason = "Sway keeps the selected parent as a floating container; floating enable converts a non-floating container with more than one child into a floating container."
 citation = "sway/sway/commands/floating.c:23-55"
-note = "The command chain requires sway to float the selected split as one group. Swayward explicitly refuses that unsupported group creation; all three assertions remain green and confirm that no floating group was created: the workspace has no floating nodes and retains its two tiled nodes."
+[[files."303-regress-move-floating.t".skip]]
+n = 3
+desc = "i3 leaves both windows tiled after moving the only child of a floating container"
+reason = "Sway keeps the selected parent and its child in the floating layer rather than restoring both windows to the workspace tiling tree."
+citation = "sway/sway/commands/floating.c:23-55"
 
 [files."304-ipc-workspace-init.t"]
 assertions = 9

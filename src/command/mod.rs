@@ -209,6 +209,13 @@ fn execute_one(
                 if fullscreen_floating {
                     return failure("Cannot move fullscreen floating container");
                 }
+                if state
+                    .swayward
+                    .layout
+                    .focused_leaf_is_only_child_of_floating_tree_root()
+                {
+                    return success();
+                }
                 let pixels = f64::from(pixels.unwrap_or(10));
                 let (x, y) = match direction {
                     Direction::Left => (-pixels, 0.),
@@ -327,16 +334,51 @@ fn execute_one(
             None
         }
         Command::MoveScratchpad => {
+            let floating_root = state
+                .swayward
+                .layout
+                .active_workspace()
+                .and_then(crate::layout::workspace::Workspace::focused_floating_tree_root);
             let target = focused_target(state);
             if target.is_none() {
                 return swayward_ipc::command::parse_error(
                     "Can't move an empty workspace to the scratchpad",
                 );
             }
-            if matches!(target, Some(CommandTarget::Container(_, _))) {
-                return failure("floating container groups are not supported");
+            let window = match target {
+                Some(CommandTarget::Container(workspace, node)) => {
+                    state.swayward.layout.window_in_node(workspace, node)
+                }
+                Some(CommandTarget::Window(_)) => None,
+                None => unreachable!(),
+            };
+            state.ipc_order_scratchpad_events(crate::ipc::server::ScratchpadEventOrder::Hide);
+            state.swayward.layout.move_to_scratchpad(window.as_ref());
+            if let Some(root) = floating_root {
+                state.ipc_refresh_layout();
+                if let Some(server) = &state.swayward.ipc_server {
+                    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+                        &state.swayward.layout,
+                        &state.swayward.global_space,
+                        &state.swayward.marks_by_window,
+                        &state.swayward.marks_by_container,
+                    ))
+                    .unwrap_or_default();
+                    if let Some(mut container) = crate::ipc::server::find_node_by_id(
+                        &tree,
+                        crate::ipc::tree::container_id(root),
+                    )
+                    .cloned()
+                    {
+                        container.as_object_mut().unwrap().remove("visible");
+                        server.send_event(swayward_ipc::legacy::Event::SwayWindowChanged {
+                            change: "move".into(),
+                            container,
+                        });
+                    }
+                }
             }
-            scratchpad::move_focused(state);
+            state.swayward.queue_redraw_all();
             None
         }
         Command::ScratchpadShow => {
@@ -374,6 +416,16 @@ fn execute_one(
             layout::fullscreen(state, mode, global);
             None
         }
+        Command::Opacity(value) | Command::OpacityRelative(value) => {
+            let Some(target) = focused_target(state) else {
+                return failure("No current container");
+            };
+            let relative = matches!(parsed.command, Command::OpacityRelative(_));
+            if let Err(error) = window::opacity(state, target, value, relative) {
+                return error;
+            }
+            None
+        }
         Command::TitleFormat(format) => {
             let Some(target) = focused_target(state) else {
                 return failure("Only valid containers can have a title_format");
@@ -393,15 +445,21 @@ fn execute_one(
             None
         }
         Command::Sticky(value) => {
-            if matches!(focused_target(state), Some(CommandTarget::Container(_, _))) {
-                return failure("floating container groups are not supported");
-            }
-            let Some(window) = state
-                .swayward
-                .layout
-                .focus()
-                .map(|mapped| mapped.window.clone())
-            else {
+            let target = focused_target(state);
+            let container_window = match target {
+                Some(CommandTarget::Container(workspace, node)) => {
+                    state.swayward.layout.window_in_node(workspace, node)
+                }
+                _ => None,
+            };
+            let window = container_window.or_else(|| {
+                state
+                    .swayward
+                    .layout
+                    .focus()
+                    .map(|mapped| mapped.window.clone())
+            });
+            let Some(window) = window else {
                 return command_failure("No current container");
             };
             if state.swayward.layout.is_scratchpad_hidden(&window) {
@@ -423,12 +481,50 @@ fn execute_one(
             None
         }
         Command::Floating(mode) => {
-            if matches!(focused_target(state), Some(CommandTarget::Container(_, _))) {
-                return if mode == Toggle::Disable {
-                    success()
-                } else {
-                    failure("floating container groups are not supported")
+            if let Some(CommandTarget::Container(workspace, node)) = focused_target(state) {
+                let floating = match mode {
+                    Toggle::Enable => true,
+                    Toggle::Disable => false,
+                    Toggle::Toggle => state
+                        .swayward
+                        .layout
+                        .active_workspace()
+                        .is_some_and(|workspace| workspace.contains_tiling_node(node)),
                 };
+                let Some(root) = state
+                    .swayward
+                    .layout
+                    .set_container_floating(workspace, node, floating)
+                else {
+                    return failure("No matching node.");
+                };
+                state.ipc_refresh_layout();
+                if let Some(server) = &state.swayward.ipc_server {
+                    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+                        &state.swayward.layout,
+                        &state.swayward.global_space,
+                        &state.swayward.marks_by_window,
+                        &state.swayward.marks_by_container,
+                    ))
+                    .unwrap_or_default();
+                    if let Some(mut container) = crate::ipc::server::find_node_by_id(
+                        &tree,
+                        crate::ipc::tree::container_id(root),
+                    )
+                    .cloned()
+                    {
+                        if floating {
+                            container["type"] = "floating_con".into();
+                            container["floating"] = "user_on".into();
+                        }
+                        server.send_event(swayward_ipc::legacy::Event::SwayWindowChanged {
+                            change: "floating".into(),
+                            container,
+                        });
+                    }
+                }
+                state.swayward.queue_redraw_all();
+                return success();
             }
             let Some(window) = state
                 .swayward
@@ -459,12 +555,16 @@ fn execute_one(
             let CommandTarget::Window(target) = target else {
                 return failure("Only views can be urgent");
             };
+            // `target` came from `layout.focus()` through `focused_target`, and
+            // no layout mutation occurs before this lookup. `Layout::windows`
+            // includes every focus source, including interactive moves and the
+            // scratchpad, so the focused ID must still be present here.
             let urgent = state
                 .swayward
                 .layout
                 .windows()
                 .find_map(|(_, window)| (window.id() == target).then(|| window.is_urgent()))
-                .expect("focused window must remain in the layout");
+                .expect("the focused window must be yielded by the same layout");
             let urgent = parse_boolean(&value, urgent);
             state.swayward.set_window_urgent(target, urgent);
             state.swayward.queue_redraw_all();
@@ -856,15 +956,17 @@ fn execute_one(
                     } => {
                         if let Err(error) = mutate_key_binding(
                             state,
-                            &name,
-                            &key,
-                            command,
-                            keycode,
-                            release,
-                            locked,
-                            inhibited,
-                            no_repeat,
-                            input_device,
+                            BindingMutation {
+                                mode: &name,
+                                key: &key,
+                                command,
+                                keycode,
+                                release,
+                                locked,
+                                inhibited,
+                                no_repeat,
+                                input_device,
+                            },
                         ) {
                             return failure(error);
                         }
@@ -930,15 +1032,17 @@ fn execute_one(
             let mode = state.swayward.binding_mode.clone();
             if let Err(error) = mutate_key_binding(
                 state,
-                &mode,
-                &key,
-                command,
-                keycode,
-                release,
-                locked,
-                inhibited,
-                no_repeat,
-                input_device,
+                BindingMutation {
+                    mode: &mode,
+                    key: &key,
+                    command,
+                    keycode,
+                    release,
+                    locked,
+                    inhibited,
+                    no_repeat,
+                    input_device,
+                },
             ) {
                 return failure(error);
             }
@@ -973,6 +1077,14 @@ fn execute_one(
             toggle,
             identifier,
         } => {
+            if state
+                .swayward
+                .layout
+                .active_workspace()
+                .is_some_and(|workspace| workspace.is_workspace_focused())
+            {
+                return swayward_ipc::command::parse_error("Only containers can have marks");
+            }
             let Some(target) = focused_target(state) else {
                 return swayward_ipc::command::parse_error("Only containers can have marks");
             };
@@ -1364,6 +1476,12 @@ fn execute_targeted(state: &mut State, command: &Command, target: CommandTarget)
             set_client_colors(state, *class, *colors);
         }
         Command::SetLayoutOption(_) => return failure("command cannot be applied to a container"),
+        Command::Opacity(value) | Command::OpacityRelative(value) => {
+            let relative = matches!(command, Command::OpacityRelative(_));
+            if let Err(error) = window::opacity(state, target, *value, relative) {
+                return error;
+            }
+        }
         Command::TitleFormat(format) => {
             if let Err(error) = window::title_format(state, target, format) {
                 return error;
@@ -1814,16 +1932,52 @@ fn matching_targets(state: &State, criteria: &criteria::Criteria) -> Vec<Command
         targets.truncate(1);
     }
     for (_, _, workspace) in state.swayward.layout.workspaces() {
-        for (node, value) in workspace.ipc_tiling_tree().nodes() {
-            if matches!(value, crate::layout::tiling_tree::IpcNodeKind::Split) {
-                let marks = state
-                    .swayward
-                    .marks_by_container
-                    .get(&(workspace.id(), node))
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                if criteria.matches_container(crate::ipc::tree::container_id(node) as u64, marks) {
-                    targets.push(CommandTarget::Container(workspace.id(), node));
+        let trees = std::iter::once((workspace.ipc_tiling_tree(), false)).chain(
+            workspace
+                .ipc_floating_trees()
+                .map(|(_, tree, _)| (tree, true)),
+        );
+        for (tree, floating) in trees {
+            for (node, value) in tree.nodes() {
+                if matches!(value, crate::layout::tiling_tree::IpcNodeKind::Leaf) {
+                    if floating {
+                        let window = tree.window_for_node(node).unwrap();
+                        let mapped = workspace
+                            .windows()
+                            .find(|mapped| mapped.window == *window)
+                            .unwrap();
+                        let (title, app_id) = with_toplevel_role(mapped.toplevel(), |role| {
+                            (role.title.clone(), role.app_id.clone())
+                        });
+                        let snapshot = (
+                            mapped.id(),
+                            title,
+                            app_id,
+                            workspace.sway_name(),
+                            true,
+                            mapped.urgent_since(),
+                            mapped.credentials().map(|c| c.pid),
+                            mapped.security_context().cloned(),
+                            mapped.tag(),
+                        );
+                        if criteria.matches(&snapshot_info(state, &snapshot), &focused_info)
+                            && !targets.contains(&CommandTarget::Window(mapped.id()))
+                        {
+                            targets.push(CommandTarget::Window(mapped.id()));
+                        }
+                    }
+                } else {
+                    let marks = state
+                        .swayward
+                        .marks_by_container
+                        .get(&(workspace.id(), node))
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    if criteria
+                        .matches_container(crate::ipc::tree::container_id(node) as u64, marks)
+                    {
+                        targets.push(CommandTarget::Container(workspace.id(), node));
+                    }
                 }
             }
         }
@@ -2014,11 +2168,9 @@ fn mutate_switch_binding(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn mutate_key_binding(
-    state: &mut State,
-    mode: &str,
-    key: &str,
+struct BindingMutation<'a> {
+    mode: &'a str,
+    key: &'a str,
     command: Option<String>,
     keycode: bool,
     release: bool,
@@ -2026,7 +2178,20 @@ fn mutate_key_binding(
     inhibited: bool,
     no_repeat: bool,
     input_device: String,
-) -> Result<(), String> {
+}
+
+fn mutate_key_binding(state: &mut State, mutation: BindingMutation<'_>) -> Result<(), String> {
+    let BindingMutation {
+        mode,
+        key,
+        command,
+        keycode,
+        release,
+        locked,
+        inhibited,
+        no_repeat,
+        input_device,
+    } = mutation;
     let keycombo = key.to_owned();
     let key = if keycode {
         let (modifiers, code) = key
@@ -2564,15 +2729,21 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_runtime_state_commands_fail_loud() {
+    fn parses_opacity_modes_and_sway_errors() {
+        assert_eq!(command("opacity 0.5"), Command::Opacity(0.5));
+        assert_eq!(command("opacity set 0.75"), Command::Opacity(0.75));
+        assert_eq!(command("opacity plus 0.1"), Command::OpacityRelative(0.1));
+        assert_eq!(command("opacity minus 0.2"), Command::OpacityRelative(-0.2));
+
         for (input, error) in [
             (
-                "opacity 0.5",
-                "opacity requires mutable per-container opacity support",
+                "opacity",
+                "Invalid opacity command (expected at least 1 argument, got 0)",
             ),
+            ("opacity nope", "opacity float invalid"),
             (
-                "inhibit_idle visible",
-                "inhibit_idle requires user inhibitor policy support",
+                "opacity multiply 0.5",
+                "Expected: set|plus|minus <0..1>: multiply",
             ),
         ] {
             assert_eq!(
@@ -2581,6 +2752,18 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn unsupported_runtime_state_commands_fail_loud() {
+        assert_eq!(
+            parse("inhibit_idle visible")[0]
+                .as_ref()
+                .unwrap_err()
+                .error
+                .as_deref(),
+            Some("inhibit_idle requires user inhibitor policy support")
+        );
     }
 
     #[test]

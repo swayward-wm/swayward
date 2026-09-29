@@ -1582,13 +1582,11 @@ impl State {
                             );
 
                             // If the active output changed (window was moved and focused).
-                            #[allow(clippy::collapsible_if)]
                             if !target_was_active
                                 && self.swayward.layout.active_output() == Some(&output)
+                                && !self.maybe_warp_cursor_to_focus_centered()
                             {
-                                if !self.maybe_warp_cursor_to_focus_centered() {
-                                    self.move_cursor_to_output(&output);
-                                }
+                                self.move_cursor_to_output(&output);
                             }
                         } else {
                             self.swayward
@@ -2136,13 +2134,11 @@ impl State {
                         );
 
                         // If the active output changed (window was moved and focused).
-                        #[allow(clippy::collapsible_if)]
                         if !target_was_active
                             && self.swayward.layout.active_output() == Some(&output)
+                            && !self.maybe_warp_cursor_to_focus_centered()
                         {
-                            if !self.maybe_warp_cursor_to_focus_centered() {
-                                self.move_cursor_to_output(&output);
-                            }
+                            self.move_cursor_to_output(&output);
                         }
                     }
                 }
@@ -5315,13 +5311,12 @@ fn find_bind<'a>(
     use keysyms::*;
 
     // Handle hardcoded binds.
-    #[allow(non_upper_case_globals)] // wat
     let hardcoded_action = match modified.raw() {
-        modified @ KEY_XF86Switch_VT_1..=KEY_XF86Switch_VT_12 => {
+        modified if (KEY_XF86Switch_VT_1..=KEY_XF86Switch_VT_12).contains(&modified) => {
             let vt = (modified - KEY_XF86Switch_VT_1 + 1) as i32;
             Some(Action::ChangeVt(vt))
         }
-        KEY_XF86PowerOff if !disable_power_key_handling => Some(Action::Suspend),
+        key if key == KEY_XF86PowerOff && !disable_power_key_handling => Some(Action::Suspend),
         _ => None,
     };
 

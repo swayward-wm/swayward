@@ -22,7 +22,9 @@ use smithay::reexports::rustix::fs::unlink;
 use smithay::reexports::rustix::io::Errno;
 use swayward_ipc::legacy::{Event, Workspace};
 use swayward_ipc::state::{EventStreamState, EventStreamStatePart as _};
-use swayward_ipc::wire::{decode_header_raw, encode, encode_raw, CLOSE_SENTINEL, HEADER_SIZE};
+use swayward_ipc::wire::{
+    decode_header_raw, encode, encode_raw, CLOSE_SENTINEL, HEADER_SIZE, MAX_PAYLOAD_SIZE,
+};
 use swayward_ipc::{
     CommandOutcome, KeyboardLayouts, MessageType, Timestamp, Version, WindowLayout,
 };
@@ -35,7 +37,6 @@ use crate::window::Mapped;
 
 const INITIAL_WRITE_BUFFER_SIZE: usize = 128;
 const MAX_WRITE_BUFFER_SIZE: usize = 4_000_000;
-const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
 #[cfg(not(test))]
 static IPC_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -463,6 +464,18 @@ fn parse_subscriptions(payload: &[u8]) -> Option<Vec<String>> {
 }
 
 /// Recompute every cached query reply from live compositor state.
+pub(crate) fn ipc_outputs_snapshot(state: &State) -> crate::backend::IpcOutputMap {
+    state
+        .backend
+        .ipc_outputs()
+        .lock()
+        .unwrap_or_else(|poisoned| {
+            warn!("backend IPC output state mutex was poisoned; using its last state");
+            poisoned.into_inner()
+        })
+        .clone()
+}
+
 fn refresh_all_query_state(state: &mut State) {
     let Some(server) = &state.swayward.ipc_server else {
         return;
@@ -471,7 +484,7 @@ fn refresh_all_query_state(state: &mut State) {
     query_state.binding_modes = binding_modes(&state.swayward.config.borrow());
     query_state.binding_state = binding_state(&state.swayward.binding_mode);
     refresh_input_query_state(&state.swayward, &mut query_state);
-    let ipc_outputs = state.backend.ipc_outputs().lock().unwrap().clone();
+    let ipc_outputs = ipc_outputs_snapshot(state);
     refresh_query_state(
         &state.swayward.layout,
         &state.swayward.global_space,
@@ -1383,7 +1396,15 @@ impl State {
                                 *container = hidden.clone();
                             }
                             container["focused"] = false.into();
-                            container["visible"] = false.into();
+                            if container["type"] == "floating_con"
+                                && container["nodes"]
+                                    .as_array()
+                                    .is_some_and(|nodes| !nodes.is_empty())
+                            {
+                                container.as_object_mut().unwrap().remove("visible");
+                            } else {
+                                container["visible"] = false.into();
+                            }
                         }
                         _ => {}
                     }
@@ -1418,6 +1439,38 @@ impl State {
             }
             _ => None,
         });
+        let sticky_root = sticky_move
+            .as_ref()
+            .and_then(|container| {
+                if container["type"] == "floating_con" {
+                    return serde_json::from_value(container.clone()).ok();
+                }
+                let id = container["id"].as_i64()?;
+                fn parent(node: &swayward_ipc::Node, id: i64) -> Option<&swayward_ipc::Node> {
+                    node.nodes
+                        .iter()
+                        .chain(&node.floating_nodes)
+                        .find_map(|child| {
+                            (child.id == id)
+                                .then_some(node)
+                                .or_else(|| parent(child, id))
+                        })
+                }
+                parent(&current_tree, id).cloned()
+            })
+            .or_else(|| {
+                fn sticky_root(node: &swayward_ipc::Node) -> Option<&swayward_ipc::Node> {
+                    (node.node_type == swayward_ipc::NodeType::FloatingCon && node.sticky)
+                        .then_some(node)
+                        .or_else(|| {
+                            node.nodes
+                                .iter()
+                                .chain(&node.floating_nodes)
+                                .find_map(sticky_root)
+                        })
+                }
+                sticky_root(&current_tree).cloned()
+            });
         if transaction.suppress_workspace_moves {
             if let Some(output_event) = events
                 .iter()
@@ -1456,13 +1509,16 @@ impl State {
                     continue;
                 }
                 Event::WorkspaceInitialized { current } => {
-                    if let Some(settled) = find_workspace_by_tree_id(&current_tree, current.id) {
-                        **current = settled.clone();
-                        current.focused = false;
-                    }
-                    if sticky_move.is_some() {
-                        current.floating_nodes.clear();
-                        current.focus.clear();
+                    // Sway emits init when it creates the empty workspace, before
+                    // the command moves a container into it.
+                    current.nodes.clear();
+                    current.floating_nodes.clear();
+                    current.focus.clear();
+                    current.focused = false;
+                    if let swayward_ipc::NodeProperties::Workspace(properties) =
+                        &mut current.properties
+                    {
+                        properties.representation = None;
                     }
                 }
                 Event::WorkspaceFocusChanged { old, current } => {
@@ -1473,9 +1529,18 @@ impl State {
                         } else {
                             clear_workspace_focus(old, true);
                         }
-                        if sticky_move.is_some() {
+                        if let Some(root) = &sticky_root {
+                            old.floating_nodes = vec![root.clone()];
+                            old.focus = vec![root.id];
                             for child in &mut old.floating_nodes {
-                                clear_workspace_focus(child, true);
+                                clear_workspace_focus(child, false);
+                            }
+                            if !root.nodes.is_empty() {
+                                if let swayward_ipc::NodeProperties::Workspace(properties) =
+                                    &mut old.properties
+                                {
+                                    properties.representation = Some("H[]".into());
+                                }
                             }
                         }
                     }
@@ -1483,7 +1548,7 @@ impl State {
                         **current = settled.clone();
                         current.focused = true;
                     }
-                    if sticky_move.is_some() {
+                    if sticky_root.is_some() {
                         current.floating_nodes.clear();
                         current.focus.clear();
                     }
@@ -1492,7 +1557,7 @@ impl State {
                     current.nodes.clear();
                     current.floating_nodes.clear();
                     current.focus.clear();
-                    if sticky_move.is_none() {
+                    if sticky_root.is_none() {
                         if has_workspace_move && !transaction.suppress_workspace_moves {
                             current.layout = swayward_ipc::NodeLayout::SplitH;
                             current.orientation = "horizontal".into();
@@ -1505,7 +1570,16 @@ impl State {
                     } else if let swayward_ipc::NodeProperties::Workspace(properties) =
                         &mut current.properties
                     {
-                        properties.representation = Some("V[]".into());
+                        properties.representation = Some(
+                            if sticky_root
+                                .as_ref()
+                                .is_some_and(|root| !root.nodes.is_empty())
+                            {
+                                "H[]".into()
+                            } else {
+                                "V[]".into()
+                            },
+                        );
                     }
                     current.focused = false;
                 }
@@ -1535,7 +1609,7 @@ impl State {
             let mut query_state = server.query_state.borrow_mut();
             query_state.binding_state = binding_state(&self.swayward.binding_mode);
             refresh_input_query_state(&self.swayward, &mut query_state);
-            let ipc_outputs = self.backend.ipc_outputs().lock().unwrap().clone();
+            let ipc_outputs = ipc_outputs_snapshot(self);
             refresh_query_state(
                 &self.swayward.layout,
                 &self.swayward.global_space,
@@ -1972,11 +2046,10 @@ impl State {
         // Check for closed windows.
         let mut ipc_focused_id = None;
         for (id, ipc_win) in &state.windows {
-            if !seen.contains(id) {
+            let node_id = crate::ipc::tree::window_id_from_raw(*id);
+            if !seen.contains(id) && find_node_by_id(&current_tree, node_id).is_none() {
                 if let Some(mut container) = previous_tree
-                    .and_then(|tree| {
-                        find_node_by_id(tree, crate::ipc::tree::window_id_from_raw(*id))
-                    })
+                    .and_then(|tree| find_node_by_id(tree, node_id))
                     .cloned()
                 {
                     container["foreign_toplevel_identifier"] = serde_json::Value::Null;

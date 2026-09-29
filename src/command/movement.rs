@@ -53,11 +53,15 @@ pub(super) fn output_target(
         OutputTarget::Name(name) => state.swayward.output_by_name_match(name).cloned(),
         OutputTarget::Direction(direction) => match (direction, reference) {
             (direction, Some(output)) => {
-                let reference = reference_point.unwrap_or_else(|| {
-                    crate::utils::center(
-                        state.swayward.global_space.output_geometry(output).unwrap(),
-                    )
-                });
+                let reference = match reference_point {
+                    Some(point) => point,
+                    None => state
+                        .swayward
+                        .global_space
+                        .output_geometry(output)
+                        .map(crate::utils::center)
+                        .ok_or("Reference output has no geometry")?,
+                };
                 let (horizontal, positive) = match direction {
                     Direction::Left => (true, false),
                     Direction::Right => (true, true),
@@ -524,7 +528,20 @@ pub(super) fn swap_target(
         return failure("Cannot swap a container with itself");
     }
     let (source_workspace, source_node) = match source {
-        CommandTarget::Container(workspace, node) => (workspace, node),
+        CommandTarget::Container(workspace, node)
+            if state
+                .swayward
+                .layout
+                .active_workspace()
+                .is_some_and(|active| {
+                    active.id() == workspace && active.contains_tiling_node(node)
+                }) =>
+        {
+            (workspace, node)
+        }
+        CommandTarget::Container(_, _) => {
+            return failure("Can only swap with containers and views");
+        }
         CommandTarget::Window(window) => {
             let Some(mapped) = state
                 .swayward
@@ -541,7 +558,16 @@ pub(super) fn swap_target(
         }
     };
     let (destination_workspace, destination_node) = match destination {
-        CommandTarget::Container(workspace, node) => (workspace, node),
+        CommandTarget::Container(workspace, node)
+            if state.swayward.layout.workspaces().any(|(_, _, candidate)| {
+                candidate.id() == workspace && candidate.contains_tiling_node(node)
+            }) =>
+        {
+            (workspace, node)
+        }
+        CommandTarget::Container(_, _) => {
+            return failure("Can only swap with containers and views");
+        }
         CommandTarget::Window(window) => {
             let Some(mapped) = state
                 .swayward
@@ -570,23 +596,18 @@ pub(super) fn swap_target(
         return failure("Can only swap with containers and views");
     }
     if source_workspace != destination_workspace {
-        let (source_remapped, destination_remapped) =
-            match state.swayward.layout.swap_tiling_nodes_between_workspaces(
-                source_workspace,
-                source_node,
-                destination_workspace,
-                destination_node,
-            ) {
-                Ok(remapped) => remapped,
-                Err(error) => return failure(error),
-            };
+        let remapped = match state.swayward.layout.swap_tiling_nodes_between_workspaces(
+            source_workspace,
+            source_node,
+            destination_workspace,
+            destination_node,
+        ) {
+            Ok(remapped) => remapped,
+            Err(error) => return failure(error),
+        };
         for (workspace, destination, remapped) in [
-            (source_workspace, destination_workspace, source_remapped),
-            (
-                destination_workspace,
-                source_workspace,
-                destination_remapped,
-            ),
+            (source_workspace, destination_workspace, remapped.first),
+            (destination_workspace, source_workspace, remapped.second),
         ] {
             for (old, new) in remapped {
                 if let Some(marks) = state.swayward.marks_by_container.remove(&(workspace, old)) {

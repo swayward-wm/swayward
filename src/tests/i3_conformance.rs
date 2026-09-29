@@ -1,10 +1,11 @@
 //! Runner for unmodified layout tests from i3's Perl testsuite.
 
 use std::any::Any;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::collections::HashSet;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -195,30 +196,11 @@ const ALLOWED_REJECTIONS: &[AllowedRejection] = &[
     },
     AllowedRejection {
         test: "184-regress-float-split-resize.t",
-        command: "floating toggle",
-        repeatable: false,
-        reason: "sway floats the focused split as one unit \
-                 (sway/sway/commands/floating.c:23-55), but swayward has no \
-                 floating-group representation and refuses rather than reporting \
-                 success without creating one",
-    },
-    AllowedRejection {
-        test: "184-regress-float-split-resize.t",
         command: "resize grow up 10 px or 10 ppt",
         repeatable: false,
-        reason: "the test only checks that the compositor remains live; floating \
-                 split containers are a documented compatibility gap, and sway \
-                 answers `Cannot resize any further` when the resulting tiled resize \
-                 changes neither size fraction (sway/sway/commands/resize.c:273-279)",
-    },
-    AllowedRejection {
-        test: "303-regress-move-floating.t",
-        command: "split v, focus parent, floating toggle, focus child, move right",
-        repeatable: false,
-        reason: "the command chain requires sway to float the selected split as one \
-                 group (sway/sway/commands/floating.c:23-55); swayward refuses \
-                 because it has no floating-group representation, and the test's \
-                 assertions confirm that no floating group was created",
+        reason: "the test only checks that the compositor remains live; sway \
+                 answers `Cannot resize any further` when the grouped resize changes \
+                 neither size fraction (sway/sway/commands/resize.c:273-279)",
     },
     AllowedRejection {
         test: "191-resize-levels.t",
@@ -553,17 +535,6 @@ fn create_window(fixture: &mut Fixture, client: super::client::ClientId, request
     let fullscreen_output = request["fullscreen_output"]
         .as_str()
         .map(|name| fixture.client(client).output(name));
-    if request["initial_floating"].as_bool() == Some(true) {
-        fixture
-            .swayward()
-            .config
-            .borrow_mut()
-            .window_rules
-            .push(swayward_config::WindowRule {
-                open_floating: Some(true),
-                ..Default::default()
-            });
-    }
     let window = fixture.client(client).create_window();
     if let Some(app_id) = request["app_id"].as_str() {
         window.xdg_toplevel.set_app_id(app_id.to_owned());
@@ -585,7 +556,19 @@ fn map_window(
     client: super::client::ClientId,
     surface_id: u32,
     requested_size: Option<(u16, u16)>,
+    initial_floating: bool,
 ) -> i64 {
+    if initial_floating {
+        fixture
+            .swayward()
+            .config
+            .borrow_mut()
+            .window_rules
+            .push(swayward_config::WindowRule {
+                open_floating: Some(true),
+                ..Default::default()
+            });
+    }
     let surface = fixture
         .client(client)
         .state
@@ -606,6 +589,9 @@ fn map_window(
     fixture.double_roundtrip(client);
     if requested_size.is_some() {
         settle_configures(fixture, client);
+    }
+    if initial_floating {
+        fixture.swayward().config.borrow_mut().window_rules.pop();
     }
     fixture
         .swayward()
@@ -821,7 +807,7 @@ fn only_ignorable_translation_warnings(test: &str, stderr: &str) -> bool {
     let warnings = lines.collect::<Vec<_>>();
     warnings.len() == count
         && warnings.iter().all(|line| {
-            line.contains(": bar blocks are unsupported; use waybar: bar ")
+            line.contains(": bar blocks are unsupported; use waybar ")
                 || (test == "271-for_window_tilingfloating.t"
                     && (line.contains(": i3-only provenance criterion tiling_from ")
                         || line.contains(": i3-only provenance criterion floating_from ")))
@@ -939,6 +925,7 @@ fn handle_control(
     client: super::client::ClientId,
     loaded_config_source: &mut Option<String>,
     scratch: &mut Vec<PathBuf>,
+    initially_floating: &mut HashSet<u32>,
     stream: UnixStream,
 ) {
     let mut request = String::new();
@@ -1010,19 +997,37 @@ fn handle_control(
             Ok(()) => json!({ "success": true }),
             Err(error) => json!({ "success": false, "error": error }),
         },
-        "create" => json!({ "handle": create_window(fixture, client, &request) }),
+        "create" => {
+            let handle = create_window(fixture, client, &request);
+            if request["initial_floating"].as_bool() == Some(true) {
+                initially_floating.insert(handle);
+            }
+            json!({ "handle": handle })
+        }
         "open" => {
             let handle = create_window(fixture, client, &request);
-            json!({ "id": map_window(fixture, client, handle, requested_size(&request)) })
+            json!({
+                "id": map_window(
+                    fixture,
+                    client,
+                    handle,
+                    requested_size(&request),
+                    request["initial_floating"].as_bool() == Some(true),
+                )
+            })
         }
-        "map" => json!({
-            "id": map_window(
-                fixture,
-                client,
-                request["handle"].as_u64().unwrap() as u32,
-                requested_size(&request),
-            )
-        }),
+        "map" => {
+            let handle = request["handle"].as_u64().unwrap() as u32;
+            json!({
+                "id": map_window(
+                    fixture,
+                    client,
+                    handle,
+                    requested_size(&request),
+                    initially_floating.remove(&handle),
+                )
+            })
+        }
         "fullscreen" => {
             let surface_id = request["handle"].as_u64().unwrap() as u32;
             let surface = fixture
@@ -1257,6 +1262,59 @@ fn collect_test_failures<'a>(
         .collect()
 }
 
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.0.as_mut().unwrap()
+    }
+
+    fn disarm(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+struct ChildOutput {
+    stdout: thread::JoinHandle<Vec<u8>>,
+    stderr: thread::JoinHandle<Vec<u8>>,
+}
+
+impl ChildOutput {
+    fn new(child: &mut Child) -> Self {
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        Self {
+            stdout: thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).unwrap();
+                bytes
+            }),
+            stderr: thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).unwrap();
+                bytes
+            }),
+        }
+    }
+
+    fn finish(self) -> (Vec<u8>, Vec<u8>) {
+        (self.stdout.join().unwrap(), self.stderr.join().unwrap())
+    }
+}
+
 fn run_i3_test(test: &str) {
     let mut config = swayward_config::Config::default();
     config.layout.gaps = 0.;
@@ -1334,6 +1392,8 @@ fn run_i3_test(test: &str) {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let child_output = ChildOutput::new(&mut child);
+    let mut child = ChildGuard::new(child);
 
     let started = Instant::now();
     // Generous enough that a cold build cache and a loaded machine cannot trip
@@ -1342,6 +1402,7 @@ fn run_i3_test(test: &str) {
     // genuinely hung test still fails, just later.
     let deadline = started + Duration::from_secs(180);
     let mut loaded_config_source = None;
+    let mut initially_floating = HashSet::new();
     loop {
         fixture.dispatch();
         match control.accept() {
@@ -1350,16 +1411,18 @@ fn run_i3_test(test: &str) {
                 client,
                 &mut loaded_config_source,
                 &mut scratch.files,
+                &mut initially_floating,
                 stream,
             ),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => panic!("test control accept failed: {error}"),
         }
-        if let Some(status) = child.try_wait().unwrap() {
-            let output = child.wait_with_output().unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(status) = child.child_mut().try_wait().unwrap() {
+            child.disarm();
+            let (stdout, stderr) = child_output.finish();
+            let stdout = String::from_utf8_lossy(&stdout);
             eprint!("{stdout}");
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(&stderr);
             if !stderr.is_empty() {
                 eprint!("{stderr}");
             }
@@ -1381,10 +1444,12 @@ fn run_i3_test(test: &str) {
             break;
         }
         if Instant::now() >= deadline {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            child.child_mut().kill().unwrap();
+            child.child_mut().wait().unwrap();
+            child.disarm();
+            let (stdout, stderr) = child_output.finish();
+            let stdout = String::from_utf8_lossy(&stdout);
+            let stderr = String::from_utf8_lossy(&stderr);
             panic!(
                 "i3 test {test} timed out after {:?}\nTAP failures:\n{}\nstdout:\n{stdout}\nstderr:\n{stderr}",
                 started.elapsed(),
@@ -1405,7 +1470,45 @@ fn run_i3_test(test: &str) {
 /// invariant asserting it against the other.
 const COVERAGE: &str = include_str!("../../tests/i3/coverage.toml");
 const COVERAGE_README: &str = include_str!("../../tests/i3/README.md");
+const PROJECT_README: &str = include_str!("../../README.md");
 const HARNESS: &str = include_str!("../../tests/i3/lib/i3test.pm");
+
+#[test]
+fn child_is_reaped_when_the_control_loop_panics() {
+    let child = Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = child.id();
+    let _ = std::panic::catch_unwind(move || {
+        let _child = ChildGuard::new(child);
+        panic!("injected control-loop panic");
+    });
+    assert!(
+        !PathBuf::from(format!("/proc/{pid}")).exists(),
+        "child {pid} survived its guard"
+    );
+}
+
+#[test]
+fn child_output_is_drained_while_the_child_runs() {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("head -c 1048576 /dev/zero >&1; head -c 1048576 /dev/zero >&2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = ChildOutput::new(&mut child);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        thread::yield_now();
+    }
+    assert!(
+        child.try_wait().unwrap().is_some(),
+        "child blocked on a full output pipe"
+    );
+    let (stdout, stderr) = output.finish();
+    assert_eq!(stdout.len(), 1_048_576);
+    assert_eq!(stderr.len(), 1_048_576);
+}
 
 #[test]
 fn harness_xcb_xkb_guard_does_not_depend_on_the_host() {
@@ -1561,6 +1664,24 @@ fn rejection_allowlist_is_keyed_by_file_and_exact_command() {
 }
 
 #[test]
+fn headless_startup_outputs_follow_sways_backend_order() {
+    let mut fixture = Fixture::new();
+    let state = fixture.niri_state();
+    let swayward = &mut state.swayward;
+    state.backend.headless().add_startup_outputs(swayward, 3);
+
+    let swayward = fixture.swayward();
+    let actual = crate::ipc::tree::describe_outputs(&swayward.layout, &swayward.global_space);
+    assert_eq!(
+        actual
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>(),
+        ["headless-3", "headless-2", "headless-1"]
+    );
+}
+
+#[test]
 fn fake_outputs_create_real_outputs_with_requested_geometry() {
     let outputs = fake_outputs("font monospace\nfake-outputs 1024x768+0+0P,800x600+1024+20\n")
         .unwrap()
@@ -1626,7 +1747,7 @@ fn i3_config_translation_ignores_only_unsupported_bar_blocks() {
     ));
     assert!(!only_ignorable_translation_warnings(
         "316-drag-container.t",
-        "manual attention: 2 directive(s)\n  config:2: bar blocks are unsupported; use waybar: bar { | }\n"
+        "manual attention: 2 directive(s)\n  config:2: bar blocks are unsupported; use waybar (docs/SWAY_CONFIG_MIGRATION.md#replace-swaybar): bar { | }\n"
     ));
 
     let error = translate_config("bar { output primary }\nmystery value\n").unwrap_err();
@@ -1688,8 +1809,10 @@ struct Coverage {
     file: &'static str,
     assertions: usize,
     passing: usize,
+    failing: usize,
+    unreached: usize,
+    documented_skip_count: usize,
     plan_unknown: bool,
-    documented_skips: bool,
 }
 
 fn coverage_entries() -> Vec<Coverage> {
@@ -1709,8 +1832,10 @@ fn coverage_entries() -> Vec<Coverage> {
                 file,
                 assertions: 0,
                 passing: 0,
+                failing: 0,
+                unreached: 0,
+                documented_skip_count: 0,
                 plan_unknown: false,
-                documented_skips: false,
             });
             continue;
         }
@@ -1731,17 +1856,19 @@ fn coverage_entries() -> Vec<Coverage> {
             entry.assertions = read(value);
         } else if let Some(value) = line.strip_prefix("pass = ") {
             entry.passing = read(value);
+        } else if let Some(value) = line.strip_prefix("fail = ") {
+            entry.failing = read(value);
+        } else if let Some(value) = line.strip_prefix("unreached = ") {
+            entry.unreached = read(value);
         } else if line.starts_with("plan_unknown = true") {
             entry.plan_unknown = true;
-        } else if line.starts_with("skip = [")
-            || line.starts_with(&format!("[[files.\"{}\".skip]]", entry.file))
-        {
-            // A documented skip is permanent: it records that the assertion is
-            // wrong about sway, with a citation. A file carrying one can never
-            // be fully green no matter how much swayward improves. The data
-            // spells it both as an inline array and as a table array, so read
-            // both rather than silently seeing half of them.
-            entry.documented_skips = true;
+        } else if line.starts_with("{ n = ") {
+            // Inline skips have one item per line. Table-array skips have one
+            // heading per assertion. Count both spellings so the README census
+            // follows the same source as contrib/coverage-report.
+            entry.documented_skip_count += 1;
+        } else if line.starts_with(&format!("[[files.\"{}\".skip]]", entry.file)) {
+            entry.documented_skip_count += 1;
         }
     }
     if let Some(done) = current {
@@ -1768,6 +1895,40 @@ fn passing_tests() -> impl Iterator<Item = &'static str> {
         .into_iter()
 }
 
+/// Keep the public in-process census tied to coverage.toml. Publishing passes
+/// alone hid the documented skips, failures, and assertions that the harness
+/// never reached, so the README must state all four figures together.
+#[test]
+fn project_readme_census_figures_match_the_manifest() {
+    let entries = coverage_entries();
+    let pass = entries.iter().map(|entry| entry.passing).sum::<usize>();
+    let skip = entries
+        .iter()
+        .map(|entry| entry.documented_skip_count)
+        .sum::<usize>();
+    let fail = entries.iter().map(|entry| entry.failing).sum::<usize>();
+    let unreached = entries.iter().map(|entry| entry.unreached).sum::<usize>();
+    let count = |n: usize| {
+        if n < 1_000 {
+            n.to_string()
+        } else {
+            format!("{},{:03}", n / 1_000, n % 1_000)
+        }
+    };
+    let claim = format!(
+        "**{} passes, {} documented skips,\n{} failures, and {} unreached assertions**",
+        count(pass),
+        count(skip),
+        count(fail),
+        count(unreached),
+    );
+    assert_eq!(
+        PROJECT_README.matches(&claim).count(),
+        1,
+        "README.md must state the coverage.toml pass/skip/fail/unreached census exactly once"
+    );
+}
+
 /// The files that are not green and carry no documented skip: every one of
 /// their non-passing assertions is swayward's own backlog, so closing it would
 /// make the file green.
@@ -1785,7 +1946,7 @@ fn gap_only_tests() -> Vec<&'static str> {
             entry.assertions > 0
                 && !entry.plan_unknown
                 && entry.passing != entry.assertions
-                && !entry.documented_skips
+                && entry.documented_skip_count == 0
         })
         .map(|entry| entry.file)
         .collect()
@@ -1998,6 +2159,21 @@ fn documented_green_ceiling_matches_the_manifest() {
 }
 
 #[test]
+fn initial_floating_applies_only_to_the_requested_window() {
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1280, 800));
+    let client = fixture.add_client();
+
+    let floating = create_window(&mut fixture, client, &json!({ "initial_floating": true }));
+    map_window(&mut fixture, client, floating, None, true);
+    assert!(fixture.swayward().layout.focus().unwrap().is_floating());
+
+    let tiled = create_window(&mut fixture, client, &json!({}));
+    map_window(&mut fixture, client, tiled, None, false);
+    assert!(!fixture.swayward().layout.focus().unwrap().is_floating());
+}
+
+#[test]
 fn settling_configures_does_not_ack_an_already_acked_configure() {
     let mut config =
         prepare_test_config("font monospace\nno_focus [app_id=\"^notme$\"]\n").unwrap();
@@ -2006,9 +2182,9 @@ fn settling_configures_does_not_ack_an_already_acked_configure() {
     fixture.add_output(1, (1280, 800));
     let client = fixture.add_client();
     let first = create_window(&mut fixture, client, &json!({}));
-    map_window(&mut fixture, client, first, None);
+    map_window(&mut fixture, client, first, None, false);
     let second = create_window(&mut fixture, client, &json!({ "app_id": "notme" }));
-    map_window(&mut fixture, client, second, None);
+    map_window(&mut fixture, client, second, None, false);
     settle_configures(&mut fixture, client);
 }
 

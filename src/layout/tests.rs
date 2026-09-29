@@ -660,6 +660,9 @@ enum Op {
         id: Option<usize>,
         floating: bool,
     },
+    ToggleFocusedContainerFloating,
+    MoveFocusedContainerToNextWorkspace,
+    MoveFocusedToScratchpad,
     FocusFloating,
     FocusTiling,
     SwitchFocusFloatingTiling,
@@ -1421,6 +1424,33 @@ impl Op {
                 let id = id.filter(|id| layout.has_window(id));
                 layout.set_window_floating(id.as_ref(), floating);
             }
+            Op::ToggleFocusedContainerFloating => {
+                let target = layout.active_workspace().and_then(|workspace| {
+                    workspace
+                        .focused_container_node()
+                        .map(|node| (workspace.id(), node, workspace.contains_tiling_node(node)))
+                });
+                if let Some((workspace, node, floating)) = target {
+                    layout.set_container_floating(workspace, node, floating);
+                }
+            }
+            Op::MoveFocusedContainerToNextWorkspace => {
+                let target = layout.active_workspace().and_then(|workspace| {
+                    workspace
+                        .focused_tiling_node()
+                        .map(|node| (workspace.id(), node))
+                });
+                if let Some((workspace, node)) = target {
+                    let _ = layout.move_tiling_subtree_to_sway_workspace(
+                        workspace,
+                        node,
+                        swayward_ipc::command::WorkspaceTarget::Next,
+                        false,
+                        false,
+                    );
+                }
+            }
+            Op::MoveFocusedToScratchpad => layout.move_to_scratchpad(None),
             Op::FocusFloating => {
                 layout.focus_floating();
             }
@@ -2589,6 +2619,41 @@ fn making_window_sticky_moves_before_cleaning_source_workspace() {
 }
 
 #[test]
+fn sticky_floating_tree_follows_workspace_focus() {
+    let mut layout = Layout::default();
+    Op::AddOutput(1).apply(&mut layout);
+    for id in 1..=2 {
+        Op::AddWindow {
+            params: TestWindowParams::new(id),
+        }
+        .apply(&mut layout);
+    }
+    let source = layout.active_workspace().unwrap().id();
+    let workspace = layout.active_workspace_mut().unwrap();
+    workspace.tiling_mut().focus_root();
+    let root = workspace.tiling().focus().unwrap();
+    let focused = workspace.tiling().node_for_window(&1).unwrap();
+    workspace.tiling_mut().set_focus(focused);
+    let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
+    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.floating_mut().add_tree(
+        subtree,
+        Rectangle::new((100., 120.).into(), (600., 450.).into()),
+    );
+    assert!(layout.set_window_sticky(&1, "enable"));
+
+    layout
+        .activate_sway_workspace(crate::command::WorkspaceTarget::Name("target".into()))
+        .unwrap();
+
+    let target = layout.active_workspace().unwrap();
+    assert_eq!(target.floating_tree_root_for_window(&1), Some(root));
+    assert_eq!(target.floating_tree_root_for_window(&2), Some(root));
+    assert_eq!(target.floating().tree(root).unwrap().focus(), Some(focused));
+    assert_ne!(target.id(), source);
+}
+
+#[test]
 fn tiled_window_restores_natural_size_when_first_floated() {
     let mut options = Options::default();
     options.layout.border.off = true;
@@ -2785,7 +2850,12 @@ fn large_max_size() {
     options.layout.border.off = false;
     options.layout.border.width = 1.;
 
-    check_ops_with_options(options, ops);
+    let layout = check_ops_with_options(options, ops);
+    let window = layout.windows().next().unwrap().1;
+    assert!(
+        window.0.requested_size.get().unwrap().w < i32::MAX,
+        "layout must request a finite usable width"
+    );
 }
 
 #[test]
@@ -2814,7 +2884,9 @@ fn workspace_cleanup_during_switch() {
         Op::CloseWindow(1),
     ];
 
-    check_ops(ops);
+    let layout = check_ops(ops);
+    assert_eq!(layout.windows().count(), 0);
+    assert_eq!(layout.workspaces().count(), 1);
 }
 
 #[test]
@@ -2835,7 +2907,11 @@ fn workspace_transfer_during_switch() {
         Op::AddOutput(1),
     ];
 
-    check_ops(ops);
+    let layout = check_ops(ops);
+    assert_eq!(layout.outputs().count(), 2);
+    assert_eq!(layout.windows().count(), 2);
+    assert!(layout.windows().any(|(_, window)| window.id() == &1));
+    assert!(layout.windows().any(|(_, window)| window.id() == &2));
 }
 
 #[test]
@@ -2851,7 +2927,10 @@ fn workspace_transfer_during_switch_from_last() {
         Op::AddOutput(1),
     ];
 
-    check_ops(ops);
+    let layout = check_ops(ops);
+    assert_eq!(layout.outputs().count(), 2);
+    assert_eq!(layout.windows().count(), 1);
+    assert!(layout.windows().any(|(_, window)| window.id() == &1));
 }
 
 #[test]
@@ -2868,7 +2947,10 @@ fn workspace_transfer_during_switch_gets_cleaned_up() {
         Op::AddOutput(1),
     ];
 
-    check_ops(ops);
+    let layout = check_ops(ops);
+    assert_eq!(layout.outputs().count(), 2);
+    assert_eq!(layout.windows().count(), 1);
+    assert!(layout.windows().any(|(_, window)| window.id() == &1));
 }
 
 #[test]
@@ -2935,7 +3017,7 @@ fn moving_the_only_workspace_replaces_it_before_reparenting() {
 fn move_to_named_target_index_preserves_addressable_workspace() {
     // Fuzzer seed: a numbered-but-unnamed workspace is addressable and must
     // survive a targeted move even though it has no windows.
-    check_ops([
+    let layout = check_ops([
         Op::AddNamedWorkspace {
             ws_name: 1,
             output_name: None,
@@ -2948,6 +3030,9 @@ fn move_to_named_target_index_preserves_addressable_workspace() {
             target_ws_idx: Some(1),
         },
     ]);
+    assert!(layout
+        .workspaces()
+        .any(|(_, _, workspace)| workspace.sway_name().as_deref() == Some("ws1")));
 }
 
 #[test]
@@ -2955,7 +3040,7 @@ fn unname_then_implicit_rename_preserves_workspace_invariants() {
     // CI shrank `random_operations_dont_panic` to this six-op sequence. Both
     // the move and rename use the implicit target (`None`), and the same output
     // is added twice.
-    check_ops([
+    let layout = check_ops([
         Op::UnnameWorkspace { ws_name: 1 },
         Op::AddOutput(1),
         Op::AddOutput(1),
@@ -2972,6 +3057,11 @@ fn unname_then_implicit_rename_preserves_workspace_invariants() {
             ws_name: None,
         },
     ]);
+    assert_eq!(
+        layout.active_workspace().unwrap().sway_name().as_deref(),
+        Some("ws1")
+    );
+    assert!(layout.active_workspace().unwrap().has_window(&1));
 }
 
 #[test]
@@ -3285,6 +3375,35 @@ fn start_interactive_move_then_remove_window() {
     ];
 
     check_ops(ops);
+}
+
+#[test]
+fn moving_popup_target_ignores_tile_animation_offset() {
+    let mut layout = Layout::default();
+    Op::AddOutput(1).apply(&mut layout);
+    Op::AddWindow {
+        params: TestWindowParams::new(0),
+    }
+    .apply(&mut layout);
+    let output = layout.outputs().next().unwrap().clone();
+
+    assert!(layout.interactive_move_begin(0, &output, Point::from((50., 100.))));
+    assert!(layout.interactive_move_update(
+        &0,
+        Point::from((1000., 0.)),
+        output,
+        Point::from((500., 500.)),
+    ));
+
+    let InteractiveMoveState::Moving(move_) = layout.interactive_move.as_ref().unwrap() else {
+        panic!("window must be moving");
+    };
+    assert_ne!(move_.tile.render_offset().y, 0.);
+    let pointer_offset_y = move_.tile.window_size().h * move_.pointer_ratio_within_window.1;
+    let stable_tile_y =
+        move_.pointer_pos_within_output.y - pointer_offset_y - move_.tile.window_loc().y;
+    let target = layout.popup_target_rect(&0);
+    assert_eq!(target.loc.y, -stable_tile_y - move_.tile.window_loc().y);
 }
 
 #[test]
@@ -3631,6 +3750,549 @@ fn move_window_to_different_output() {
         ..Default::default()
     };
     check_ops_with_options(options, ops);
+}
+
+#[test]
+fn floating_tree_entry_routes_geometry_focus_hit_testing_and_lifecycle() {
+    let output = Output::new(
+        "output".into(),
+        PhysicalProperties {
+            size: Size::from((1280, 720)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: Size::from((1280, 720)),
+            refresh: 60000,
+        }),
+        None,
+        None,
+        None,
+    );
+    output.user_data().insert_if_missing(|| OutputName {
+        connector: "output".into(),
+        make: None,
+        model: None,
+        serial: None,
+    });
+    let mut workspace = Workspace::new(
+        output,
+        Clock::with_time(Duration::ZERO),
+        Rc::new(Options::default()),
+    );
+    for id in 1..=2 {
+        let tile = workspace.make_tile(TestWindow::new(TestWindowParams::new(id)));
+        workspace.add_tile(
+            tile,
+            WorkspaceAddWindowTarget::Auto,
+            ActivateWindow::Yes,
+            TiledWidth::Proportion(0.5),
+            false,
+            false,
+            None,
+        );
+    }
+    let first = workspace.tiling().node_for_window(&1).unwrap();
+    workspace
+        .tiling_mut()
+        .set_layout(first, tiling_tree::Layout::SplitV);
+    workspace.tiling_mut().focus_root();
+    let root = workspace.tiling().focus().unwrap();
+    workspace.tiling_mut().set_focus(first);
+    let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
+    workspace.finish_tiling_subtree_detach(old_parent);
+    let rect = Rectangle::new((100., 120.).into(), (600., 450.).into());
+
+    let (root, remapped) = workspace.floating_mut().add_tree(subtree, rect);
+    assert!(remapped.is_empty());
+    assert_eq!(workspace.floating().tree(root).unwrap().parent_area(), rect);
+    assert_eq!(
+        workspace.floating().tree(root).unwrap().geometry(first),
+        Some(Rectangle::new((100., 120.).into(), (300., 450.).into()))
+    );
+    assert!(workspace
+        .floating_mut()
+        .tree_mut(root)
+        .unwrap()
+        .focus_parent());
+    let parent = workspace.floating().tree(root).unwrap().focus().unwrap();
+    assert_ne!(parent, first);
+    assert!(workspace
+        .floating()
+        .tree(root)
+        .unwrap()
+        .contains_node(root, parent));
+
+    let detached = workspace.floating_mut().remove_tree(root).unwrap();
+    let (restored, remapped) = workspace.attach_tiling_subtree(detached);
+    assert_eq!(restored, root);
+    assert!(remapped.is_empty());
+    assert_eq!(workspace.tiling().windows().count(), 2);
+    workspace.verify_invariants(None);
+}
+
+#[test]
+fn moving_the_only_child_of_a_floating_group_keeps_the_root_position() {
+    let output = Output::new(
+        "output".into(),
+        PhysicalProperties {
+            size: Size::from((1280, 720)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: Size::from((1280, 720)),
+            refresh: 60000,
+        }),
+        None,
+        None,
+        None,
+    );
+    output.user_data().insert_if_missing(|| OutputName {
+        connector: "output".into(),
+        make: None,
+        model: None,
+        serial: None,
+    });
+    let mut workspace = Workspace::new(
+        output,
+        Clock::with_time(Duration::ZERO),
+        Rc::new(Options::default()),
+    );
+    for id in 1..=2 {
+        let tile = workspace.make_tile(TestWindow::new(TestWindowParams::new(id)));
+        workspace.add_tile(
+            tile,
+            WorkspaceAddWindowTarget::Auto,
+            ActivateWindow::Yes,
+            TiledWidth::Proportion(0.5),
+            false,
+            false,
+            None,
+        );
+    }
+    let second = workspace.tiling().node_for_window(&2).unwrap();
+    workspace
+        .tiling_mut()
+        .split(second, tiling_tree::Layout::SplitV);
+    workspace.tiling_mut().focus_parent();
+    let group = workspace.tiling().focus().unwrap();
+    workspace.set_container_floating(group, true).unwrap();
+    workspace.focus_child();
+
+    let root = workspace.floating_tree_root_for_window(&2).unwrap();
+    let before = workspace.floating().tree_rect(root).unwrap();
+    assert!(workspace
+        .floating()
+        .focused_leaf_is_only_child_of_tree_root());
+
+    workspace.move_window_in_direction(&2, tiling_tree::Direction::Right, 10.);
+
+    assert_eq!(workspace.floating().tree_rect(root), Some(before));
+    assert_eq!(workspace.tiling().windows().count(), 1);
+    workspace.verify_invariants(None);
+}
+
+#[test]
+fn removing_a_floating_tree_leaf_uses_the_resident_tree() {
+    let output = Output::new(
+        "output".into(),
+        PhysicalProperties {
+            size: Size::from((1280, 720)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: Size::from((1280, 720)),
+            refresh: 60000,
+        }),
+        None,
+        None,
+        None,
+    );
+    output.user_data().insert_if_missing(|| OutputName {
+        connector: "output".into(),
+        make: None,
+        model: None,
+        serial: None,
+    });
+    let mut workspace = Workspace::new(
+        output,
+        Clock::with_time(Duration::ZERO),
+        Rc::new(Options::default()),
+    );
+    for id in 1..=2 {
+        let tile = workspace.make_tile(TestWindow::new(TestWindowParams::new(id)));
+        workspace.add_tile(
+            tile,
+            WorkspaceAddWindowTarget::Auto,
+            ActivateWindow::Yes,
+            TiledWidth::Proportion(0.5),
+            false,
+            false,
+            None,
+        );
+    }
+    workspace.tiling_mut().focus_root();
+    let root = workspace.tiling().focus().unwrap();
+    let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
+    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.floating_mut().add_tree(
+        subtree,
+        Rectangle::new((100., 120.).into(), (600., 450.).into()),
+    );
+
+    let removed = workspace.remove_tile(&1, Transaction::new());
+
+    assert_eq!(removed.tile.window().id(), &1);
+    assert!(workspace.floating().has_window(&2));
+    assert!(!workspace.floating().has_window(&1));
+    workspace.verify_invariants(None);
+}
+
+#[test]
+fn floating_tree_root_tracks_output_geometry_changes() {
+    let output = Output::new(
+        "output".into(),
+        PhysicalProperties {
+            size: Size::from((1280, 720)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: Size::from((1280, 720)),
+            refresh: 60000,
+        }),
+        None,
+        None,
+        None,
+    );
+    output.user_data().insert_if_missing(|| OutputName {
+        connector: "output".into(),
+        make: None,
+        model: None,
+        serial: None,
+    });
+    let mut workspace = Workspace::new(
+        output.clone(),
+        Clock::with_time(Duration::ZERO),
+        Rc::new(Options::default()),
+    );
+    for id in 1..=2 {
+        let tile = workspace.make_tile(TestWindow::new(TestWindowParams::new(id)));
+        workspace.add_tile(
+            tile,
+            WorkspaceAddWindowTarget::Auto,
+            ActivateWindow::Yes,
+            TiledWidth::Proportion(0.5),
+            false,
+            false,
+            None,
+        );
+    }
+    workspace.tiling_mut().focus_root();
+    let root = workspace.tiling().focus().unwrap();
+    let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
+    workspace.finish_tiling_subtree_detach(old_parent);
+    let (root, _) = workspace.floating_mut().add_tree(
+        subtree,
+        Rectangle::new((100., 120.).into(), (600., 450.).into()),
+    );
+
+    workspace.floating_mut().update_config(
+        (2560., 1440.).into(),
+        Rectangle::from_size((2560., 1440.).into()),
+        1.,
+        Rc::new(Options::default()),
+    );
+
+    assert_eq!(
+        workspace.floating().tree_rect(root),
+        Some(Rectangle::new((200., 240.).into(), (600., 450.).into()))
+    );
+    workspace.floating().verify_invariants();
+}
+
+#[test]
+fn fullscreen_targets_a_node_inside_a_floating_tree() {
+    let output = Output::new(
+        "output".into(),
+        PhysicalProperties {
+            size: Size::from((1280, 720)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: Size::from((1280, 720)),
+            refresh: 60000,
+        }),
+        None,
+        None,
+        None,
+    );
+    output.user_data().insert_if_missing(|| OutputName {
+        connector: "output".into(),
+        make: None,
+        model: None,
+        serial: None,
+    });
+    let mut workspace = Workspace::new(
+        output,
+        Clock::with_time(Duration::ZERO),
+        Rc::new(Options::default()),
+    );
+    for id in 1..=2 {
+        let tile = workspace.make_tile(TestWindow::new(TestWindowParams::new(id)));
+        workspace.add_tile(
+            tile,
+            WorkspaceAddWindowTarget::Auto,
+            ActivateWindow::Yes,
+            TiledWidth::Proportion(0.5),
+            false,
+            false,
+            None,
+        );
+    }
+    workspace.tiling_mut().focus_root();
+    let root = workspace.tiling().focus().unwrap();
+    let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
+    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.floating_mut().add_tree(
+        subtree,
+        Rectangle::new((100., 120.).into(), (600., 450.).into()),
+    );
+    workspace.activate_window(&1);
+    workspace.floating_mut().focus_parent();
+
+    assert!(workspace.set_focused_fullscreen(Some(tiling_tree::FullscreenMode::Workspace)));
+    assert_eq!(
+        workspace.floating().tree(root).unwrap().fullscreen_node(),
+        Some(root)
+    );
+    assert_eq!(
+        workspace.fullscreen_mode(),
+        Some(tiling_tree::FullscreenMode::Workspace)
+    );
+    assert!(workspace.fullscreen_contains_window(&1));
+    assert_eq!(workspace.fullscreen_window(), Some(&1));
+
+    assert!(workspace.set_focused_fullscreen(Some(tiling_tree::FullscreenMode::Global)));
+    assert_eq!(
+        workspace.fullscreen_mode(),
+        Some(tiling_tree::FullscreenMode::Global)
+    );
+    workspace.disable_fullscreen();
+    assert_eq!(workspace.fullscreen_mode(), None);
+
+    assert!(workspace.set_focused_fullscreen(Some(tiling_tree::FullscreenMode::Workspace)));
+    assert!(workspace.set_focused_fullscreen(None));
+    workspace.floating_mut().focus_child();
+    assert!(workspace.set_focused_fullscreen(Some(tiling_tree::FullscreenMode::Workspace)));
+    assert_eq!(
+        workspace.floating().tree(root).unwrap().fullscreen_node(),
+        workspace.floating().tree(root).unwrap().node_for_window(&1)
+    );
+}
+
+#[test]
+fn floating_tree_root_survives_workspace_and_output_moves() {
+    let output = Output::new(
+        "output".into(),
+        PhysicalProperties {
+            size: Size::from((1280, 720)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: Size::from((1280, 720)),
+            refresh: 60000,
+        }),
+        None,
+        None,
+        None,
+    );
+    output.user_data().insert_if_missing(|| OutputName {
+        connector: "output".into(),
+        make: None,
+        model: None,
+        serial: None,
+    });
+    let mut source = Workspace::new(
+        output.clone(),
+        Clock::with_time(Duration::ZERO),
+        Rc::new(Options::default()),
+    );
+    for id in 1..=2 {
+        let tile = source.make_tile(TestWindow::new(TestWindowParams::new(id)));
+        source.add_tile(
+            tile,
+            WorkspaceAddWindowTarget::Auto,
+            ActivateWindow::Yes,
+            TiledWidth::Proportion(0.5),
+            false,
+            false,
+            None,
+        );
+    }
+    let first = source.tiling().node_for_window(&1).unwrap();
+    source.tiling_mut().focus_root();
+    let root = source.tiling().focus().unwrap();
+    source.tiling_mut().set_focus(first);
+    let (subtree, old_parent) = source.detach_tiling_subtree(root).unwrap();
+    source.finish_tiling_subtree_detach(old_parent);
+    let old_rect = Rectangle::new((100., 120.).into(), (600., 450.).into());
+    let (root, _) = source.floating_mut().add_tree(subtree, old_rect);
+    source
+        .floating_mut()
+        .tree_mut(root)
+        .unwrap()
+        .set_fullscreen(&1, true);
+    source.floating_mut().set_tree_sticky(root, true);
+    let node_ids = source
+        .floating()
+        .tree(root)
+        .unwrap()
+        .iter_depth_first()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+
+    let removed = source.remove_floating_tree(root).unwrap();
+    assert!(source.floating().is_empty());
+
+    let target_output = Output::new(
+        "target".into(),
+        PhysicalProperties {
+            size: Size::from((2560, 1440)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    target_output.change_current_state(
+        Some(Mode {
+            size: Size::from((2560, 1440)),
+            refresh: 60000,
+        }),
+        None,
+        None,
+        None,
+    );
+    target_output.user_data().insert_if_missing(|| OutputName {
+        connector: "target".into(),
+        make: None,
+        model: None,
+        serial: None,
+    });
+    let mut target = Workspace::new(
+        target_output,
+        Clock::with_time(Duration::ZERO),
+        Rc::new(Options::default()),
+    );
+    let restored = target.add_floating_tree(removed, true);
+    let tree = target.floating().tree(restored).unwrap();
+
+    assert_eq!(restored, root);
+    assert_eq!(tree.focus(), Some(first));
+    assert_eq!(
+        tree.iter_depth_first()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        node_ids
+    );
+    assert_eq!(tree.fullscreen_node(), tree.node_for_window(&1));
+    assert!(target.floating().tree_is_sticky(restored));
+    assert_eq!(
+        target.floating().tree_rect(restored),
+        Some(Rectangle::new((500., 465.).into(), (600., 450.).into()))
+    );
+    target.verify_invariants(None);
+}
+
+#[test]
+fn directional_focus_descends_into_a_floating_tree() {
+    let mut layout = Layout::default();
+    Op::AddOutput(1).apply(&mut layout);
+    for id in 1..=2 {
+        Op::AddWindow {
+            params: TestWindowParams::new(id),
+        }
+        .apply(&mut layout);
+    }
+    let workspace = layout.active_workspace_mut().unwrap();
+    workspace.tiling_mut().focus_root();
+    let root = workspace.tiling().focus().unwrap();
+    let first = workspace.tiling().node_for_window(&1).unwrap();
+    workspace.tiling_mut().set_focus(first);
+    let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
+    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.floating_mut().add_tree(
+        subtree,
+        Rectangle::new((100., 120.).into(), (600., 450.).into()),
+    );
+
+    assert!(workspace.floating_mut().focus_right());
+    assert_eq!(workspace.floating().active_window().unwrap().id(), &2);
+}
+
+#[test]
+fn floating_tree_scratchpad_moves_the_whole_root() {
+    let mut layout = Layout::default();
+    Op::AddOutput(1).apply(&mut layout);
+    for id in 1..=2 {
+        Op::AddWindow {
+            params: TestWindowParams::new(id),
+        }
+        .apply(&mut layout);
+    }
+    let workspace = layout.active_workspace_mut().unwrap();
+    workspace.tiling_mut().focus_root();
+    let root = workspace.tiling().focus().unwrap();
+    let focused = workspace.tiling().node_for_window(&1).unwrap();
+    workspace.tiling_mut().set_focus(focused);
+    let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
+    workspace.finish_tiling_subtree_detach(old_parent);
+    let rect = Rectangle::new((100., 120.).into(), (600., 450.).into());
+    let (root, _) = workspace.floating_mut().add_tree(subtree, rect);
+
+    layout.move_to_scratchpad(Some(&1));
+    assert!(layout.is_scratchpad_hidden(&1));
+    assert!(layout.is_scratchpad_hidden(&2));
+    assert_eq!(layout.scratchpad_windows().count(), 2);
+
+    assert_eq!(layout.show_scratchpad(Some(&2)), Some(1));
+    let workspace = layout.active_workspace().unwrap();
+    assert_eq!(workspace.floating_tree_root_for_window(&1), Some(root));
+    assert_eq!(workspace.floating_tree_root_for_window(&2), Some(root));
+    assert_eq!(
+        workspace.floating().tree(root).unwrap().focus(),
+        Some(focused)
+    );
+    layout.verify_invariants();
 }
 
 #[test]
@@ -4705,7 +5367,7 @@ proptest! {
 
 #[test]
 fn focus_parent_with_only_a_floating_window_preserves_tree_invariants() {
-    check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams {
@@ -4715,6 +5377,7 @@ fn focus_parent_with_only_a_floating_window_preserves_tree_invariants() {
         },
         Op::FocusParent,
     ]);
+    assert_eq!(layout.focus().unwrap().id(), &1);
 }
 
 #[test]
@@ -4849,7 +5512,7 @@ fn focus_parent_then_move_left_keeps_focus_on_a_live_node() {
     // CI 35986895235 shrank `random_operations_dont_panic` to this sequence
     // (proptest cc acc67c75). Moving a focused parent container left after a
     // column move left the tree's focus pointing at a removed node.
-    check_ops([
+    let layout = check_ops([
         Op::AddWindow {
             params: TestWindowParams::new(2),
         },
@@ -4863,4 +5526,301 @@ fn focus_parent_then_move_left_keeps_focus_on_a_live_node() {
         Op::FocusParent,
         Op::MoveWindowInDirection(tiling_tree::Direction::Left),
     ]);
+    assert!(matches!(
+        layout.focus().map(|window| *window.id()),
+        Some(1 | 2)
+    ));
+    assert_eq!(layout.windows().count(), 2);
+}
+
+#[test]
+fn refreshing_after_hiding_an_interactive_move_does_not_panic() {
+    check_ops([
+        Op::AddWindow {
+            params: TestWindowParams::new(5),
+        },
+        Op::AddOutput(2),
+        Op::InteractiveMoveBegin {
+            window: 5,
+            output_idx: 2,
+            px: 0.,
+            py: 0.,
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::MoveFocusedToScratchpad,
+        Op::Refresh { is_active: false },
+    ]);
+}
+
+#[test]
+fn unfloat_container_after_changing_its_layout_does_not_panic() {
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::FocusParent,
+        Op::SetFocusedLayout(tiling_tree::Layout::Stacked),
+        Op::SetFocusedLayout(tiling_tree::Layout::SplitH),
+        Op::ToggleWindowFloating { id: None },
+    ]);
+}
+
+#[test]
+fn interactive_move_on_a_floating_container_does_not_panic() {
+    check_ops([
+        Op::AddOutput(5),
+        Op::AddWindow {
+            params: TestWindowParams::new(5),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::InteractiveMoveBegin {
+            window: 5,
+            output_idx: 5,
+            px: 0.,
+            py: 0.,
+        },
+    ]);
+}
+
+#[test]
+fn adding_a_floating_window_next_to_a_floating_container_does_not_panic() {
+    let mut floating = TestWindowParams::new(3);
+    floating.is_floating = true;
+    check_ops([
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddOutput(1),
+        Op::ToggleFocusedContainerFloating,
+        Op::AddWindowNextTo {
+            params: floating,
+            next_to_id: 2,
+        },
+    ]);
+}
+
+#[test]
+fn interactive_resize_on_a_floating_container_does_not_panic() {
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::InteractiveResizeBegin {
+            window: 3,
+            edges: ResizeEdge::RIGHT,
+        },
+    ]);
+}
+
+#[test]
+fn moving_a_floating_workspace_between_fractional_scales_does_not_panic() {
+    check_ops([
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddScaledOutput {
+            id: 2,
+            scale: 2.,
+            layout_config: None,
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::MoveWindowUpOrToWorkspaceUp,
+        Op::AddScaledOutput {
+            id: 1,
+            scale: 1.5,
+            layout_config: None,
+        },
+        Op::MoveWorkspaceToOutput(1),
+    ]);
+}
+
+#[test]
+fn moving_a_tiny_window_to_scratchpad_with_a_huge_border_does_not_panic() {
+    let mut layout = swayward_config::Layout::default();
+    layout.border.width = 29_707.;
+    check_ops_with_options(
+        Options {
+            layout,
+            ..Default::default()
+        },
+        vec![
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::MoveFocusedToScratchpad,
+        ],
+    );
+}
+
+#[test]
+fn hiding_the_active_floating_container_focuses_the_remaining_leaf() {
+    let mut floating = TestWindowParams::new(1);
+    floating.is_floating = true;
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::AddWindow { params: floating },
+        Op::FocusWindowDown,
+        Op::MoveFocusedToScratchpad,
+    ]);
+}
+
+#[test]
+fn moving_a_hidden_scratchpad_window_to_an_output_does_not_panic() {
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddOutput(2),
+        Op::MoveFocusedToScratchpad,
+        Op::MoveWindowToOutput {
+            window_id: Some(2),
+            output_id: 1,
+            target_ws_idx: None,
+        },
+    ]);
+}
+
+#[test]
+fn centering_a_floating_container_does_not_panic() {
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::CenterWindow { id: None },
+    ]);
+}
+
+#[test]
+fn moving_the_last_floating_leaf_keeps_a_resident_tree_active() {
+    let mut floating = TestWindowParams::new(1);
+    floating.is_floating = true;
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::AddWindow { params: floating },
+        Op::MoveWindowToWorkspaceDown(false),
+    ]);
+}
+
+#[test]
+fn resizing_a_window_in_a_floating_container_does_not_panic() {
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::SetFocusedWidth(SizeChange::SetFixed(0)),
+    ]);
+}
+
+#[test]
+fn directional_focus_with_one_floating_container_does_not_panic() {
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::FocusLeft,
+    ]);
+}
+
+#[test]
+fn toggling_a_window_in_a_floating_container_unfloats_the_container() {
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::ToggleWindowFloating { id: None },
+    ]);
+}
+
+#[test]
+fn preset_width_on_floating_container_does_not_panic() {
+    // The floating-group operation generator found this command dispatching to
+    // the leaf-only floating list for a resident tree (cc 7508638e).
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleFocusedContainerFloating,
+        Op::SwitchPresetTiledWidth,
+    ]);
+}
+
+#[test]
+fn unfloat_last_group_after_focusing_parent_deactivates_floating() {
+    // The deep proptest soak shrank this to a floating group whose parent had
+    // focus while its last member returned to tiling (cc e3487ca6).
+    let mut options = Options::default();
+    options.layout.default_orientation = swayward_config::DefaultOrientation::Vertical;
+    check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(3),
+            },
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::MoveFocusedToWorkspaceUp(false),
+            Op::UpdateConfig {
+                layout_config: Box::default(),
+            },
+            Op::FocusWindowTop,
+            Op::ToggleWindowFloating { id: None },
+            Op::FocusParent,
+            Op::ToggleWindowFloating { id: Some(3) },
+            Op::FocusChild,
+        ],
+    );
+}
+
+#[test]
+fn singleton_move_after_floating_close_keeps_the_parent_live() {
+    // CI 36310511080 shrank `random_operations_dont_panic` to this sequence
+    // (proptest cc 16b75ae3). A directional move of the only window read a
+    // parent node that an earlier layout change had already removed.
+    let mut floating = TestWindowParams::new(5);
+    floating.is_floating = true;
+    let mut options = Options::default();
+    options.layout.default_orientation = swayward_config::DefaultOrientation::Vertical;
+    check_ops_with_options(
+        options,
+        [
+            Op::AddWindow {
+                params: TestWindowParams::new(3),
+            },
+            Op::AddOutput(1),
+            Op::CenterWindow { id: None },
+            Op::AddWindow { params: floating },
+            Op::MoveFocusedToWorkspaceUp(false),
+            Op::ToggleWindowFloating { id: None },
+            Op::SwapWindowHorizontal(false),
+            Op::FocusParent,
+            Op::CloseWindow(5),
+            Op::SplitFocused(tiling_tree::Layout::SplitH),
+            Op::MoveWindowDown,
+        ],
+    );
 }

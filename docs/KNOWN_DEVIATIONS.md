@@ -12,7 +12,6 @@ exact behaviour, the reason for it, and the sway source citations.
 | GNOME portal backend | The GNOME backend is the default, with `xdg-desktop-portal-wlr` available as a fallback. | [Desktop integration](#desktop-integration) |
 | Reload keeps display changes | A display change made by a protocol client survives `reload` unless the file changes the output settings. | [Reload and transient output configuration](#reload-and-transient-output-configuration) |
 | Layout and Xwayland limits | Scrollable tiling, some i3-only structures, and full X11 identity are not available. | [Layout and Xwayland](#layout-and-xwayland) |
-| No floating split containers | Swayward can float windows, but not a whole split container. | [Floating split containers](#floating-split-containers) |
 
 The details use three labels, because each kind needs something different from
 you:
@@ -254,15 +253,17 @@ the [IPC oracle coverage](IPC_ORACLE_COVERAGE.md) for its test boundary.
 
 **Command gap.**
 
-Swayward refuses `opacity`, `inhibit_idle`, `allow_tearing`, and
-`max_render_time`. Sway stores each value on the target container or view and
-exposes all but opacity in `GET_TREE` (`sway/commands/opacity.c:9-40`,
-`sway/commands/inhibit_idle.c:8-50`, `sway/commands/allow_tearing.c:6-25`, and
+Swayward refuses `inhibit_idle`, `allow_tearing`, and `max_render_time`. Sway
+stores each value on the target view and exposes them in `GET_TREE`
+(`sway/commands/inhibit_idle.c:8-50`, `sway/commands/allow_tearing.c:6-25`, and
 `sway/commands/max_render_time.c:6-32`). Swayward has no equivalent mutable
-per-view state. Its window-rule opacity is computed from configuration, idle
-inhibition comes from client protocol objects, and its frame clock has no
-per-view tearing or render-deadline controls. Returning success would therefore
-report state that the compositor does not apply.
+per-view state: idle inhibition comes from client protocol objects, and its
+frame clock has no per-view tearing or render-deadline controls. Returning
+success would therefore report state that the compositor does not apply.
+
+The `opacity` command is implemented as mutable per-window state and multiplies
+window-rule opacity. Unlike the configured opacity, it remains effective in
+fullscreen, matching sway's scene-tree opacity.
 
 ### Reload and transient output configuration
 
@@ -543,6 +544,10 @@ command loop and its targeted clear operation
 (`sway/sway/commands/unmark.c:24-54`). Assertions 14, 15, and 17 in i3's
 `210-mark-unmark.t` expect i3's multi-target `mark` rejection and are excluded.
 
+### X11 window identity
+
+**Infrastructure gap.**
+
 X11 applications run through `xwayland-satellite`. Swayward does not include
 sway's in-process Xwayland window manager. The satellite presents X11 clients as
 ordinary `xdg_toplevel` surfaces and forwards `WM_TRANSIENT_FOR` as an xdg
@@ -576,37 +581,3 @@ state and creates a named workspace only when the drop completes.
 `GET_WORKSPACES` and `GET_TREE` report the same real workspace set. Workspace
 numbers and names match sway, including `num = -1` for names without a leading
 digit (`sway/sway/ipc-json.c:503-517`).
-
-## Floating split containers
-
-Sway can float a whole split container. `cmd_floating` selects the focused
-container, wraps every tiling child when the workspace itself is selected,
-promotes a child of an existing floating root to that root, then calls
-`container_set_floating`, which detaches the selected node as one unit
-(`sway/sway/commands/floating.c:23-55`).
-
-Swayward floats windows, not containers. `FloatingSpace` stores a
-`Vec<Tile<W>>` of leaves rather than tree nodes
-(`src/layout/floating.rs:36-38`), and `Workspace::toggle_window_floating`
-accepts a single window id (`src/layout/workspace.rs:1641`). Commands whose
-result needs floating split-container state (`floating enable` or `toggle`,
-`move scratchpad`, `sticky`, or moving to a floating or scratchpad mark with a
-split focused) therefore fail before changing state. Direct floating, sticky,
-and scratchpad commands report `floating container groups are not supported`;
-mark moves report the unsupported subtree destination. `floating disable` on
-an already tiled split remains a successful no-op. Moving a fullscreen leaf
-does not need a group: swayward keeps the leaf tiled and preserves its
-fullscreen state, matching sway's single-window behavior.
-
-Supporting it needs a floating container representation plus coordinated
-rendering, geometry, focus, IPC, toggle-back, workspace-move, scratchpad and
-invariant work. That is a deliberate deferral, not an oversight: I5 makes the
-upstream diff a budget and Q7 keeps `floating.rs` close to niri so upstream
-merges stay viable.
-
-A feasibility assessment
-found no failing assertion that this feature alone would turn green. The sole
-assertion in `184-regress-float-split-resize.t` already passes vacuously, so promoting it
-would also require a native state assertion. Floating split containers remain
-deferred until a user-facing requirement justifies the container-forest,
-geometry, and lifecycle work.

@@ -117,15 +117,13 @@ pub(crate) fn compute<W: LayoutElement>(
             draw_uncovered_top_border,
             &mut result,
         );
-        result
-            .titlebars
-            .retain(|id, _| !contains_node(nodes, fullscreen_root, *id));
+        result.titlebars.retain(|id, _| !fullscreen.contains(id));
         result
             .titlebar_attached
-            .retain(|id| !contains_node(nodes, fullscreen_root, *id));
+            .retain(|id| !fullscreen.contains(id));
         result
             .titlebar_owned_by_parent
-            .retain(|id| !contains_node(nodes, fullscreen_root, *id));
+            .retain(|id| !fullscreen.contains(id));
     }
     for id in mapped_under_fullscreen {
         result.titlebars.remove(id);
@@ -184,20 +182,6 @@ fn is_strip_entry<W: LayoutElement>(nodes: &HashMap<NodeId, Node<W>>, id: NodeId
         })
 }
 
-fn contains_node<W: LayoutElement>(
-    nodes: &HashMap<NodeId, Node<W>>,
-    root: NodeId,
-    id: NodeId,
-) -> bool {
-    root == id
-        || match nodes.get(&root).map(|node| &node.value) {
-            Some(TreeNode::Split { children, .. }) => children
-                .iter()
-                .any(|child| contains_node(nodes, *child, id)),
-            _ => false,
-        }
-}
-
 fn subtree_has_visible_leaf<W: LayoutElement>(
     nodes: &HashMap<NodeId, Node<W>>,
     id: NodeId,
@@ -227,10 +211,13 @@ pub(super) fn apply_struts(
         .loc
         .to_physical_precise_ceil(scale)
         .to_logical(scale);
-    let mut size_diff = (loc - working_area.loc).to_size();
+    let loc_delta = loc - working_area.loc;
+    let mut size_diff = Size::from((loc_delta.x.max(0.), loc_delta.y.max(0.)));
     size_diff.w = working_area.size.w.min(size_diff.w);
     size_diff.h = working_area.size.h.min(size_diff.h);
     working_area.size -= size_diff;
+    working_area.size.w = working_area.size.w.max(0.);
+    working_area.size.h = working_area.size.h.max(0.);
     working_area.loc = loc;
     working_area
 }

@@ -36,6 +36,8 @@ impl<W: LayoutElement> TilingTree<W> {
                 mode.fullscreen = None;
             }
             self.mapped_under_fullscreen.clear();
+            self.fullscreen_layout_wrappers.clear();
+            self.pre_layout_ipc_rects.clear();
         }
         if let Some(fullscreen) = fullscreen {
             self.pending_modes
@@ -45,7 +47,9 @@ impl<W: LayoutElement> TilingTree<W> {
                     maximized: false,
                 })
                 .fullscreen = Some(fullscreen);
-            self.set_focus_id(self.focused_leaf_in(id));
+            if self.focus != Some(id) {
+                self.set_focus_id(self.focused_leaf_in(id));
+            }
         }
         self.cancel_resize_for(id);
         true

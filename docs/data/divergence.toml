@@ -1,5 +1,5 @@
 # This count records the entries migrated from docs/DIVERGENCE.md.
-migrated_entries = 204
+migrated_entries = 206
 
 [[edit]]
 migrated = true
@@ -532,6 +532,12 @@ why = ""
 [[edit]]
 migrated = true
 paths = [".github/workflows/ci.yml"]
+what = "upload proptest regression seeds when randomized CI fails."
+why = "Because a randomized failure otherwise leaves its generated seed only on the ephemeral runner, forcing maintainers to reconstruct the case from logs."
+
+[[edit]]
+migrated = true
+paths = [".github/workflows/ci.yml"]
 what = "install the Perl modules required by the vendored i3 conformance runner."
 why = ""
 
@@ -730,7 +736,7 @@ why = ""
 [[edit]]
 migrated = true
 paths = ["src/command/mod.rs"]
-what = "do not retarget `floating` from a structurally focused split to its keyboard-focus descendant; floating split containers remain unsupported."
+what = "do not retarget `floating` from a structurally focused split to its keyboard-focus descendant; the selected split is the floating root."
 why = ""
 
 [[edit]]
@@ -1005,6 +1011,18 @@ why = ""
 
 [[edit]]
 migrated = true
+paths = ["contrib/sway-to-kdl"]
+what = "translate sway's grouped `set`, binding, execution, and `for_window` syntax; accept case-insensitive compatibility modifiers and map default-XKB `Mod5`; and convert map-time no-focus, opacity, fixed-size, and shortcut-inhibitor actions."
+why = "Reduce manual config migration without weakening or silently dropping source semantics."
+
+[[edit]]
+migrated = true
+paths = ["contrib/sway-to-kdl", "docs/KNOWN_DEVIATIONS.md", "docs/SWAY_CONFIG_MIGRATION.md", "src/tests/i3_conformance.rs"]
+what = "give common manual-attention warnings direct migration guidance for swaybar, device-specific input settings, and X11-only window criteria."
+why = "These runtime limits cannot be translated faithfully, so the generated config points users to the exact replacement or explanation instead of leaving an unactionable warning."
+
+[[edit]]
+migrated = true
 paths = ["contrib/sway-to-kdl", "swayward-config/src/window_rule.rs", "src/window/mod.rs", "src/layout/mod.rs", "src/layout/monitor.rs", "src/layout/tile.rs", "src/handlers/xdg_shell.rs", "src/handlers/compositor.rs"]
 what = "translate sway window rules:\n- map default border directives to initial tiled and floating border rules without changing shipped visual defaults;\n- preserve combined app-id, title, and current tiling-state criteria, distinct workspace-name, workspace-number, and output targets, regex escapes, and mouse-region bind options on either side of the key;\n- translate floating, layout, focus, `nop`, `no_focus`, activation, mouse-warping, and workspace-placement actions;\n- fail loudly on X11-only criteria, i3-only provenance criteria, visibility-dependent activation, and unsupported actions."
 why = ""
@@ -1140,12 +1158,6 @@ migrated = true
 paths = ["swayward-ipc/src/command.rs", "src/command/mod.rs", "src/swayward.rs"]
 what = "implement sway's runtime `set` symbol table and argument substitution at command dispatch, including same-request ordering, criteria repetition, binding execution, longest-name matching, and reload reset; KDL remains variable-free."
 why = "Because the sway translator expands config variables before writing KDL."
-
-[[edit]]
-migrated = true
-paths = ["src/command/mod.rs", "src/command/scratchpad.rs", "src/command/window.rs"]
-what = "fail commands that would create or require sway floating split-container groups before changing state; swayward deliberately has no floating-subtree model, so reporting success after acting on one child or doing nothing would claim unsupported semantics."
-why = ""
 
 [[edit]]
 migrated = true
@@ -1381,6 +1393,12 @@ why = "Sway appends containers to the scratchpad list and prepends each one to t
 
 [[edit]]
 migrated = false
+paths = ["src/ipc/tree.rs"]
+what = "document why output-node serialization can require a matching flat output entry."
+why = "Both entries are derived in the same call from the same immutable layout monitor, so the lookup is an internal serialization invariant rather than independently mutable compositor state."
+
+[[edit]]
+migrated = false
 paths = ["src/layout/tiling_tree/movement.rs", "src/layout/tiling_tree/tests.rs"]
 what = "preserve focus history when a move-to-mark target is already the moved node's preceding sibling."
 why = "Sway leaves an already positioned container attached, so replaying move-to-mark does not reorder its focus stack (`sway/commands/move.c`)."
@@ -1513,6 +1531,24 @@ why = "Sway serializes `parse_error` whenever a command result has an error (`sw
 
 [[edit]]
 migrated = false
+paths = ["swayward-ipc/src/command.rs"]
+what = "report sway's exact invalid-border grammar, which allows an optional width only after `pixel`."
+why = "Sway's `cmd_border` error is `Expected 'border <none|normal|pixel|csd|toggle>' or 'border pixel <px>'` (`sway/commands/border.c:59-90`)."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/monitor.rs", "src/tests/ipc/workspace_output.rs"]
+what = "preserve every output's initial workspace split while its configured output mode is applied, rather than only preserving the first output's split."
+why = "Sway creates an initial workspace in output_enable before the configured mode takes effect (`sway/tree/output.c`); the 360-state oracle shows portrait secondary outputs retaining the pre-mode horizontal split."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/layout/workspace.rs", "src/layout/tiling_tree/fullscreen.rs", "src/tests/ipc/workspace_commands.rs"]
+what = "apply unscoped fullscreen only to the focused floating window when the floating layer is active, and retain structural focus when fullscreening an already focused tiling container."
+why = "Sway fullscreen targets the seat's raw focused node; applying it to both the active floating window and stale tiling focus left two fullscreen nodes, while descending a directly focused split changed GET_TREE focus metadata (`sway/commands/fullscreen.c`; `sway/tree/container.c`)."
+
+[[edit]]
+migrated = false
 paths = ["src/ipc/server.rs", "src/tests/ipc/config_commands.rs"]
 what = "track a window's formatted title in IPC event state and emit one `window::title` event when the `title_format` command changes only compositor-rendered title text."
 why = "Sway emits `window::title` when `title_format` recomputes the container title (`sway/sway/commands/title_format.c:25-28`; `sway/sway/tree/view.c:1117-1138`). Swayward's event state tracked only the client's raw title, so the command produced no event."
@@ -1540,3 +1576,135 @@ migrated = false
 paths = ["src/layout/tiling_tree/mod.rs", "src/layout/tiling_tree/movement.rs", "src/layout/tiling_tree/tests.rs", "src/tests/ipc/tree_commands.rs"]
 what = "preserve non-empty singleton split containers when a child window closes, moves to the scratchpad, or is vacated by an outward directional move; only reap containers made empty by the removal, and resolve a one-window directional move's source parent after root compaction."
 why = "Sway's container detach path calls `container_reap_empty`, which removes empty ancestors but retains a split with one surviving child (`sway/tree/container.c`). Swayward instead collapsed every singleton ancestor and changed the IPC tree shape; after retaining it, the one-window move path could keep a stale pre-compaction parent ID and leave its actual parent empty."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/server.rs", "src/tests/ipc/events.rs"]
+what = "serialize a workspace init event as the empty workspace at creation time instead of replacing it with the command's settled destination tree."
+why = "Sway emits workspace init from `workspace_create` before a following container move populates the workspace (`sway/tree/workspace.c`; `sway/sway/ipc-server.c`). The transaction flusher's settled-tree substitution leaked the moved floating group into the earlier init event."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/server.rs"]
+what = "reconstruct a sticky floating group's source-workspace snapshot at the workspace-switch event boundary while omitting the group from the destination snapshot until sway moves it."
+why = "Sway emits the workspace focus transition before its post-focus sticky-container transfer (`sway/input/seat.c:1195-1215`). Swayward batches the whole command and otherwise serializes only the settled destination, reversing which workspace contains the group in the focus event."
+
+[[edit]]
+migrated = false
+paths = ["src/command/layout.rs", "src/layout/floating_tree.rs", "src/layout/workspace.rs", "src/tests/ipc/events.rs"]
+what = "fullscreen a resident floating container tree as one recursive root and emit the root's `window::fullscreen_mode` event instead of passing one descendant through the inherited leaf-only floating toggle."
+why = "Sway fullscreen targets the focused container, including a split in the workspace floating list, and emits one recursive event for that container (`sway/commands/fullscreen.c`; `sway/sway/ipc-server.c`). The inherited leaf path could not find resident-tree descendants and panicked."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/command/focus.rs", "src/layout/tiling_tree/mod.rs", "src/tests/ipc/events.rs"]
+what = "match command criteria against resident floating-tree leaves and emit their focus event explicitly when criteria focus raises the group."
+why = "Sway evaluates criteria against every view and emits `window::focus` after focusing a matched view (`sway/criteria.c`; `sway/input/seat.c:1177-1198`). Swayward's general event iterator omits resident-tree leaves, so criteria matching and the resulting event need the recursive tree path."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/layout/tiling_tree/mod.rs", "src/tests/ipc/events.rs"]
+what = "include resident floating-tree leaves in command criteria matching without changing window event iteration."
+why = "Sway evaluates criteria against every view, including views nested below a floating split (`sway/criteria.c`; `sway/commands/focus.c`). Swayward's general window iterator omits resident-tree leaves to preserve event semantics, so criteria need to read those leaves from the recursive IPC tree separately."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/command/scratchpad.rs", "src/tests/ipc/events.rs"]
+what = "emit recursive root move events when a resident floating group enters or leaves the scratchpad, preceded by the focused leaf event when shown."
+why = "Sway moves the floating container root through the scratchpad and emits events for the actual affected nodes (`sway/tree/root.c:150-154`; `sway/sway/ipc-server.c`). Leaf iteration does not expose swayward's detached or resident floating roots, so the generic event diff emitted nothing."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/layout/workspace.rs", "src/ui/screenshot_ui.rs"]
+what = "store a workspace's floating windows in swayward's owned `FloatingLayout` root model instead of niri's leaf-only `FloatingSpace`, and route the shared directional-move constant through the owned module."
+why = "Sway workspaces store ordered floating container roots (`sway/tree/workspace.c:961-973`). The owned boundary preserves the current one-window behavior while allowing a later migration to resident nested trees without branching through inherited niri floating code."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tiling_tree/mod.rs", "src/layout/tiling_tree/tests.rs", "src/tests/ipc/workspace_commands.rs"]
+what = "preserve a detached split root's layout, previous layout, title format, fullscreen state, ID remapping, and representation state when attaching it to an empty tiling tree."
+why = "A destination workspace has its own permanent root ID, so attaching a whole source tree must transfer the source root's state onto that root rather than discarding it while adopting only its children. Sway updates the destination workspace representation after attaching the moved container (`sway/tree/container.c:1519-1523`)."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tiling_tree/mod.rs", "src/layout/tiling_tree/rendering.rs", "src/layout/tiling_tree/tests.rs", "src/layout/tests.rs", "src/layout/workspace.rs"]
+what = "allow detached nested container roots to reside in an arbitrary floating rectangle, preserving collision-free node IDs and recursive layout, focus, rendering, hit testing, resize, and lifecycle state."
+why = "Sway floats a split by moving the same recursive container root into the workspace floating list, rather than flattening it to leaves (`sway/tree/container.c:955-1050`; `sway/tree/workspace.c:961-973`)."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/layout/workspace.rs", "src/tests/ipc/workspace_commands.rs"]
+what = "keep hidden floating subtrees visible to Wayland lifecycle lookup, and accept root-ID remapping and missing transient geometry while toggling container trees between floating and tiling."
+why = "Sway's scratchpad keeps container trees in the compositor tree while hidden; swayward stores them separately, so lifecycle lookup and floating transitions must still account for those resident trees (`sway/tree/root.c`; `sway/tree/container.c`)."
+
+[[edit]]
+migrated = false
+paths = ["contrib/live-ipc-soak", "docs/BUILDING.md"]
+what = "provide a repeatable, fixed-seed live IPC soak for nested floating-container mutations, command parsing, and wire framing on one or two headless outputs."
+why = "The randomized layout property test cannot exercise the compositor event loop, live Wayland clients, or IPC framing; the standalone probe runs through the capped nested launcher and leaves the failing seed, step, and command for reduction."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/layout/workspace.rs", "src/ui/screenshot_ui.rs"]
+what = "store a workspace's floating windows in swayward's owned `FloatingLayout` root model instead of niri's leaf-only `FloatingSpace`, and route the shared directional-move constant through the owned module."
+why = "Sway workspaces store ordered floating container roots (`sway/tree/workspace.c:961-973`). The owned boundary preserves the current one-window behavior while allowing a later migration to resident nested trees without branching through inherited niri floating code."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tiling_tree/mod.rs", "src/layout/tiling_tree/tests.rs", "src/tests/ipc/workspace_commands.rs"]
+what = "preserve a detached split root's layout, previous layout, title format, fullscreen state, and ID remapping when attaching it to an empty tiling tree."
+why = "A destination workspace has its own permanent root ID, so attaching a whole source tree must transfer the source root's state onto that root rather than discarding it while adopting only its children."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/tiling_tree/mod.rs", "src/layout/tiling_tree/rendering.rs", "src/layout/tiling_tree/tests.rs", "src/layout/tests.rs", "src/layout/workspace.rs"]
+what = "allow detached nested container roots to reside in an arbitrary floating rectangle, preserving collision-free node IDs and recursive layout, focus, rendering, hit testing, resize, and lifecycle state."
+why = "Sway floats a split by moving the same recursive container root into the workspace floating list, rather than flattening it to leaves (`sway/tree/container.c:955-1050`; `sway/tree/workspace.c:961-973`)."
+
+[[edit]]
+migrated = false
+paths = ["src/command/mod.rs", "src/tests/ipc/config_commands.rs"]
+what = "reject `mark` while a workspace root is focused instead of storing a mark on swayward's permanent tiling root."
+why = "Sway workspace nodes are never containers, regardless of how many tiling children they have, so `cmd_mark` returns `Only containers can have marks` when the workspace itself is focused (`sway/commands/mark.c`)."
+
+[[edit]]
+migrated = false
+paths = ["README.md", "docs/wiki/Getting-Started.md", "docs/wiki/FAQ.md", "docs/wiki/Development:-Releasing-swayward.md"]
+what = "describe build-from-source and Nix as the current install paths, list GitHub release artifacts as beta-1 plans, and state that COPR and AUR publication comes later."
+why = "The GitHub repository has no public release, the COPR API reports no swayward project, and there is no AUR package, so instructions must not present planned artifacts as available downloads."
+
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/layout/tests.rs"]
+what = "exclude a moving tile's temporary animation offset when computing the stable output-relative box used to unconstrain its popups."
+why = "Sway unconstrains popups from the output box relative to the container's pending content geometry (`sway/desktop/xdg_shell.c:44-65`); a visual movement animation must not shift that constraint box."
+
+[[edit]]
+migrated = false
+paths = ["contrib/live-ipc-soak", "docs/BUILDING.md", "src/layout/mod.rs", "src/layout/monitor.rs", "src/tests/ipc/workspace_output.rs"]
+what = "provide a repeatable, fixed-seed live IPC soak for nested floating-container mutations, output hotplug and workspace evacuation, command parsing, and wire framing; remove a reclaimed workspace from its old output order and keep each workspace unique after repeated moves and replug."
+why = "The randomized layout property test cannot exercise the compositor event loop, live Wayland clients, output disable and re-enable, or IPC framing; repeated hotplug exposed stale workspace-order entries that duplicated a workspace and all its windows in GET_TREE."
+
+[[edit]]
+migrated = false
+paths = ["src/swayward.rs", "src/tests/ipc/wire.rs"]
+what = "skip keyboard-focus updates when the seat has no keyboard, and soak input IPC across repeated keyboard and pointer hotplug cycles."
+why = "A keyboard may disappear between compositor refreshes; live-session focus refresh must not panic while GET_INPUTS, GET_SEATS, and input commands continue returning structured replies."
+
+[[edit]]
+migrated = false
+paths = ["src/ipc/tree.rs", "src/layout/mod.rs", "src/layout/monitor.rs", "src/layout/tiling_tree/mod.rs", "src/layout/workspace.rs", "src/tests/ipc/mod.rs", "src/tests/ipc/property.rs"]
+what = "exercise random sway command, window-map, and window-unmap sequences through the real headless compositor fixture; keep targeted commands for scratchpad windows safe and preserve floating focus when sticky windows follow workspace switches."
+why = "Sway commands can target hidden scratchpad containers, which are not attached to a monitor, and a workspace containing only sticky floating windows must retain a live focused container as it follows the active workspace."
+
+[[edit]]
+migrated = false
+paths = ["src/swayward.rs", "src/tests/fixture.rs", "src/tests/ipc/property.rs"]
+what = "tear down the test seat keyboard before its Wayland display so repeated real-compositor fixtures release the keymap memfd, and continue without a keyboard if both configured and default keymaps fail."
+why = "The Wayland backend retains protocol keyboard resources until display teardown, creating a cycle through the seat's keyboard handle in the in-process fixture; live startup must also log keymap exhaustion instead of panicking."
+
+[[edit]]
+migrated = false
+paths = ["src/protocols/foreign_toplevel.rs"]
+what = "retain the last advertised foreign-toplevel title and app ID while an xdg-toplevel role is being destroyed instead of treating transient absent role metadata as a live update."
+why = "Wayland foreign-toplevel protocols have no event for clearing a title or app ID. Client teardown can clear xdg role metadata before the surface leaves the mapped-window list, so reporting that expected lifecycle state as an ERROR violates swayward's live-session logging invariant."

@@ -1282,7 +1282,7 @@ impl<W: LayoutElement> Tile<W> {
         let fullscreen_progress = self.fullscreen_progress();
         let expanded_progress = self.expanded_progress();
 
-        let win_alpha = if self.window.is_ignoring_opacity_window_rule() {
+        let rule_alpha = if self.window.is_ignoring_opacity_window_rule() {
             1.
         } else {
             let alpha = self.window.rules().opacity.unwrap_or(1.).clamp(0., 1.);
@@ -1291,6 +1291,7 @@ impl<W: LayoutElement> Tile<W> {
             let p = fullscreen_progress as f32;
             alpha * (1. - p) + 1. * p
         };
+        let win_alpha = rule_alpha * self.window.command_opacity();
 
         // This is here rather than in render_offset() because render_offset() is currently assumed
         // by the code to be temporary. So, for example, interactive move will try to "grab" the
@@ -1831,18 +1832,15 @@ impl<W: LayoutElement> Tile<W> {
     }
 
     pub fn has_sway_titlebar(&self) -> bool {
+        self.has_configured_sway_titlebar() && self.effective_border_width().is_some()
+    }
+
+    pub(crate) fn has_configured_sway_titlebar(&self) -> bool {
         // Only `normal` draws a titlebar. When no rule or command has set a
         // border this follows `default_border`, so the answer stays
         // consistent with sway_border() above; they were allowed to disagree
         // once and the i3 centering test caught it.
-        !self.sway_uses_csd
-            && match self.sway_border {
-                Some((style, _)) => style == BorderStyle::Normal,
-                None => {
-                    self.default_sway_border().0 == BorderStyle::Normal
-                        && self.effective_border_width().is_some()
-                }
-            }
+        !self.sway_uses_csd && self.sway_border().0 == BorderStyle::Normal
     }
 
     pub fn set_sway_border(

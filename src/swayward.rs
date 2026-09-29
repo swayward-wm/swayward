@@ -202,6 +202,16 @@ pub enum RuntimeWindowRule {
     NoFocus(String, crate::criteria::Criteria),
 }
 
+struct LayerRenderRequest<'a> {
+    ns: Option<usize>,
+    layer_map: &'a LayerMap,
+    layer: Layer,
+    xray_pos: XrayPos,
+    for_backdrop: bool,
+}
+
+type ScreencopyRenderResult = anyhow::Result<Option<SyncPoint>>;
+
 pub struct Swayward {
     pub config: Rc<RefCell<Config>>,
 
@@ -764,9 +774,20 @@ impl KeyboardFocus {
     }
 }
 
+#[cfg(test)]
+pub(crate) static LIVE_STATE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub struct State {
     pub backend: Backend,
     pub swayward: Swayward,
+}
+
+#[cfg(test)]
+impl Drop for State {
+    fn drop(&mut self) {
+        LIVE_STATE_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl State {
@@ -811,6 +832,8 @@ impl State {
         backend.init(&mut swayward);
 
         let mut state = Self { backend, swayward };
+        #[cfg(test)]
+        LIVE_STATE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Load the xkb_file config option if set by the user.
         state.load_xkb_file();
@@ -1258,6 +1281,10 @@ impl State {
     }
 
     pub fn update_keyboard_focus(&mut self) {
+        let Some(keyboard) = self.swayward.seat.get_keyboard() else {
+            return;
+        };
+
         // Clean up on-demand layer surface focus if necessary.
         if let Some(surface) = &self.swayward.layer_shell_on_demand_focus {
             // Still alive and has on-demand interactivity.
@@ -1392,7 +1419,6 @@ impl State {
             KeyboardFocus::Layout { surface: None }
         };
 
-        let keyboard = self.swayward.seat.get_keyboard().unwrap();
         if self.swayward.keyboard_focus != focus {
             trace!(
                 "keyboard focus changed from {:?} to {:?}",
@@ -2488,8 +2514,12 @@ impl Swayward {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let _span = tracy_client::span!("Swayward::new");
 
-        let (executor, scheduler) = calloop::futures::executor().unwrap();
-        event_loop.insert_source(executor, |_, _, _| ()).unwrap();
+        let (executor, scheduler) =
+            calloop::futures::executor().context("error creating the async executor")?;
+        event_loop
+            .insert_source(executor, |_, _, _| ())
+            .map_err(|error| anyhow::anyhow!(error.error))
+            .context("error registering the async executor")?;
 
         let display_handle = display.handle();
         let config_ = config.borrow();
@@ -2613,7 +2643,8 @@ impl Swayward {
                     TimeoutAction::ToDuration(XDG_ACTIVATION_TOKEN_TIMEOUT)
                 },
             )
-            .unwrap();
+            .map_err(|error| anyhow::anyhow!(error.error))
+            .context("error registering the activation token timer")?;
 
         let mutter_x11_interop_state =
             MutterX11InteropManagerState::new::<State, _>(&display_handle, move |_| true);
@@ -2634,19 +2665,26 @@ impl Swayward {
                 } else {
                     warn!("error adding keyboard: {err:?}");
                 }
-                seat.add_keyboard(
+                match seat.add_keyboard(
                     Default::default(),
                     config_.input.keyboard.repeat_delay.into(),
                     config_.input.keyboard.repeat_rate.into(),
-                )
-                .unwrap()
+                ) {
+                    Ok(keyboard) => Some(keyboard),
+                    Err(err) => {
+                        error!("error adding keyboard with the default keymap: {err:?}");
+                        None
+                    }
+                }
             }
-            Ok(keyboard) => keyboard,
+            Ok(keyboard) => Some(keyboard),
         };
         if config_.input.keyboard.numlock {
-            let mut modifier_state = keyboard.modifier_state();
-            modifier_state.num_lock = true;
-            keyboard.set_modifier_state(modifier_state);
+            if let Some(keyboard) = keyboard {
+                let mut modifier_state = keyboard.modifier_state();
+                modifier_state.num_lock = true;
+                keyboard.set_modifier_state(modifier_state);
+            }
         }
         seat.add_pointer();
 
@@ -2725,7 +2763,8 @@ impl Swayward {
                 }
                 Ok(PostAction::Continue)
             })
-            .unwrap();
+            .map_err(|error| anyhow::anyhow!(error.error))
+            .context("error registering the Wayland display")?;
 
         event_loop
             .insert_source(
@@ -2738,7 +2777,8 @@ impl Swayward {
                     TimeoutAction::Drop
                 },
             )
-            .unwrap();
+            .map_err(|error| anyhow::anyhow!(error.error))
+            .context("error registering the startup timer")?;
 
         drop(config_);
         let mut swayward = Self {
@@ -4763,11 +4803,13 @@ impl Swayward {
             ($layer:expr, $ns:expr, $xray_pos:expr, $backdrop:expr, $push:expr) => {{
                 self.render_layer_popups(
                     ctx.r(),
-                    $ns,
-                    &layer_map,
-                    $layer,
-                    $xray_pos,
-                    $backdrop,
+                    LayerRenderRequest {
+                        ns: $ns,
+                        layer_map: &layer_map,
+                        layer: $layer,
+                        xray_pos: $xray_pos,
+                        for_backdrop: $backdrop,
+                    },
                     $push,
                 );
             }};
@@ -4789,11 +4831,13 @@ impl Swayward {
             ($layer:expr, $ns:expr, $xray_pos:expr, $backdrop:expr, $push:expr) => {{
                 self.render_layer_normal(
                     ctx.r(),
-                    $ns,
-                    &layer_map,
-                    $layer,
-                    $xray_pos,
-                    $backdrop,
+                    LayerRenderRequest {
+                        ns: $ns,
+                        layer_map: &layer_map,
+                        layer: $layer,
+                        xray_pos: $xray_pos,
+                        for_backdrop: $backdrop,
+                    },
                     $push,
                 );
             }};
@@ -4922,11 +4966,13 @@ impl Swayward {
             elements.clear();
             self.render_layer_normal(
                 ctx.r(),
-                None,
-                &layer_map,
-                Layer::Background,
-                XrayPos::default(),
-                false,
+                LayerRenderRequest {
+                    ns: None,
+                    layer_map: &layer_map,
+                    layer: Layer::Background,
+                    xray_pos: XrayPos::default(),
+                    for_backdrop: false,
+                },
                 &mut |elem| elements.push(elem.into()),
             );
             // Avoid unused capacity remaining forever.
@@ -4939,11 +4985,13 @@ impl Swayward {
             elements.clear();
             self.render_layer_normal(
                 ctx.r(),
-                None,
-                &layer_map,
-                Layer::Background,
-                XrayPos::default(),
-                true,
+                LayerRenderRequest {
+                    ns: None,
+                    layer_map: &layer_map,
+                    layer: Layer::Background,
+                    xray_pos: XrayPos::default(),
+                    for_backdrop: true,
+                },
                 &mut |elem| elements.push(elem.into()),
             );
             // Avoid unused capacity remaining forever.
@@ -4999,17 +5047,19 @@ impl Swayward {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_layer_normal<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
-        ns: Option<usize>,
-        layer_map: &LayerMap,
-        layer: Layer,
-        xray_pos: XrayPos,
-        for_backdrop: bool,
+        request: LayerRenderRequest<'_>,
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
+        let LayerRenderRequest {
+            ns,
+            layer_map,
+            layer,
+            xray_pos,
+            for_backdrop,
+        } = request;
         for (mapped, geo) in self.layers_in_render_order(layer_map, layer, for_backdrop) {
             let loc = geo.loc.to_f64();
             let xray_pos = xray_pos.offset(loc);
@@ -5017,17 +5067,19 @@ impl Swayward {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_layer_popups<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
-        ns: Option<usize>,
-        layer_map: &LayerMap,
-        layer: Layer,
-        xray_pos: XrayPos,
-        for_backdrop: bool,
+        request: LayerRenderRequest<'_>,
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
+        let LayerRenderRequest {
+            ns,
+            layer_map,
+            layer,
+            xray_pos,
+            for_backdrop,
+        } = request;
         for (mapped, geo) in self.layers_in_render_order(layer_map, layer, for_backdrop) {
             let loc = geo.loc.to_f64();
             let xray_pos = xray_pos.offset(loc);
@@ -5880,14 +5932,13 @@ impl Swayward {
         damage_tracker.damage_output(1, elements).unwrap()
     }
 
-    #[allow(clippy::type_complexity)]
     fn render_for_screencopy_internal(
         renderer: &mut GlesRenderer,
         damage_tracker: &mut OutputDamageTracker,
         elements: &[impl RenderElement<GlesRenderer>],
         states: RenderElementStates,
         screencopy: &Screencopy,
-    ) -> anyhow::Result<Option<SyncPoint>> {
+    ) -> ScreencopyRenderResult {
         let sync = match screencopy.buffer() {
             ScreencopyBuffer::Dmabuf(dmabuf) => {
                 let sync =
@@ -6053,12 +6104,13 @@ impl Swayward {
         let _span = tracy_client::span!("Swayward::screenshot_window");
 
         let scale = Scale::from(output.current_scale().fractional_scale());
-        let alpha =
+        let rule_alpha =
             if mapped.sizing_mode().is_fullscreen() || mapped.is_ignoring_opacity_window_rule() {
                 1.
             } else {
                 mapped.rules().opacity.unwrap_or(1.).clamp(0., 1.)
             };
+        let alpha = rule_alpha * mapped.command_opacity();
 
         let mut elements: Vec<WindowScreenshotRenderElement<GlesRenderer>> = Vec::new();
 

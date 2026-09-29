@@ -1,8 +1,8 @@
 //! Window, workspace, and output layout logic.
 //!
 //! Each output owns an ordered set of workspaces. Each workspace contains a nested
-//! [`tiling_tree::TilingTree`] and a [`floating::FloatingSpace`]. Empty inactive workspaces are
-//! destroyed unless configuration makes them persistent; every output still keeps an active
+//! [`tiling_tree::TilingTree`] and a [`floating_tree::FloatingLayout`]. Empty inactive workspaces
+//! are destroyed unless configuration makes them persistent; every output still keeps an active
 //! workspace. [`scrolling`] contains compatibility types from niri's removed scrolling engine,
 //! not the active layout model.
 //!
@@ -63,7 +63,7 @@ use crate::utils::{
 use crate::window::ResolvedWindowRules;
 
 pub mod closing_window;
-pub mod floating;
+pub mod floating_tree;
 pub mod focus_ring;
 pub mod insert_hint_element;
 pub mod monitor;
@@ -108,6 +108,13 @@ swayward_render_elements! {
 
 pub type LayoutElementRenderSnapshot =
     RenderSnapshot<BakedBuffer<TextureBuffer<GlesTexture>>, BakedBuffer<SolidColorBuffer>>;
+
+type NodeRemap = Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>;
+
+pub(crate) struct SwapRemap {
+    pub(crate) first: NodeRemap,
+    pub(crate) second: NodeRemap,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizingMode {
@@ -259,6 +266,9 @@ pub trait LayoutElement {
     }
     fn set_bounds(&self, bounds: Size<i32, Logical>);
     fn is_ignoring_opacity_window_rule(&self) -> bool;
+    fn command_opacity(&self) -> f32 {
+        1.
+    }
 
     fn is_urgent(&self) -> bool;
 
@@ -384,6 +394,8 @@ pub struct Layout<W: LayoutElement> {
     last_active_workspace_id: HashMap<String, WorkspaceId>,
     /// Windows hidden on sway's synthetic scratchpad workspace.
     scratchpad: VecDeque<RemovedTile<W>>,
+    /// Floating container roots hidden on sway's synthetic scratchpad workspace.
+    scratchpad_trees: VecDeque<floating_tree::RemovedFloatingTree<W>>,
     /// All scratchpad windows, including the one currently shown.
     scratchpad_windows: Vec<W::Id>,
     /// Ongoing interactive move.
@@ -655,7 +667,7 @@ impl<W: LayoutElement> InteractiveMoveState<W> {
 }
 
 impl<W: LayoutElement> InteractiveMoveData<W> {
-    fn tile_render_location(&self, zoom: f64) -> Point<f64, Logical> {
+    fn tile_location(&self, zoom: f64, render_offset: Point<f64, Logical>) -> Point<f64, Logical> {
         let scale = Scale::from(self.output.current_scale().fractional_scale());
         let window_size = self.tile.window_size();
         let pointer_offset_within_window = Point::from((
@@ -663,10 +675,13 @@ impl<W: LayoutElement> InteractiveMoveData<W> {
             window_size.h * self.pointer_ratio_within_window.1,
         ));
         let pos = self.pointer_pos_within_output
-            - (pointer_offset_within_window + self.tile.window_loc() - self.tile.render_offset())
-                .upscale(zoom);
+            - (pointer_offset_within_window + self.tile.window_loc() - render_offset).upscale(zoom);
         // Round to physical pixels.
         pos.to_physical_precise_round(scale).to_logical(scale)
+    }
+
+    fn tile_render_location(&self, zoom: f64) -> Point<f64, Logical> {
+        self.tile_location(zoom, self.tile.render_offset())
     }
 }
 
@@ -907,6 +922,7 @@ impl<W: LayoutElement> Layout<W> {
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             scratchpad: VecDeque::new(),
+            scratchpad_trees: VecDeque::new(),
             scratchpad_windows: Vec::new(),
             interactive_move: None,
             dnd: None,
@@ -946,6 +962,7 @@ impl<W: LayoutElement> Layout<W> {
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             scratchpad: VecDeque::new(),
+            scratchpad_trees: VecDeque::new(),
             scratchpad_windows: Vec::new(),
             interactive_move: None,
             dnd: None,
@@ -1219,6 +1236,9 @@ impl<W: LayoutElement> Layout<W> {
                 for i in (0..primary.workspaces.len()).rev() {
                     if primary.workspaces[i].original_output.matches(&output) {
                         let ws = primary.workspaces.remove(i);
+                        primary
+                            .sway_workspace_order
+                            .retain(|candidate| *candidate != ws.id());
                         reclaimed_any = true;
 
                         // FIXME: this can be coded in a way that the workspace switch won't be
@@ -1374,16 +1394,21 @@ impl<W: LayoutElement> Layout<W> {
                     }
 
                     let primary = &mut monitors[primary_idx];
+                    let mut sticky_trees = Vec::new();
                     let mut sticky = Vec::new();
                     workspaces.retain_mut(|workspace| {
                         if workspace.has_non_sticky_windows() {
                             true
                         } else {
+                            sticky_trees.extend(workspace.take_sticky_trees());
                             sticky.extend(workspace.take_sticky_tiles());
                             false
                         }
                     });
                     let target_workspace = primary.active_workspace();
+                    for removed in sticky_trees {
+                        target_workspace.add_floating_tree(removed, true);
+                    }
                     for mut removed in sticky {
                         target_workspace.remap_floating_position(
                             &mut removed.tile,
@@ -1968,6 +1993,11 @@ impl<W: LayoutElement> Layout<W> {
             .scratchpad
             .iter()
             .map(|removed| removed.tile.window())
+            .chain(
+                self.scratchpad_trees
+                    .iter()
+                    .flat_map(|removed| removed.tree.windows().map(|(_, window)| window)),
+            )
             .find(|window| window.is_wl_surface(wl_surface))
         {
             return Some((window, None));
@@ -2009,6 +2039,11 @@ impl<W: LayoutElement> Layout<W> {
             .scratchpad
             .iter_mut()
             .map(|removed| removed.tile.window_mut())
+            .chain(
+                self.scratchpad_trees
+                    .iter_mut()
+                    .flat_map(|removed| removed.tree.tiles_mut().map(|tile| tile.window_mut())),
+            )
             .find(|window| window.is_wl_surface(wl_surface))
         {
             return Some((window, None));
@@ -2053,9 +2088,7 @@ impl<W: LayoutElement> Layout<W> {
                 let width = move_.tile.window_size().w;
                 let height = output_size(&move_.output).h;
                 let mut target = Rectangle::from_size(Size::from((width, height)));
-                // FIXME: ideally this shouldn't include the tile render offset, but the code
-                // duplication would be a bit annoying for this edge case.
-                target.loc.y -= move_.tile_render_location(1.).y;
+                target.loc.y -= move_.tile_location(1., Point::default()).y;
                 target.loc.y -= move_.tile.window_loc().y;
                 return target;
             }
@@ -2138,14 +2171,10 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn activate_window(&mut self, window: &W::Id) {
         let global = self.workspaces().find_map(|(_, _, workspace)| {
-            (workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global)).then(|| {
-                (
-                    workspace.id(),
-                    workspace.tiling().fullscreen_node().unwrap(),
-                )
-            })
+            (workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global))
+                .then(|| workspace.id())
         });
-        if let Some((workspace_id, node)) = global {
+        if let Some(workspace_id) = global {
             let target_is_inside = self.workspaces().any(|(_, _, candidate)| {
                 candidate.id() == workspace_id && candidate.has_window(window)
             });
@@ -2154,7 +2183,7 @@ impl<W: LayoutElement> Layout<W> {
                     .workspaces_mut()
                     .find(|candidate| candidate.id() == workspace_id)
                 {
-                    workspace.tiling_mut().set_node_fullscreen(node, None);
+                    workspace.disable_fullscreen();
                 }
             }
         }
@@ -2981,10 +3010,13 @@ impl<W: LayoutElement> Layout<W> {
 
         let monitor = if let Some(window) = window {
             match &mut self.monitor_set {
-                MonitorSet::Normal { monitors, .. } => monitors
-                    .iter_mut()
-                    .find(|mon| mon.has_window(window))
-                    .unwrap(),
+                MonitorSet::Normal { monitors, .. } => {
+                    let Some(monitor) = monitors.iter_mut().find(|mon| mon.has_window(window))
+                    else {
+                        return;
+                    };
+                    monitor
+                }
                 MonitorSet::NoOutputs { .. } => {
                     return;
                 }
@@ -3582,20 +3614,13 @@ impl<W: LayoutElement> Layout<W> {
             .map_err(str::to_owned)
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn swap_tiling_nodes_between_workspaces(
+    pub(crate) fn swap_tiling_nodes_between_workspaces(
         &mut self,
         first_workspace: WorkspaceId,
         first: tiling_tree::NodeId,
         second_workspace: WorkspaceId,
         second: tiling_tree::NodeId,
-    ) -> Result<
-        (
-            Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>,
-            Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>,
-        ),
-        String,
-    > {
+    ) -> Result<SwapRemap, String> {
         let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
             return Err("cannot swap containers without an output".into());
         };
@@ -3641,7 +3666,7 @@ impl<W: LayoutElement> Layout<W> {
         let (mut second_subtree, second_slot) = second_ws
             .detach_tiling_subtree_for_swap(second)
             .ok_or_else(|| "No matching node.".to_owned())?;
-        first_subtree.swap_root_mode(&mut second_subtree);
+        first_subtree.swap_fullscreen_position(&mut second_subtree);
         let second_remapped = first_ws
             .attach_tiling_subtree_for_swap(second_subtree, first_slot)
             .1;
@@ -3650,7 +3675,10 @@ impl<W: LayoutElement> Layout<W> {
             .1;
         first_ws.finish_tiling_subtree_detach(None);
         second_ws.finish_tiling_subtree_detach(None);
-        Ok((first_remapped, second_remapped))
+        Ok(SwapRemap {
+            first: first_remapped,
+            second: second_remapped,
+        })
     }
 
     pub fn move_tiling_subtree_to_node(
@@ -4095,8 +4123,12 @@ impl<W: LayoutElement> Layout<W> {
         }
         let target = monitor.active_workspace_ref().id();
         if sticky && source != target {
+            let removed_trees = monitor.workspaces[source_idx].take_sticky_trees();
             let removed = monitor.workspaces[source_idx].take_sticky_tiles();
             let target_idx = monitor.idx_of_ws(target).unwrap();
+            for removed in removed_trees {
+                monitor.workspaces[target_idx].add_floating_tree(removed, false);
+            }
             for removed in removed {
                 monitor.workspaces[target_idx].add_tile(
                     removed.tile,
@@ -4126,7 +4158,34 @@ impl<W: LayoutElement> Layout<W> {
             .scratchpad
             .iter()
             .any(|removed| removed.tile.window().id() == &window)
+            || self
+                .scratchpad_trees
+                .iter()
+                .any(|removed| removed.contains_window(&window))
         {
+            return;
+        }
+        let floating_tree = self.workspaces().find_map(|(_, _, workspace)| {
+            workspace
+                .floating_tree_root_for_window(&window)
+                .map(|root| (workspace.id(), root))
+        });
+        if let Some((source_workspace, root)) = floating_tree {
+            let removed = {
+                let workspace = self
+                    .workspaces_mut()
+                    .find(|workspace| workspace.id() == source_workspace)
+                    .unwrap();
+                workspace.clear_floating_tree_fullscreen(root);
+                workspace.remove_floating_tree(root).unwrap()
+            };
+            for id in removed.window_ids() {
+                if !self.scratchpad_windows.contains(id) {
+                    self.scratchpad_windows.push(id.clone());
+                }
+            }
+            self.scratchpad_trees.push_back(removed);
+            self.clean_up_removed_window_workspace(source_workspace);
             return;
         }
         let automatic_maximum = self.output_layout_size();
@@ -4162,6 +4221,34 @@ impl<W: LayoutElement> Layout<W> {
                     .find(|id| !self.is_scratchpad_hidden(id))
                     .cloned()
             });
+        let target_tree = window
+            .and_then(|window| {
+                self.scratchpad_trees
+                    .iter()
+                    .position(|removed| removed.contains_window(window))
+            })
+            .or_else(|| {
+                (window.is_none() && shown.is_none() && self.scratchpad.is_empty())
+                    .then_some(0)
+                    .filter(|_| !self.scratchpad_trees.is_empty())
+            });
+        if let Some(index) = target_tree {
+            let active_workspace = self.active_workspace()?.id();
+            for workspace in self.workspaces_mut() {
+                let disables_fullscreen = workspace.id() == active_workspace
+                    || workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global);
+                if disables_fullscreen {
+                    workspace.disable_fullscreen();
+                }
+            }
+            let removed = self.scratchpad_trees.remove(index)?;
+            let shown = removed.window_ids().first()?.clone();
+            self.workspaces_mut()
+                .find(|workspace| workspace.id() == active_workspace)
+                .unwrap()
+                .add_floating_tree(removed, true);
+            return Some(shown);
+        }
         let mut target_index = window.and_then(|window| {
             self.scratchpad
                 .iter()
@@ -4187,6 +4274,20 @@ impl<W: LayoutElement> Layout<W> {
                 return None;
             }
             self.move_to_scratchpad(Some(&shown));
+            if let Some(index) = self
+                .scratchpad_trees
+                .iter()
+                .position(|removed| removed.contains_window(&shown))
+            {
+                let active_workspace = self.active_workspace()?.id();
+                let removed = self.scratchpad_trees.remove(index)?;
+                let shown = removed.window_ids().first()?.clone();
+                self.workspaces_mut()
+                    .find(|workspace| workspace.id() == active_workspace)
+                    .unwrap()
+                    .add_floating_tree(removed, true);
+                return Some(shown);
+            }
             target_index = self
                 .scratchpad
                 .iter()
@@ -4200,9 +4301,7 @@ impl<W: LayoutElement> Layout<W> {
             let disables_fullscreen = workspace.id() == active_workspace
                 || workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global);
             if disables_fullscreen {
-                if let Some(window) = workspace.fullscreen_window().cloned() {
-                    workspace.set_fullscreen(&window, false);
-                }
+                workspace.disable_fullscreen();
             }
         }
 
@@ -4227,7 +4326,22 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn scratchpad_windows(&self) -> impl Iterator<Item = &W> {
-        self.scratchpad.iter().map(|removed| removed.tile.window())
+        self.scratchpad
+            .iter()
+            .map(|removed| removed.tile.window())
+            .chain(
+                self.scratchpad_trees
+                    .iter()
+                    .flat_map(|removed| removed.windows()),
+            )
+    }
+
+    pub fn scratchpad_trees(
+        &self,
+    ) -> impl Iterator<Item = (tiling_tree::IpcNode<W::Id>, bool)> + '_ {
+        self.scratchpad_trees
+            .iter()
+            .map(|removed| (removed.ipc_tree(), removed.is_sticky()))
     }
 
     pub fn scratchpad_is_empty(&self) -> bool {
@@ -4249,6 +4363,10 @@ impl<W: LayoutElement> Layout<W> {
         self.scratchpad
             .iter()
             .any(|removed| removed.tile.window().id() == window)
+            || self
+                .scratchpad_trees
+                .iter()
+                .any(|removed| removed.contains_window(window))
     }
 
     /// Assign a workspace to the first of `output_names` that resolves.
@@ -4428,6 +4546,28 @@ impl<W: LayoutElement> Layout<W> {
         self.workspaces_mut()
             .find(|workspace| workspace.id() == workspace_id)
             .is_some_and(|workspace| workspace.set_tiling_node_title_format(node, format))
+    }
+
+    pub fn set_container_floating(
+        &mut self,
+        workspace_id: WorkspaceId,
+        node: NodeId,
+        floating: bool,
+    ) -> Option<NodeId> {
+        self.workspaces_mut()
+            .find(|workspace| workspace.id() == workspace_id)?
+            .set_container_floating(node, floating)
+    }
+
+    pub fn window_in_node(&self, workspace_id: WorkspaceId, node: NodeId) -> Option<W::Id> {
+        let workspace = self
+            .workspaces()
+            .find(|(_, _, workspace)| workspace.id() == workspace_id)?
+            .2;
+        workspace
+            .tiling_node_windows(node)
+            .and_then(|windows| windows.into_iter().next())
+            .or_else(|| workspace.floating().window_in_node(node).cloned())
     }
 
     pub fn tiling_node_windows(
@@ -4611,7 +4751,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     #[cfg(test)]
-    fn verify_invariants(&self) {
+    pub(crate) fn verify_invariants(&self) {
         use std::collections::HashSet;
 
         use approx::assert_abs_diff_eq;
@@ -5613,6 +5753,14 @@ impl<W: LayoutElement> Layout<W> {
         workspace.switch_focus_floating_tiling();
     }
 
+    pub fn focused_leaf_is_only_child_of_floating_tree_root(&self) -> bool {
+        self.active_workspace().is_some_and(|workspace| {
+            workspace
+                .floating()
+                .focused_leaf_is_only_child_of_tree_root()
+        })
+    }
+
     pub fn move_floating_window(
         &mut self,
         id: Option<&W::Id>,
@@ -5696,16 +5844,15 @@ impl<W: LayoutElement> Layout<W> {
                 .unwrap();
 
             let (mon_idx, ws_idx) = if let Some(window) = window {
-                monitors
-                    .iter()
-                    .enumerate()
-                    .find_map(|(mon_idx, mon)| {
-                        mon.workspaces
-                            .iter()
-                            .position(|ws| ws.has_window(window))
-                            .map(|ws_idx| (mon_idx, ws_idx))
-                    })
-                    .unwrap()
+                let Some(location) = monitors.iter().enumerate().find_map(|(mon_idx, mon)| {
+                    mon.workspaces
+                        .iter()
+                        .position(|ws| ws.has_window(window))
+                        .map(|ws_idx| (mon_idx, ws_idx))
+                }) else {
+                    return;
+                };
+                location
             } else {
                 let mon_idx = *active_monitor_idx;
                 let mon = &monitors[mon_idx];
@@ -5755,6 +5902,18 @@ impl<W: LayoutElement> Layout<W> {
                 return;
             };
             let window = window.clone();
+
+            if let Some(root) = ws.floating_tree_root_for_window(&window) {
+                let removed = ws.remove_floating_tree(root).unwrap();
+                monitors[new_idx].workspaces[workspace_idx].add_floating_tree(removed, true);
+                if activate.map_smart(|| false) {
+                    *active_monitor_idx = new_idx;
+                }
+                if monitors[mon_idx].workspace_switch.is_none() {
+                    monitors[mon_idx].clean_up_workspaces();
+                }
+                return;
+            }
 
             let transaction = Transaction::new();
             let mut removed = ws.remove_tile(&window, transaction);
@@ -6036,8 +6195,7 @@ impl<W: LayoutElement> Layout<W> {
         if mode.is_some() {
             for workspace in self.workspaces_mut() {
                 if workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global) {
-                    let node = workspace.tiling().fullscreen_node().unwrap();
-                    workspace.tiling_mut().set_node_fullscreen(node, None);
+                    workspace.disable_fullscreen();
                     break;
                 }
             }
@@ -6070,8 +6228,7 @@ impl<W: LayoutElement> Layout<W> {
         if mode.is_some() {
             for workspace in self.workspaces_mut() {
                 if workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global) {
-                    let fullscreen = workspace.tiling().fullscreen_node().unwrap();
-                    workspace.tiling_mut().set_node_fullscreen(fullscreen, None);
+                    workspace.disable_fullscreen();
                     break;
                 }
             }
@@ -6094,23 +6251,15 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn fullscreen_mode(&self, id: &W::Id) -> Option<tiling_tree::FullscreenMode> {
-        self.workspaces().find_map(|(_, _, workspace)| {
-            let node = workspace.tiling().node_for_window(id)?;
-            let fullscreen = workspace.tiling().fullscreen_node()?;
-            workspace
-                .tiling()
-                .contains_node(fullscreen, node)
-                .then(|| workspace.tiling().fullscreen_mode(fullscreen))
-                .flatten()
-        })
+        self.workspaces()
+            .find_map(|(_, _, workspace)| workspace.fullscreen_mode_for_window(id))
     }
 
     pub fn set_fullscreen_mode(&mut self, id: &W::Id, mode: Option<tiling_tree::FullscreenMode>) {
         if mode.is_some() {
             for workspace in self.workspaces_mut() {
                 if workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global) {
-                    let node = workspace.tiling().fullscreen_node().unwrap();
-                    workspace.tiling_mut().set_node_fullscreen(node, None);
+                    workspace.disable_fullscreen();
                     break;
                 }
             }
@@ -6124,7 +6273,7 @@ impl<W: LayoutElement> Layout<W> {
         {
             workspace.activate_window(id);
             if workspace.is_floating(id) {
-                workspace.set_fullscreen(id, mode.is_some());
+                workspace.set_window_fullscreen(id, mode);
                 workspace.activate_window(id);
                 if mode == Some(tiling_tree::FullscreenMode::Global) {
                     workspace.set_focused_fullscreen(mode);
@@ -6399,10 +6548,12 @@ impl<W: LayoutElement> Layout<W> {
         let zoom = mon.overview_zoom();
 
         let is_floating = ws.is_floating(&window_id);
-        let (tile, tile_offset, _visible) = ws
+        let Some((tile, tile_offset, _visible)) = ws
             .tiles_with_render_positions()
             .find(|(tile, _, _)| tile.window().id() == &window_id)
-            .unwrap();
+        else {
+            return false;
+        };
         let window_offset = tile.window_loc();
 
         let tile_pos = ws_geo.loc + tile_offset.upscale(zoom);
@@ -7520,13 +7671,15 @@ impl<W: LayoutElement> Layout<W> {
         } else if let Some(InteractiveMoveState::Starting { window_id, .. }) =
             &self.interactive_move
         {
-            ongoing_scrolling_dnd.get_or_insert_with(|| {
-                let (_, _, ws) = self
-                    .workspaces()
-                    .find(|(_, _, ws)| ws.has_window(window_id))
-                    .unwrap();
-                !ws.is_floating(window_id)
-            });
+            let floating = self
+                .workspaces()
+                .find(|(_, _, ws)| ws.has_window(window_id))
+                .map(|(_, _, ws)| ws.is_floating(window_id));
+            if let Some(floating) = floating {
+                ongoing_scrolling_dnd.get_or_insert(!floating);
+            } else {
+                self.interactive_move = None;
+            }
         }
 
         match &mut self.monitor_set {
@@ -7652,7 +7805,12 @@ impl<W: LayoutElement> Layout<W> {
         let scratchpad = self
             .scratchpad
             .iter()
-            .map(|removed| (None, removed.tile.window()));
+            .map(|removed| (None, removed.tile.window()))
+            .chain(
+                self.scratchpad_trees
+                    .iter()
+                    .flat_map(|removed| removed.windows().map(|window| (None, window))),
+            );
         let rest = self
             .workspaces()
             .flat_map(|(mon, _, ws)| ws.windows().map(move |win| (mon, win)));
