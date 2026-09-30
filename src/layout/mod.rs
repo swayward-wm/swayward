@@ -1687,6 +1687,18 @@ impl<W: LayoutElement> Layout<W> {
             self.scratchpad_windows.retain(|id| id != window);
             return self.scratchpad.remove(index).map(|removed| (removed, None));
         }
+        if let Some(index) = self
+            .scratchpad_trees
+            .iter()
+            .position(|removed| removed.contains_window(window))
+        {
+            let removed = self.scratchpad_trees[index].remove_window(window, transaction)?;
+            self.scratchpad_windows.retain(|id| id != window);
+            if self.scratchpad_trees[index].window_ids().is_empty() {
+                self.scratchpad_trees.remove(index);
+            }
+            return Some((removed, None));
+        }
 
         if let Some(state) = &self.interactive_move {
             match state {
@@ -3599,6 +3611,16 @@ impl<W: LayoutElement> Layout<W> {
             .is_some_and(|(_, _, candidate)| candidate.tiling().is_root(node))
     }
 
+    pub fn workspace_contains_tiling_node(
+        &self,
+        workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+    ) -> bool {
+        self.workspaces()
+            .find(|(_, _, candidate)| candidate.id() == workspace)
+            .is_some_and(|(_, _, candidate)| candidate.contains_tiling_node(node))
+    }
+
     pub fn swap_tiling_nodes(
         &mut self,
         workspace: WorkspaceId,
@@ -3797,6 +3819,17 @@ impl<W: LayoutElement> Layout<W> {
         })
     }
 
+    pub fn swap_target_for_window(
+        &self,
+        window: &W::Id,
+    ) -> Option<(WorkspaceId, tiling_tree::NodeId)> {
+        self.workspaces().find_map(|(_, _, workspace)| {
+            workspace
+                .swap_node_for_window(window)
+                .map(|node| (workspace.id(), node))
+        })
+    }
+
     pub fn active_workspace_id_for_output(&self, output: &Output) -> Option<WorkspaceId> {
         self.monitor_for_output(output)
             .map(|monitor| monitor.active_workspace_ref().id())
@@ -3810,17 +3843,30 @@ impl<W: LayoutElement> Layout<W> {
         preserve_empty_workspace: bool,
         auto_back_and_forth: bool,
     ) -> Result<(WorkspaceId, Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>), String> {
+        let floating_group_window = self
+            .workspaces()
+            .find(|(_, _, workspace)| workspace.id() == source_workspace)
+            .and_then(|(_, _, workspace)| {
+                let floating = workspace.floating();
+                floating.tree(node)?;
+                floating.window_in_node(node).cloned()
+            });
+        if let Some(window) = floating_group_window {
+            self.move_window_to_sway_workspace(&window, target, auto_back_and_forth)?;
+            let target_workspace = self
+                .workspaces()
+                .find(|(_, _, workspace)| workspace.has_window(&window))
+                .map(|(_, _, workspace)| workspace.id())
+                .ok_or_else(|| "No matching node.".to_owned())?;
+            return Ok((target_workspace, Vec::new()));
+        }
         let (floating, empty_root) = self
             .workspaces()
             .find(|(_, _, workspace)| workspace.id() == source_workspace)
             .filter(|(_, _, workspace)| workspace.tiling().is_root(node))
             .map(|(_, _, workspace)| {
                 (
-                    workspace
-                        .tiles()
-                        .filter(|tile| workspace.is_floating(tile.window().id()))
-                        .map(|tile| tile.window().id().clone())
-                        .collect::<Vec<_>>(),
+                    workspace.floating_transfer_window_ids(),
                     workspace.tiling().tiles().next().is_none(),
                 )
             })
@@ -4099,9 +4145,34 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_window_sticky(&mut self, window: &W::Id, value: &str) -> bool {
-        let current = self
+        self.set_sticky(window, None, value)
+    }
+
+    /// Applies `sticky` to a floating group root itself rather than to one of its
+    /// children, as sway sets `is_sticky` on the focused container
+    /// (`sway/commands/sticky.c:20-26`). Returns `None` when `node` is not a
+    /// floating group root in `workspace`.
+    pub fn set_floating_group_sticky(
+        &mut self,
+        workspace: WorkspaceId,
+        node: NodeId,
+        value: &str,
+    ) -> Option<bool> {
+        let window = self
             .workspaces()
-            .any(|(_, _, workspace)| workspace.is_window_sticky(window));
+            .find(|(_, _, candidate)| candidate.id() == workspace)
+            .and_then(|(_, _, candidate)| {
+                candidate.floating().tree(node)?;
+                candidate.floating().window_in_node(node).cloned()
+            })?;
+        Some(self.set_sticky(&window, Some(node), value))
+    }
+
+    fn set_sticky(&mut self, window: &W::Id, group: Option<NodeId>, value: &str) -> bool {
+        let current = self.workspaces().any(|(_, _, workspace)| match group {
+            Some(root) => workspace.floating().tree_is_sticky(root),
+            None => workspace.is_window_sticky(window),
+        });
         let sticky = swayward_ipc::command::parse_boolean(value, current);
         let Some(monitor) = self
             .monitors_mut()
@@ -4118,11 +4189,17 @@ impl<W: LayoutElement> Layout<W> {
             return false;
         };
         let source_idx = monitor.idx_of_ws(source).unwrap();
-        if !monitor.workspaces[source_idx].set_window_sticky(window, sticky) {
+        let whole_tree =
+            group.is_some() || monitor.workspaces[source_idx].window_is_floating_root(window);
+        let changed = match group {
+            Some(root) => monitor.workspaces[source_idx].set_floating_tree_sticky(root, sticky),
+            None => monitor.workspaces[source_idx].set_window_sticky(window, sticky),
+        };
+        if !changed {
             return true;
         }
         let target = monitor.active_workspace_ref().id();
-        if sticky && source != target {
+        if whole_tree && sticky && source != target {
             let removed_trees = monitor.workspaces[source_idx].take_sticky_trees();
             let removed = monitor.workspaces[source_idx].take_sticky_tiles();
             let target_idx = monitor.idx_of_ws(target).unwrap();
@@ -4154,6 +4231,7 @@ impl<W: LayoutElement> Layout<W> {
         let Some(window) = window else {
             return;
         };
+        self.finish_starting_interactive_move(&window);
         if self
             .scratchpad
             .iter()
@@ -5948,6 +6026,27 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    pub fn move_window_to_output_from_direction(
+        &mut self,
+        window: &W::Id,
+        output: &Output,
+        direction: tiling_tree::Direction,
+        activate: ActivateWindow,
+    ) {
+        self.move_to_output(Some(window), output, None, activate);
+        // Sway inserts right/down moves at the leading edge of a parallel
+        // destination (`sway/commands/move.c:168-193`). The generic transfer
+        // inserts after the destination focus, so move the new leaf across it.
+        let opposite = match direction {
+            tiling_tree::Direction::Right => Some(tiling_tree::Direction::Left),
+            tiling_tree::Direction::Down => Some(tiling_tree::Direction::Up),
+            tiling_tree::Direction::Left | tiling_tree::Direction::Up => None,
+        };
+        if let Some(direction) = opposite {
+            self.move_window_in_direction(window, direction, 10.);
+        }
+    }
+
     pub fn move_focused_to_output(
         &mut self,
         output: &Output,
@@ -6129,12 +6228,20 @@ impl<W: LayoutElement> Layout<W> {
         let Some(mut ws) = monitors[current_idx].detach_workspace(workspace_id) else {
             return false;
         };
-        monitors[current_idx].reap_empty_workspaces();
         if source_was_active {
+            // Detaching cancels the workspace animation. Select its settled fallback before
+            // reaping so an empty workspace that the interrupted switch left active can go.
             monitors[current_idx].active_workspace_idx = source_replacement
                 .and_then(|id| monitors[current_idx].idx_of_ws(id))
-                .unwrap_or(monitors[current_idx].workspaces.len() - 1);
+                .or_else(|| {
+                    monitors[current_idx]
+                        .workspaces
+                        .iter()
+                        .rposition(Workspace::must_be_kept)
+                })
+                .unwrap_or(0);
         }
+        monitors[current_idx].reap_empty_workspaces();
         ws.original_output = OutputId::new(new_output);
 
         let target_active = monitors[target_idx].active_workspace_ref().id();
@@ -6620,27 +6727,49 @@ impl<W: LayoutElement> Layout<W> {
                 let (cx, cy) = (pointer_delta.x, pointer_delta.y);
                 let sq_dist = cx * cx + cy * cy;
 
+                let is_rendered = self.monitors().any(|mon| {
+                    mon.workspaces_with_render_geo().any(|(ws, _)| {
+                        ws.tiles_with_render_positions()
+                            .any(|(tile, _, _)| tile.window().id() == &window_id)
+                    })
+                });
+                if !is_rendered {
+                    for mon in self.monitors_mut() {
+                        mon.dnd_scroll_gesture_end();
+                    }
+                    for ws in self.workspaces_mut() {
+                        ws.dnd_scroll_gesture_end();
+                    }
+                    return false;
+                }
+
                 let factor = RubberBand {
                     stiffness: 1.0,
                     limit: 0.5,
                 }
                 .band(sq_dist / INTERACTIVE_MOVE_START_THRESHOLD);
 
-                let (is_floating, source_workspace, tile, workspace_config) = self
+                let Some((is_floating, source_workspace, tile, workspace_config)) = self
                     .workspaces_mut()
                     .find(|ws| ws.has_window(&window_id))
-                    .map(|ws| {
+                    .and_then(|ws| {
                         let workspace_config = ws.layout_config().cloned().map(|c| (ws.id(), c));
-                        (
-                            ws.is_floating(&window_id),
-                            ws.id(),
-                            ws.tiles_mut()
-                                .find(|tile| *tile.window().id() == window_id)
-                                .unwrap(),
-                            workspace_config,
-                        )
+                        let is_floating = ws.is_floating(&window_id);
+                        let workspace_id = ws.id();
+                        let tile = ws
+                            .tiles_mut()
+                            .find(|tile| *tile.window().id() == window_id)?;
+                        Some((is_floating, workspace_id, tile, workspace_config))
                     })
-                    .unwrap();
+                else {
+                    for mon in self.monitors_mut() {
+                        mon.dnd_scroll_gesture_end();
+                    }
+                    for ws in self.workspaces_mut() {
+                        ws.dnd_scroll_gesture_end();
+                    }
+                    return false;
+                };
                 tile.interactive_move_offset = pointer_delta.upscale(factor);
 
                 // Put it back to be able to easily return.
@@ -6673,13 +6802,13 @@ impl<W: LayoutElement> Layout<W> {
                         .map(|rv| (mon, rv))
                 }) {
                     if mon.output() == &output {
-                        let (_, tile_offset, _) = ws
+                        if let Some((_, tile_offset, _)) = ws
                             .tiles_with_render_positions()
                             .find(|(tile, _, _)| tile.window().id() == window)
-                            .unwrap();
-
-                        let zoom = mon.overview_zoom();
-                        tile_pos = Some((ws_geo.loc + tile_offset.upscale(zoom), zoom));
+                        {
+                            let zoom = mon.overview_zoom();
+                            tile_pos = Some((ws_geo.loc + tile_offset.upscale(zoom), zoom));
+                        }
                     }
                 }
 
@@ -6817,50 +6946,51 @@ impl<W: LayoutElement> Layout<W> {
         true
     }
 
-    pub fn interactive_move_end(&mut self, window: &W::Id) {
-        let Some(move_) = &self.interactive_move else {
-            return;
+    fn finish_starting_interactive_move(&mut self, window: &W::Id) -> bool {
+        let Some(InteractiveMoveState::Starting { window_id, .. }) = &self.interactive_move else {
+            return false;
+        };
+        if window_id != window {
+            return true;
+        }
+
+        let Some(InteractiveMoveState::Starting { window_id, .. }) = self.interactive_move.take()
+        else {
+            unreachable!()
         };
 
-        let move_ = match move_ {
-            InteractiveMoveState::Starting { window_id, .. } => {
-                if window_id != window {
-                    return;
-                }
+        for mon in self.monitors_mut() {
+            mon.dnd_scroll_gesture_end();
+        }
 
-                let Some(InteractiveMoveState::Starting { window_id, .. }) =
-                    self.interactive_move.take()
-                else {
-                    unreachable!()
-                };
-
-                for mon in self.monitors_mut() {
-                    mon.dnd_scroll_gesture_end();
-                }
-
-                for ws in self.workspaces_mut() {
-                    if let Some(tile) = ws.tiles_mut().find(|tile| *tile.window().id() == window_id)
-                    {
-                        let offset = tile.interactive_move_offset;
-                        tile.interactive_move_offset = Point::from((0., 0.));
-                        tile.animate_move_from(offset);
-                    }
-
-                    // Unlock the view on the workspaces, but if the moved window was active,
-                    // preserve that.
-                    let moved_tile_was_active =
-                        ws.active_window().is_some_and(|win| *win.id() == window_id);
-
-                    ws.dnd_scroll_gesture_end();
-
-                    if moved_tile_was_active {
-                        ws.activate_window(&window_id);
-                    }
-                }
-
-                return;
+        for ws in self.workspaces_mut() {
+            if let Some(tile) = ws.tiles_mut().find(|tile| *tile.window().id() == window_id) {
+                let offset = tile.interactive_move_offset;
+                tile.interactive_move_offset = Point::from((0., 0.));
+                tile.animate_move_from(offset);
             }
-            InteractiveMoveState::Moving(move_) => move_,
+
+            // Unlock the view on the workspaces, but if the moved window was active, preserve that.
+            let moved_tile_was_active =
+                ws.active_window().is_some_and(|win| *win.id() == window_id);
+
+            ws.dnd_scroll_gesture_end();
+
+            if moved_tile_was_active {
+                ws.activate_window(&window_id);
+            }
+        }
+
+        true
+    }
+
+    pub fn interactive_move_end(&mut self, window: &W::Id) {
+        if self.finish_starting_interactive_move(window) {
+            return;
+        }
+
+        let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move else {
+            return;
         };
 
         if window != move_.tile.window().id() {

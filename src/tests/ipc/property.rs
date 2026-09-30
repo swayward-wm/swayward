@@ -242,6 +242,9 @@ fn check_ops(ops: Vec<Op>) {
         assert_state(&mut fixture);
     }
 
+    for surface in windows.into_iter().flatten() {
+        unmap_window(&mut fixture, client, &surface);
+    }
     drop(fixture);
 }
 
@@ -318,6 +321,20 @@ fn swapping_with_a_marked_floating_container_is_rejected_safely() {
 }
 
 #[test]
+fn showing_scratchpad_after_unfocused_floating_toggle_keeps_unique_trees() {
+    check_ops(vec![
+        Op::Command("focus parent"),
+        Op::Command("floating toggle"),
+        Op::Open(2),
+        Op::Command("focus parent"),
+        Op::Command("focus right"),
+        Op::ConIdCommand(1, "move scratchpad"),
+        Op::Command("floating toggle"),
+        Op::Command("scratchpad show"),
+    ]);
+}
+
+#[test]
 fn killed_windows_can_receive_late_configures() {
     check_ops(vec![
         Op::Command("focus parent"),
@@ -354,9 +371,33 @@ fn sticky_floating_window_stays_active_after_workspace_changes() {
 }
 
 #[test]
+fn runtime_default_border_keeps_floating_tile_data_current() {
+    check_ops(vec![
+        Op::Command("layout tabbed"),
+        Op::Command("default_border pixel 2"),
+        Op::ConIdCommand(0, "floating toggle"),
+    ]);
+}
+
+#[test]
 fn changing_from_tabbed_to_split_keeps_visible_tiles_consistent() {
     check_ops(vec![
         Op::Command("layout tabbed"),
+        Op::Command("layout splith"),
+    ]);
+}
+
+#[test]
+fn closing_a_floating_group_child_keeps_the_resident_root() {
+    check_ops(vec![
+        Op::Command("layout splitv"),
+        Op::Command("floating toggle"),
+        Op::Command("focus parent"),
+        Op::Command("floating toggle"),
+        Op::Command("layout tabbed"),
+        Op::Command("layout splith"),
+        Op::Close(1),
+        Op::Command("focus parent"),
         Op::Command("layout splith"),
     ]);
 }

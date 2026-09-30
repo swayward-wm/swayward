@@ -685,7 +685,7 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn is_floating(&self, id: &W::Id) -> bool {
-        self.floating.has_window(id)
+        self.floating.window_is_floating_root(id)
     }
 
     pub fn window_border(
@@ -705,6 +705,7 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> Result<(), &'static str> {
         let changed = if self.floating.has_window(window) {
             self.floating.set_window_border(window, style, width)
+                || self.floating.set_tree_window_border(window, style, width)
         } else {
             self.tiling.set_window_border(window, style, width)
         };
@@ -1193,10 +1194,10 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn swap_tiling_nodes(&mut self, first: NodeId, second: NodeId) -> Result<(), &'static str> {
-        if !self.tiling.contains(first) || !self.tiling.contains(second) {
-            return Err("node not found");
+        if self.tiling.contains(first) && self.tiling.contains(second) {
+            return self.tiling.swap_nodes(first, second);
         }
-        self.tiling.swap_nodes(first, second)
+        self.floating.swap_nodes(first, second)
     }
 
     pub fn detach_tiling_subtree_for_swap(
@@ -1484,6 +1485,10 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    pub fn focused_floating_tree_child(&self) -> bool {
+        self.floating_is_active.get() && self.floating.focused_tree_child()
+    }
+
     pub fn is_workspace_focused(&self) -> bool {
         !self.floating_is_active.get() && self.tiling.root_is_focused()
     }
@@ -1736,7 +1741,13 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn move_left(&mut self) -> bool {
         if self.floating_is_active.get() {
-            self.floating.move_left();
+            if self
+                .floating
+                .move_focused_tree_child(Direction::Left)
+                .is_none()
+            {
+                self.floating.move_left();
+            }
             true
         } else {
             self.tiling.move_left()
@@ -1745,10 +1756,13 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn move_right(&mut self) -> bool {
         if self.floating_is_active.get() {
-            if self.floating.focused_leaf_is_only_child_of_tree_root() {
-                return true;
+            if self
+                .floating
+                .move_focused_tree_child(Direction::Right)
+                .is_none()
+            {
+                self.floating.move_right();
             }
-            self.floating.move_right();
             true
         } else {
             self.tiling.move_right()
@@ -1762,7 +1776,7 @@ impl<W: LayoutElement> Workspace<W> {
         pixels: f64,
     ) -> bool {
         if self.floating.has_window(window) {
-            if self.floating.focused_leaf_is_only_child_of_tree_root() {
+            if self.floating.move_tree_window(window, direction).is_some() {
                 return true;
             }
             let (x, y) = match direction {
@@ -1810,7 +1824,13 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn move_down(&mut self) -> bool {
         if self.floating_is_active.get() {
-            self.floating.move_down();
+            if self
+                .floating
+                .move_focused_tree_child(Direction::Down)
+                .is_none()
+            {
+                self.floating.move_down();
+            }
             true
         } else {
             self.tiling.move_down()
@@ -1819,7 +1839,13 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn move_up(&mut self) -> bool {
         if self.floating_is_active.get() {
-            self.floating.move_up();
+            if self
+                .floating
+                .move_focused_tree_child(Direction::Up)
+                .is_none()
+            {
+                self.floating.move_up();
+            }
             true
         } else {
             self.tiling.move_up()
@@ -1877,14 +1903,8 @@ impl<W: LayoutElement> Workspace<W> {
         layout: crate::layout::tiling_tree::Layout,
     ) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            let Some(node) = self.floating.focused_container_node() else {
-                return Vec::new();
-            };
-            let Some(root) = self.floating.tree_root_for_node(node) else {
-                return Vec::new();
-            };
             self.floating
-                .tree_mut(root)
+                .focused_child_tree_mut()
                 .map(|tree| tree.set_focused_layout(layout))
                 .unwrap_or_default()
         } else {
@@ -1926,7 +1946,10 @@ impl<W: LayoutElement> Workspace<W> {
         toggle: &swayward_ipc::command::LayoutToggle,
     ) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            Vec::new()
+            self.floating
+                .focused_child_tree_mut()
+                .map(|tree| tree.toggle_focused_layout(toggle))
+                .unwrap_or_default()
         } else {
             self.tiling.toggle_focused_layout(toggle)
         }
@@ -1934,7 +1957,9 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
         if self.floating_is_active.get() {
-            None
+            self.floating
+                .focused_child_tree_mut()?
+                .restore_focused_split_layout()
         } else {
             self.tiling.restore_focused_split_layout()
         }
@@ -1942,7 +1967,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn toggle_focused_layout_split(&mut self) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            Vec::new()
+            self.floating
+                .focused_child_tree_mut()
+                .map(crate::layout::tiling_tree::TilingTree::toggle_focused_layout_split)
+                .unwrap_or_default()
         } else {
             self.tiling.toggle_focused_layout_split()
         }
@@ -2570,15 +2598,21 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating.tree_root_for_window(window)
     }
 
+    pub fn floating_transfer_window_ids(&self) -> Vec<W::Id> {
+        self.floating.transfer_window_ids()
+    }
+
+    pub fn window_is_floating_root(&self, window: &W::Id) -> bool {
+        self.floating.window_is_floating_root(window) || self.floating.window_is_tree_root(window)
+    }
+
     pub fn focused_floating_tree_root(&self) -> Option<NodeId> {
         self.active_window()
             .and_then(|window| self.floating.tree_root_for_window(window.id()))
     }
 
     pub fn is_window_sticky(&self, window: &W::Id) -> bool {
-        self.floating
-            .tree_root_for_window(window)
-            .is_some_and(|root| self.floating.tree_is_sticky(root))
+        self.floating.window_is_sticky(window)
             || self
                 .tiles()
                 .find(|tile| tile.window().id() == window)
@@ -2586,14 +2620,18 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn set_window_sticky(&mut self, window: &W::Id, sticky: bool) -> bool {
-        if let Some(root) = self.floating.tree_root_for_window(window) {
-            return self.floating.set_tree_sticky(root, sticky);
+        if self.floating.tree_root_for_window(window).is_some() {
+            return self.floating.set_window_sticky(window, sticky);
         }
         let Some(tile) = self.tiles_mut().find(|tile| tile.window().id() == window) else {
             return false;
         };
         tile.is_sticky = sticky;
         true
+    }
+
+    pub fn set_floating_tree_sticky(&mut self, root: NodeId, sticky: bool) -> bool {
+        self.floating.set_tree_sticky(root, sticky)
     }
 
     pub fn take_sticky_trees(&mut self) -> Vec<RemovedFloatingTree<W>> {
@@ -2608,7 +2646,9 @@ impl<W: LayoutElement> Workspace<W> {
         let ids = self
             .floating
             .tiles()
-            .filter(|tile| tile.is_sticky)
+            .filter(|tile| {
+                tile.is_sticky && self.floating.window_is_floating_root(tile.window().id())
+            })
             .map(|tile| tile.window().id().clone())
             .collect::<Vec<_>>();
         ids.iter()
@@ -2653,11 +2693,25 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.contains(id)
     }
 
+    pub fn contains_swap_node(&self, id: crate::layout::tiling_tree::NodeId) -> bool {
+        self.tiling.contains(id) || self.floating.tree_root_for_node(id).is_some()
+    }
+
     pub fn tiling_node_for_window(
         &self,
         window: &W::Id,
     ) -> Option<crate::layout::tiling_tree::NodeId> {
         self.tiling.node_for_window(window)
+    }
+
+    pub fn swap_node_for_window(
+        &self,
+        window: &W::Id,
+    ) -> Option<crate::layout::tiling_tree::NodeId> {
+        self.tiling.node_for_window(window).or_else(|| {
+            let root = self.floating.tree_root_for_window(window)?;
+            self.floating.tree(root)?.node_for_window(window)
+        })
     }
 
     pub fn tiling_window_for_node(&self, node: NodeId) -> Option<&W> {
@@ -2675,6 +2729,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn tab_indicator_focus_target(&self, window: &W::Id) -> Option<&W> {
         self.tiling.tab_indicator_focus_target(window)
+    }
+
+    pub fn tiling_ipc_focus_is_stale(&self, id: NodeId) -> bool {
+        self.tiling.ipc_focus_is_stale(id)
     }
 
     pub fn ipc_tiling_tree(&self) -> super::tiling_tree::IpcNode<W::Id> {
@@ -2746,75 +2804,11 @@ impl<W: LayoutElement> Workspace<W> {
             self.tiling.popup_target_rect(window)
         }
     }
+}
 
-    pub fn render_scrolling<R: NiriRenderer>(
-        &self,
-        ctx: RenderCtx<R>,
-        xray_pos: XrayPos,
-        focus_ring: bool,
-        layer: RenderLayer,
-        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
-    ) {
-        let scrolling_focus_ring = focus_ring && !self.floating_is_active();
-        self.tiling
-            .render(ctx, xray_pos, scrolling_focus_ring, layer, &mut |elem| {
-                push(elem.into())
-            });
-    }
+mod rendering;
 
-    pub fn render_floating<R: NiriRenderer>(
-        &self,
-        ctx: RenderCtx<R>,
-        xray_pos: XrayPos,
-        focus_ring: bool,
-        layer: RenderLayer,
-        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
-    ) {
-        if !self.is_floating_visible() && layer.is_normal() {
-            return;
-        }
-
-        let view_rect = Rectangle::from_size(self.view_size);
-        let floating_focus_ring = focus_ring && self.floating_is_active();
-        self.floating.render(
-            ctx,
-            xray_pos,
-            view_rect,
-            floating_focus_ring,
-            layer,
-            &mut |elem| push(elem.into()),
-        );
-    }
-
-    pub fn render_shadow<R: NiriRenderer>(
-        &self,
-        renderer: &mut R,
-        push: &mut dyn FnMut(ShadowRenderElement),
-    ) {
-        self.shadow.render(renderer, Point::from((0., 0.)), push);
-    }
-
-    pub fn render_background(&self) -> SolidColorRenderElement {
-        SolidColorRenderElement::from_buffer(
-            &self.background_buffer,
-            Point::new(0., 0.),
-            1.,
-            Kind::Unspecified,
-        )
-    }
-
-    pub fn render_above_top_layer(&self) -> bool {
-        self.tiling.render_above_top_layer()
-    }
-
-    pub fn is_floating_visible(&self) -> bool {
-        // If the focus is on a fullscreen scrolling window, hide the floating windows.
-        matches!(
-            self.floating_is_active,
-            FloatingActive::Yes | FloatingActive::NoButRaised
-        ) || !self.render_above_top_layer()
-    }
-
+impl<W: LayoutElement> Workspace<W> {
     pub fn store_unmap_snapshot_if_empty(
         &mut self,
         renderer: &mut GlesRenderer,

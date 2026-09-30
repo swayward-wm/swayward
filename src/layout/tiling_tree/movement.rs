@@ -56,6 +56,16 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         self.nodes.get_mut(&first).unwrap().parent = Some(second_parent);
         self.nodes.get_mut(&second).unwrap().parent = Some(first_parent);
+        self.swap_fullscreen_modes(first, second);
+        if self.focus != focus_after_swap {
+            self.set_focus_id(focus_after_swap);
+        }
+        self.animate_geometry_changes(old, None);
+        self.request_window_sizes();
+        Ok(())
+    }
+
+    fn swap_fullscreen_modes(&mut self, first: NodeId, second: NodeId) {
         let first_fullscreen = self
             .pending_modes
             .get(&first)
@@ -77,12 +87,6 @@ impl<W: LayoutElement> TilingTree<W> {
                 );
             }
         }
-        if self.focus != focus_after_swap {
-            self.set_focus_id(focus_after_swap);
-        }
-        self.animate_geometry_changes(old, None);
-        self.request_window_sizes();
-        Ok(())
     }
 
     pub fn move_subtree_to_node(&mut self, id: NodeId, destination: NodeId) -> bool {
@@ -129,6 +133,13 @@ impl<W: LayoutElement> TilingTree<W> {
         self.insert_child(parent, id, after);
         self.reap_empty_from(old_parent);
         self.compact_tree();
+        self.restore_moved_focus_history(moved);
+        self.animate_geometry_changes(old, None);
+        self.request_window_sizes();
+        true
+    }
+
+    fn restore_moved_focus_history(&mut self, moved: Vec<W::Id>) {
         let insertion = usize::from(self.focus.is_some());
         for window in moved.into_iter().rev() {
             let Some(leaf) = self.node_for_window(&window) else {
@@ -138,9 +149,6 @@ impl<W: LayoutElement> TilingTree<W> {
             self.focus_history
                 .insert(insertion.min(self.focus_history.len()), leaf);
         }
-        self.animate_geometry_changes(old, None);
-        self.request_window_sizes();
-        true
     }
 
     pub fn move_direction(&mut self, id: NodeId, direction: Direction) -> bool {
@@ -193,31 +201,10 @@ impl<W: LayoutElement> TilingTree<W> {
             Direction::Left | Direction::Right => Layout::SplitH,
             Direction::Up | Direction::Down => Layout::SplitV,
         };
+        let boundary_root = self.resident_root().unwrap_or(self.root);
         if self.windows().nth(1).is_none() {
-            let root_layout = match self.nodes[&self.root].value {
-                TreeNode::Split { layout, .. } => layout,
-                TreeNode::Leaf { .. } => unreachable!(),
-            };
-            if !Self::layouts_parallel(root_layout, wanted_layout) {
-                self.set_layout(self.root, wanted_layout);
-                // `set_layout` compacts the tree, which squashes a singleton
-                // split. When the moved node was that split, continue with
-                // the one window that survives the compaction.
-                let Some(id) = self
-                    .nodes
-                    .contains_key(&id)
-                    .then_some(id)
-                    .or_else(|| self.windows().next().map(|(leaf, _)| leaf))
-                else {
-                    return false;
-                };
-                let old_parent = self.nodes[&id].parent;
-                if let Some(parent) = old_parent.filter(|parent| *parent != self.root) {
-                    self.detach_subtree_only(id);
-                    self.insert_child_at(self.root, id, 0);
-                    self.reap_empty_from(parent);
-                    self.finish_directional_move(id);
-                }
+            if boundary_root == self.root {
+                self.move_only_window(id, wanted_layout);
             }
             return false;
         }
@@ -269,7 +256,7 @@ impl<W: LayoutElement> TilingTree<W> {
                         false,
                     );
                 }
-                if parent_id == self.root {
+                if parent_id == boundary_root {
                     if branch == id {
                         return false;
                     }
@@ -283,7 +270,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     let Some(old_parent) = self.detach_subtree_only(id) else {
                         return false;
                     };
-                    self.insert_existing_child(self.root, id, insert_index, boundary);
+                    self.insert_existing_child(boundary_root, id, insert_index, boundary);
                     self.reap_empty_from(old_parent);
                     self.compact_tree();
                     self.finish_directional_move(id);
@@ -292,6 +279,9 @@ impl<W: LayoutElement> TilingTree<W> {
             }
             branch = parent_id;
             parent = *grandparent;
+        }
+        if boundary_root != self.root {
+            return false;
         }
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
@@ -305,6 +295,35 @@ impl<W: LayoutElement> TilingTree<W> {
         self.compact_tree();
         self.finish_directional_move(id);
         true
+    }
+
+    fn move_only_window(&mut self, id: NodeId, wanted_layout: Layout) {
+        let root_layout = match self.nodes[&self.root].value {
+            TreeNode::Split { layout, .. } => layout,
+            TreeNode::Leaf { .. } => unreachable!(),
+        };
+        if Self::layouts_parallel(root_layout, wanted_layout) {
+            return;
+        }
+        self.set_layout(self.root, wanted_layout);
+        // `set_layout` compacts the tree, which squashes a singleton split.
+        // When the moved node was that split, continue with the one window
+        // that survives the compaction.
+        let Some(id) = self
+            .nodes
+            .contains_key(&id)
+            .then_some(id)
+            .or_else(|| self.windows().next().map(|(leaf, _)| leaf))
+        else {
+            return;
+        };
+        let old_parent = self.nodes[&id].parent;
+        if let Some(parent) = old_parent.filter(|parent| *parent != self.root) {
+            self.detach_subtree_only(id);
+            self.insert_child_at(self.root, id, 0);
+            self.reap_empty_from(parent);
+            self.finish_directional_move(id);
+        }
     }
 
     fn move_into_directional_destination(

@@ -14,6 +14,14 @@ impl<W: LayoutElement> TilingTree<W> {
     /// next move. Compaction is therefore driven from the mutation paths in
     /// `compact_tree`, not enforced as a global invariant.
     pub fn check_invariants(&self) {
+        self.check_root_and_reachability();
+        self.check_focus();
+        self.check_side_state();
+        self.check_modes();
+        self.check_resize();
+    }
+
+    fn check_root_and_reachability(&self) {
         assert_eq!(
             self.nodes.get(&self.root).and_then(|node| node.parent),
             None
@@ -25,17 +33,33 @@ impl<W: LayoutElement> TilingTree<W> {
         let mut seen = HashSet::new();
         self.check_node(self.root, &mut seen);
         assert_eq!(seen.len(), self.nodes.len(), "unreachable nodes in arena");
+    }
+
+    fn check_focus(&self) {
         if let Some(focus) = self.focus {
             assert!(self.nodes.contains_key(&focus));
             assert!(self.windows().next().is_some());
         } else {
             assert!(self.windows().next().is_none());
         }
+        assert_eq!(
+            self.focus_history.iter().collect::<HashSet<_>>().len(),
+            self.focus_history.len(),
+            "focus_history contains duplicate node ids"
+        );
+    }
+
+    fn check_side_state(&self) {
         // Every NodeId-keyed side collection must join this check and be cleared in remove().
         for (collection, id) in self
             .focus_history
             .iter()
             .map(|id| ("focus_history", id))
+            .chain(
+                self.ipc_stale_nodes
+                    .iter()
+                    .map(|id| ("ipc_stale_nodes", id)),
+            )
             .chain(
                 self.previous_split_layouts
                     .keys()
@@ -72,11 +96,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 Some(TreeNode::Split { children, .. }) if children.contains(child)
             )
         }));
-        assert_eq!(
-            self.focus_history.iter().collect::<HashSet<_>>().len(),
-            self.focus_history.len(),
-            "focus_history contains duplicate node ids"
-        );
+    }
+
+    fn check_modes(&self) {
         assert!(self.pending_modes.iter().all(|(id, mode)| {
             self.nodes
                 .get(id)
@@ -90,6 +112,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 <= 1,
             "multiple fullscreen nodes"
         );
+    }
+
+    fn check_resize(&self) {
         if let Some(resize) = &self.interactive_resize {
             assert_eq!(self.node_for_window(&resize.window), Some(resize.target));
             assert!(!resize.axes.is_empty());
