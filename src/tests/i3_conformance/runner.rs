@@ -35,18 +35,23 @@ fn with_test_context(test: &str, run: impl FnOnce()) {
     }
 }
 
-fn run_i3_test_with_context(test: &str) {
-    with_test_context(test, || run_i3_test(test));
+fn run_i3_test_with_context(test: &str, is_green: bool) {
+    with_test_context(test, || {
+        let run = run_i3_file(test);
+        if let Err(verdict) = verdict(test, is_green, &run) {
+            panic!("{}", verdict.message(test, &run));
+        }
+    });
 }
 
 fn collect_test_failures<'a>(
-    tests: impl IntoIterator<Item = &'a str>,
-    mut run: impl FnMut(&str),
+    tests: impl IntoIterator<Item = (&'a str, bool)>,
+    mut run: impl FnMut(&str, bool),
 ) -> Vec<(String, String)> {
     tests
         .into_iter()
-        .filter_map(|test| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(test)))
+        .filter_map(|(test, is_green)| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(test, is_green)))
                 .err()
                 .map(|payload| (test.to_owned(), panic_message(payload.as_ref()).to_owned()))
         })
@@ -113,27 +118,58 @@ struct I3Run {
     stderr: String,
 }
 
-fn run_i3_test(test: &str) {
-    let I3Run {
-        success,
-        stdout,
-        stderr,
-    } = run_i3_file(test);
-    let rejected = rejected_commands(&stderr).collect::<Vec<_>>();
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    TapFailed,
+    AdapterFailed,
+    RejectionsChanged {
+        expected: Vec<String>,
+        actual: Vec<String>,
+    },
+    GreenFileSkipped(Vec<String>),
+}
+
+impl Verdict {
+    fn message(&self, test: &str, run: &I3Run) -> String {
+        match self {
+            Self::TapFailed => format!(
+                "i3 test {test} failed\nTAP failures:\n{}\nstdout:\n{}\nstderr:\n{}",
+                tap_failure_summary(&run.stdout, &run.stderr), run.stdout, run.stderr
+            ),
+            Self::AdapterFailed => format!("i3 test {test} xdotool adapter failed\nstderr:\n{}", run.stderr),
+            Self::RejectionsChanged { expected, actual } => format!(
+                "i3 test {test} rejected commands changed\nexpected: {expected:?}\nactual: {actual:?}"
+            ),
+            Self::GreenFileSkipped(skips) => format!("green i3 test {test} skipped assertions: {skips:?}"),
+        }
+    }
+}
+
+fn verdict(test: &str, is_green: bool, run: &I3Run) -> Result<(), Verdict> {
+    if !run.success {
+        return Err(Verdict::TapFailed);
+    }
+    if run.stderr.contains("swayward xdotool adapter") {
+        return Err(Verdict::AdapterFailed);
+    }
+    let actual = rejected_commands(&run.stderr)
+        .map(|command| command.to_owned())
+        .collect::<Vec<_>>();
     let expected = expected_rejections(test)
         .iter()
-        .map(|item| item.command)
+        .map(|item| item.command.to_owned())
         .collect::<Vec<_>>();
-    let adapter_failed = stderr.contains("swayward xdotool adapter");
-    let skips = tap_skips(&stdout);
-    assert!(
-        success
-            && rejections_match(test, &rejected)
-            && !adapter_failed
-            && (!passing_tests().any(|green| green == test) || skips.is_empty()),
-        "i3 test {test} failed, its xdotool adapter failed, its rejected commands changed, or a green file skipped assertions\nTAP failures:\n{}\nTAP skips: {skips:?}\nexpected rejections: {expected:?}\nactual rejections: {rejected:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-        tap_failure_summary(&stdout, &stderr),
-    );
+    if !rejections_match(test, &rejected_commands(&run.stderr).collect::<Vec<_>>()) {
+        return Err(Verdict::RejectionsChanged { expected, actual });
+    }
+    let skips = tap_skips(&run.stdout)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if is_green && !skips.is_empty() {
+        return Err(Verdict::GreenFileSkipped(skips));
+    }
+    Ok(())
 }
 
 /// Run one unchanged i3 file to completion and return its output without
@@ -141,15 +177,7 @@ fn run_i3_test(test: &str) {
 /// fails.
 fn run_i3_file(test: &str) -> I3Run {
     let mut config = swayward_config::Config::default();
-    config.layout.gaps = 0.;
-    config.layout.border.off = false;
-    configure_client_state_oracle(&mut config, test);
-    config.input.focus_follows_mouse = Some(swayward_config::input::FocusFollowsMouse {
-        mode: swayward_config::input::FocusFollowsMouseMode::Yes,
-        max_scroll_amount: None,
-    });
-    config.animations.window_movement.0.off = true;
-    config.animations.window_resize.anim.off = true;
+    apply_harness_policy(&mut config, None, test);
     let mut fixture = Fixture::with_config(config);
     fixture.add_output(1, (1280, 800));
     let client = fixture.add_client();
@@ -169,6 +197,8 @@ fn run_i3_file(test: &str) -> I3Run {
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let oracle = oracle_i3_dir();
+    let skip_adaptations = coverage_skip_adaptations(test);
+    let adaptations = coverage_adaptations(test);
     let mut child = Command::new("perl")
         .arg(format!("-I{}", root.join("tests/i3/lib").display()))
         .arg(format!("-I{}", oracle.join("lib").display()))
@@ -176,6 +206,8 @@ fn run_i3_file(test: &str) -> I3Run {
         .env("I3SOCK", &ipc_socket)
         .env("SWAYWARD_TEST_CONTROL", &control_path)
         .env("SWAYWARD_I3_TEST", test)
+        .env("SWAYWARD_I3_SKIPS", skip_adaptations.to_string())
+        .env("SWAYWARD_I3_ADAPT", adaptations.to_string())
         .env(
             "PATH",
             format!(
@@ -251,4 +283,3 @@ fn i3_child_polling_yields_cpu_between_checks() {
     }
     assert!(started.elapsed() >= Duration::from_millis(5));
 }
-

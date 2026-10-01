@@ -230,9 +230,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         event_loop.handle(),
         event_loop.get_signal(),
         display,
-        headless_outputs.is_some(),
-        true,
-        cli.session,
+        swayward::swayward::StartupOptions {
+            headless: headless_outputs.is_some(),
+            create_wayland_socket: true,
+            ipc_mode: swayward::swayward::IpcMode::Ambient,
+            is_session_instance: cli.session,
+        },
     )?;
 
     if let Some(count) = headless_outputs {
@@ -305,7 +308,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Show the config error notification right away if needed.
     if config_errored {
         state.swayward.config_error_notification.show();
-        state.ipc_config_loaded(true);
     } else if let Some(path) = config_created_at {
         state.swayward.config_error_notification.show_created(path);
     }

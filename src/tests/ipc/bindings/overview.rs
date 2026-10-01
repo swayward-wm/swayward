@@ -58,7 +58,7 @@ workspace "2" {}"#,
 
     let ((event_type, payload), _) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
-    assert_eq!(event_type, 1 << 31, "expected a workspace event");
+    assert_eq!(event_type, EVENT_WORKSPACE, "expected a workspace event");
     let event = serde_json::from_str::<Value>(&payload).unwrap();
     assert_eq!(
         event["change"], "focus",
@@ -72,9 +72,9 @@ workspace "2" {}"#,
 /// server is holding at the moment it emits the event is the tree the bar
 /// draws.
 ///
-/// ipc_refresh_layout emits from ipc_refresh_workspaces first and only then
-/// calls refresh_query_state, so for that window query_state.tree still
-/// describes the workspace the user left.
+/// ipc_refresh_layout emits from ipc_refresh_workspaces before it records the
+/// new event baseline, so a reply served from a cached tree would still
+/// describe the workspace the user left.
 #[test]
 fn query_state_tree_is_current_when_a_workspace_event_is_emitted() {
     let config = swayward_config::Config::parse_mem(
@@ -271,7 +271,7 @@ workspace "2" {}"#,
         try_read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder.clone())
     {
         remainder = rest;
-        assert_eq!(event_type, 1 << 31);
+        assert_eq!(event_type, EVENT_WORKSPACE);
         let event = serde_json::from_str::<Value>(&payload).unwrap();
         changes.push((
             event["change"].as_str().unwrap_or_default().to_owned(),
@@ -460,4 +460,3 @@ workspace "2" {}"#,
         );
     }
 }
-

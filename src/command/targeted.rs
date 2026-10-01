@@ -108,51 +108,12 @@ pub(super) fn move_direction(
         Direction::Down => crate::layout::tiling_tree::Direction::Down,
     };
     let moved_within_workspace = if focused {
-        let moved = match target {
-            CommandTarget::Container(workspace, node) => state
-                .swayward
-                .layout
-                .move_tiling_node_in_direction(workspace, node, layout_direction),
-            CommandTarget::Window(_) => match direction {
-                Direction::Left => state.swayward.layout.move_left(),
-                Direction::Right => state.swayward.layout.move_right(),
-                Direction::Up => state.swayward.layout.move_up(),
-                Direction::Down => state.swayward.layout.move_down(),
-            },
-        };
-        if !moved && state.swayward.layout.focused_fullscreen_mode().is_none() {
-            move_target_to_adjacent_output(state, target, direction, activate);
-        }
-        moved
+        move_focused_direction(state, target, direction, layout_direction, activate)
     } else {
-        match target {
-            CommandTarget::Window(target) => {
-                let window =
-                    state.swayward.layout.windows().find_map(|(_, mapped)| {
-                        (mapped.id() == target).then(|| mapped.window.clone())
-                    });
-                let Some(window) = window else {
-                    return failure("No matching node.");
-                };
-                let moved = state.swayward.layout.move_window_in_direction(
-                    &window,
-                    layout_direction,
-                    f64::from(pixels.unwrap_or(10)),
-                );
-                if !moved {
-                    move_target_to_adjacent_output(
-                        state,
-                        CommandTarget::Window(target),
-                        direction,
-                        activate,
-                    );
-                }
-                moved
-            }
-            CommandTarget::Container(workspace, node) => state
-                .swayward
-                .layout
-                .move_tiling_node_in_direction(workspace, node, layout_direction),
+        match move_targeted_direction(state, target, direction, layout_direction, pixels, activate)
+        {
+            Ok(moved) => moved,
+            Err(outcome) => return outcome,
         }
     };
     state.swayward.queue_redraw_all();
@@ -167,6 +128,71 @@ pub(super) fn move_direction(
         }
     }
     success()
+}
+
+/// `move <direction>` on the focused container: tiled moves follow the
+/// focus, and a move that leaves the workspace edge crosses outputs.
+fn move_focused_direction(
+    state: &mut State,
+    target: CommandTarget,
+    direction: Direction,
+    layout_direction: crate::layout::tiling_tree::Direction,
+    activate: crate::layout::ActivateWindow,
+) -> bool {
+    let moved = match target {
+        CommandTarget::Container(workspace, node) => state
+            .swayward
+            .layout
+            .move_tiling_node_in_direction(workspace, node, layout_direction),
+        CommandTarget::Window(_) => match direction {
+            Direction::Left => state.swayward.layout.move_left(),
+            Direction::Right => state.swayward.layout.move_right(),
+            Direction::Up => state.swayward.layout.move_up(),
+            Direction::Down => state.swayward.layout.move_down(),
+        },
+    };
+    if !moved && state.swayward.layout.focused_fullscreen_mode().is_none() {
+        move_target_to_adjacent_output(state, target, direction, activate);
+    }
+    moved
+}
+
+/// `move <direction>` on a criteria target.
+fn move_targeted_direction(
+    state: &mut State,
+    target: CommandTarget,
+    direction: Direction,
+    layout_direction: crate::layout::tiling_tree::Direction,
+    pixels: Option<i32>,
+    activate: crate::layout::ActivateWindow,
+) -> Result<bool, CommandOutcome> {
+    let target = match target {
+        CommandTarget::Window(target) => target,
+        CommandTarget::Container(workspace, node) => {
+            return Ok(state.swayward.layout.move_tiling_node_in_direction(
+                workspace,
+                node,
+                layout_direction,
+            ));
+        }
+    };
+    let window = state
+        .swayward
+        .layout
+        .windows()
+        .find_map(|(_, mapped)| (mapped.id() == target).then(|| mapped.window.clone()));
+    let Some(window) = window else {
+        return Err(failure("No matching node."));
+    };
+    let moved = state.swayward.layout.move_window_in_direction(
+        &window,
+        layout_direction,
+        f64::from(pixels.unwrap_or(10)),
+    );
+    if !moved {
+        move_target_to_adjacent_output(state, CommandTarget::Window(target), direction, activate);
+    }
+    Ok(moved)
 }
 
 pub(super) fn set_client_colors(
@@ -422,21 +448,11 @@ pub(super) fn mark_target(
             CommandTarget::Window(window) => crate::ipc::tree::window_id(window),
             CommandTarget::Container(_, node) => crate::ipc::tree::container_id(node),
         };
-        let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
-            &state.swayward.layout,
-            &state.swayward.global_space,
-            &state.swayward.marks_by_window,
-            &state.swayward.marks_by_container,
-        ))
-        .unwrap_or_default();
-        let container = crate::ipc::server::find_node_by_id(&tree, node_id).cloned();
+        let container = state.ipc_container_snapshot(node_id);
         unmark_target(state, target, None);
-        if let (Some(server), Some(mut container)) = (&state.swayward.ipc_server, container) {
+        if let Some(mut container) = container {
             container["marks"] = serde_json::json!([]);
-            server.send_event(swayward_ipc::legacy::Event::SwayWindowChanged {
-                change: "mark".into(),
-                container,
-            });
+            state.ipc_send_window_change("mark", container);
         }
     }
     unmark_globally(state, Some(mark));
@@ -452,22 +468,7 @@ pub(super) fn mark_target(
         }
     }
     if let CommandTarget::Container(_, node) = target {
-        let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
-            &state.swayward.layout,
-            &state.swayward.global_space,
-            &state.swayward.marks_by_window,
-            &state.swayward.marks_by_container,
-        ))
-        .unwrap_or_default();
-        if let (Some(server), Some(container)) = (
-            &state.swayward.ipc_server,
-            crate::ipc::server::find_node_by_id(&tree, crate::ipc::tree::container_id(node)),
-        ) {
-            server.send_event(swayward_ipc::legacy::Event::SwayWindowChanged {
-                change: "mark".into(),
-                container: container.clone(),
-            });
-        }
+        state.ipc_emit_window_change("mark", crate::ipc::tree::container_id(node), |_| {});
     }
     refresh_titlebar_marks(state);
     if let CommandTarget::Window(window) = target {
@@ -554,186 +555,232 @@ pub(super) fn focused_con_id(state: &State) -> Option<u64> {
     }
 }
 
-type WindowSnapshot = (
-    crate::window::mapped::MappedId,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    bool,
-    Option<Duration>,
-    Option<i32>,
-    Option<crate::swayward::SecurityContextMetadata>,
-    Option<std::sync::Arc<str>>,
-);
+/// The criteria-visible state of one window, copied out so matching does not
+/// hold a layout borrow.
+struct WindowSnapshot {
+    id: crate::window::mapped::MappedId,
+    title: Option<String>,
+    app_id: Option<String>,
+    workspace: Option<String>,
+    floating: bool,
+    urgent_since: Option<Duration>,
+    pid: Option<i32>,
+    security: Option<crate::swayward::SecurityContextMetadata>,
+    tag: Option<std::sync::Arc<str>>,
+}
 
-fn snapshot_info<'a>(state: &'a State, snapshot: &'a WindowSnapshot) -> criteria::WindowInfo<'a> {
-    criteria::WindowInfo {
-        title: snapshot.1.as_deref(),
-        shell: Some("xdg_shell"),
-        app_id: snapshot.2.as_deref(),
-        marks: state
-            .swayward
-            .marks_by_window
-            .get(&snapshot.0)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]),
-        con_id: crate::ipc::tree::window_id(snapshot.0) as u64,
-        floating: snapshot.4,
-        urgent_since: snapshot.5,
-        workspace: snapshot.3.as_deref(),
-        pid: snapshot.6.and_then(|pid| u32::try_from(pid).ok()),
-        sandbox_engine: snapshot
-            .7
-            .as_ref()
-            .and_then(|context| context.sandbox_engine.as_deref()),
-        sandbox_app_id: snapshot
-            .7
-            .as_ref()
-            .and_then(|context| context.app_id.as_deref()),
-        sandbox_instance_id: snapshot
-            .7
-            .as_ref()
-            .and_then(|context| context.instance_id.as_deref()),
-        tag: snapshot.8.as_deref(),
+impl WindowSnapshot {
+    fn new(mapped: &crate::window::Mapped, workspace: Option<String>, floating: bool) -> Self {
+        let (title, app_id) = crate::utils::with_toplevel_role(mapped.toplevel(), |role| {
+            (role.title.clone(), role.app_id.clone())
+        });
+        Self {
+            id: mapped.id(),
+            title,
+            app_id,
+            workspace,
+            floating,
+            urgent_since: mapped.urgent_since(),
+            pid: mapped.credentials().map(|c| c.pid),
+            security: mapped.security_context().cloned(),
+            tag: mapped.tag(),
+        }
+    }
+
+    fn info<'a>(&'a self, state: &'a State) -> criteria::WindowInfo<'a> {
+        let security = self.security.as_ref();
+        criteria::WindowInfo {
+            title: self.title.as_deref(),
+            shell: Some("xdg_shell"),
+            app_id: self.app_id.as_deref(),
+            marks: state
+                .swayward
+                .marks_by_window
+                .get(&self.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+            con_id: crate::ipc::tree::window_id(self.id) as u64,
+            floating: self.floating,
+            urgent_since: self.urgent_since,
+            workspace: self.workspace.as_deref(),
+            pid: self.pid.and_then(|pid| u32::try_from(pid).ok()),
+            sandbox_engine: security.and_then(|context| context.sandbox_engine.as_deref()),
+            sandbox_app_id: security.and_then(|context| context.app_id.as_deref()),
+            sandbox_instance_id: security.and_then(|context| context.instance_id.as_deref()),
+            tag: self.tag.as_deref(),
+        }
     }
 }
 
-pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> Vec<CommandTarget> {
-    use crate::utils::with_toplevel_role;
+/// One criteria candidate, in the order sway's walk visits it.
+enum Candidate {
+    Window(WindowSnapshot),
+    /// A container node, with the target a match on it selects.
+    Container(CommandTarget, crate::layout::tiling_tree::NodeId),
+}
 
-    let focused_id = focused_id(state);
-    let mut snapshots = Vec::new();
-    state
-        .swayward
-        .layout
-        .with_windows(|mapped, _, workspace_id, _| {
-            let (title, app_id) = with_toplevel_role(mapped.toplevel(), |role| {
-                (role.title.clone(), role.app_id.clone())
-            });
-            let workspace = workspace_id.and_then(|id| {
-                state
-                    .swayward
-                    .layout
-                    .workspaces()
-                    .find_map(|(_, _, ws)| (ws.id() == id).then(|| ws.sway_name()).flatten())
-            });
-            snapshots.push((
-                mapped.id(),
-                title,
-                app_id,
-                workspace,
-                mapped.is_floating(),
-                mapped.urgent_since(),
-                mapped.credentials().map(|c| c.pid),
-                mapped.security_context().cloned(),
-                mapped.tag(),
-            ));
-        });
-    let focused = snapshots
-        .iter()
-        .find(|snapshot| Some(snapshot.0) == focused_id);
-    let focused_info = focused
-        .map(|snapshot| snapshot_info(state, snapshot))
-        .unwrap_or_default();
-    let mut targets = snapshots
-        .iter()
-        .filter(|snapshot| criteria.matches(&snapshot_info(state, snapshot), &focused_info))
-        .map(|snapshot| CommandTarget::Window(snapshot.0))
-        .collect::<Vec<_>>();
-    if let Some(order) = criteria.urgent() {
-        targets.sort_by_key(|target| {
-            let CommandTarget::Window(id) = target else {
-                return None;
-            };
-            snapshots
-                .iter()
-                .find(|snapshot| snapshot.0 == *id)
-                .and_then(|snapshot| snapshot.5)
-        });
-        if matches!(order, criteria::Urgent::Latest) {
-            targets.reverse();
-        }
-        targets.truncate(1);
-    }
-    for (_, _, workspace) in state.swayward.layout.workspaces() {
-        let trees = std::iter::once((workspace.ipc_tiling_tree(), false)).chain(
-            workspace
-                .ipc_floating_trees()
-                .map(|(_, tree, _)| (tree, true)),
+/// Every window and container a criteria command can match, in sway's
+/// `root_for_each_container` order: per output and workspace, the tiling
+/// tree and then the floating containers, each depth first with parents
+/// before children, then the hidden scratchpad
+/// (`sway/sway/tree/root.c:246-261`, `sway/sway/tree/workspace.c:836-850`).
+fn collect_candidates(state: &State) -> Vec<Candidate> {
+    use std::collections::HashMap;
+
+    use crate::layout::tiling_tree::{IpcNode, IpcNodeKind};
+
+    let layout = &state.swayward.layout;
+    let workspace_names = layout
+        .workspaces()
+        .map(|(_, _, ws)| (ws.id(), ws.sway_name()))
+        .collect::<HashMap<_, _>>();
+    let mut order = Vec::new();
+    let mut snapshots = HashMap::new();
+    layout.with_windows(|mapped, _, workspace_id, _| {
+        let workspace = workspace_id
+            .and_then(|id| workspace_names.get(&id).cloned())
+            .flatten();
+        order.push(mapped.id());
+        snapshots.insert(
+            mapped.id(),
+            WindowSnapshot::new(mapped, workspace, mapped.is_floating()),
         );
-        for (tree, floating) in trees {
-            for (node, value) in tree.nodes() {
-                if matches!(value, crate::layout::tiling_tree::IpcNodeKind::Leaf) {
-                    if floating {
-                        // The snapshot and the window list come from the same
-                        // workspace borrow, so both lookups succeed. A leaf that
-                        // did not resolve would be unmatchable, never a reason
-                        // to take the compositor down on a criteria command.
-                        let Some(mapped) = tree.window_for_node(node).and_then(|window| {
-                            workspace.windows().find(|mapped| mapped.window == *window)
-                        }) else {
-                            warn!("criteria: floating leaf {node:?} has no mapped window");
-                            continue;
-                        };
-                        let (title, app_id) = with_toplevel_role(mapped.toplevel(), |role| {
-                            (role.title.clone(), role.app_id.clone())
-                        });
-                        let snapshot = (
-                            mapped.id(),
-                            title,
-                            app_id,
-                            workspace.sway_name(),
-                            true,
-                            mapped.urgent_since(),
-                            mapped.credentials().map(|c| c.pid),
-                            mapped.security_context().cloned(),
-                            mapped.tag(),
-                        );
-                        if criteria.matches(&snapshot_info(state, &snapshot), &focused_info)
-                            && !targets.contains(&CommandTarget::Window(mapped.id()))
-                        {
-                            targets.push(CommandTarget::Window(mapped.id()));
-                        }
-                    }
-                } else {
-                    let marks = state
-                        .swayward
-                        .marks_by_container
-                        .get(&node)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]);
-                    if criteria
-                        .matches_container(crate::ipc::tree::container_id(node) as u64, marks)
-                    {
-                        targets.push(CommandTarget::Container(workspace.id(), node));
-                    }
+    });
+    let mapped_by_window = layout
+        .windows()
+        .map(|(_, mapped)| (&mapped.window, mapped))
+        .collect::<HashMap<_, _>>();
+
+    let mut candidates = Vec::new();
+    for (_, _, workspace) in layout.workspaces() {
+        let push_tree = |tree: IpcNode<_>,
+                         floating: bool,
+                         candidates: &mut Vec<Candidate>,
+                         snapshots: &mut HashMap<_, WindowSnapshot>| {
+            for (node, kind) in tree.nodes() {
+                if !matches!(kind, IpcNodeKind::Leaf) {
+                    let target = CommandTarget::Container(workspace.id(), node);
+                    candidates.push(Candidate::Container(target, node));
+                    continue;
                 }
+                let Some(mapped) = tree
+                    .window_for_node(node)
+                    .and_then(|window| mapped_by_window.get(window))
+                else {
+                    warn!("criteria: leaf {node:?} has no mapped window");
+                    continue;
+                };
+                // Floating-group leaves are not in `with_windows`.
+                let snapshot = snapshots.remove(&mapped.id()).unwrap_or_else(|| {
+                    WindowSnapshot::new(mapped, workspace.sway_name(), floating)
+                });
+                candidates.push(Candidate::Window(snapshot));
+            }
+        };
+        push_tree(
+            workspace.ipc_tiling_tree(),
+            false,
+            &mut candidates,
+            &mut snapshots,
+        );
+        // GET_TREE's floating_nodes order: plain floating windows and
+        // floating groups, reversed (src/ipc/tree/workspaces.rs).
+        let plain_floating = workspace
+            .tiles_with_ipc_layouts()
+            .map(|(tile, _)| tile.window())
+            .filter(|mapped| workspace.is_floating_for_ipc(&mapped.window))
+            .map(|mapped| mapped.id())
+            .collect::<Vec<_>>();
+        for id in plain_floating.into_iter().rev() {
+            if let Some(snapshot) = snapshots.remove(&id) {
+                candidates.push(Candidate::Window(snapshot));
             }
         }
+        let groups = workspace.ipc_floating_trees().collect::<Vec<_>>();
+        for (_, tree, _) in groups.into_iter().rev() {
+            push_tree(tree, true, &mut candidates, &mut snapshots);
+        }
     }
-    // A hidden scratchpad group's containers stay matchable, as in sway's
-    // criteria walk (`sway/sway/tree/root.c:250-257`). The group has no
-    // workspace, so a match targets the group through one of its windows;
-    // the scratchpad commands act on the whole group from any of them.
-    for (node, window) in state.swayward.layout.scratchpad_tree_nodes() {
-        let marks = state
-            .swayward
-            .marks_by_container
-            .get(&node)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        if criteria.matches_container(crate::ipc::tree::container_id(node) as u64, marks) {
-            if let Some(mapped) = state
-                .swayward
-                .layout
-                .windows()
-                .find_map(|(_, mapped)| (mapped.window == *window).then(|| mapped.id()))
-            {
-                let target = CommandTarget::Window(mapped);
-                if !targets.contains(&target) {
-                    targets.push(target);
-                }
+    // A hidden scratchpad group has no workspace, so a match on one of its
+    // nodes targets the group through one of its windows; the scratchpad
+    // commands act on the whole group from any of them.
+    for (node, window) in layout.scratchpad_tree_nodes() {
+        if let Some(mapped) = mapped_by_window.get(window) {
+            candidates.push(Candidate::Container(
+                CommandTarget::Window(mapped.id()),
+                node,
+            ));
+        }
+    }
+    // Hidden scratchpad windows, then anything the walk did not reach (a
+    // window under an interactive move), in `with_windows` order.
+    let hidden = layout
+        .scratchpad_windows()
+        .map(|mapped| mapped.id())
+        .collect::<Vec<_>>();
+    let (hidden, rest): (Vec<_>, Vec<_>) = order.into_iter().partition(|id| hidden.contains(id));
+    for id in hidden.into_iter().chain(rest) {
+        if let Some(snapshot) = snapshots.remove(&id) {
+            candidates.push(Candidate::Window(snapshot));
+        }
+    }
+    candidates
+}
+
+/// The candidates `criteria` selects, in walk order, each target once.
+///
+/// Sway applies a criteria command to its matches in this order
+/// (`sway/sway/criteria.c:500-512`), so a command whose effect depends on
+/// order, such as `mark` moving a mark between targets, ends as sway does.
+pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> Vec<CommandTarget> {
+    let candidates = collect_candidates(state);
+    let windows = || {
+        candidates.iter().filter_map(|candidate| match candidate {
+            Candidate::Window(snapshot) => Some(snapshot),
+            Candidate::Container(..) => None,
+        })
+    };
+    let focused_id = focused_id(state);
+    let focused_info = windows()
+        .find(|snapshot| Some(snapshot.id) == focused_id)
+        .map(|snapshot| snapshot.info(state))
+        .unwrap_or_default();
+    if let Some(order) = criteria.urgent() {
+        // Sway stable-sorts the urgent views by urgency time and takes the
+        // oldest or the latest (`sway/sway/criteria.c:434-447`).
+        let mut urgent = windows()
+            .filter(|snapshot| criteria.matches(&snapshot.info(state), &focused_info))
+            .collect::<Vec<_>>();
+        urgent.sort_by_key(|snapshot| snapshot.urgent_since);
+        if matches!(order, criteria::Urgent::Latest) {
+            urgent.reverse();
+        }
+        return urgent
+            .first()
+            .map(|snapshot| CommandTarget::Window(snapshot.id))
+            .into_iter()
+            .collect();
+    }
+    let mut targets = Vec::new();
+    for candidate in &candidates {
+        let target = match candidate {
+            Candidate::Window(snapshot) => criteria
+                .matches(&snapshot.info(state), &focused_info)
+                .then_some(CommandTarget::Window(snapshot.id)),
+            Candidate::Container(target, node) => {
+                let marks = state
+                    .swayward
+                    .marks_by_container
+                    .get(node)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                criteria
+                    .matches_container(crate::ipc::tree::container_id(*node) as u64, marks)
+                    .then_some(*target)
             }
+        };
+        if let Some(target) = target.filter(|target| !targets.contains(target)) {
+            targets.push(target);
         }
     }
     targets

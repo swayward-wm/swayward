@@ -100,9 +100,14 @@ use smithay::wayland::shm::ShmState;
 mod capture;
 mod capture_requests;
 mod config_reload;
+mod cursor;
 mod focus;
+mod lock;
+mod marks;
+mod mru;
 mod outputs;
 mod render;
+mod urgency;
 
 #[cfg(test)]
 use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
@@ -117,8 +122,8 @@ use smithay::wayland::xdg_toplevel_tag::XdgToplevelTagManager;
 use swayward_config::debug::PreviewRender;
 use swayward_config::output::MaxBpc;
 use swayward_config::{
-    Bind, Config, Key, Modifiers, OutputName, PositiveFloatOrInt, TrackLayout,
-    WarpMouseToFocusMode, WorkspaceReference, Xkb,
+    Bind, Config, Modifiers, OutputName, PositiveFloatOrInt, TrackLayout, WarpMouseToFocusMode,
+    WorkspaceReference, Xkb,
 };
 use wayland_server::protocol::wl_output::WlOutput;
 
@@ -261,8 +266,8 @@ pub struct Swayward {
     pub layout: Layout<Mapped>,
 
     pub marks: HashMap<String, MappedId>,
-    pub marks_by_window: HashMap<MappedId, Vec<String>>,
-    pub marks_by_container: HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
+    pub marks_by_window: WindowMarks,
+    pub marks_by_container: ContainerMarks,
     pub runtime_window_rules: Vec<RuntimeWindowRule>,
     pub for_window: Vec<(String, String, crate::criteria::Criteria)>,
     /// Runtime `for_window` criteria added since the last successful reload.
@@ -392,9 +397,7 @@ pub struct Swayward {
     /// Button codes of the mouse buttons to suppress.
     pub suppressed_buttons: HashSet<u32>,
     pub held_release_buttons: HashMap<(String, u32), Bind>,
-    #[allow(clippy::type_complexity)]
-    pub bind_cooldown_timers:
-        HashMap<(Key, String, Option<u8>, bool, bool, bool), RegistrationToken>,
+    pub bind_cooldown_timers: HashMap<swayward_config::BindIdentity, RegistrationToken>,
     pub bind_repeat_timer: Option<RegistrationToken>,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
@@ -659,6 +662,11 @@ pub enum CenterCoords {
     BothAlways,
 }
 
+/// Marks on each window, in the order they were added.
+pub type WindowMarks = HashMap<MappedId, Vec<String>>;
+/// Marks on each split container, in the order they were added.
+pub type ContainerMarks = HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>;
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum CastTarget {
     // Dynamic cast before selecting anything.
@@ -683,27 +691,6 @@ impl CastTarget {
 
     pub fn matches_output(&self, weak: &WeakOutput) -> bool {
         matches!(self, CastTarget::Output { output, .. } if output == weak)
-    }
-
-    pub fn matches(&self, ipc: &swayward_ipc::CastTarget) -> bool {
-        use CastTarget::*;
-        match (self, ipc) {
-            (Nothing, swayward_ipc::CastTarget::Nothing {}) => true,
-            (Output { name, .. }, swayward_ipc::CastTarget::Output { name: ipc_name }) => {
-                name == ipc_name
-            }
-            (Window { id }, swayward_ipc::CastTarget::Window { id: ipc_id }) => id == ipc_id,
-            _ => false,
-        }
-    }
-
-    pub fn make_ipc(&self) -> swayward_ipc::CastTarget {
-        use CastTarget::*;
-        match self {
-            Nothing => swayward_ipc::CastTarget::Nothing {},
-            Output { name, .. } => swayward_ipc::CastTarget::Output { name: name.clone() },
-            Window { id } => swayward_ipc::CastTarget::Window { id: *id },
-        }
     }
 }
 
@@ -782,6 +769,19 @@ impl KeyboardFocus {
 pub(crate) static LIVE_STATE_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+pub enum IpcMode {
+    Ambient,
+    At(PathBuf),
+    Off,
+}
+
+pub struct StartupOptions {
+    pub headless: bool,
+    pub create_wayland_socket: bool,
+    pub ipc_mode: IpcMode,
+    pub is_session_instance: bool,
+}
+
 pub struct State {
     pub backend: Backend,
     pub swayward: Swayward,
@@ -800,9 +800,7 @@ impl State {
         event_loop: LoopHandle<'static, State>,
         stop_signal: LoopSignal,
         display: Display<State>,
-        headless: bool,
-        create_wayland_socket: bool,
-        is_session_instance: bool,
+        options: StartupOptions,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let _span = tracy_client::span!("State::new");
 
@@ -812,7 +810,7 @@ impl State {
             || env::var_os("WAYLAND_SOCKET").is_some()
             || env::var_os("DISPLAY").is_some();
 
-        let mut backend = if headless {
+        let mut backend = if options.headless {
             let headless = Headless::new();
             Backend::Headless(headless)
         } else if has_display {
@@ -830,8 +828,7 @@ impl State {
             stop_signal,
             display,
             &backend,
-            create_wayland_socket,
-            is_session_instance,
+            &options,
         )?;
         backend.init(&mut swayward);
 
@@ -946,7 +943,9 @@ impl State {
         // screencasts.
         #[cfg(feature = "xdp-gnome-screencast")]
         self.swayward.refresh_mapped_cast_window_rules();
-        self.ipc_refresh_casts();
+        // Clear expired screencopy casts. Ideally we'd have a deadline timer, but our 1 second
+        // frame callback timer calls refresh regularly, so that's fine as is.
+        self.swayward.screencopy_state.clear_expired_casts();
 
         self.swayward.refresh_window_rules();
         self.refresh_ipc_outputs();
@@ -965,343 +964,6 @@ impl State {
             self.client_compositor_state(&client)
                 .blocker_cleared(self, &dh);
         }
-    }
-
-    pub fn move_cursor(&mut self, location: Point<f64, Logical>) {
-        let mut under = match self.swayward.pointer_visibility {
-            PointerVisibility::Disabled => PointContents::default(),
-            _ => self.swayward.contents_under(location),
-        };
-
-        // Disable the hidden pointer if the contents underneath have changed.
-        if !self.swayward.pointer_visibility.is_visible() && self.swayward.pointer_contents != under
-        {
-            self.swayward.pointer_visibility = PointerVisibility::Disabled;
-
-            // When setting PointerVisibility::Hidden together with pointer contents changing,
-            // we can change straight to nothing to avoid one frame of hover. Notably, this can
-            // be triggered through warp-mouse-to-focus combined with hide-when-typing.
-            under = PointContents::default();
-        }
-
-        self.swayward.pointer_contents.clone_from(&under);
-
-        let pointer = &self.swayward.seat.get_pointer().unwrap();
-        pointer.motion(
-            self,
-            under.surface,
-            &MotionEvent {
-                location,
-                serial: SERIAL_COUNTER.next_serial(),
-                time: InputTime::now(),
-            },
-        );
-        pointer.frame(self);
-
-        self.swayward.maybe_activate_pointer_constraint();
-
-        // We do not show the pointer on programmatic or keyboard movement.
-
-        // FIXME: granular
-        self.swayward.queue_redraw_all();
-    }
-
-    /// Moves cursor within the specified rectangle, only adjusting coordinates if needed.
-    fn move_cursor_to_rect(&mut self, rect: Rectangle<f64, Logical>, mode: CenterCoords) -> bool {
-        let pointer = &self.swayward.seat.get_pointer().unwrap();
-        let cur_loc = pointer.current_location();
-        let x_in_bound = cur_loc.x >= rect.loc.x && cur_loc.x <= rect.loc.x + rect.size.w;
-        let y_in_bound = cur_loc.y >= rect.loc.y && cur_loc.y <= rect.loc.y + rect.size.h;
-
-        let p = match mode {
-            CenterCoords::Separately => {
-                if x_in_bound && y_in_bound {
-                    return false;
-                } else if y_in_bound {
-                    // adjust x
-                    Point::from((rect.loc.x + rect.size.w / 2.0, cur_loc.y))
-                } else if x_in_bound {
-                    // adjust y
-                    Point::from((cur_loc.x, rect.loc.y + rect.size.h / 2.0))
-                } else {
-                    // adjust x and y
-                    center_f64(rect)
-                }
-            }
-            CenterCoords::Both => {
-                if x_in_bound && y_in_bound {
-                    return false;
-                } else {
-                    // adjust x and y
-                    center_f64(rect)
-                }
-            }
-            CenterCoords::BothAlways => center_f64(rect),
-        };
-
-        self.move_cursor(p);
-        true
-    }
-
-    pub fn move_cursor_to_focused_tile(&mut self, mode: CenterCoords) -> bool {
-        if !self.swayward.keyboard_focus.is_layout() {
-            return false;
-        }
-
-        if self.swayward.tablet_cursor_location.is_some() {
-            return false;
-        }
-
-        let Some(output) = self.swayward.layout.active_output() else {
-            return false;
-        };
-        let monitor = self.swayward.layout.monitor_for_output(output).unwrap();
-
-        let mut rv = false;
-        let rect = monitor.active_window_visual_rectangle();
-
-        if let Some(rect) = rect {
-            let output_geo = self.swayward.global_space.output_geometry(output).unwrap();
-            let mut rect = rect;
-            rect.loc += output_geo.loc.to_f64();
-            rv = self.move_cursor_to_rect(rect, mode);
-        }
-
-        rv
-    }
-
-    pub fn focus_default_monitor(&mut self) {
-        // Our default target is the first output in sorted order.
-        let Some(target) = self.swayward.sorted_outputs.first().cloned() else {
-            // No outputs are connected.
-            return;
-        };
-
-        if !self.focus_configured_monitor() {
-            self.swayward.layout.focus_output(&target);
-            self.move_cursor_to_output(&target);
-        }
-    }
-
-    pub fn focus_configured_monitor(&mut self) -> bool {
-        let target = {
-            let config = self.swayward.config.borrow();
-            config.outputs.0.iter().find_map(|config| {
-                config
-                    .focus_at_startup
-                    .then(|| self.swayward.output_by_name_match(&config.name))
-                    .flatten()
-                    .cloned()
-            })
-        };
-        let Some(target) = target else {
-            return false;
-        };
-
-        self.swayward.layout.focus_output(&target);
-        self.move_cursor_to_output(&target);
-        true
-    }
-
-    /// Focus a specific window, taking care of a potential active output change and cursor
-    /// warp.
-    pub fn focus_window(&mut self, window: &Window) {
-        let active_output = self.swayward.layout.active_output().cloned();
-
-        self.swayward.layout.activate_window(window);
-
-        let new_active = self.swayward.layout.active_output().cloned();
-        if new_active != active_output {
-            if !self.maybe_warp_cursor_to_focus_centered() {
-                self.move_cursor_to_output(&new_active.unwrap());
-            }
-        } else {
-            self.maybe_warp_cursor_to_focus();
-        }
-
-        // FIXME: granular
-        self.swayward.queue_redraw_all();
-    }
-
-    pub fn confirm_mru(&mut self) {
-        if let Some(window) = self.swayward.close_mru(MruCloseRequest::Confirm) {
-            // focus_window() will warp the cursor to the window only when the keyboard focus is on
-            // the layout. However, right now the keyboard focus is still on the MRU (that we had
-            // just closed) since it's only updated at the end of the event loop cycle. Force-update
-            // the keyboard focus here to make cursor warping work.
-            self.update_keyboard_focus();
-
-            self.focus_window(&window);
-        }
-    }
-
-    /// Resolve sway's `mouse_warping` policy for the focus change about to
-    /// happen.
-    ///
-    /// `Some(mode)` means the policy governs this warp and the inherited
-    /// `warp-mouse-to-focus` centering option is not consulted; `None` means
-    /// no sway policy is in force.
-    ///
-    /// `WARP_OUTPUT` warps only when the newly focused target is on an output
-    /// that does not already contain the pointer, and `WARP_CONTAINER` warps
-    /// on every qualifying focus change. Both skip the warp when the pointer
-    /// already sits inside the target, because sway calls
-    /// `cursor_warp_to_container` with `force` unset
-    /// (`sway/sway/input/seat.c:1526-1547`, `sway/sway/input/cursor.c:1166-1184`).
-    fn sway_warp_mode(&self) -> Option<CenterCoords> {
-        match self.swayward.config.borrow().input.mouse_warping {
-            swayward_config::input::MouseWarping::No => None,
-            swayward_config::input::MouseWarping::Container => Some(CenterCoords::Both),
-            swayward_config::input::MouseWarping::Output => {
-                let output = self.swayward.layout.active_output()?;
-                let geometry = self.swayward.global_space.output_geometry(output)?;
-                let pointer = self.swayward.seat.get_pointer()?.current_location();
-                if geometry.to_f64().contains(pointer) {
-                    // The pointer is already on the focused output, so this
-                    // mode leaves it alone.
-                    None
-                } else {
-                    Some(CenterCoords::Both)
-                }
-            }
-        }
-    }
-
-    pub fn maybe_warp_cursor_to_focus(&mut self) -> bool {
-        if let Some(mode) = self.sway_warp_mode() {
-            return self.move_cursor_to_focused_tile(mode);
-        }
-        let focused = match self.swayward.config.borrow().input.warp_mouse_to_focus {
-            None => return false,
-            Some(inner) => match inner.mode {
-                None => CenterCoords::Separately,
-                Some(WarpMouseToFocusMode::CenterXy) => CenterCoords::Both,
-                Some(WarpMouseToFocusMode::CenterXyAlways) => CenterCoords::BothAlways,
-            },
-        };
-        self.move_cursor_to_focused_tile(focused)
-    }
-
-    pub fn maybe_warp_cursor_to_focus_centered(&mut self) -> bool {
-        if let Some(mode) = self.sway_warp_mode() {
-            return self.move_cursor_to_focused_tile(mode);
-        }
-        let focused = match self.swayward.config.borrow().input.warp_mouse_to_focus {
-            None => return false,
-            Some(inner) => match inner.mode {
-                None => CenterCoords::Both,
-                Some(WarpMouseToFocusMode::CenterXy) => CenterCoords::Both,
-                Some(WarpMouseToFocusMode::CenterXyAlways) => CenterCoords::BothAlways,
-            },
-        };
-        self.move_cursor_to_focused_tile(focused)
-    }
-
-    pub fn refresh_pointer_contents(&mut self) {
-        // Don't move the mouse pointer while the user is interacting with the tablet, as it causes
-        // unwanted jumps for the client.
-        if self.swayward.tablet_cursor_location.is_some() {
-            return;
-        }
-
-        let _span = tracy_client::span!("Swayward::refresh_pointer_contents");
-
-        let pointer = &self.swayward.seat.get_pointer().unwrap();
-        let location = pointer.current_location();
-
-        if !self.swayward.exit_confirm_dialog.is_open()
-            && !self.swayward.is_locked()
-            && !self.swayward.screenshot_ui.is_open()
-        {
-            // Don't refresh cursor focus during transitions.
-            if let Some((output, _)) = self.swayward.output_under(location) {
-                let monitor = self.swayward.layout.monitor_for_output(output).unwrap();
-                if monitor.are_transitions_ongoing() {
-                    return;
-                }
-            }
-        }
-
-        if !self.update_pointer_contents() {
-            return;
-        }
-
-        pointer.frame(self);
-
-        // Pointer motion from a surface to nothing triggers a cursor change to default, which
-        // means we may need to redraw.
-
-        // FIXME: granular
-        self.swayward.queue_redraw_all();
-    }
-
-    pub fn update_pointer_contents(&mut self) -> bool {
-        let _span = tracy_client::span!("Swayward::update_pointer_contents");
-
-        let pointer = &self.swayward.seat.get_pointer().unwrap();
-        let location = pointer.current_location();
-        let mut under = match self.swayward.pointer_visibility {
-            PointerVisibility::Disabled => PointContents::default(),
-            _ => self.swayward.contents_under(location),
-        };
-
-        // We're not changing the global cursor location here, so if the contents did not change,
-        // then nothing changed.
-        if self.swayward.pointer_contents == under {
-            return false;
-        }
-
-        // Disable the hidden pointer if the contents underneath have changed.
-        if !self.swayward.pointer_visibility.is_visible() {
-            self.swayward.pointer_visibility = PointerVisibility::Disabled;
-
-            // When setting PointerVisibility::Hidden together with pointer contents changing,
-            // we can change straight to nothing to avoid one frame of hover. Notably, this can
-            // be triggered through warp-mouse-to-focus combined with hide-when-typing.
-            under = PointContents::default();
-            if self.swayward.pointer_contents == under {
-                return false;
-            }
-        }
-
-        self.swayward.pointer_contents.clone_from(&under);
-
-        pointer.motion(
-            self,
-            under.surface,
-            &MotionEvent {
-                location,
-                serial: SERIAL_COUNTER.next_serial(),
-                time: InputTime::now(),
-            },
-        );
-
-        self.swayward.maybe_activate_pointer_constraint();
-
-        true
-    }
-
-    pub fn move_cursor_to_output(&mut self, output: &Output) {
-        let geo = self.swayward.global_space.output_geometry(output).unwrap();
-        self.move_cursor(center(geo).to_f64());
-    }
-
-    pub fn refresh_popup_grab(&mut self) {
-        if let Some(grab) = &mut self.swayward.popup_grab {
-            if grab.grab.has_ended() {
-                self.swayward.popup_grab = None;
-            }
-        }
-    }
-
-    /// The seat keyboard's modifier state, or no modifiers when startup could
-    /// not add a keyboard because no keymap compiled.
-    pub fn modifier_state(&self) -> smithay::input::keyboard::ModifiersState {
-        self.swayward
-            .seat
-            .get_keyboard()
-            .map(|keyboard| keyboard.modifier_state())
-            .unwrap_or_default()
     }
 
     pub fn update_keyboard_focus(&mut self) {
@@ -1592,8 +1254,7 @@ impl Swayward {
         stop_signal: LoopSignal,
         display: Display<State>,
         backend: &Backend,
-        create_wayland_socket: bool,
-        is_session_instance: bool,
+        options: &StartupOptions,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let _span = tracy_client::span!("Swayward::new");
 
@@ -1707,10 +1368,10 @@ impl Swayward {
         let background_effect_state = BackgroundEffectState::new::<State>(&display_handle);
         let xdg_foreign_state = XdgForeignState::new::<State>(&display_handle);
 
-        let is_tty = matches!(backend, Backend::Tty(_));
+        let supports_gamma = backend.supports_gamma();
         let gamma_control_manager_state =
             GammaControlManagerState::new::<State, _>(&display_handle, move |client| {
-                (is_tty || cfg!(test)) && !client.get_data::<ClientState>().unwrap().restricted
+                supports_gamma && !client.get_data::<ClientState>().unwrap().restricted
             });
         let activation_state = XdgActivationState::new::<State>(&display_handle);
         event_loop
@@ -1806,7 +1467,7 @@ impl Swayward {
             )
             .unwrap();
 
-        let socket_name = if create_wayland_socket {
+        let socket_name = if options.create_wayland_socket {
             let socket_source =
                 ListeningSocketSource::new_auto().context("unable to open Wayland socket")?;
             let socket_name = socket_source.socket_name().to_os_string();
@@ -1825,14 +1486,13 @@ impl Swayward {
             None
         };
 
-        #[cfg(not(test))]
-        let ipc_server = if socket_name.is_some() {
-            Some(IpcServer::start(&event_loop, socket_name.as_deref())?)
-        } else {
-            None
+        let ipc_server = match &options.ipc_mode {
+            IpcMode::Ambient if socket_name.is_some() => {
+                Some(IpcServer::start(&event_loop, socket_name.as_deref())?)
+            }
+            IpcMode::At(path) => Some(IpcServer::start_at(&event_loop, Some(path.clone()))?),
+            IpcMode::Ambient | IpcMode::Off => None,
         };
-        #[cfg(test)]
-        let ipc_server = None;
 
         #[cfg(feature = "xdp-gnome-screencast")]
         let screencasting = Screencasting::new(&event_loop);
@@ -1877,7 +1537,7 @@ impl Swayward {
             lock_deadline: Duration::from_millis(1000),
             socket_name,
             display_handle,
-            is_session_instance,
+            is_session_instance: options.is_session_instance,
             start_time: Instant::now(),
             is_at_startup: true,
             clock: animation_clock,
@@ -2037,84 +1697,6 @@ impl Swayward {
         Ok(swayward)
     }
 
-    pub fn set_mark(&mut self, window: MappedId, mark: &str, add: bool, toggle: bool) {
-        let had_mark = self.marks.get(mark) == Some(&window);
-        if !add {
-            if let Some(existing) = self.marks_by_window.remove(&window) {
-                for mark in existing {
-                    self.marks.remove(&mark);
-                }
-            }
-        }
-        if let Some(previous) = self.marks.remove(mark) {
-            if let Some(marks) = self.marks_by_window.get_mut(&previous) {
-                marks.retain(|existing| existing != mark);
-            }
-        }
-        if !toggle || !had_mark {
-            self.marks.insert(mark.to_owned(), window);
-            self.marks_by_window
-                .entry(window)
-                .or_default()
-                .push(mark.to_owned());
-        }
-    }
-
-    /// Move container marks to the node ids a tree transfer assigned.
-    ///
-    /// Node ids are unique across every tree, so marks are keyed by node
-    /// alone and follow a container wherever it lives, including a hidden
-    /// scratchpad group. All entries are lifted before any is re-inserted, so
-    /// a swap whose two halves exchange ids cannot clobber either half.
-    pub fn remap_container_marks(
-        &mut self,
-        remapped: impl IntoIterator<
-            Item = (
-                crate::layout::tiling_tree::NodeId,
-                crate::layout::tiling_tree::NodeId,
-            ),
-        >,
-    ) {
-        let moved = remapped
-            .into_iter()
-            .filter_map(|(old, new)| Some((new, self.marks_by_container.remove(&old)?)))
-            .collect::<Vec<_>>();
-        for (new, marks) in moved {
-            self.marks_by_container
-                .entry(new)
-                .or_default()
-                .extend(marks);
-        }
-    }
-
-    pub fn unmark(&mut self, window: Option<MappedId>, mark: Option<&str>) {
-        match (window, mark) {
-            (Some(window), Some(mark)) if self.marks.get(mark) == Some(&window) => {
-                self.marks.remove(mark);
-                if let Some(marks) = self.marks_by_window.get_mut(&window) {
-                    marks.retain(|existing| existing != mark);
-                }
-            }
-            (Some(window), None) => {
-                for mark in self.marks_by_window.remove(&window).unwrap_or_default() {
-                    self.marks.remove(&mark);
-                }
-            }
-            (None, Some(mark)) => {
-                if let Some(window) = self.marks.remove(mark) {
-                    if let Some(marks) = self.marks_by_window.get_mut(&window) {
-                        marks.retain(|existing| existing != mark);
-                    }
-                }
-            }
-            (None, None) => {
-                self.marks.clear();
-                self.marks_by_window.clear();
-            }
-            _ => {}
-        }
-    }
-
     pub fn insert_client(&mut self, client: NewClient) {
         let NewClient {
             client,
@@ -2167,291 +1749,6 @@ impl Swayward {
         self.inhibit_power_key_fd = Some(fd);
 
         Ok(())
-    }
-
-    /// Repositions all outputs, optionally adding a new output.
-    fn ensure_lock_redraw(&mut self, output: &Output) {
-        let output = output.downgrade();
-        self.event_loop
-            .insert_source(
-                Timer::from_duration(Duration::from_millis(100)),
-                move |_, _, state| {
-                    if !matches!(state.swayward.lock_state, LockState::Locking(_)) {
-                        return TimeoutAction::Drop;
-                    }
-                    let Some(output) = output.upgrade() else {
-                        return TimeoutAction::Drop;
-                    };
-                    let Some(output_state) = state.swayward.output_state.get_mut(&output) else {
-                        return TimeoutAction::Drop;
-                    };
-                    if output_state.lock_render_state == LockRenderState::Locked {
-                        return TimeoutAction::Drop;
-                    }
-
-                    output_state.redraw_state =
-                        mem::take(&mut output_state.redraw_state).queue_redraw();
-                    TimeoutAction::ToDuration(Duration::from_millis(100))
-                },
-            )
-            .unwrap();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_test_lock_deadline(&mut self, deadline: Duration) {
-        self.lock_deadline = deadline;
-    }
-
-    pub fn is_locked(&self) -> bool {
-        match self.lock_state {
-            LockState::Unlocked | LockState::WaitingForSurfaces { .. } => false,
-            LockState::Locking(_) | LockState::Locked(_) => true,
-        }
-    }
-
-    pub fn lock(&mut self, confirmation: SessionLocker) {
-        // Check if another client is in the process of locking.
-        if matches!(
-            self.lock_state,
-            LockState::WaitingForSurfaces { .. } | LockState::Locking(_)
-        ) {
-            info!("refusing lock as another client is currently locking");
-            return;
-        }
-
-        // Check if we're already locked with an active client.
-        if let LockState::Locked(lock) = &self.lock_state {
-            if lock.is_alive() {
-                info!("refusing lock as already locked with an active client");
-                return;
-            }
-
-            // If the client had died, continue with the new lock.
-            info!("locking session (replacing existing dead lock)");
-
-            // Since the session was already locked, we know that the outputs are blanked, and
-            // can lock right away.
-            let lock = confirmation.ext_session_lock().clone();
-            confirmation.lock();
-            self.lock_state = LockState::Locked(lock);
-
-            return;
-        }
-
-        info!("locking session");
-
-        if self.output_state.is_empty() {
-            // There are no outputs, lock the session right away.
-            self.screenshot_ui.close();
-            self.cursor_manager
-                .set_cursor_image(CursorImageStatus::default_named());
-
-            let lock = confirmation.ext_session_lock().clone();
-            confirmation.lock();
-            self.lock_state = LockState::Locked(lock);
-        } else {
-            // There are outputs which we need to redraw before locking. But before we do that,
-            // let's wait for the lock surfaces.
-            //
-            // Give them a second; swaylock can take its time to paint a big enough image.
-            #[cfg(not(test))]
-            let lock_deadline = Duration::from_millis(1000);
-            #[cfg(test)]
-            let lock_deadline = self.lock_deadline;
-            let timer = Timer::from_duration(lock_deadline);
-            let deadline_token = self
-                .event_loop
-                .insert_source(timer, |_, _, state| {
-                    trace!("lock deadline expired, continuing");
-                    state.swayward.continue_to_locking();
-                    TimeoutAction::Drop
-                })
-                .unwrap();
-
-            self.lock_state = LockState::WaitingForSurfaces {
-                confirmation,
-                deadline_token,
-            };
-        }
-    }
-
-    pub fn maybe_continue_to_locking(&mut self) {
-        if !matches!(self.lock_state, LockState::WaitingForSurfaces { .. }) {
-            // Not waiting.
-            return;
-        }
-
-        // Check if there are any outputs whose lock surfaces had not had a commit yet.
-        for state in self.output_state.values() {
-            let Some(surface) = &state.lock_surface else {
-                // Surface not created yet.
-                return;
-            };
-
-            if !is_mapped(surface.wl_surface()) {
-                return;
-            }
-        }
-
-        // All good.
-        trace!("lock surfaces are ready, continuing");
-        self.continue_to_locking();
-    }
-
-    fn continue_to_locking(&mut self) {
-        match mem::take(&mut self.lock_state) {
-            LockState::WaitingForSurfaces {
-                confirmation,
-                deadline_token,
-            } => {
-                self.event_loop.remove(deadline_token);
-
-                self.screenshot_ui.close();
-                self.cursor_manager
-                    .set_cursor_image(CursorImageStatus::default_named());
-                self.cancel_mru();
-
-                if self.output_state.is_empty() {
-                    // There are no outputs, lock the session right away.
-                    let lock = confirmation.ext_session_lock().clone();
-                    confirmation.lock();
-                    self.lock_state = LockState::Locked(lock);
-                } else {
-                    // There are outputs which we need to redraw before locking.
-                    self.lock_state = LockState::Locking(confirmation);
-                    self.queue_redraw_all();
-                    for output in self.output_state.keys().cloned().collect::<Vec<_>>() {
-                        self.ensure_lock_redraw(&output);
-                    }
-                }
-            }
-            other => {
-                error!("continue_to_locking() called with wrong lock state: {other:?}",);
-                self.lock_state = other;
-            }
-        }
-    }
-
-    pub fn unlock(&mut self) {
-        info!("unlocking session");
-
-        let prev = mem::take(&mut self.lock_state);
-        if let LockState::WaitingForSurfaces { deadline_token, .. } = prev {
-            self.event_loop.remove(deadline_token);
-        }
-
-        for output_state in self.output_state.values_mut() {
-            output_state.lock_surface = None;
-        }
-        self.queue_redraw_all();
-    }
-
-    #[cfg(feature = "dbus")]
-    fn update_locked_hint(&mut self) {
-        use std::sync::LazyLock;
-
-        if !self.is_session_instance {
-            return;
-        }
-
-        static XDG_SESSION_ID: LazyLock<Option<String>> = LazyLock::new(|| {
-            let id = std::env::var("XDG_SESSION_ID").ok();
-            if id.is_none() {
-                warn!(
-                    "env var 'XDG_SESSION_ID' is unset or invalid; logind LockedHint won't be set"
-                );
-            }
-            id
-        });
-
-        let Some(session_id) = &*XDG_SESSION_ID else {
-            return;
-        };
-
-        fn call(session_id: &str, locked: bool) -> anyhow::Result<()> {
-            let conn = zbus::blocking::Connection::system()
-                .context("error connecting to the system bus")?;
-
-            let message = conn
-                .call_method(
-                    Some("org.freedesktop.login1"),
-                    "/org/freedesktop/login1",
-                    Some("org.freedesktop.login1.Manager"),
-                    "GetSession",
-                    &(session_id),
-                )
-                .context("failed to call GetSession")?;
-
-            let message_body = message.body();
-            let session_path: zbus::zvariant::ObjectPath = message_body
-                .deserialize()
-                .context("failed to deserialize GetSession reply")?;
-
-            conn.call_method(
-                Some("org.freedesktop.login1"),
-                session_path,
-                Some("org.freedesktop.login1.Session"),
-                "SetLockedHint",
-                &(locked),
-            )
-            .context("failed to call SetLockedHint")?;
-
-            Ok(())
-        }
-
-        // Consider only the fully locked state here. When using the locked hint with sleep
-        // inhibitor tools, we want to allow sleep only after the screens are fully cleared with
-        // the lock screen, which corresponds to the Locked state.
-        let locked = matches!(self.lock_state, LockState::Locked(_));
-
-        if self.locked_hint.is_some_and(|h| h == locked) {
-            return;
-        }
-
-        self.locked_hint = Some(locked);
-
-        let res = thread::Builder::new()
-            .name("Logind LockedHint Updater".to_owned())
-            .spawn(move || {
-                let _span = tracy_client::span!("LockedHint");
-
-                if let Err(err) = call(session_id, locked) {
-                    warn!("failed to set logind LockedHint: {err:?}");
-                }
-            });
-
-        if let Err(err) = res {
-            warn!("error spawning a thread to set logind LockedHint: {err:?}");
-        }
-    }
-
-    pub fn new_lock_surface(&mut self, surface: LockSurface, output: &Output) {
-        let lock = match &self.lock_state {
-            LockState::Unlocked => {
-                error!("tried to add a lock surface on an unlocked session");
-                return;
-            }
-            LockState::WaitingForSurfaces { confirmation, .. } => confirmation.ext_session_lock(),
-            LockState::Locking(confirmation) => confirmation.ext_session_lock(),
-            LockState::Locked(lock) => lock,
-        };
-
-        if lock.client() != surface.wl_surface().client() {
-            debug!("ignoring lock surface from an unrelated client");
-            return;
-        }
-
-        if lock != surface.ext_session_lock() {
-            debug!("ignoring lock surface from an unrelated lock instance");
-            return;
-        }
-
-        let Some(output_state) = self.output_state.get_mut(output) else {
-            error!("missing output state");
-            return;
-        };
-
-        output_state.lock_surface = Some(surface);
     }
 
     /// Activates the pointer constraint if necessary according to the current pointer contents.
@@ -2704,71 +2001,6 @@ impl Swayward {
         }
     }
 
-    fn focus_clears_urgency(&mut self, surface: &WlSurface, changed_workspace: bool) {
-        let Some((mapped, _)) = self.layout.find_window_and_output_mut(surface) else {
-            return;
-        };
-        if !mapped.is_urgent() || self.urgency_timers.contains_key(&mapped.id()) {
-            return;
-        }
-
-        let id = mapped.id();
-        let timeout_ms = self.config.borrow().urgent_timeout_ms;
-        if !changed_workspace || timeout_ms == 0 {
-            mapped.set_urgent(false);
-            return;
-        }
-
-        let token = self
-            .event_loop
-            .insert_source(
-                Timer::from_duration(Duration::from_millis(u64::from(timeout_ms))),
-                move |_, _, state| {
-                    state.swayward.urgency_timers.remove(&id);
-                    state.swayward.clear_window_urgency(id);
-                    TimeoutAction::Drop
-                },
-            )
-            .unwrap();
-        self.urgency_timers.insert(id, token);
-    }
-
-    fn clear_window_urgency(&mut self, id: MappedId) {
-        self.layout.with_windows_mut(|mapped, _| {
-            if mapped.id() == id {
-                mapped.set_urgent(false);
-            }
-        });
-        self.queue_redraw_all();
-    }
-
-    #[cfg(test)]
-    pub fn fire_urgency_timer_for_test(&mut self, id: MappedId) -> bool {
-        let Some(token) = self.urgency_timers.remove(&id) else {
-            return false;
-        };
-        self.event_loop.remove(token);
-        self.clear_window_urgency(id);
-        true
-    }
-
-    pub fn cancel_urgency_timer(&mut self, id: MappedId) {
-        if let Some(token) = self.urgency_timers.remove(&id) {
-            self.event_loop.remove(token);
-        }
-    }
-
-    pub fn set_window_urgent(&mut self, id: MappedId, urgent: bool) {
-        if !urgent {
-            self.cancel_urgency_timer(id);
-        }
-        self.layout.with_windows_mut(|mapped, _| {
-            if mapped.id() == id {
-                mapped.set_urgent(urgent);
-            }
-        });
-    }
-
     pub fn reset_pointer_inactivity_timer(&mut self) {
         if self.pointer_inactivity_timer_got_reset {
             return;
@@ -2816,46 +2048,6 @@ impl Swayward {
         self.idle_notifier_state.notify_activity(&self.seat);
 
         self.notified_activity_this_iteration = true;
-    }
-
-    pub fn close_mru(&mut self, close_request: MruCloseRequest) -> Option<Window> {
-        if !self.window_mru_ui.is_open() {
-            return None;
-        }
-        self.queue_redraw_all();
-
-        let id = self.window_mru_ui.close(close_request)?;
-        self.find_window_by_id(id)
-    }
-
-    pub fn cancel_mru(&mut self) {
-        self.close_mru(MruCloseRequest::Cancel);
-    }
-
-    /// Apply a pending MRU commit immediately.
-    ///
-    /// Called for example on keyboard events that reach the active window, which immediately adds
-    /// it to the MRU.
-    pub fn mru_apply_keyboard_commit(&mut self) {
-        let Some(pending) = self.pending_mru_commit.take() else {
-            return;
-        };
-        self.event_loop.remove(pending.token);
-
-        if let Some(window) = self
-            .layout
-            .workspaces_mut()
-            .flat_map(|ws| ws.windows_mut())
-            .find(|w| w.id() == pending.id)
-        {
-            window.set_focus_timestamp(pending.stamp);
-        }
-    }
-
-    pub fn queue_redraw_mru_output(&mut self) {
-        if let Some(output) = self.window_mru_ui.output().cloned() {
-            self.queue_redraw(&output);
-        }
     }
 }
 

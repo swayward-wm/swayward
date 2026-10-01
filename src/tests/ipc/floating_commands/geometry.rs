@@ -270,14 +270,9 @@ fn move_absolute_position_is_verbatim_under_a_bar_and_gaps() {
     // Sway applies the workspace origin only on the relative form
     // (`sway/sway/commands/move.c:913-916`) and then calls
     // container_floating_move_to, which performs no bounds check
-    // (`sway/sway/tree/container.c:1127-1159`).
-    //
-    // swayward routed the coordinate through floating_pos, whose setter adds
-    // working_area.loc back (`src/layout/floating.rs:120-129`), so a request
-    // that already accounted for the bar gained the bar and the gaps a second
-    // time. Only a preset with no slack revealed it: a full-workspace-height
-    // window at the workspace origin overflowed the bottom edge, while shorter
-    // presets absorbed the shift invisibly.
+    // (`sway/sway/tree/container.c:1113-1145`).
+    // A full-workspace-height window leaves no slack for an accidental second
+    // application of the bar or gap offset.
     let mut config = swayward_config::Config::default();
     config.animations.off = true;
     config.layout.gaps = 4.;
@@ -346,7 +341,10 @@ fn move_absolute_position_is_verbatim_under_a_bar_and_gaps() {
         ws["width"].as_i64().unwrap(),
         ws["height"].as_i64().unwrap(),
     );
-    assert_eq!(ws_y, 24, "workspace rect starts below the bar and outer gap");
+    assert_eq!(
+        ws_y, 24,
+        "workspace rect starts below the bar and outer gap"
+    );
 
     // The tallCenter preset from a real script: full workspace height at the
     // workspace origin, computed from the IPC workspace rect. Zero slack, so
@@ -671,4 +669,3 @@ fn floating_stacking_and_focus_match_sway_before_and_after_raise() {
         serde_json::from_str(&sway_fixture!("three_floating_after_raise.tree.json")).unwrap();
     assert_eq!(floating_order(&describe(&mut f)), floating_order(&after));
 }
-

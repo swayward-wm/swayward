@@ -164,8 +164,7 @@ fn ipc_output_rects_use_global_positions() {
     let (mut f, _) = ipc_fixture();
     f.add_output(1, (1280, 720));
     f.add_output(2, (1920, 1080));
-    let outputs: Vec<swayward_ipc::Output> =
-        serde_json::from_value(get_outputs(&mut f)).unwrap();
+    let outputs: Vec<swayward_ipc::Output> = serde_json::from_value(get_outputs(&mut f)).unwrap();
     let rects = outputs.iter().map(|output| output.rect).collect::<Vec<_>>();
     assert_eq!(rects[0].x, 0);
     assert_eq!(rects[0].width, 1280);
@@ -242,6 +241,7 @@ fn stale_tree_leaf_is_omitted_without_panicking() {
         border_edges: crate::utils::ResizeEdge::all(),
         sticky: false,
         mapped_under_fullscreen: false,
+        moved_under_fullscreen: None,
     };
     assert!(crate::ipc::tree::describe_tiling(
         tree,
@@ -274,6 +274,7 @@ fn stale_tree_leaf_is_omitted_without_panicking() {
             border_edges: crate::utils::ResizeEdge::all(),
             sticky: false,
             mapped_under_fullscreen: false,
+            moved_under_fullscreen: None,
         }],
     };
     let node = crate::ipc::tree::describe_tiling(
@@ -333,10 +334,7 @@ fn newly_focused_tiled_window_precedes_floating_children_in_workspace_focus() {
         .unwrap()
         .iter()
         .map(|id| {
-            children
-                .clone()
-                .find(|node| node["id"] == *id)
-                .unwrap()["app_id"]
+            children.clone().find(|node| node["id"] == *id).unwrap()["app_id"]
                 .as_str()
                 .unwrap()
         })

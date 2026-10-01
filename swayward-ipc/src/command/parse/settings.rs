@@ -103,36 +103,52 @@ pub(super) fn parse_gaps_kind(kind: &str) -> Option<(bool, [bool; 4])> {
     })
 }
 
-/// C's `atoi`: optional leading whitespace and sign, then as many decimal
-/// digits as follow; anything else ends the number, and no digits give 0.
-/// Out-of-range values saturate, where C's behaviour is undefined.
-pub(super) fn atoi(raw: &str) -> i32 {
-    let raw = raw.trim_start_matches(|c: char| c.is_ascii_whitespace());
-    let (negative, digits) = match (raw.strip_prefix('-'), raw.strip_prefix('+')) {
+/// C's `strtol(raw, &end, 10)`: optional leading whitespace and sign, then
+/// as many decimal digits as follow, saturating at the `long` range as
+/// strtol does. Returns the value and the unparsed rest; with no digits the
+/// value is 0 and the rest is the whole input, as strtol leaves `end` at the
+/// start.
+fn strtol(raw: &str) -> (i64, &str) {
+    let trimmed = raw.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let (negative, unsigned) = match (trimmed.strip_prefix('-'), trimmed.strip_prefix('+')) {
         (Some(digits), _) => (true, digits),
         (None, Some(digits)) => (false, digits),
-        (None, None) => (false, raw),
+        (None, None) => (false, trimmed),
     };
-    let magnitude = digits
-        .bytes()
-        .take_while(u8::is_ascii_digit)
-        .fold(0i64, |value, digit| {
-            (value * 10 + i64::from(digit - b'0')).min(i64::from(i32::MAX) + 1)
-        });
-    let value = if negative { -magnitude } else { magnitude };
-    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    let digit_len = unsigned.bytes().take_while(u8::is_ascii_digit).count();
+    let Some((digits, rest)) = unsigned.split_at_checked(digit_len) else {
+        return (0, raw);
+    };
+    if digits.is_empty() {
+        return (0, raw);
+    }
+    let value = digits.bytes().fold(0i128, |value, digit| {
+        (value * 10 + i128::from(digit - b'0')).min(i128::from(i64::MAX) + 1)
+    });
+    let value = if negative { -value } else { value };
+    (
+        value.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+        rest,
+    )
 }
 
-/// Sway parses with `strtol` and accepts a bare number or a `px` suffix,
-/// rejecting any other trailing text (`sway/sway/commands/gaps.c:55-58`).
+/// C's `atoi`: strtol's leading integer, and 0 when there are no digits.
+/// Out-of-range values saturate at the `int` range, where C's behaviour is
+/// undefined.
+pub(super) fn atoi(raw: &str) -> i32 {
+    strtol(raw)
+        .0
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+/// Sway reads the amount with `strtol` into an int and rejects any trailing
+/// text other than a case-insensitive "px"
+/// (`sway/sway/commands/gaps.c:55-58, 194-198`). With no digits strtol gives
+/// 0 and leaves the whole input as the rest, so a bare `px` is 0. The long
+/// to int conversion keeps the low 32 bits, as it does on sway's platforms.
 pub(super) fn parse_gaps_amount(raw: &str) -> Option<i32> {
-    let digits = raw
-        .strip_suffix("px")
-        .or_else(|| raw.strip_suffix("PX"))
-        .or_else(|| raw.strip_suffix("Px"))
-        .or_else(|| raw.strip_suffix("pX"))
-        .unwrap_or(raw);
-    digits.parse::<i64>().ok().map(|amount| amount as i32)
+    let (amount, rest) = strtol(raw);
+    (rest.is_empty() || rest.eq_ignore_ascii_case("px")).then_some(amount as i32)
 }
 
 pub(super) fn parse_gaps(args: &[&str]) -> Result<Command, String> {
@@ -189,6 +205,55 @@ pub(super) fn parse_gaps(args: &[&str]) -> Result<Command, String> {
     }
 }
 
+pub(super) const FOCUS_FOLLOWS_MOUSE_USAGE: &str = "Expected 'focus_follows_mouse no|yes|always'";
+pub(super) const MOUSE_WARPING_USAGE: &str = "Expected 'mouse_warping output|container|none'";
+pub(super) const INVALID_SIZE: &str = "Invalid size specified";
+
+/// Session-wide settings from sway's shared `handlers` table, which serves
+/// both the config file and IPC (`sway/sway/commands.c:43-100,160-173`).
+/// swayward stores the same settings in KDL and re-applies the config after
+/// changing one. The config-only `config_handlers` (workspace_layout,
+/// default_orientation, primary_selection, xwayland, ...) are not searched
+/// at run time (commands.c:102-110,156-163), so they are not listed.
+pub(super) const SETTINGS: &[&str] = &[
+    "client.focused",
+    "client.focused_inactive",
+    "client.focused_tab_title",
+    "client.unfocused",
+    "client.urgent",
+    "focus_wrapping",
+    "force_focus_wrapping",
+    "hide_edge_borders",
+    "smart_borders",
+    "smart_gaps",
+    "show_marks",
+    "title_align",
+    "tiling_drag",
+    "tiling_drag_threshold",
+    "force_display_urgency_hint",
+    "focus_on_window_activation",
+    "focus_follows_mouse",
+    "workspace_auto_back_and_forth",
+    "default_border",
+    "default_floating_border",
+    "new_window",
+    "new_float",
+    "popup_during_fullscreen",
+    "floating_modifier",
+    "mouse_warping",
+    "font",
+    "titlebar_border_thickness",
+    "titlebar_padding",
+    "floating_minimum_size",
+    "floating_maximum_size",
+];
+
+pub(super) fn is_setting(name: &str) -> bool {
+    SETTINGS.contains(&name)
+}
+
+/// Parse one of the [`SETTINGS`]. Accepted values and error strings follow
+/// sway's own command files.
 pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
     match name {
         name @ ("client.focused"
@@ -202,19 +267,14 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             [value] => {
                 let value = value.to_ascii_lowercase();
                 let mapped = match value.as_str() {
-                    "force" => "force",
-                    "workspace" => "workspace",
-                    "toggle" => "toggle",
-                    other => {
-                        if parse_boolean(other, false) {
-                            "yes"
-                        } else {
-                            "no"
-                        }
-                    }
+                    "force" => FocusWrappingArg::Force,
+                    "workspace" => FocusWrappingArg::Workspace,
+                    "toggle" => FocusWrappingArg::Toggle,
+                    other if parse_boolean(other, false) => FocusWrappingArg::Yes,
+                    _ => FocusWrappingArg::No,
                 };
                 Ok(Command::SetLayoutOption(LayoutOption::FocusWrapping(
-                    mapped.to_owned(),
+                    mapped,
                 )))
             }
             _ => Err("Expected 'focus_wrapping yes|no|force|workspace'".into()),
@@ -228,31 +288,32 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             _ => Err("Expected 'force_focus_wrapping <yes|no>'".into()),
         },
         "hide_edge_borders" => {
-            // `sway/sway/commands/hide_edge_borders.c` accepts an --i3 flag
-            // before the value; it selects i3's smart behaviour, which
-            // swayward expresses through smart_borders. Sway's arity check is
-            // only a minimum; trailing arguments are ignored.
-            let rest: Vec<&str> = rest.iter().copied().filter(|a| *a != "--i3").collect();
-            match rest.as_slice() {
-                [value, ..]
-                    if matches!(
-                        *value,
-                        "none" | "vertical" | "horizontal" | "both" | "smart" | "smart_no_gaps"
-                    ) =>
-                {
-                    // smart and smart_no_gaps are the smart-border toggle in
-                    // sway, not edge-border values.
-                    let option = match *value {
-                        "smart" => LayoutOption::SmartBorders("on".to_owned()),
-                        "smart_no_gaps" => LayoutOption::SmartBorders("no-gaps".to_owned()),
-                        other => LayoutOption::HideEdgeBorders(other.to_owned()),
-                    };
-                    Ok(Command::SetLayoutOption(option))
+            // `sway/sway/commands/hide_edge_borders.c:7-45`: an optional --i3
+            // only as argv[0], then a strcmp-matched value; later arguments
+            // are ignored. --i3 enables hide_lone_tab, which swayward's
+            // titlebar model cannot express, so it fails loudly rather than
+            // being accepted and dropped (docs/KNOWN_DEVIATIONS.md).
+            let usage = "Expected 'hide_edge_borders [--i3] \
+                         none|vertical|horizontal|both|smart|smart_no_gaps";
+            let (lone_tab, rest) = match rest {
+                ["--i3", rest @ ..] => (true, rest),
+                rest => (false, rest),
+            };
+            let option = match rest.first().copied() {
+                Some(value @ ("none" | "vertical" | "horizontal" | "both")) => {
+                    LayoutOption::HideEdgeBorders(value.to_owned())
                 }
-                _ => Err("Expected 'hide_edge_borders [--i3] \
-                          none|vertical|horizontal|both|smart|smart_no_gaps"
-                    .into()),
+                Some("smart") => LayoutOption::HideEdgeBordersSmart("on".to_owned()),
+                Some("smart_no_gaps") => LayoutOption::HideEdgeBordersSmart("no-gaps".to_owned()),
+                _ => return Err(usage.into()),
+            };
+            if lone_tab {
+                return Err(
+                    "hide_edge_borders --i3 is unsupported because swayward cannot hide a lone tab's title bar"
+                        .into(),
+                );
             }
+            Ok(Command::SetLayoutOption(option))
         }
         "smart_borders" => match rest {
             [value] => {
@@ -276,14 +337,12 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             [value] => {
                 let value = value.to_ascii_lowercase();
                 let mapped = match value.as_str() {
-                    "inverse_outer" => "inverse-outer",
-                    "toggle" => "toggle",
-                    other if parse_boolean(other, true) => "on",
-                    _ => "off",
+                    "inverse_outer" => SmartGapsArg::InverseOuter,
+                    "toggle" => SmartGapsArg::Toggle,
+                    other if parse_boolean(other, true) => SmartGapsArg::On,
+                    _ => SmartGapsArg::Off,
                 };
-                Ok(Command::SetLayoutOption(LayoutOption::SmartGaps(
-                    mapped.into(),
-                )))
+                Ok(Command::SetLayoutOption(LayoutOption::SmartGaps(mapped)))
             }
             _ => Err("Expected 'smart_gaps on|off|toggle|inverse_outer'".into()),
         },
@@ -353,7 +412,7 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             ["always"] => Ok(Command::SetLayoutOption(LayoutOption::FocusFollowsMouse(
                 FocusFollowsMouse::Always,
             ))),
-            _ => Err("Expected 'focus_follows_mouse no|yes|always'".into()),
+            _ => Err(FOCUS_FOLLOWS_MOUSE_USAGE.into()),
         },
         "workspace_auto_back_and_forth" => match rest {
             [value] => Ok(Command::SetLayoutOption(
@@ -398,19 +457,21 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
                 width,
             }))
         }
-        "popup_during_fullscreen" => match rest {
-            [value]
-                if matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "smart" | "ignore" | "leave_fullscreen"
-                ) =>
-            {
-                Ok(Command::SetLayoutOption(
-                    LayoutOption::PopupDuringFullscreen(value.to_ascii_lowercase()),
-                ))
-            }
-            _ => Err("Expected 'popup_during_fullscreen smart|ignore|leave_fullscreen'".into()),
-        },
+        "popup_during_fullscreen" => {
+            let mode = match rest {
+                [value] => match value.to_ascii_lowercase().as_str() {
+                    "smart" => Some(PopupDuringFullscreen::Smart),
+                    "ignore" => Some(PopupDuringFullscreen::Ignore),
+                    "leave_fullscreen" => Some(PopupDuringFullscreen::LeaveFullscreen),
+                    _ => None,
+                },
+                _ => None,
+            };
+            mode.map(|mode| Command::SetLayoutOption(LayoutOption::PopupDuringFullscreen(mode)))
+                .ok_or_else(|| {
+                    "Expected 'popup_during_fullscreen smart|ignore|leave_fullscreen'".into()
+                })
+        }
         "floating_modifier" => {
             // `sway/sway/commands/floating_modifier.c:6-32`: at least one
             // argument, then an optional normal|inverse. `none` returns
@@ -477,11 +538,11 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
                 } else if value.eq_ignore_ascii_case("none") {
                     MouseWarping::No
                 } else {
-                    return Err("Expected 'mouse_warping output|container|none'".into());
+                    return Err(MOUSE_WARPING_USAGE.into());
                 };
                 Ok(Command::SetLayoutOption(LayoutOption::MouseWarping(mode)))
             }
-            _ => Err("Expected 'mouse_warping output|container|none'".into()),
+            _ => Err(MOUSE_WARPING_USAGE.into()),
         },
         "font" => {
             // `sway/sway/commands/font.c` joins the remaining words and strips
@@ -499,7 +560,7 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             }))
         }
         "titlebar_border_thickness" => {
-            const INVALID: &str = "Invalid size specified";
+            const INVALID: &str = INVALID_SIZE;
             let [value] = rest else {
                 return Err(format!(
                     "Invalid titlebar_border_thickness command (expected 1 argument, got {})",
@@ -515,7 +576,7 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             // One value sets both axes; two set horizontal then vertical.
             // Negatives are rejected, matching sway's `Invalid size specified`
             // (`sway/sway/commands/titlebar_padding.c:8-38`).
-            const INVALID: &str = "Invalid size specified";
+            const INVALID: &str = INVALID_SIZE;
             let (horizontal, vertical) = match rest {
                 [h] => {
                     let h: i32 = h.parse().map_err(|_| INVALID.to_owned())?;

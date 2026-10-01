@@ -70,18 +70,21 @@ fn mark_event_matches_captured_sway_schema() {
     fixture.niri_state().ipc_refresh_layout();
     let ((event_type, payload), remainder) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, Vec::new());
-    assert_eq!(event_type, (1 << 31) | 3);
+    assert_eq!(event_type, EVENT_WINDOW);
     let cleared = serde_json::from_str::<Value>(&payload).unwrap();
     assert_eq!(cleared["change"], "mark");
     assert_eq!(cleared["container"]["marks"], serde_json::json!([]));
 
     let ((event_type, payload), remainder) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
-    assert_eq!(event_type, (1 << 31) | 3);
+    assert_eq!(event_type, EVENT_WINDOW);
     let expected: Value = serde_json::from_str(&sway_fixture!("events/window.mark.json")).unwrap();
     let marked = serde_json::from_str(&payload).unwrap();
     assert_event_shape(&expected, &marked, "$window");
-    assert_eq!(marked["container"]["marks"], serde_json::json!(["event-mark"]));
+    assert_eq!(
+        marked["container"]["marks"],
+        serde_json::json!(["event-mark"])
+    );
     assert!(remainder.is_empty());
 }
 
@@ -131,7 +134,10 @@ fn plain_mark_on_container_emits_clear_then_add_events() {
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
     let marked = serde_json::from_str::<Value>(&payload).unwrap();
     assert_eq!(marked["change"], "mark");
-    assert_eq!(marked["container"]["marks"], serde_json::json!(["containermark"]));
+    assert_eq!(
+        marked["container"]["marks"],
+        serde_json::json!(["containermark"])
+    );
     assert!(remainder.is_empty());
 }
 
@@ -167,7 +173,7 @@ fn close_event_matches_captured_sway_schema_before_removal() {
     window.commit();
     fixture.double_roundtrip(client);
     let (event_type, payload) = read_ipc_reply(&mut fixture, &mut subscriber);
-    assert_eq!(event_type, (1 << 31) | 3);
+    assert_eq!(event_type, EVENT_WINDOW);
     let expected: Value = serde_json::from_str(&sway_fixture!("events/window.close.json")).unwrap();
     assert_event_shape(
         &expected,
@@ -250,7 +256,7 @@ fn marks_round_trip_through_commands_get_marks_and_tree() {
 }
 
 /// Sway's GET_MARKS walks the container tree and appends each container's
-/// marks in the order it meets them (`sway/tree/root.c:246-260`,
+/// marks in the order it meets them (`sway/tree/root.c:243-262`,
 /// `sway/ipc-server.c:604-610,825-834`). It never sorts, and it visits every
 /// container, not only the ones holding a view.
 ///
@@ -329,4 +335,3 @@ fn get_marks_reports_container_marks_in_tree_order_like_sway() {
          before its children, rather than sorting: {marks:?}"
     );
 }
-

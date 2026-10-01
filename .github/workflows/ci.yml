@@ -132,6 +132,7 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - run: ./contrib/check-rustfmt-fragments
 
   internal-links:
     name: public docs do not link to docs/internal
@@ -150,6 +151,7 @@ jobs:
       - run: ./contrib/check-internal-links
       - run: python3 contrib/test-check-divergence.py
       - run: python3 contrib/test-tap-count.py
+      - run: python3 contrib/test-targeted-oracle.py
       - run: ./contrib/check-divergence
       - run: ./contrib/fetch-oracle
       - run: ./contrib/command-census --check

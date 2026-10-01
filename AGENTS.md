@@ -22,15 +22,42 @@ Prefer the headless harness wherever it can answer the question. `src/tests/`
 drives a real compositor and real `wayland-client` clients with no nested
 session, and unlike a human watching a screen it runs in CI.
 
-## Start from main, finish on the full gate
+## Start from main, finish on the fast gate
 
 Begin every fix from current `main` (`git checkout --detach main` in a
-worktree), and run the whole gate on that tree before calling it done:
-nightly fmt, clippy, `cargo test --all`, and the slow gates below when
-`src/layout/` changed. A fix verified on a stale base or with focused tests
-only broke main four times in one day: two fixes that each passed alone
+worktree), and run `./contrib/fast-gate` before calling it done. It runs nightly
+fmt, clippy, `cargo test --all`, ledger and coverage checks, plus the slow gates
+below when `src/layout/` changed. A fix verified on a stale base or with focused
+tests only broke main four times in one day: two fixes that each passed alone
 collided, and a command change regressed green i3 files that only the full
-conformance runner exercises.
+conformance runner exercises. `cargo test --all` includes that runner.
+
+Rebase onto the latest `origin/main` immediately before handing a commit over.
+Main moves several times an hour, and most integration conflicts are stale
+bases.
+
+### What each kind of commit needs
+
+The fast gate is the whole gate for most commits. The full oracle sweep
+(random, i3-derived, state, events) takes 25 to 110 minutes and saturates the
+machine, so it runs off the critical path.
+
+| Commit | Before handover | After landing |
+|---|---|---|
+| Refactor, test, docs, tooling | `./contrib/fast-gate` | nothing |
+| Behavior change | `./contrib/fast-gate`, plus the oracle rows it can affect | integrator sweep on the batch tip |
+
+Select the affected rows with `contrib/targeted-oracle --out-dir <scratch>`.
+Review the printed commands, then add `--run`. It uses a release binary and
+fails closed for an unmapped production path. A sway-compatibility fix still
+names its oracle row in the commit message (see Invariants).
+
+The integrator owns the full sweep. It lands behavior commits in batches, runs
+the sweep once on the pushed tip, and on a regression replays only the lost
+rows against each commit in the batch, then reverts or bounces the culprit.
+Refactor batches are checked for zero per-row change. Nightly CI owns
+exhaustive coverage: 200k proptests and the live soak. Workers run the full
+corpus only when the integrator asks for it.
 
 Done means pushed, or committed where the orchestrator cherry-picks. A close
 note that names a commit must name one that exists on the remote.
@@ -204,6 +231,8 @@ The unchanged i3 tests live in `martintrojer/sway-ipc-oracle` at the commit in
 test you can edit to pass is not evidence. Run `./contrib/fetch-oracle` before
 the in-process harness. Where i3 and sway differ, record a skip with a citation
 into sway's source rather than changing the assertion.
+
+Which oracle runs a commit needs is in "What each kind of commit needs" above.
 
 Measure swayward against the oracle from a clean worktree of it, passing
 `--out` outside the repo: the runners' default output path is a tracked

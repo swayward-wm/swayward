@@ -1,3 +1,13 @@
+// Sway's event message types (`sway/include/ipc.h:27-38`).
+const EVENT_WORKSPACE: u32 = 1 << 31;
+const EVENT_OUTPUT: u32 = EVENT_WORKSPACE | 1;
+const EVENT_MODE: u32 = EVENT_WORKSPACE | 2;
+const EVENT_WINDOW: u32 = EVENT_WORKSPACE | 3;
+const EVENT_BINDING: u32 = EVENT_WORKSPACE | 5;
+const EVENT_SHUTDOWN: u32 = EVENT_WORKSPACE | 6;
+const EVENT_TICK: u32 = EVENT_WORKSPACE | 7;
+const EVENT_INPUT: u32 = EVENT_WORKSPACE | 21;
+
 struct ScratchDir(std::path::PathBuf);
 
 impl ScratchDir {
@@ -23,6 +33,20 @@ impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// Queue a tick with payload "barrier". Sway delivers events in order, so a
+/// subscriber that reads up to this tick has seen everything sent before it.
+fn send_tick_barrier(fixture: &mut Fixture) {
+    fixture
+        .swayward()
+        .ipc_server
+        .as_ref()
+        .unwrap()
+        .send_event(swayward_ipc::legacy::Event::Tick {
+            payload: "barrier".into(),
+            first: false,
+        });
 }
 
 static NEXT_TEST_SCRATCH: AtomicU64 = AtomicU64::new(0);
@@ -158,10 +182,9 @@ fn query_ipc_with_payload(
     serde_json::from_str(&payload).unwrap()
 }
 
-/// Two fixtures must get distinct, live sockets, and those sockets must sit
-/// outside `$XDG_RUNTIME_DIR` so the nested-compositor cleanup glob cannot
-/// delete them mid-test. That glob is what made the conformance runner fail
-/// one file per run for a whole session.
+/// Two fixtures must get distinct, live sockets outside `$XDG_RUNTIME_DIR`,
+/// where nested-compositor cleanup may remove sockets. See AGENTS.md,
+/// "Never let a test adopt the ambient SWAYSOCK".
 #[test]
 fn two_ipc_fixtures_get_distinct_live_sockets() {
     no_test_server_adopts_the_ambient_swaysock();
@@ -230,13 +253,11 @@ fn no_test_server_adopts_the_ambient_swaysock() {
 /// operator's interactive `SWAYSOCK`, so if anything has unlinked that path
 /// while their compositor still holds the bound listener, the test binds a
 /// second listener on the name and steals every new connection from the live
-/// session: `swaymsg` stops reaching the real compositor for as long as the
-/// session lasts, which took an operator's display down.
+/// session. See AGENTS.md for the operational consequences and recovery.
 ///
-/// The temp directory also keeps these sockets clear of the
-/// `/run/user/$UID/swayward-ipc.*.sock` cleanup glob that nested-compositor
-/// scripts run, which used to delete a live socket mid-test and surface as an
-/// intermittent ENOENT somewhere unrelated.
+/// Keep test sockets clear of the `/run/user/$UID/swayward-ipc.*.sock`
+/// cleanup glob used by nested-compositor scripts. See the matching AGENTS.md
+/// safety section.
 fn test_socket_path() -> std::path::PathBuf {
     crate::ipc::server::test_socket_path("ipc-test.sock")
 }
@@ -249,9 +270,7 @@ fn ipc_fixture() -> (Fixture, std::path::PathBuf) {
 ///
 /// Keyboard layouts are initialized here so configured and default fixtures
 /// expose the same initial input state to subscribers and GET_INPUTS clients.
-fn ipc_fixture_with_config(
-    config: swayward_config::Config,
-) -> (Fixture, std::path::PathBuf) {
+fn ipc_fixture_with_config(config: swayward_config::Config) -> (Fixture, std::path::PathBuf) {
     let mut fixture = Fixture::with_config(config);
     let handle = fixture.swayward().event_loop.clone();
     let ipc_server =

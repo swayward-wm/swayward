@@ -1475,7 +1475,7 @@ fn sticky_floating_tree_follows_workspace_focus() {
     let focused = workspace.tiling().node_for_window(&1).unwrap();
     workspace.tiling_mut().set_focus(focused);
     let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
-    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.tiling_mut().finish_subtree_detach(old_parent);
     let (root, _) = workspace.floating_mut().add_tree(
         subtree,
         Rectangle::new((100., 120.).into(), (600., 450.).into()),
@@ -2661,10 +2661,7 @@ fn floating_tree_entry_routes_geometry_focus_hit_testing_and_lifecycle() {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
     }
@@ -2676,7 +2673,7 @@ fn floating_tree_entry_routes_geometry_focus_hit_testing_and_lifecycle() {
     let tiling_root = workspace.tiling().focus().unwrap();
     workspace.tiling_mut().set_focus(first);
     let (subtree, old_parent) = workspace.detach_tiling_subtree(tiling_root).unwrap();
-    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.tiling_mut().finish_subtree_detach(old_parent);
     let rect = Rectangle::new((100., 120.).into(), (600., 450.).into());
 
     let (root, remapped) = workspace.floating_mut().add_tree(subtree, rect);
@@ -2749,10 +2746,7 @@ fn moving_the_only_child_of_a_floating_group_keeps_the_root_position() {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
     }
@@ -2818,10 +2812,7 @@ fn directional_move_reorders_a_floating_group_child() {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
     }
@@ -2882,17 +2873,14 @@ fn removing_a_floating_tree_leaf_uses_the_resident_tree() {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
     }
     workspace.tiling_mut().focus_root();
     let root = workspace.tiling().focus().unwrap();
     let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
-    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.tiling_mut().finish_subtree_detach(old_parent);
     workspace.floating_mut().add_tree(
         subtree,
         Rectangle::new((100., 120.).into(), (600., 450.).into()),
@@ -2945,17 +2933,14 @@ fn floating_tree_root_tracks_output_geometry_changes() {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
     }
     workspace.tiling_mut().focus_root();
     let root = workspace.tiling().focus().unwrap();
     let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
-    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.tiling_mut().finish_subtree_detach(old_parent);
     let (root, _) = workspace.floating_mut().add_tree(
         subtree,
         Rectangle::new((100., 120.).into(), (600., 450.).into()),
@@ -3013,17 +2998,14 @@ fn floating_group_workspace() -> (Workspace<TestWindow>, tiling_tree::NodeId) {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
     }
     workspace.tiling_mut().focus_root();
     let root = workspace.tiling().focus().unwrap();
     let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
-    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.tiling_mut().finish_subtree_detach(old_parent);
     let (root, _) = workspace.floating_mut().add_tree(
         subtree,
         Rectangle::new((100., 120.).into(), (600., 450.).into()),
@@ -3105,17 +3087,14 @@ fn fullscreen_targets_a_node_inside_a_floating_tree() {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
     }
     workspace.tiling_mut().focus_root();
     let root = workspace.tiling().focus().unwrap();
     let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
-    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.tiling_mut().finish_subtree_detach(old_parent);
     let (root, _) = workspace.floating_mut().add_tree(
         subtree,
         Rectangle::new((100., 120.).into(), (600., 450.).into()),
@@ -3202,10 +3181,7 @@ fn floating_tree_root_survives_workspace_and_output_moves() {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
     }
@@ -3214,7 +3190,7 @@ fn floating_tree_root_survives_workspace_and_output_moves() {
     let root = source.tiling().focus().unwrap();
     source.tiling_mut().set_focus(first);
     let (subtree, old_parent) = source.detach_tiling_subtree(root).unwrap();
-    source.finish_tiling_subtree_detach(old_parent);
+    source.tiling_mut().finish_subtree_detach(old_parent);
     let old_rect = Rectangle::new((100., 120.).into(), (600., 450.).into());
     let (root, _) = source.floating_mut().add_tree(subtree, old_rect);
     source
@@ -3300,7 +3276,7 @@ fn directional_focus_descends_into_a_floating_tree() {
     let first = workspace.tiling().node_for_window(&1).unwrap();
     workspace.tiling_mut().set_focus(first);
     let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
-    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.tiling_mut().finish_subtree_detach(old_parent);
     workspace.floating_mut().add_tree(
         subtree,
         Rectangle::new((100., 120.).into(), (600., 450.).into()),
@@ -3326,7 +3302,7 @@ fn floating_tree_scratchpad_moves_the_whole_root() {
     let focused = workspace.tiling().node_for_window(&1).unwrap();
     workspace.tiling_mut().set_focus(focused);
     let (subtree, old_parent) = workspace.detach_tiling_subtree(root).unwrap();
-    workspace.finish_tiling_subtree_detach(old_parent);
+    workspace.tiling_mut().finish_subtree_detach(old_parent);
     let rect = Rectangle::new((100., 120.).into(), (600., 450.).into());
     let (root, _) = workspace.floating_mut().add_tree(subtree, rect);
 
@@ -3390,10 +3366,7 @@ fn mixed_layer_selection_filters_one_global_focus_order() {
             WorkspaceAddWindowTarget::Auto,
             super::workspace::AddTileOptions {
                 activate: ActivateWindow::Yes,
-                width: TiledWidth::Proportion(0.5),
-                is_full_width: false,
                 is_floating: false,
-                anim: None,
             },
         );
         if id >= 3 {
@@ -4443,7 +4416,7 @@ proptest! {
 
 #[test]
 fn moving_a_floating_singleton_after_child_focus_keeps_its_resident_root() {
-    check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(1),
@@ -4453,11 +4426,20 @@ fn moving_a_floating_singleton_after_child_focus_keeps_its_resident_root() {
         Op::FocusChild,
         Op::MoveWindowDownOrToWorkspaceDown,
     ]);
+    let (_, workspace) = layout
+        .workspaces()
+        .map(|(_, _, ws)| ws)
+        .enumerate()
+        .find(|(_, ws)| ws.has_window(&1))
+        .expect("window 1 is still laid out");
+    // Inside a floating container, so not a floating root leaf.
+    assert!(workspace.floating().has_window(&1) && !workspace.is_floating(&1));
+    assert_eq!(workspace.floating().tree_roots().count(), 1);
 }
 
 #[test]
 fn layout_changes_do_not_flatten_a_floating_group_resident_root() {
-    check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddOutput(2),
         Op::AddWindow {
@@ -4477,6 +4459,12 @@ fn layout_changes_do_not_flatten_a_floating_group_resident_root() {
         Op::FocusWindow(2),
         Op::SetFocusedLayout(tiling_tree::Layout::SplitH),
     ]);
+    // The split wrapped window 2 alone, so the floated group holds only it;
+    // the layout changes must leave that group a floating tree root.
+    let workspace = layout.active_workspace().unwrap();
+    assert!(workspace.floating().has_window(&2) && !workspace.is_floating(&2));
+    assert!(!workspace.floating().has_window(&1));
+    assert_eq!(workspace.floating().tree_roots().count(), 1);
 }
 
 #[test]
@@ -4574,7 +4562,7 @@ fn drop_on_a_tile_centre_across_outputs_exchanges_windows() {
         .monitor_for_output(&outputs[1])
         .unwrap()
         .active_workspace_ref();
-    let target_node = target_workspace_ref.tiling_node_for_window(&1).unwrap();
+    let target_node = target_workspace_ref.tiling().node_for_window(&1).unwrap();
     let target_rect = target_workspace_ref
         .tiling()
         .node_geometry(target_node)
@@ -4622,7 +4610,7 @@ fn drop_on_a_tile_centre_swaps_instead_of_inserting() {
     let output = layout.outputs().next().unwrap().clone();
     let monitor = layout.monitor_for_output(&output).unwrap();
     let workspace = monitor.active_workspace_ref();
-    let target = workspace.tiling_node_for_window(&0).unwrap();
+    let target = workspace.tiling().node_for_window(&0).unwrap();
     let target_rect = workspace.tiling().node_geometry(target).unwrap();
     let geo = (target_rect.loc, target_rect.size);
 
@@ -4830,7 +4818,7 @@ fn moving_a_tiny_window_to_scratchpad_with_a_huge_border_does_not_panic() {
 fn hiding_the_active_floating_container_focuses_the_remaining_leaf() {
     let mut floating = TestWindowParams::new(1);
     floating.is_floating = true;
-    check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(2),
@@ -4840,6 +4828,14 @@ fn hiding_the_active_floating_container_focuses_the_remaining_leaf() {
         Op::FocusWindowDown,
         Op::MoveFocusedToScratchpad,
     ]);
+    let hidden = if layout.is_scratchpad_window(&1) {
+        1
+    } else {
+        2
+    };
+    let remaining = 3 - hidden;
+    assert!(layout.is_scratchpad_window(&hidden));
+    assert_eq!(layout.focus().map(|window| *window.id()), Some(remaining));
 }
 
 #[test]
@@ -4875,7 +4871,7 @@ fn centering_a_floating_container_does_not_panic() {
 fn moving_the_last_floating_leaf_keeps_a_resident_tree_active() {
     let mut floating = TestWindowParams::new(1);
     floating.is_floating = true;
-    check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(3),
@@ -4884,6 +4880,12 @@ fn moving_the_last_floating_leaf_keeps_a_resident_tree_active() {
         Op::AddWindow { params: floating },
         Op::MoveWindowToWorkspaceDown(false),
     ]);
+    let workspace = layout.active_workspace().unwrap();
+    assert!(!workspace.has_window(&1));
+    assert!(workspace.floating().has_window(&3) && !workspace.is_floating(&3));
+    assert_eq!(workspace.floating().tree_roots().count(), 1);
+    assert!(workspace.floating_is_active());
+    assert_eq!(layout.focus().map(|window| *window.id()), Some(3));
 }
 
 #[test]
@@ -4912,7 +4914,7 @@ fn directional_focus_with_one_floating_container_does_not_panic() {
 
 #[test]
 fn toggling_a_window_in_a_floating_container_unfloats_the_container() {
-    check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(1),
@@ -4920,6 +4922,10 @@ fn toggling_a_window_in_a_floating_container_unfloats_the_container() {
         Op::ToggleFocusedContainerFloating,
         Op::ToggleWindowFloating { id: None },
     ]);
+    let workspace = layout.active_workspace().unwrap();
+    assert!(!workspace.floating().has_window(&1));
+    assert!(workspace.floating().is_empty());
+    assert!(!workspace.floating_is_active());
 }
 
 #[test]
@@ -4942,7 +4948,7 @@ fn unfloat_last_group_after_focusing_parent_deactivates_floating() {
     // focus while its last member returned to tiling (cc e3487ca6).
     let mut options = Options::default();
     options.layout.default_orientation = swayward_config::DefaultOrientation::Vertical;
-    check_ops_with_options(
+    let mut layout = check_ops_with_options(
         options,
         [
             Op::AddOutput(1),
@@ -4959,22 +4965,40 @@ fn unfloat_last_group_after_focusing_parent_deactivates_floating() {
             Op::FocusWindowTop,
             Op::ToggleWindowFloating { id: None },
             Op::FocusParent,
-            Op::ToggleWindowFloating { id: Some(3) },
-            Op::FocusChild,
         ],
     );
+    let workspace = layout
+        .workspaces()
+        .map(|(_, _, ws)| ws)
+        .find(|ws| ws.has_window(&3))
+        .unwrap();
+    assert!(workspace.floating().has_window(&3));
+    check_ops_on_layout(
+        &mut layout,
+        [Op::ToggleWindowFloating { id: Some(3) }, Op::FocusChild],
+    );
+    let workspace = layout
+        .workspaces()
+        .map(|(_, _, ws)| ws)
+        .find(|ws| ws.has_window(&3))
+        .unwrap();
+    assert!(!workspace.floating().has_window(&3));
+    assert!(workspace.floating().is_empty());
+    assert!(!workspace.floating_is_active());
 }
 
 #[test]
 fn singleton_move_after_floating_close_keeps_the_parent_live() {
     // CI 36310511080 shrank `random_operations_dont_panic` to this sequence
     // (proptest cc 16b75ae3). A directional move of the only window read a
-    // parent node that an earlier layout change had already removed.
+    // parent node that an earlier layout change had already removed. The
+    // seed was never committed and the run's artifact has expired, so this
+    // named sequence is the only record.
     let mut floating = TestWindowParams::new(5);
     floating.is_floating = true;
     let mut options = Options::default();
     options.layout.default_orientation = swayward_config::DefaultOrientation::Vertical;
-    check_ops_with_options(
+    let layout = check_ops_with_options(
         options,
         [
             Op::AddWindow {
@@ -4992,4 +5016,6 @@ fn singleton_move_after_floating_close_keeps_the_parent_live() {
             Op::MoveWindowDown,
         ],
     );
+    assert!(!layout.has_window(&5));
+    assert_eq!(layout.focus().map(|window| *window.id()), Some(3));
 }

@@ -17,7 +17,7 @@ use super::workspace::{
     compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
     WorkspaceRenderElement,
 };
-use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options, TiledWidth};
+use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::RenderLayer;
@@ -337,7 +337,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         for (idx, ws) in workspaces.iter_mut().enumerate() {
             if preserve_initial_auto_layout {
-                ws.preserve_empty_auto_layout();
+                ws.tiling_mut().preserve_empty_auto_layout();
             }
             ws.set_output(Some(output.clone()));
             ws.update_config(options.clone());
@@ -354,7 +354,7 @@ impl<W: LayoutElement> Monitor<W> {
             let mut ws = Workspace::new(output.clone(), clock.clone(), options.clone());
             // Sway creates each output's initial workspace before applying the
             // configured mode, then keeps that workspace's original split.
-            ws.preserve_empty_auto_layout();
+            ws.tiling_mut().preserve_empty_auto_layout();
             if let Some(name) = initial_workspace_name {
                 let (name, number) = super::sway_identity_from_name(name);
                 ws.set_sway_identity(name, number);
@@ -440,7 +440,7 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn refresh_empty_auto_layout(&mut self, idx: usize) {
-        self.workspaces[idx].track_empty_auto_layout();
+        self.workspaces[idx].tiling_mut().track_empty_auto_layout();
     }
 
     pub fn idx_of_ws(&self, id: WorkspaceId) -> Option<usize> {
@@ -709,24 +709,13 @@ impl<W: LayoutElement> Monitor<W> {
         window: W,
         target: MonitorAddWindowTarget<W>,
         activate: ActivateWindow,
-        width: TiledWidth,
-        is_full_width: bool,
         is_floating: bool,
     ) {
         // Currently, everything a workspace sets on a Tile is the same across all workspaces of a
         // monitor. So we can use any workspace, not necessarily the exact target workspace.
         let tile = self.workspaces[0].make_tile(window);
 
-        self.add_tile(
-            tile,
-            target,
-            activate,
-            true,
-            width,
-            is_full_width,
-            is_floating,
-            None,
-        );
+        self.add_tile(tile, target, activate, true, is_floating);
     }
 
     pub fn add_tiling_tile(&mut self, workspace_idx: usize, tile: Tile<W>, activate: bool) {
@@ -744,7 +733,6 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn add_tile(
         &mut self,
         tile: Tile<W>,
@@ -753,10 +741,7 @@ impl<W: LayoutElement> Monitor<W> {
         // Kept separate from window activation until mu task layout-activate-window-api gives the
         // API an explicit workspace-activation policy.
         allow_to_activate_workspace: bool,
-        width: TiledWidth,
-        is_full_width: bool,
         is_floating: bool,
-        anim: Option<swayward_config::Animation>,
     ) {
         let (workspace_idx, target) = self.resolve_add_window_target(target);
 
@@ -767,10 +752,7 @@ impl<W: LayoutElement> Monitor<W> {
             target,
             super::workspace::AddTileOptions {
                 activate,
-                width,
-                is_full_width,
                 is_floating,
-                anim,
             },
         );
 
@@ -825,10 +807,7 @@ impl<W: LayoutElement> Monitor<W> {
                 WorkspaceAddWindowTarget::Auto,
                 super::workspace::AddTileOptions {
                     activate: ActivateWindow::No,
-                    width: removed.width,
-                    is_full_width: removed.is_full_width,
                     is_floating: true,
-                    anim: None,
                 },
             );
         }
@@ -1049,7 +1028,9 @@ impl<W: LayoutElement> Monitor<W> {
         let target_idx = self.idx_of_ws(target_workspace)?;
         let (subtree, old_parent) = self.workspaces[source_idx].detach_tiling_subtree(node)?;
         let remapped = self.workspaces[target_idx].attach_tiling_subtree(subtree).1;
-        self.workspaces[source_idx].finish_tiling_subtree_detach(old_parent);
+        self.workspaces[source_idx]
+            .tiling_mut()
+            .finish_subtree_detach(old_parent);
         if !preserve_empty_workspace && self.workspace_switch.is_none() {
             self.consider_destroy_workspace(source_workspace);
         }
@@ -1097,33 +1078,7 @@ impl<W: LayoutElement> Monitor<W> {
             window.is_none_or(|win| self.active_window().map(|win| win.id()) == Some(win))
         });
 
-        let tree_root = window
-            .and_then(|window| {
-                self.workspaces[source_workspace_idx].floating_tree_root_for_window(window)
-            })
-            .or_else(|| {
-                window
-                    .is_none()
-                    .then(|| {
-                        self.workspaces[source_workspace_idx]
-                            .active_window()
-                            .and_then(|window| {
-                                self.workspaces[source_workspace_idx]
-                                    .floating_tree_root_for_window(window.id())
-                            })
-                    })
-                    .flatten()
-            });
-        if let Some(root) = tree_root {
-            let Some(removed) = self.workspaces[source_workspace_idx].remove_floating_tree(root)
-            else {
-                warn!("move_to_workspace: floating tree root reported for the window is gone");
-                return;
-            };
-            self.workspaces[new_idx].add_floating_tree(removed, false);
-            if self.workspace_switch.is_none() {
-                self.consider_destroy_workspace(source_id);
-            }
+        if self.move_floating_tree_to_workspace(window, source_workspace_idx, new_idx) {
             return;
         }
 
@@ -1144,10 +1099,32 @@ impl<W: LayoutElement> Monitor<W> {
             .find_map(|(tile, offset, _visible)| (tile.window().id() == &window).then_some(offset))
             .unwrap_or_default();
 
-        let fullscreen = workspace.fullscreen_mode();
+        // Only a fullscreen leaf travels with its window. Sway moves the view's
+        // own container, so a fullscreen parent stays behind and is reaped
+        // (`container_move_to_workspace`, sway/commands/move.c:220-229;
+        // `container_reap_empty`, sway/tree/container.c).
+        let tiling_fullscreen_elsewhere = workspace
+            .tiling()
+            .fullscreen_node()
+            .zip(workspace.tiling().node_for_window(&window))
+            .is_some_and(|(fullscreen, leaf)| {
+                fullscreen != leaf && workspace.tiling().contains_node(fullscreen, leaf)
+            });
+        let fullscreen = workspace
+            .fullscreen_mode()
+            .filter(|_| !tiling_fullscreen_elsewhere);
         let fullscreen_window = workspace.fullscreen_window().cloned();
+        let source_rect = workspace.tiling().ipc_rect_for_window(&window);
         let transaction = Transaction::new();
-        let removed = workspace.remove_tile_for_transfer(&window, transaction);
+        let mut removed = workspace.remove_tile_for_transfer(&window, transaction);
+        if tiling_fullscreen_elsewhere {
+            // The window was sized for its fullscreen ancestor; it arrives as
+            // an ordinary tile, so drop that request before the destination
+            // reads it back as a fullscreen map.
+            removed
+                .tile
+                .request_tile_size(removed.tile.tile_size(), false, None);
+        }
 
         // If the view is following the tile, match the animation.
         let config = if activate {
@@ -1168,16 +1145,19 @@ impl<W: LayoutElement> Monitor<W> {
                 ActivateWindow::No
             },
             true,
-            removed.width,
-            removed.is_full_width,
             removed.is_floating,
-            Some(config),
         );
         if let (Some(fullscreen), Some(fullscreen_window)) = (fullscreen, fullscreen_window) {
             self.workspaces[new_idx].set_window_fullscreen(&fullscreen_window, Some(fullscreen));
             if fullscreen_window == window {
-                self.workspaces[new_idx].mark_tiling_fullscreen_arrived();
+                self.workspaces[new_idx]
+                    .tiling_mut()
+                    .mark_fullscreen_arrived();
             }
+        } else if let Some(source_rect) = source_rect {
+            self.workspaces[new_idx]
+                .tiling_mut()
+                .mark_moved_under_fullscreen(&window, source_rect);
         }
 
         if self.workspace_switch.is_none() {
@@ -1200,13 +1180,7 @@ impl<W: LayoutElement> Monitor<W> {
                 self.workspace_size_with_gap(1.).h * (source_workspace_idx as f64 - new_idx as f64);
         }
 
-        if let Some((tile, new_render_pos)) = self.workspaces[new_idx]
-            .tiles_with_render_positions_mut(false)
-            .find(|(tile, _)| tile.window().id() == &window)
-        {
-            tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
-            tile.set_anim_y_between_workspaces();
-        }
+        self.animate_moved_tile(new_idx, &window, old_render_pos, config);
     }
 
     pub fn move_focused_to_workspace(&mut self, target: WorkspaceId, activate: bool) {
@@ -1262,13 +1236,7 @@ impl<W: LayoutElement> Monitor<W> {
             warn!("move_focused_to_workspace: target workspace vanished after the move");
             return;
         };
-        if let Some((tile, new_render_pos)) = self.workspaces[target_idx]
-            .tiles_with_render_positions_mut(false)
-            .find(|(tile, _)| tile.window().id() == &window)
-        {
-            tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
-            tile.set_anim_y_between_workspaces();
-        }
+        self.animate_moved_tile(target_idx, &window, old_render_pos, config);
     }
 
     pub fn switch_workspace_up(&mut self) {
@@ -2034,6 +2002,7 @@ impl<W: LayoutElement> Monitor<W> {
 }
 
 mod rendering;
+mod workspace_moves;
 
 impl<W: LayoutElement> Monitor<W> {
     pub fn dnd_scroll_gesture_begin(&mut self) {

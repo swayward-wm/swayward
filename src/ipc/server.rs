@@ -10,8 +10,6 @@ use std::{env, io, process};
 use anyhow::Context;
 use async_channel::{Receiver, Sender};
 use calloop::io::Async;
-#[cfg(not(test))]
-use directories::BaseDirs;
 use futures_util::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use futures_util::{select_biased, AsyncWrite, FutureExt as _};
 use smithay::reexports::calloop::channel::{self, Event as ChannelEvent};
@@ -41,18 +39,17 @@ mod transport;
 
 pub(crate) use event_bridge::ScratchpadEventOrder;
 use event_bridge::WorkspaceEventTransaction;
-pub(crate) use query_state::{find_node_by_id, ipc_outputs_snapshot, keyboard_layouts};
-use query_state::{refresh_all_query_state, QueryState};
-#[cfg(not(test))]
-use transport::socket_dir;
+#[cfg(test)]
+pub(crate) use query_state::ipc_outputs_snapshot;
+pub(crate) use query_state::{find_node_by_id, keyboard_layouts};
+use query_state::{query_reply, serialize_outcomes, QueryState};
 use transport::{
-    bind_listener, default_socket_path, on_new_ipc_client, select_socket_path, ClientCtx,
-    CommandRequest, EventStreamSender, RequestKind,
+    bind_listener, default_socket_path, on_new_ipc_client, select_socket_path, socket_dir,
+    ClientCtx, CommandRequest, EventStreamSender, RequestKind,
 };
 
 const INITIAL_WRITE_BUFFER_SIZE: usize = 128;
 const MAX_WRITE_BUFFER_SIZE: usize = 4_000_000;
-#[cfg(not(test))]
 static IPC_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static TEST_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
@@ -83,7 +80,6 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
-    #[cfg(not(test))]
     pub fn start(
         event_loop: &LoopHandle<'static, State>,
         wayland_socket_name: Option<&OsStr>,
@@ -111,11 +107,13 @@ impl IpcServer {
             .insert_source(command_rx, |event, _, state| {
                 if let ChannelEvent::Msg(request) = event {
                     let outcome = match request.kind {
-                        RequestKind::Command(input) => crate::command::execute(state, &input),
-                        RequestKind::RefreshQueryState => {
-                            refresh_all_query_state(state);
-                            Vec::new()
+                        RequestKind::Command(input) => {
+                            serialize_outcomes(&crate::command::execute(state, &input)).into_bytes()
                         }
+                        RequestKind::Query(msg_type) => query_reply(state, msg_type)
+                            .unwrap_or_else(|| {
+                                br#"{"success":false,"error":"not implemented"}"#.to_vec()
+                            }),
                         RequestKind::RefreshEventState => {
                             state.ipc_initialize_event_state();
                             Vec::new()
@@ -182,42 +180,7 @@ impl IpcServer {
     }
 
     fn send_event_now(&self, event: Event) {
-        let event_type = match &event {
-            Event::WorkspacesChanged { .. } => "workspaces_changed",
-            Event::WorkspaceEmptied { .. } => "workspace_empty",
-            Event::WorkspaceReloaded => "workspace_reload",
-            Event::WorkspaceInitialized { .. } => "workspace_init",
-            Event::WorkspaceRenamed { .. } => "workspace_rename",
-            Event::WorkspaceFocusChanged { .. } => "workspace_focus",
-            Event::WorkspaceMoved { .. } => "workspace_move",
-            Event::WorkspaceUrgencyChanged { .. } => "workspace_urgent",
-            Event::WorkspaceActivated { .. } => "workspace_activated",
-            Event::WorkspaceActiveWindowChanged { .. } => "workspace_active_window",
-            Event::WindowsChanged { .. } => "windows_changed",
-            Event::WindowOpenedOrChanged { .. } => "window_opened_or_changed",
-            Event::SwayWindowChanged { .. } => "sway_window",
-            Event::WindowMoved { .. } => "window_move",
-            Event::WindowClosed { .. } => "window_close",
-            Event::WindowFocusChanged { .. } => "window_focus",
-            Event::WindowFocusTimestampChanged { .. } => "window_focus_timestamp",
-            Event::WindowUrgencyChanged { .. } => "window_urgent",
-            Event::WindowLayoutsChanged { .. } => "window_layout",
-            Event::KeyboardLayoutsChanged { .. } => "keyboard_layouts",
-            Event::KeyboardLayoutSwitched { .. } => "keyboard_layout_switch",
-            Event::SwayInputChanged { .. } => "sway_input",
-            Event::OutputChanged => "output",
-            Event::Shutdown { .. } => "shutdown",
-            Event::Tick { .. } => "tick",
-            Event::SwayBinding { .. } => "binding",
-            Event::BindingModeChanged { .. } => "binding_mode",
-            Event::OverviewOpenedOrClosed { .. } => "overview",
-            Event::ConfigLoaded { .. } => "config",
-            Event::ScreenshotCaptured { .. } => "screenshot",
-            Event::CastsChanged { .. } => "casts_changed",
-            Event::CastStartedOrChanged { .. } => "cast_started_or_changed",
-            Event::CastStopped { .. } => "cast_stopped",
-        };
-        trace!(event_type, "emitting IPC event");
+        trace!(event_type = event.kind(), "emitting IPC event");
         let mut streams = self.event_streams.borrow_mut();
         let mut to_remove = Vec::new();
         for (idx, stream) in streams.iter_mut().enumerate() {

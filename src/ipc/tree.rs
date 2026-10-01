@@ -10,6 +10,7 @@ use swayward_ipc::{
 use crate::layout::tiling_tree::{IpcNode, Layout as TreeLayout, NodeId};
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::{Layout, LayoutElement as _};
+use crate::swayward::{ContainerMarks, WindowMarks};
 use crate::utils::{with_toplevel_role, ResizeEdge};
 use crate::window::mapped::MappedId;
 use crate::window::Mapped;
@@ -47,8 +48,8 @@ const WINDOW_ID_BASE: i64 = 4 * ID_NAMESPACE_SIZE;
 pub fn describe_tree(
     layout: &Layout<Mapped>,
     global_space: &Space<Window>,
-    marks: &std::collections::HashMap<MappedId, Vec<String>>,
-    container_marks: &std::collections::HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
+    marks: &WindowMarks,
+    container_marks: &ContainerMarks,
 ) -> Node {
     describe_tree_with_power(
         layout,
@@ -64,8 +65,8 @@ pub fn describe_tree(
 pub fn describe_tree_with_power(
     layout: &Layout<Mapped>,
     global_space: &Space<Window>,
-    marks: &std::collections::HashMap<MappedId, Vec<String>>,
-    container_marks: &std::collections::HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
+    marks: &WindowMarks,
+    container_marks: &ContainerMarks,
     output_power: &std::collections::HashMap<String, bool>,
 ) -> Node {
     let outputs: Vec<_> = layout.monitors().collect();
@@ -122,8 +123,8 @@ pub fn describe_tree_with_power(
 fn scratch_output(
     layout: &Layout<Mapped>,
     rect: Rect,
-    marks: &std::collections::HashMap<MappedId, Vec<String>>,
-    container_marks: &std::collections::HashMap<NodeId, Vec<String>>,
+    marks: &WindowMarks,
+    container_marks: &ContainerMarks,
 ) -> Node {
     let mut floating_nodes = layout
         .scratchpad_trees()
@@ -173,9 +174,22 @@ fn scratch_output(
             .scratchpad_windows()
             .filter(|mapped| !tree_window_ids.contains(&mapped.id()))
             .map(|mapped| {
+                let (border, border_width) = layout
+                    .window_border(&mapped.window)
+                    .map_or((NodeBorder::Normal, 2), |border| {
+                        (ipc_border(border.0), i32::from(border.1))
+                    });
                 let mut node = describe_window(WindowNodeContext {
                     mapped,
                     rect: Rect::default(),
+                    border,
+                    border_width,
+                    // A hidden window has no content box: zero-sized, inset
+                    // by the default 2px side border.
+                    window_rect: Rect {
+                        x: 2,
+                        ..Rect::default()
+                    },
                     node_type: NodeType::FloatingCon,
                     floating: "user_on",
                     parent: None,
@@ -183,10 +197,6 @@ fn scratch_output(
                     in_scratchpad: true,
                     visible: false,
                 });
-                if let Some(border) = layout.window_border(&mapped.window) {
-                    node.border = ipc_border(border.0);
-                    node.current_border_width = i32::from(border.1);
-                }
                 node.sticky = layout
                     .scratchpad_tiles()
                     .find_map(|(window, sticky)| (window.id() == mapped.id()).then_some(sticky))

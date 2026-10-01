@@ -42,11 +42,9 @@ fn get_config_reports_not_implemented_rather_than_returning_kdl() {
     // `config->current_config`; `sway/sway/ipc-server.c:908-917` returns it
     // unaltered). swayward's config is KDL, so there is nothing sway-shaped
     // to return.
-    //
-    // Serving KDL inside sway's single-field envelope was worse than serving
-    // nothing: the reply is well-formed, so a client parses it as sway syntax
-    // and fails with no error to attribute it to. A wire deviation is either
-    // fully compliant or not implemented.
+    // swayward cannot put KDL in sway's config envelope: a client would parse
+    // the well-formed reply as sway syntax. The request is therefore explicitly
+    // unsupported rather than approximately implemented.
     //
     // `{"success": false}` is sway's own answer for a request it declines to
     // serve (`sway/sway/ipc-server.c:919-925`, IPC_SYNC).
@@ -86,7 +84,7 @@ fn subscribing_to_all_sway_event_families_succeeds() {
     assert_eq!(payload, r#"{"success": true}"#);
     let ((event_type, payload), remainder) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
-    assert_eq!(event_type, (1 << 31) | 7);
+    assert_eq!(event_type, EVENT_TICK);
     assert_eq!(
         serde_json::from_str::<Value>(&payload).unwrap(),
         serde_json::json!({"first": true, "payload": ""})
@@ -115,7 +113,7 @@ fn input_subscription_emits_added_and_removed_with_get_inputs_payload() {
     );
     let ((event_type, payload), remainder) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
-    assert_eq!(event_type, (1 << 31) | 21);
+    assert_eq!(event_type, EVENT_INPUT);
     let added = serde_json::from_str::<Value>(&payload).unwrap();
     assert_eq!(added["change"], "added");
 
@@ -128,7 +126,7 @@ fn input_subscription_emits_added_and_removed_with_get_inputs_payload() {
     );
     let ((event_type, payload), remainder) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
-    assert_eq!(event_type, (1 << 31) | 21);
+    assert_eq!(event_type, EVENT_INPUT);
     assert_eq!(
         serde_json::from_str::<Value>(&payload).unwrap(),
         serde_json::json!({"change": "removed", "input": added["input"]})
@@ -156,18 +154,10 @@ fn input_events_do_not_leak_to_a_tick_only_subscriber() {
             device: TestDevice::pointer("test pointer"),
         },
     );
-    fixture
-        .swayward()
-        .ipc_server
-        .as_ref()
-        .unwrap()
-        .send_event(swayward_ipc::legacy::Event::Tick {
-            payload: "barrier".into(),
-            first: false,
-        });
+    send_tick_barrier(&mut fixture);
     let ((event_type, payload), remainder) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
-    assert_eq!(event_type, (1 << 31) | 7);
+    assert_eq!(event_type, EVENT_TICK);
     assert_eq!(
         serde_json::from_str::<Value>(&payload).unwrap(),
         serde_json::json!({"first": false, "payload": "barrier"})
@@ -201,7 +191,7 @@ fn input_subscription_emits_xkb_keymap_and_layout_from_current_payload() {
     fixture.niri_state().ipc_keyboard_layouts_changed();
     let ((event_type, payload), remainder) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
-    assert_eq!(event_type, (1 << 31) | 21);
+    assert_eq!(event_type, EVENT_INPUT);
     let keymap = serde_json::from_str::<Value>(&payload).unwrap();
     assert_eq!(keymap["change"], "xkb_keymap");
     let mut query = UnixStream::connect(&socket).unwrap();
@@ -212,7 +202,7 @@ fn input_subscription_emits_xkb_keymap_and_layout_from_current_payload() {
     fixture.niri_state().ipc_refresh_keyboard_layout_index();
     let ((event_type, payload), remainder) =
         read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
-    assert_eq!(event_type, (1 << 31) | 21);
+    assert_eq!(event_type, EVENT_INPUT);
     let layout = serde_json::from_str::<Value>(&payload).unwrap();
     assert_eq!(layout["change"], "xkb_layout");
     let inputs = query_ipc(&mut fixture, &mut query, MessageType::GetInputs);
@@ -267,7 +257,7 @@ fn input_xkb_switch_layout_changes_get_inputs_and_emits_layout_events() {
         let ((event_type, payload), next_remainder) =
             read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder);
         remainder = next_remainder;
-        assert_eq!(event_type, (1 << 31) | 21);
+        assert_eq!(event_type, EVENT_INPUT);
         let event = serde_json::from_str::<Value>(&payload).unwrap();
         assert_eq!(event["change"], "xkb_layout");
         assert_eq!(event["input"], inputs[0]);
@@ -320,4 +310,3 @@ fn input_event_queue_overflow_disconnects_a_non_reading_subscriber() {
         }
     }
 }
-

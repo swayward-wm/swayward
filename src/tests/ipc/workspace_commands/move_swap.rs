@@ -316,6 +316,96 @@ fn cross_workspace_swap_exchanges_positions_marks_and_fullscreen() {
     );
 }
 
+// random seed 274 step 10 (sway-1.12-random): moving a window out of a
+// fullscreen split container moves only the window. The container stays
+// behind and is reaped, so the moved window does not arrive fullscreen
+// (`container_move_to_workspace`, sway/commands/move.c:220-229).
+#[test]
+fn moving_a_window_out_of_a_fullscreen_container_leaves_fullscreen_behind() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["moved", "other"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    for command in [
+        "splitv",
+        "splith",
+        "focus left",
+        "fullscreen toggle",
+        "splith",
+        "move left",
+        "splith",
+        "move container to workspace 2",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "moved").unwrap()["fullscreen_mode"],
+        0
+    );
+}
+
+// random seed 105 step 17 (sway-1.12-random): a floating fullscreen window
+// moved to another workspace stays a floating container there
+// (`container_move_to_workspace`, sway/commands/move.c:203-219).
+#[test]
+fn moving_a_floating_fullscreen_window_keeps_it_floating() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for (workspace, app_id) in [("2", "tiled"), ("1", "floating")] {
+        assert!(
+            crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success
+        );
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+
+    assert!(crate::command::execute(f.niri_state(), "move container to workspace 2")[0].success);
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let moved = find_json_node_with_app_id(&tree, "floating").unwrap();
+    assert_eq!(moved["type"], "floating_con");
+    assert_eq!(moved["fullscreen_mode"], 1);
+}
+
 #[test]
 fn live_ipc_move_to_an_empty_workspace_preserves_the_container_layout() {
     let (mut f, socket) = ipc_fixture();
@@ -341,12 +431,7 @@ fn live_ipc_move_to_an_empty_workspace_preserves_the_container_layout() {
         "workspace target",
         "[con_mark=group] move workspace target",
     ] {
-        let outcome = query_ipc_with_payload(
-            &mut f,
-            &mut stream,
-            MessageType::RunCommand,
-            command,
-        );
+        let outcome = query_ipc_with_payload(&mut f, &mut stream, MessageType::RunCommand, command);
         assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
     }
     let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
@@ -652,10 +737,10 @@ fn fullscreen_parent_after_child_map(
     )
 }
 
-// sway/tree/container.c:990-994 removes the container from the scratchpad
+// sway/tree/container.c:977-980 removes the container from the scratchpad
 // before returning it to tiling. root_scratchpad_remove_container emits
 // `move` (sway/tree/root.c:150-154) and container_set_floating then emits
-// `floating` (sway/tree/container.c:1029).
+// `floating` (sway/tree/container.c:1015).
 #[test]
 fn unfloating_a_scratchpad_window_emits_move_then_floating() {
     let (mut f, socket) = ipc_fixture();
@@ -691,7 +776,7 @@ fn unfloating_a_scratchpad_window_emits_move_then_floating() {
         let ((event_type, payload), rest) =
             read_ipc_reply_with_remainder(&mut f, &mut subscriber, remainder);
         remainder = rest;
-        assert_eq!(event_type, (1 << 31) | 3);
+        assert_eq!(event_type, EVENT_WINDOW);
         events.push(serde_json::from_str::<Value>(&payload).unwrap());
     }
     for event in &events {
@@ -723,7 +808,10 @@ fn floating_toggle_after_moving_scratchpad_window_between_workspaces_does_not_pa
         ("floating toggle", true),
     ] {
         let outcome = crate::command::execute(f.niri_state(), command);
-        assert_eq!(outcome[0].success, expected_success, "{command}: {outcome:?}");
+        assert_eq!(
+            outcome[0].success, expected_success,
+            "{command}: {outcome:?}"
+        );
         f.swayward().layout.verify_invariants();
     }
 }
@@ -766,7 +854,10 @@ fn moving_a_window_away_refocuses_the_most_recent_container_under_its_parent() {
     map(&mut f, "first");
     map(&mut f, "second");
     for command in ["layout splitv", "focus up", "move right"] {
-        assert!(crate::command::execute(f.niri_state(), command)[0].success, "{command}");
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
     }
     assert!(crate::command::execute(f.niri_state(), "move container to workspace 2")[0].success);
     assert_eq!(
@@ -774,4 +865,68 @@ fn moving_a_window_away_refocuses_the_most_recent_container_under_its_parent() {
         (serde_json::json!("splitv"), serde_json::Value::Null),
         "the vacated split was focused through its window, so sway refocuses the split"
     );
+}
+
+// random seed 230 step 15 (sway-1.12-random): a window moved onto a workspace
+// whose child is fullscreen keeps its configured border and titlebar.
+// `container_move_to_workspace` (sway/commands/move.c:220-229) zeroes its
+// size, and `arrange_workspace` lays out only the fullscreen container
+// (sway/tree/arrange.c:310-316), so GET_TREE reports a zero-width box below
+// the titlebar rather than the border-less placeholder of a freshly mapped
+// window.
+#[test]
+fn moving_a_window_under_fullscreen_keeps_its_border() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for (workspace, app_id) in [("2", "fullscreen"), ("1", "moved")] {
+        assert!(
+            crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success
+        );
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        if app_id == "fullscreen" {
+            assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+        }
+    }
+
+    assert!(crate::command::execute(f.niri_state(), "move container to workspace 2")[0].success);
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let moved = find_json_node_with_app_id(&tree, "moved").unwrap();
+    let fullscreen = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(moved["border"], "normal");
+    assert_eq!(
+        moved["current_border_width"],
+        fullscreen["current_border_width"]
+    );
+    assert_eq!(moved["percent"], 0.0);
+    assert_eq!(fullscreen["percent"], 1.0);
+    let titlebar = moved["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0);
+    assert_eq!(moved["rect"]["width"], 0);
+    assert_eq!(moved["rect"]["height"], -titlebar);
+    // `workspace_focus_fullscreen` raises the fullscreen view above the moved one.
+    let workspace = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|output| output["nodes"].as_array().unwrap())
+        .find(|workspace| workspace["name"] == "2")
+        .unwrap();
+    assert_eq!(workspace["focus"][0], fullscreen["id"]);
 }

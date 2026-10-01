@@ -185,45 +185,39 @@ pub enum Event {
         /// Whether clients should render the mode as Pango markup.
         pango_markup: bool,
     },
-    /// The overview was opened or closed.
-    OverviewOpenedOrClosed {
-        /// The new state of the overview.
-        is_open: bool,
-    },
-    /// The configuration was reloaded.
-    ///
-    /// You will always receive this event when connecting to the event stream, indicating the last
-    /// config load attempt.
-    ConfigLoaded {
-        /// Whether the loading failed.
-        ///
-        /// For example, the config file couldn't be parsed.
-        failed: bool,
-    },
-    /// A screenshot was captured.
-    ScreenshotCaptured {
-        /// The file path where the screenshot was saved, if it was written to disk.
-        ///
-        /// If `None`, the screenshot was either only copied to the clipboard, or the path couldn't
-        /// be converted to a `String` (e.g. contained invalid UTF-8 bytes).
-        path: Option<String>,
-    },
-    /// The screencasts have changed.
-    CastsChanged {
-        /// The new screencast information.
-        ///
-        /// This configuration completely replaces the previous configuration. I.e. if any casts
-        /// are missing from here, then they were stopped.
-        casts: Vec<Cast>,
-    },
-    /// A screencast started, or an existing cast changed.
-    CastStartedOrChanged {
-        /// The cast that started or changed.
-        cast: Cast,
-    },
-    /// A screencast stopped.
-    CastStopped {
-        /// Stream ID of the stopped screencast.
-        stream_id: u64,
-    },
+}
+
+impl Event {
+    /// A short name for logs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::WorkspacesChanged { .. } => "workspaces_changed",
+            Self::WorkspaceEmptied { .. } => "workspace_empty",
+            Self::WorkspaceReloaded => "workspace_reload",
+            Self::WorkspaceInitialized { .. } => "workspace_init",
+            Self::WorkspaceRenamed { .. } => "workspace_rename",
+            Self::WorkspaceFocusChanged { .. } => "workspace_focus",
+            Self::WorkspaceMoved { .. } => "workspace_move",
+            Self::WorkspaceUrgencyChanged { .. } => "workspace_urgent",
+            Self::WorkspaceActivated { .. } => "workspace_activated",
+            Self::WorkspaceActiveWindowChanged { .. } => "workspace_active_window",
+            Self::WindowsChanged { .. } => "windows_changed",
+            Self::WindowOpenedOrChanged { .. } => "window_opened_or_changed",
+            Self::SwayWindowChanged { .. } => "sway_window",
+            Self::WindowMoved { .. } => "window_move",
+            Self::WindowClosed { .. } => "window_close",
+            Self::WindowFocusChanged { .. } => "window_focus",
+            Self::WindowFocusTimestampChanged { .. } => "window_focus_timestamp",
+            Self::WindowUrgencyChanged { .. } => "window_urgent",
+            Self::WindowLayoutsChanged { .. } => "window_layout",
+            Self::KeyboardLayoutsChanged { .. } => "keyboard_layouts",
+            Self::KeyboardLayoutSwitched { .. } => "keyboard_layout_switch",
+            Self::SwayInputChanged { .. } => "sway_input",
+            Self::OutputChanged => "output",
+            Self::Shutdown { .. } => "shutdown",
+            Self::Tick { .. } => "tick",
+            Self::SwayBinding { .. } => "binding",
+            Self::BindingModeChanged { .. } => "binding_mode",
+        }
+    }
 }
