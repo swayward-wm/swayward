@@ -117,14 +117,15 @@ use smithay::wayland::xdg_toplevel_tag::XdgToplevelTagManager;
 use swayward_config::debug::PreviewRender;
 use swayward_config::output::MaxBpc;
 use swayward_config::{
-    Bind, Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
-    WorkspaceReference, Xkb,
+    Bind, Config, Key, Modifiers, OutputName, PositiveFloatOrInt, TrackLayout,
+    WarpMouseToFocusMode, WorkspaceReference, Xkb,
 };
 use wayland_server::protocol::wl_output::WlOutput;
 
 #[cfg(feature = "dbus")]
 use crate::a11y::A11y;
 use crate::animation::Clock;
+use crate::backend::headless::HeadlessStartupOutput;
 use crate::backend::tty::SurfaceDmabufFeedback;
 use crate::backend::{Backend, Headless, RenderResult, Tty, Winit};
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
@@ -235,6 +236,8 @@ pub struct Swayward {
     pub scheduler: Scheduler<()>,
     pub stop_signal: LoopSignal,
     pub shutdown_requested: bool,
+    #[cfg(test)]
+    lock_deadline: Duration,
     pub display_handle: DisplayHandle,
 
     /// Whether swayward was run with `--session`
@@ -259,13 +262,7 @@ pub struct Swayward {
 
     pub marks: HashMap<String, MappedId>,
     pub marks_by_window: HashMap<MappedId, Vec<String>>,
-    pub marks_by_container: HashMap<
-        (
-            crate::layout::workspace::WorkspaceId,
-            crate::layout::tiling_tree::NodeId,
-        ),
-        Vec<String>,
-    >,
+    pub marks_by_container: HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
     pub runtime_window_rules: Vec<RuntimeWindowRule>,
     pub for_window: Vec<(String, String, crate::criteria::Criteria)>,
     /// Runtime `for_window` criteria added since the last successful reload.
@@ -1297,6 +1294,16 @@ impl State {
         }
     }
 
+    /// The seat keyboard's modifier state, or no modifiers when startup could
+    /// not add a keyboard because no keymap compiled.
+    pub fn modifier_state(&self) -> smithay::input::keyboard::ModifiersState {
+        self.swayward
+            .seat
+            .get_keyboard()
+            .map(|keyboard| keyboard.modifier_state())
+            .unwrap_or_default()
+    }
+
     pub fn update_keyboard_focus(&mut self) {
         let Some(keyboard) = self.swayward.seat.get_keyboard() else {
             return;
@@ -1866,6 +1873,8 @@ impl Swayward {
             scheduler,
             stop_signal,
             shutdown_requested: false,
+            #[cfg(test)]
+            lock_deadline: Duration::from_millis(1000),
             socket_name,
             display_handle,
             is_session_instance,
@@ -2051,6 +2060,33 @@ impl Swayward {
         }
     }
 
+    /// Move container marks to the node ids a tree transfer assigned.
+    ///
+    /// Node ids are unique across every tree, so marks are keyed by node
+    /// alone and follow a container wherever it lives, including a hidden
+    /// scratchpad group. All entries are lifted before any is re-inserted, so
+    /// a swap whose two halves exchange ids cannot clobber either half.
+    pub fn remap_container_marks(
+        &mut self,
+        remapped: impl IntoIterator<
+            Item = (
+                crate::layout::tiling_tree::NodeId,
+                crate::layout::tiling_tree::NodeId,
+            ),
+        >,
+    ) {
+        let moved = remapped
+            .into_iter()
+            .filter_map(|(old, new)| Some((new, self.marks_by_container.remove(&old)?)))
+            .collect::<Vec<_>>();
+        for (new, marks) in moved {
+            self.marks_by_container
+                .entry(new)
+                .or_default()
+                .extend(marks);
+        }
+    }
+
     pub fn unmark(&mut self, window: Option<MappedId>, mark: Option<&str>) {
         match (window, mark) {
             (Some(window), Some(mark)) if self.marks.get(mark) == Some(&window) => {
@@ -2161,6 +2197,11 @@ impl Swayward {
             .unwrap();
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_lock_deadline(&mut self, deadline: Duration) {
+        self.lock_deadline = deadline;
+    }
+
     pub fn is_locked(&self) -> bool {
         match self.lock_state {
             LockState::Unlocked | LockState::WaitingForSurfaces { .. } => false,
@@ -2213,7 +2254,11 @@ impl Swayward {
             // let's wait for the lock surfaces.
             //
             // Give them a second; swaylock can take its time to paint a big enough image.
-            let timer = Timer::from_duration(Duration::from_millis(1000));
+            #[cfg(not(test))]
+            let lock_deadline = Duration::from_millis(1000);
+            #[cfg(test)]
+            let lock_deadline = self.lock_deadline;
+            let timer = Timer::from_duration(lock_deadline);
             let deadline_token = self
                 .event_loop
                 .insert_source(timer, |_, _, state| {

@@ -512,3 +512,157 @@ mod gap_form_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod untrusted_input_panic_tests {
+    use super::super::*;
+
+    #[test]
+    fn raw_tail_parsers_survive_multibyte_whitespace_after_empty_quotes() {
+        for input in [
+            "''\u{3000}exec foo",
+            "''''''''''\u{3000}exec_always foo",
+            "''''''\u{3000}no_focus [app_id=x]",
+            "''\u{3000}for_window [app_id=x] kill",
+            "''\u{3000}assign [app_id=x] 1",
+        ] {
+            let results = parse(input);
+            assert!(
+                results.iter().all(Result::is_err),
+                "{input:?} must not dispatch through a mangled raw tail: {results:?}"
+            );
+        }
+        // Sway splits argv on ASCII whitespace only and never unquotes argv[0]
+        // (sway/common/stringop.c:92-140, sway/sway/commands.c:264-277).
+        assert_eq!(
+            parse("''\u{3000}exec foo"),
+            vec![Err(parse_error("Unknown/invalid command '''\u{3000}exec'"))]
+        );
+    }
+
+    /// Deterministic sweep over short strings from an alphabet that mixes command
+    /// names, quotes, separators and multibyte whitespace. Untrusted IPC input
+    /// must never panic the parser.
+    #[test]
+    fn mixed_multibyte_command_text_never_panics() {
+        const PIECES: &[&str] = &[
+            "exec",
+            "exec_always",
+            "for_window",
+            "assign",
+            "no_focus",
+            "move",
+            "resize",
+            "opacity",
+            "client.focused",
+            "gaps",
+            "output",
+            "workspace",
+            "mark",
+            "set",
+            "$a",
+            "'",
+            "\"",
+            "''",
+            " ",
+            "\u{3000}",
+            "\u{a0}",
+            "\u{2003}",
+            "é",
+            "日",
+            "[",
+            "]",
+            "=",
+            "app_id",
+            ";",
+            ",",
+            "\\",
+            "px",
+            "ppt",
+            "1",
+            "-",
+            "x",
+        ];
+        let variables = [("$a".to_owned(), "x".to_owned())];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..200_000 {
+            let mut input = String::new();
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = (state % 7) as usize + 1;
+            for _ in 0..len {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                input.push_str(PIECES[(state % PIECES.len() as u64) as usize]);
+            }
+            let _ = parse(&input);
+            let _ = parse_with_variables(&input, &variables);
+        }
+    }
+}
+
+#[cfg(test)]
+mod quoted_command_name_tests {
+    use super::super::*;
+
+    /// Oracle: command-fuzz argv0-single-quoted-focus,
+    /// argv0-double-quoted-workspace, argv0-quoted-kill, argv0-quoted-nop,
+    /// argv0-quoted-mode and argv0-quoted-set. Sway strips quotes from argv[1..]
+    /// only and looks argv[0] up verbatim (sway/sway/commands.c:264-277).
+    #[test]
+    fn quoted_command_names_are_unknown_commands() {
+        for (input, name) in [
+            ("'focus' left", "'focus'"),
+            ("\"workspace\" oracle-quoted", "\"workspace\""),
+            ("\"kill\"", "\"kill\""),
+            ("'nop' oracle", "'nop'"),
+            ("\"mode\" default", "\"mode\""),
+            ("\"set\" $oracle value", "\"set\""),
+            ("\"exec\" true", "\"exec\""),
+        ] {
+            assert_eq!(
+                parse(input),
+                vec![Err(parse_error(format!(
+                    "Unknown/invalid command '{name}'"
+                )))],
+                "{input}"
+            );
+            assert_eq!(
+                parse_with_variables(input, &[("$oracle".into(), "x".into())]),
+                vec![Err(parse_error(format!(
+                    "Unknown/invalid command '{name}'"
+                )))],
+                "{input} with variables"
+            );
+        }
+        // Quotes inside later arguments are still stripped.
+        assert_eq!(
+            parse("workspace \"oracle quoted\""),
+            parse("workspace 'oracle quoted'")
+        );
+    }
+}
+
+#[cfg(test)]
+mod atoi_tests {
+    use super::super::settings::atoi;
+
+    #[test]
+    fn atoi_reads_a_leading_signed_integer_like_c() {
+        for (input, expected) in [
+            ("7", 7),
+            ("7px", 7),
+            ("  -3", -3),
+            ("+4", 4),
+            ("abc", 0),
+            ("", 0),
+            ("-", 0),
+            ("99999999999", i32::MAX),
+            ("-99999999999", i32::MIN),
+        ] {
+            assert_eq!(atoi(input), expected, "{input:?}");
+        }
+    }
+}

@@ -17,17 +17,27 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             Layout::SplitV
         };
-        let parent = self.nodes[&target].parent.unwrap_or(self.root);
+        // tiled_drop_target computes the target before the drop completes; a
+        // target that has since gone falls back to an ordinary insertion.
+        let Some(parent) = self
+            .nodes
+            .get(&target)
+            .map(|node| node.parent.unwrap_or(self.root))
+        else {
+            return self.add_tile_with_activation(tile, InsertTarget::Focused, activate);
+        };
         if !matches!(
-            self.nodes[&parent].value,
-            TreeNode::Split { layout: current, .. } if current == layout
+            self.nodes.get(&parent).map(|node| &node.value),
+            Some(TreeNode::Split { layout: current, .. }) if *current == layout
         ) {
             self.split(target, layout);
         }
         let id = self.add_tile_with_activation(tile, InsertTarget::Node(target), activate);
         if edge.intersects(ResizeEdge::LEFT | ResizeEdge::TOP) {
-            let parent = self.nodes[&id]
-                .parent
+            let parent = self
+                .nodes
+                .get(&id)
+                .and_then(|node| node.parent)
                 .expect("invariant: an inserted tile has a parent");
             let first = self
                 .child_index(parent, target)
@@ -82,7 +92,7 @@ impl<W: LayoutElement> TilingTree<W> {
         self.has_had_tile = true;
         tile.update_config(self.view_size, self.scale, self.options.clone());
         let pending_mode = tile.window().pending_sizing_mode();
-        let mapped_under_fullscreen = self.fullscreen_node().is_some();
+        let fullscreen = self.fullscreen_node();
         let previous_focus = self.focus;
         let old_geometries = self.compute_geometry();
         if !self.fullscreen_layout_wrappers.is_empty() {
@@ -96,6 +106,30 @@ impl<W: LayoutElement> TilingTree<W> {
         });
         let (parent, after) = self.insertion_slot(target);
         self.insert_child(parent, id, after);
+        // Sway never focuses a view mapped while its workspace has a
+        // fullscreen container (`should_focus`, `sway/tree/view.c:706-709`),
+        // but only a view added directly to the workspace stays unarranged:
+        // one added to a container is arranged with its siblings
+        // (`arrange_container(parent)`, `sway/tree/view.c:931-940`).
+        let focus_blocked = fullscreen.is_some();
+        let mapped_under_fullscreen = focus_blocked && parent == self.root;
+        // Only split layouts divide the parent box; tabbed and stacked
+        // children keep the full box (`apply_tabbed_layout`,
+        // sway/tree/arrange.c:163-187).
+        if fullscreen.is_some_and(|fullscreen| {
+            parent != self.root
+                && parent != fullscreen
+                && self.contains_node(parent, fullscreen)
+                && matches!(
+                    self.nodes.get(&parent).map(|node| &node.value),
+                    Some(TreeNode::Split {
+                        layout: Layout::SplitH | Layout::SplitV,
+                        ..
+                    })
+                )
+        }) {
+            self.fullscreen_tile_slot = true;
+        }
         if parent == self.root {
             if let Some(layout) = match self.options.layout.workspace_layout {
                 swayward_config::WorkspaceLayout::Default => None,
@@ -105,11 +139,11 @@ impl<W: LayoutElement> TilingTree<W> {
                 self.wrap_node(id, layout);
             }
         }
-        if activate && !mapped_under_fullscreen {
+        if activate && !focus_blocked {
             self.set_focus_id(Some(id));
         } else if let Some(previous_focus) = previous_focus {
             self.focus_history.retain(|candidate| *candidate != id);
-            if mapped_under_fullscreen {
+            if focus_blocked {
                 self.focus_history.push(id);
             } else {
                 self.focus_history
@@ -119,16 +153,7 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             self.set_focus_id(Some(id));
         }
-        if mapped_under_fullscreen
-            && !pending_mode.is_fullscreen()
-            && !matches!(
-                self.nodes.get(&parent).map(|node| &node.value),
-                Some(TreeNode::Split {
-                    layout: Layout::Tabbed | Layout::Stacked,
-                    ..
-                })
-            )
-        {
+        if mapped_under_fullscreen && !pending_mode.is_fullscreen() {
             self.mapped_under_fullscreen.insert(id);
         }
         if pending_mode.is_maximized() {
@@ -185,7 +210,9 @@ impl<W: LayoutElement> TilingTree<W> {
             self.reap_empty_from(parent);
         }
         if self.windows().next().is_none() {
-            let TreeNode::Split { layout, .. } = self.nodes[&self.root].value else {
+            let Some(&TreeNode::Split { layout, .. }) =
+                self.nodes.get(&self.root).map(|node| &node.value)
+            else {
                 unreachable!()
             };
             self.empty_representation_layout = Some(layout);
@@ -210,6 +237,7 @@ impl<W: LayoutElement> TilingTree<W> {
         let node = self.nodes.remove(&id)?;
         self.previous_split_layouts.remove(&id);
         self.title_formats.remove(&id);
+        self.sticky_splits.remove(&id);
         self.pending_modes.remove(&id);
         self.mapped_under_fullscreen.remove(&id);
         self.fullscreen_layout_wrappers.remove(&id);
@@ -225,7 +253,20 @@ impl<W: LayoutElement> TilingTree<W> {
     pub(super) fn set_focus_id(&mut self, focus: Option<NodeId>) {
         self.focus = focus;
         if let Some(id) = focus {
-            self.focus_history.retain(|candidate| *candidate != id);
+            // Sway raises every ancestor, outermost last, before the focused node itself, so the
+            // node's parents become focus-inactive entries (`seat_set_workspace_focus`,
+            // sway/input/seat.c:1178-1190).
+            let mut ancestors = Vec::new();
+            let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
+            while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+                ancestors.push(ancestor);
+                parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+            }
+            self.focus_history
+                .retain(|candidate| *candidate != id && !ancestors.contains(candidate));
+            for ancestor in ancestors {
+                self.focus_history.insert(0, ancestor);
+            }
             self.focus_history.insert(0, id);
             let stale = self.ipc_stale_nodes.clone();
             self.ipc_stale_nodes = stale
@@ -233,6 +274,24 @@ impl<W: LayoutElement> TilingTree<W> {
                 .filter(|candidate| !self.contains_node(*candidate, id))
                 .collect();
         }
+    }
+
+    /// The child a tabbed or stacked `parent` shows: the one holding focus,
+    /// else the one its focus last visited. Sway arranges the container's
+    /// focused-inactive child (sway/desktop/transaction.c:468-470) and
+    /// disables the rest (:316-321).
+    pub(super) fn shown_child_in(&self, parent: NodeId) -> Option<NodeId> {
+        let TreeNode::Split { children, .. } = &self.nodes.get(&parent)?.value else {
+            return None;
+        };
+        self.focus
+            .and_then(|focus| {
+                children
+                    .iter()
+                    .copied()
+                    .find(|child| self.contains_node(*child, focus))
+            })
+            .or_else(|| self.focused_child_in(parent))
     }
 
     pub(super) fn focused_child_in(&self, parent: NodeId) -> Option<NodeId> {
@@ -248,6 +307,28 @@ impl<W: LayoutElement> TilingTree<W> {
                     .find(|child| self.contains_node(*child, *focused))
             })
             .or_else(|| children.first().copied())
+    }
+
+    /// Removes a window that is being transferred elsewhere rather than closed. Sway refocuses
+    /// the most recent focus entry under the old parent, which is a container when that
+    /// container was focused on its own (sway/commands/move.c:598-608;
+    /// sway/tree/root.c:128-140). Closing uses the view-only rule in `remove_tile`.
+    pub fn remove_tile_for_transfer(
+        &mut self,
+        window: &W::Id,
+        transaction: Transaction,
+    ) -> Option<Tile<W>> {
+        let id = self.node_for_window(window)?;
+        let target = (self.focus == Some(id) && self.fullscreen_node().is_none())
+            .then(|| {
+                self.transfer_focus_target(Some(id), self.nodes.get(&id).and_then(|n| n.parent))
+            })
+            .flatten();
+        let tile = self.remove_tile(window, transaction)?;
+        if self.focus.is_some() {
+            self.resolve_transfer_focus(target);
+        }
+        Some(tile)
     }
 
     pub fn remove_tile(&mut self, window: &W::Id, transaction: Transaction) -> Option<Tile<W>> {
@@ -325,18 +406,22 @@ impl<W: LayoutElement> TilingTree<W> {
         .copied() else {
             return false;
         };
+        // The new wrapper holds both `id` and its sibling one level deeper.
+        if !self.can_wrap(id) || !self.can_wrap(sibling) {
+            return false;
+        }
 
         self.interactive_resize = None;
         let old = self.compute_geometry();
         self.remove_child(parent, id);
-        let sibling_percent = match &self.nodes[&parent].value {
-            TreeNode::Split {
+        let sibling_percent = match self.nodes.get(&parent).map(|node| &node.value) {
+            Some(TreeNode::Split {
                 children, percents, ..
-            } => children
+            }) => children
                 .iter()
                 .position(|child| *child == sibling)
-                .map(|index| percents[index]),
-            TreeNode::Leaf { .. } => None,
+                .and_then(|index| percents.get(index).copied()),
+            _ => None,
         };
         let Some(sibling_percent) = sibling_percent else {
             return false;
@@ -361,8 +446,12 @@ impl<W: LayoutElement> TilingTree<W> {
         }) = self.nodes.get_mut(&parent)
         {
             if let Some(index) = children.iter().position(|child| *child == sibling) {
-                children[index] = wrapper;
-                percents[index] = sibling_percent;
+                if let (Some(child), Some(percent)) =
+                    (children.get_mut(index), percents.get_mut(index))
+                {
+                    *child = wrapper;
+                    *percent = sibling_percent;
+                }
             }
         }
         self.nodes
@@ -402,11 +491,12 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub(super) fn insert_child(&mut self, parent: NodeId, child: NodeId, after: Option<NodeId>) {
-        let index = match &self.nodes[&parent].value {
-            TreeNode::Split { children, .. } => after
+        let index = match self.nodes.get(&parent).map(|node| &node.value) {
+            None => return,
+            Some(TreeNode::Split { children, .. }) => after
                 .and_then(|id| children.iter().position(|child| *child == id))
                 .map_or(children.len(), |index| index + 1),
-            TreeNode::Leaf { .. } => return,
+            Some(TreeNode::Leaf { .. }) => return,
         };
         self.insert_child_at(parent, child, index);
     }
@@ -467,8 +557,11 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(target_index) = children.iter().position(|id| *id == split_share_of) else {
             return;
         };
-        percents[target_index] /= 2.;
-        let percent = percents[target_index];
+        let Some(target_percent) = percents.get_mut(target_index) else {
+            return;
+        };
+        *target_percent /= 2.;
+        let percent = *target_percent;
         let index = index.min(children.len());
         children.insert(index, child);
         percents.insert(index, percent);
@@ -592,8 +685,36 @@ impl<W: LayoutElement> TilingTree<W> {
             }
             self.remove_node(id);
             self.remove_child(parent, id);
+            self.raise_view_after_reap(parent);
             id = parent;
         }
+    }
+
+    /// Sway's seat-node destroy handler raises the most recent view under the reaped
+    /// container's parent into the focus stack below the current focus
+    /// (`handle_seat_node_destroy`, sway/input/seat.c:273-323).
+    fn raise_view_after_reap(&mut self, mut parent: NodeId) {
+        let view = loop {
+            if let Some(view) = self.focus_history.iter().copied().find(|candidate| {
+                self.tile(*candidate).is_some() && self.contains_node(parent, *candidate)
+            }) {
+                break view;
+            }
+            match self.nodes.get(&parent).and_then(|node| node.parent) {
+                Some(next) => parent = next,
+                None => return,
+            }
+        };
+        if Some(view) == self.focus {
+            return;
+        }
+        self.focus_history.retain(|candidate| *candidate != view);
+        let index = usize::from(
+            self.focus
+                .is_some_and(|focus| self.focus_history.first() == Some(&focus)),
+        );
+        self.focus_history
+            .insert(index.min(self.focus_history.len()), view);
     }
 
     pub(super) fn collapse_from(&mut self, mut id: NodeId) {
@@ -631,7 +752,9 @@ impl<W: LayoutElement> TilingTree<W> {
             let Some(index) = children.iter().position(|node| *node == id) else {
                 return;
             };
-            children[index] = child;
+            if let Some(slot) = children.get_mut(index) {
+                *slot = child;
+            }
             self.nodes
                 .get_mut(&child)
                 .expect("invariant: a split's only child is present in the arena")
@@ -727,11 +850,11 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(child) = self.squashable_child(id) else {
             return;
         };
-        let (grandchildren, child_percents) = match &self.nodes[&child].value {
-            TreeNode::Split {
+        let (grandchildren, child_percents) = match self.nodes.get(&child).map(|node| &node.value) {
+            Some(TreeNode::Split {
                 children, percents, ..
-            } => (children.clone(), percents.clone()),
-            TreeNode::Leaf { .. } => return,
+            }) => (children.clone(), percents.clone()),
+            _ => return,
         };
         let Some(Node {
             value: TreeNode::Split {

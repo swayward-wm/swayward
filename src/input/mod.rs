@@ -56,7 +56,7 @@ use crate::swayward::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
-use crate::utils::{center, CastSessionId, ResizeEdge};
+use crate::utils::{center, ResizeEdge};
 
 pub mod backend_ext;
 pub mod click_grab;
@@ -502,7 +502,7 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time(&event);
         let pressed = event.state() == KeyState::Pressed;
-        let code_modifiers = self.swayward.seat.get_keyboard().unwrap().modifier_state();
+        let code_modifiers = self.modifier_state();
 
         // Stop bind key repeat on any release. This won't work 100% correctly in cases like:
         // 1. Press Mod
@@ -548,7 +548,10 @@ impl State {
         #[cfg(not(feature = "dbus"))]
         let _ = consumed_by_a11y;
 
-        let Some(Some(bind)) = self.swayward.seat.get_keyboard().unwrap().input(
+        let Some(keyboard) = self.swayward.seat.get_keyboard() else {
+            return;
+        };
+        let Some(Some(bind)) = keyboard.input(
             self,
             event.key_code(),
             event.state(),
@@ -655,24 +658,24 @@ impl State {
                         &mut this.swayward.suppressed_keys,
                         &mut this.swayward.held_release_bind,
                         bindings,
-                        mod_key,
-                        &input_device,
-                        key_code,
-                        modified,
-                        raw,
-                        group,
+                        KeyEventContext {
+                            input_device: &input_device,
+                            key_code,
+                            modified,
+                            raw,
+                            group,
+                            code_modifiers,
+                            raw_modifiers,
+                            translated_modifiers,
+                        },
                         pressed,
-                        code_modifiers,
-                        raw_modifiers,
-                        translated_modifiers,
                         &this.swayward.screenshot_ui,
-                        locked,
-                        this.swayward
-                            .config
-                            .borrow()
-                            .input
-                            .disable_power_key_handling,
-                        is_inhibiting_shortcuts,
+                        BindingPolicy {
+                            mod_key,
+                            locked,
+                            inhibited: is_inhibiting_shortcuts,
+                            disable_power_key_handling: config.input.disable_power_key_handling,
+                        },
                     )
                 };
 
@@ -812,9 +815,5 @@ impl State {
     }
 }
 
-/// Check whether the key should be intercepted and mark intercepted
-/// pressed keys as `suppressed`, thus preventing `releases` corresponding
-/// to them from being delivered.
-#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 mod tests;

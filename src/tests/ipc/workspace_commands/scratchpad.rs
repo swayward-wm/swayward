@@ -94,7 +94,7 @@ fn fullscreen_with_a_focused_floating_window_does_not_target_the_tiling_parent()
 
 #[test]
 fn get_tree_has_one_focused_node_after_scratchpad_cycle() {
-    let mut f = Fixture::new();
+    let (mut f, _) = ipc_fixture();
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
     for app_id in ["scratch", "tiled"] {
@@ -129,13 +129,7 @@ fn get_tree_has_one_focused_node_after_scratchpad_cycle() {
         assert!(crate::command::execute(f.niri_state(), command)[0].success);
     }
 
-    let swayward = f.swayward();
-    let tree = describe_tree(
-        &swayward.layout,
-        &swayward.global_space,
-        &swayward.marks_by_window,
-        &swayward.marks_by_container,
-    );
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
     let mut focused = Vec::new();
     collect_focused_nodes(&tree, &mut focused);
     assert_eq!(focused.len(), 1, "focused nodes: {focused:?}");
@@ -155,21 +149,11 @@ fn get_tree_has_one_focused_node_after_scratchpad_cycle() {
     assert_eq!(focused_workspace.focus.first(), Some(&focused_id));
 
     assert!(crate::command::execute(f.niri_state(), "workspace empty")[0].success);
-    let swayward = f.swayward();
-    let tree = describe_tree(
-        &swayward.layout,
-        &swayward.global_space,
-        &swayward.marks_by_window,
-        &swayward.marks_by_container,
-    );
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let active = f.swayward().layout.active_workspace().unwrap().id().get();
     let mut focused = Vec::new();
     collect_focused_nodes(&tree, &mut focused);
-    assert_eq!(
-        focused,
-        [crate::ipc::tree::workspace_id(
-            swayward.layout.active_workspace().unwrap().id().get()
-        )]
-    );
+    assert_eq!(focused, [crate::ipc::tree::workspace_id(active)]);
 }
 
 #[test]
@@ -231,6 +215,28 @@ fn scratchpad_hides_focused_window_and_show_cycles_windows() {
 }
 
 #[test]
+fn sticky_state_survives_moving_a_window_back_to_scratchpad() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+
+    map_test_window(&mut f, client, "sticky-scratchpad");
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "sticky enable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+
+    let swayward = f.swayward();
+    let tree = describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    );
+    assert!(tree.nodes[0].nodes[0].floating_nodes[0].sticky);
+}
+
+#[test]
 fn directional_move_emits_one_settled_sway_move_event() {
     let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1280, 800));
@@ -284,7 +290,7 @@ fn directional_move_emits_one_settled_sway_move_event() {
         crate::ipc::tree::window_id(moved_id)
     );
     assert!(event["container"]["rect"]["x"].as_i64().unwrap() < before);
-    let expected: Value = serde_json::from_str(sway_fixture!("events/window.move.json")).unwrap();
+    let expected: Value = serde_json::from_str(&sway_fixture!("events/window.move.json")).unwrap();
     assert_event_shape(&expected, &event, "$window");
 }
 
@@ -560,10 +566,11 @@ fn scratchpad_show_disables_target_workspace_and_global_fullscreen() {
 
 #[test]
 fn scratchpad_show_toggles_the_only_window() {
-    let mut f = Fixture::new();
+    let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
     let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("only".into());
     window.commit();
     let surface = window.surface.clone();
     f.roundtrip(client);
@@ -575,10 +582,15 @@ fn scratchpad_show_toggles_the_only_window() {
     for command in ["move scratchpad", "scratchpad show"] {
         assert!(crate::command::execute(f.niri_state(), command)[0].success);
     }
-    assert!(f.swayward().layout.focus().is_some());
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    assert_eq!(find_json_node_with_app_id(&tree, "only").unwrap()["focused"], true);
+
     assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
-    assert!(f.swayward().layout.focus().is_none());
-    assert_eq!(f.swayward().layout.scratchpad_windows().count(), 1);
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let hidden = find_json_node_with_app_id(&tree, "only").unwrap();
+    assert_eq!(hidden["focused"], false);
+    assert_eq!(hidden["scratchpad_state"], "fresh");
 }
 
 #[test]
@@ -611,13 +623,13 @@ fn empty_scratch_workspace_is_always_serialized() {
 
 #[test]
 fn get_workspaces_distinguishes_seat_focus_from_output_visibility() {
-    let mut f = Fixture::new();
+    let (mut f, _) = ipc_fixture();
     f.add_output(1, (1920, 1080));
     f.add_output(2, (1920, 1080));
     f.niri_focus_output(2);
 
-    let swayward = f.swayward();
-    let workspaces = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let workspaces: Vec<swayward_ipc::Workspace> =
+        serde_json::from_value(get_workspaces(&mut f)).unwrap();
     assert_eq!(
         workspaces
             .iter()

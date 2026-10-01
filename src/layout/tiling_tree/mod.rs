@@ -1,3 +1,7 @@
+// A live-session path must not panic (AGENTS.md). Outside tests, look nodes
+// up with `get` and handle a miss, or state the invariant with `expect`.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::indexing_slicing))]
+mod depth;
 mod focus;
 mod fullscreen;
 mod geometry;
@@ -17,6 +21,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
+#[cfg(test)]
+pub(crate) use depth::MAX_TREE_DEPTH;
+pub(crate) use depth::TOO_DEEP;
 use geometry::apply_struts;
 use node::Node;
 pub use node::{NodeId, TreeNode};
@@ -78,6 +85,18 @@ pub struct DetachedSlot {
     focused: bool,
 }
 
+/// The fields of [`DetachedNode::Split`], passed whole when a split is reattached.
+struct DetachedSplit<W: LayoutElement> {
+    old_id: NodeId,
+    layout: Layout,
+    children: Vec<DetachedNode<W>>,
+    percents: Vec<f64>,
+    previous_layout: Option<Layout>,
+    title_format: Option<String>,
+    pending_mode: Option<PendingMode>,
+    sticky: bool,
+}
+
 #[derive(Debug)]
 enum DetachedNode<W: LayoutElement> {
     Split {
@@ -88,6 +107,7 @@ enum DetachedNode<W: LayoutElement> {
         previous_layout: Option<Layout>,
         title_format: Option<String>,
         pending_mode: Option<PendingMode>,
+        sticky: bool,
     },
     Leaf {
         old_id: NodeId,
@@ -216,6 +236,7 @@ pub enum IpcNode<I> {
         focus: Vec<NodeId>,
         focused: bool,
         fullscreen_mode: i32,
+        sticky: bool,
         children: Vec<IpcNode<I>>,
     },
     Leaf {
@@ -333,8 +354,20 @@ pub struct TilingTree<W: LayoutElement> {
     focus_history: Vec<NodeId>,
     previous_split_layouts: HashMap<NodeId, Layout>,
     title_formats: HashMap<NodeId, String>,
+    sticky_splits: HashSet<NodeId>,
     pending_modes: HashMap<NodeId, PendingMode>,
     mapped_under_fullscreen: HashSet<NodeId>,
+    /// The fullscreen node reports its tiled slot over IPC. Sway's
+    /// `arrange_container(parent)` gives it the slot's pending box until the
+    /// next workspace arrange restores the output box.
+    fullscreen_tile_slot: bool,
+    /// The fullscreen node arrived in this tree already fullscreen. Sway gives
+    /// a moved container a zero width fraction and arranges only the
+    /// fullscreen node (`container_move_to_workspace`,
+    /// sway/commands/move.c:220-229; `arrange_workspace`,
+    /// sway/tree/arrange.c:310-316), so its siblings keep their old shares
+    /// until fullscreen ends.
+    fullscreen_arrived: bool,
     fullscreen_layout_wrappers: HashSet<NodeId>,
     pre_layout_ipc_rects: HashMap<NodeId, Rectangle<f64, Logical>>,
     interactive_resize: Option<InteractiveResize<W::Id>>,

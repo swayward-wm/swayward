@@ -1,3 +1,32 @@
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn new(tag: &str) -> Self {
+        let path = std::env::var_os("SWAYWARD_TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
+            .join(format!(
+                "swayward-{tag}.{}.{}",
+                std::process::id(),
+                NEXT_TEST_SCRATCH.fetch_add(1, Ordering::Relaxed),
+            ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn join(&self, path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+        self.0.join(path)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+static NEXT_TEST_SCRATCH: AtomicU64 = AtomicU64::new(0);
+
 fn read_ipc_reply(fixture: &mut Fixture, stream: &mut UnixStream) -> (u32, String) {
     let (reply, _) = read_ipc_reply_with_remainder(fixture, stream, Vec::new());
     reply
@@ -92,6 +121,29 @@ fn query_ipc(fixture: &mut Fixture, stream: &mut UnixStream, message_type: Messa
     query_ipc_with_payload(fixture, stream, message_type, "")
 }
 
+fn get_tree(fixture: &mut Fixture) -> Value {
+    query_fixture(fixture, MessageType::GetTree)
+}
+
+fn get_workspaces(fixture: &mut Fixture) -> Value {
+    query_fixture(fixture, MessageType::GetWorkspaces)
+}
+
+fn get_outputs(fixture: &mut Fixture) -> Value {
+    query_fixture(fixture, MessageType::GetOutputs)
+}
+
+fn query_fixture(fixture: &mut Fixture, message_type: MessageType) -> Value {
+    let socket = fixture
+        .swayward()
+        .ipc_server
+        .as_ref()
+        .and_then(|server| server.socket_path.clone())
+        .expect("fixture has no IPC server");
+    let mut stream = UnixStream::connect(socket).unwrap();
+    query_ipc(fixture, &mut stream, message_type)
+}
+
 fn query_ipc_with_payload(
     fixture: &mut Fixture,
     stream: &mut UnixStream,
@@ -125,6 +177,11 @@ fn two_ipc_fixtures_get_distinct_live_sockets() {
         assert!(
             !socket.starts_with("/run/user"),
             "{} must not sit in the swept runtime directory",
+            socket.display()
+        );
+        assert!(
+            !socket.starts_with(std::env::temp_dir()),
+            "{} must not sit on tmpfs",
             socket.display()
         );
     }
@@ -181,17 +238,21 @@ fn no_test_server_adopts_the_ambient_swaysock() {
 /// scripts run, which used to delete a live socket mid-test and surface as an
 /// intermittent ENOENT somewhere unrelated.
 fn test_socket_path() -> std::path::PathBuf {
-    static NEXT_SOCKET: AtomicU64 = AtomicU64::new(0);
-
-    std::env::temp_dir().join(format!(
-        "swayward-ipc-test.{}.{}.sock",
-        std::process::id(),
-        NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
-    ))
+    crate::ipc::server::test_socket_path("ipc-test.sock")
 }
 
 fn ipc_fixture() -> (Fixture, std::path::PathBuf) {
-    let mut fixture = Fixture::new();
+    ipc_fixture_with_config(swayward_config::Config::default())
+}
+
+/// Starts an IPC-enabled fixture on a private test socket.
+///
+/// Keyboard layouts are initialized here so configured and default fixtures
+/// expose the same initial input state to subscribers and GET_INPUTS clients.
+fn ipc_fixture_with_config(
+    config: swayward_config::Config,
+) -> (Fixture, std::path::PathBuf) {
+    let mut fixture = Fixture::with_config(config);
     let handle = fixture.swayward().event_loop.clone();
     let ipc_server =
         crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();

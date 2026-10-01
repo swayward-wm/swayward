@@ -12,28 +12,14 @@ fn subscribe_to_window_events(fixture: &mut Fixture, socket: &std::path::Path) -
 }
 
 fn map_test_window(fixture: &mut Fixture, client: super::client::ClientId, app_id: &str) {
-    let window = fixture.client(client).create_window();
-    window.xdg_toplevel.set_app_id(app_id.into());
-    window.commit();
-    let surface = window.surface.clone();
-    fixture.roundtrip(client);
-    let window = fixture.client(client).window(&surface);
-    window.attach_new_buffer();
-    window.ack_last_and_commit();
-    fixture.double_roundtrip(client);
-}
-
-fn map_titled_test_window(fixture: &mut Fixture, client: super::client::ClientId, app_id: &str) {
-    let window = fixture.client(client).create_window();
-    window.xdg_toplevel.set_app_id(app_id.into());
-    window.set_title(app_id);
-    window.commit();
-    let surface = window.surface.clone();
-    fixture.roundtrip(client);
-    let window = fixture.client(client).window(&surface);
-    window.attach_new_buffer();
-    window.ack_last_and_commit();
-    fixture.double_roundtrip(client);
+    windows::map_window(
+        fixture,
+        client,
+        windows::WindowSpec {
+            app_id: Some(app_id),
+            ..Default::default()
+        },
+    );
 }
 
 #[test]
@@ -295,7 +281,7 @@ fn captured_window_map_sequences_pin_focus_order_and_multiplicity() {
             &["new", "title"][..],
         ),
     ] {
-        let events: Vec<Value> = serde_json::from_str(fixture).unwrap();
+        let events: Vec<Value> = serde_json::from_str(&fixture).unwrap();
         assert_eq!(
             events
                 .iter()
@@ -370,7 +356,15 @@ fn map_events_keep_a_new_tab_hidden_until_its_focus_event() {
     let client = fixture.add_client();
     let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
 
-    map_titled_test_window(&mut fixture, client, "first-tab");
+    windows::map_window(
+        &mut fixture,
+        client,
+        windows::WindowSpec {
+            app_id: Some("first-tab"),
+            title: Some("first-tab"),
+            ..Default::default()
+        },
+    );
     fixture.niri_state().update_keyboard_focus();
     fixture.niri_state().ipc_refresh_layout();
     let mut remainder = Vec::new();
@@ -380,7 +374,15 @@ fn map_events_keep_a_new_tab_hidden_until_its_focus_event() {
         remainder = next;
     }
 
-    map_titled_test_window(&mut fixture, client, "second-tab");
+    windows::map_window(
+        &mut fixture,
+        client,
+        windows::WindowSpec {
+            app_id: Some("second-tab"),
+            title: Some("second-tab"),
+            ..Default::default()
+        },
+    );
     fixture.niri_state().update_keyboard_focus();
     fixture.niri_state().ipc_refresh_layout();
     let mut events = Vec::new();
@@ -454,13 +456,7 @@ fn mapping_an_unfocused_window_emits_only_new() {
         open_focused: Some(false),
         ..Default::default()
     });
-    let mut fixture = Fixture::with_config(config);
-    let handle = fixture.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    fixture.swayward().ipc_server = Some(ipc_server);
-    fixture.niri_state().ipc_keyboard_layouts_changed();
+    let (mut fixture, socket) = ipc_fixture_with_config(config);
     fixture.add_output(1, (1920, 1080));
     let client = fixture.add_client();
     map_test_window(&mut fixture, client, "existing-focus");
@@ -583,7 +579,7 @@ fn workspace_window_and_mode_events_match_sway_shapes() {
     let (event_type, payload) = read_ipc_reply(&mut fixture, &mut subscriber);
     assert_eq!(event_type, 1 << 31);
     let expected: Value =
-        serde_json::from_str(sway_fixture!("events/workspace.reload.json")).unwrap();
+        serde_json::from_str(&sway_fixture!("events/workspace.reload.json")).unwrap();
     assert_event_shape(
         &expected,
         &serde_json::from_str(&payload).unwrap(),
@@ -617,7 +613,7 @@ fn workspace_window_and_mode_events_match_sway_shapes() {
     );
     let (event_type, payload) = read_ipc_reply(&mut fixture, &mut subscriber);
     assert_eq!(event_type, (1 << 31) | 3);
-    let expected: Value = serde_json::from_str(sway_fixture!("events/window.focus.json")).unwrap();
+    let expected: Value = serde_json::from_str(&sway_fixture!("events/window.focus.json")).unwrap();
     assert_event_shape(
         &expected,
         &serde_json::from_str(&payload).unwrap(),
@@ -632,7 +628,7 @@ fn workspace_window_and_mode_events_match_sway_shapes() {
     );
     let (event_type, payload) = read_ipc_reply(&mut fixture, &mut subscriber);
     assert_eq!(event_type, (1 << 31) | 2);
-    let expected: Value = serde_json::from_str(sway_fixture!("events/mode.default.json")).unwrap();
+    let expected: Value = serde_json::from_str(&sway_fixture!("events/mode.default.json")).unwrap();
     assert_event_shape(&expected, &serde_json::from_str(&payload).unwrap(), "$mode");
 }
 
@@ -641,8 +637,17 @@ fn closing_the_focused_window_emits_close_before_restored_focus() {
     let (mut fixture, socket) = ipc_fixture();
     fixture.add_output(1, (1920, 1080));
     let client = fixture.add_client();
-    map_titled_test_window(&mut fixture, client, "first");
-    map_titled_test_window(&mut fixture, client, "second");
+    for app_id in ["first", "second"] {
+        windows::map_window(
+            &mut fixture,
+            client,
+            windows::WindowSpec {
+                app_id: Some(app_id),
+                title: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
     fixture.niri_state().ipc_refresh_layout();
     let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
     let mapped = fixture
@@ -674,3 +679,93 @@ fn closing_the_focused_window_emits_close_before_restored_focus() {
     assert_eq!(focus["container"]["app_id"], "first");
 }
 
+
+/// Oracle: events/for_window_during_scratchpad. A `mark` whose runtime
+/// `for_window` rule matches re-enters the command executor in the middle of
+/// the list. The outer transaction must still order `move scratchpad` as sway
+/// does: floating while visible, then move with the hidden state.
+#[test]
+fn nested_for_window_command_keeps_the_outer_scratchpad_event_order() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "for-window-scratchpad");
+    assert!(
+        crate::command::execute(fixture.niri_state(), "for_window [con_mark=\"oracle\"] nop")[0]
+            .success
+    );
+    fixture.niri_state().ipc_refresh_layout();
+    let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
+
+    let outcome = crate::command::execute(fixture.niri_state(), "mark oracle, move scratchpad");
+    assert!(outcome.iter().all(|outcome| outcome.success), "{outcome:?}");
+    fixture.niri_state().ipc_refresh_layout();
+
+    let mut events = Vec::new();
+    let mut remainder = Vec::new();
+    while let Some(((_, payload), rest)) =
+        try_read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder.clone())
+    {
+        remainder = rest;
+        let event = serde_json::from_str::<Value>(&payload).unwrap();
+        events.push((
+            event["change"].as_str().unwrap().to_owned(),
+            event["container"]["scratchpad_state"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ));
+    }
+    assert_eq!(
+        events,
+        [
+            ("mark".to_owned(), "none".to_owned()),
+            ("mark".to_owned(), "none".to_owned()),
+            ("floating".to_owned(), "none".to_owned()),
+            ("move".to_owned(), "fresh".to_owned()),
+        ]
+    );
+}
+
+/// Two independent windows moved by one criteria command must retain their
+/// own container ids in every floating/move event. The transaction used to
+/// copy the first visible/hidden snapshot onto every event.
+#[test]
+fn criteria_scratchpad_events_keep_each_windows_container_id() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "scratch-a");
+    map_test_window(&mut fixture, client, "scratch-b");
+    fixture.niri_state().ipc_refresh_layout();
+    let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
+
+    let outcome = crate::command::execute(
+        fixture.niri_state(),
+        "[app_id=\"^scratch-[ab]$\"] move scratchpad",
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+    fixture.niri_state().ipc_refresh_layout();
+
+    let mut remainder = Vec::new();
+    let mut by_change = std::collections::HashMap::<String, Vec<i64>>::new();
+    while let Some(((_, payload), rest)) =
+        try_read_ipc_reply_with_remainder(&mut fixture, &mut subscriber, remainder.clone())
+    {
+        remainder = rest;
+        let event = serde_json::from_str::<Value>(&payload).unwrap();
+        let change = event["change"].as_str().unwrap().to_owned();
+        if matches!(change.as_str(), "floating" | "move") {
+            by_change
+                .entry(change)
+                .or_default()
+                .push(event["container"]["id"].as_i64().unwrap());
+        }
+    }
+    for change in ["floating", "move"] {
+        let mut ids = by_change.remove(change).unwrap_or_default();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 2, "{change}: {ids:?}");
+    }
+}

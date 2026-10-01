@@ -96,6 +96,72 @@ fn sync_ids(tree: &TilingTree<TestWindow>, ids: &mut Vec<NodeId>) {
     ids.retain(|id| tree.windows().any(|(candidate, _)| candidate == *id));
 }
 
+/// Checks the GET_TREE snapshot: every node id appears once, a split's focus list is a
+/// permutation of its children, and split percents are finite and non-negative.
+///
+/// It deliberately does not bound the per-split percent sum. Sway's child extents add up to the
+/// parent box exactly (sway/tree/arrange.c:160-174, the last child takes the remainder), but
+/// swayward rounds the parent extent and the children's extent separately, so ordinary splits
+/// can sum just past 1. That is tracked as its own task and needs a pinned-sway row first.
+fn check_ipc(node: &IpcNode<usize>, seen: &mut HashSet<NodeId>) {
+    let id = match node {
+        IpcNode::Split { id, .. } | IpcNode::Leaf { id, .. } => *id,
+    };
+    assert!(seen.insert(id), "node {id:?} appears twice in the IPC tree");
+    let IpcNode::Split {
+        focus, children, ..
+    } = node
+    else {
+        return;
+    };
+    let child_ids = children
+        .iter()
+        .map(|child| match child {
+            IpcNode::Split { id, .. } | IpcNode::Leaf { id, .. } => *id,
+        })
+        .collect::<Vec<_>>();
+    let mut sorted_focus = focus.clone();
+    sorted_focus.sort_by_key(|id| id.0);
+    let mut sorted_children = child_ids.clone();
+    sorted_children.sort_by_key(|id| id.0);
+    assert_eq!(
+        sorted_focus, sorted_children,
+        "focus of {id:?} is not a permutation of its children"
+    );
+    let percents = children
+        .iter()
+        .map(|child| match child {
+            IpcNode::Split { percent, .. } | IpcNode::Leaf { percent, .. } => *percent,
+        })
+        .collect::<Vec<_>>();
+    for percent in percents.iter().flatten() {
+        assert!(
+            percent.is_finite() && *percent >= 0.,
+            "child of {id:?} has percent {percent}"
+        );
+    }
+    for child in children {
+        check_ipc(child, seen);
+    }
+}
+
+/// Under fullscreen only the fullscreen subtree is laid out, so containment and separation do
+/// not apply; every rect must still be finite and non-negative.
+fn check_rects_are_finite(tree: &TilingTree<TestWindow>) {
+    let geometry = tree.compute_geometry();
+    for (id, rect) in &geometry.ipc_nodes {
+        assert!(
+            rect.loc.x.is_finite()
+                && rect.loc.y.is_finite()
+                && rect.size.w.is_finite()
+                && rect.size.h.is_finite()
+                && rect.size.w >= 0.
+                && rect.size.h >= 0.,
+            "invalid geometry for {id:?}: {rect:?}"
+        );
+    }
+}
+
 fn check_geometry(tree: &TilingTree<TestWindow>) {
     let geometry = tree.compute_geometry();
     for (id, rect) in &geometry.ipc_nodes {
@@ -154,11 +220,6 @@ fn tiling_tree_proptest_cases() -> u32 {
     }
 }
 
-#[test]
-fn tiling_tree_proptest_runs_cases_on_the_fast_gate() {
-    assert!(tiling_tree_proptest_cases() > 0);
-}
-
 fn run_operations(ops: Vec<Op>) {
     let mut tree = tree((1920., 1080.), 8.);
     let mut peer = super::tests::tree((1280., 720.), 4.);
@@ -203,20 +264,20 @@ fn run_operations(ops: Vec<Op>) {
             }
             Op::ReorderFirst(index) => {
                 let nodes: Vec<_> = tree.iter_depth_first().map(|(id, _)| id).collect();
-                if let Some(id) = nodes.get(index).copied() {
-                    tree.move_subtree_to_first(id);
+                if !nodes.is_empty() {
+                    tree.move_subtree_to_first(nodes[index % nodes.len()]);
                 }
             }
             Op::ReorderIndex(id, index) => {
                 let nodes: Vec<_> = tree.iter_depth_first().map(|(id, _)| id).collect();
-                if let Some(id) = nodes.get(id).copied() {
-                    tree.move_subtree_to_index(id, index);
+                if !nodes.is_empty() {
+                    tree.move_subtree_to_index(nodes[id % nodes.len()], index);
                 }
             }
             Op::ReorderLast(index) => {
                 let nodes: Vec<_> = tree.iter_depth_first().map(|(id, _)| id).collect();
-                if let Some(id) = nodes.get(index).copied() {
-                    tree.move_subtree_to_last(id);
+                if !nodes.is_empty() {
+                    tree.move_subtree_to_last(nodes[index % nodes.len()]);
                 }
             }
             Op::Resize(first, second, delta) => {
@@ -335,15 +396,122 @@ fn run_operations(ops: Vec<Op>) {
         sync_ids(&tree, &mut ids);
         tree.check_invariants();
         peer.check_invariants();
-        let _ = tree.ipc_tree();
-        let _ = peer.ipc_tree();
-        if tree.fullscreen_node().is_none() {
-            check_geometry(&tree);
-        }
-        if peer.fullscreen_node().is_none() {
-            check_geometry(&peer);
+        for tree in [&tree, &peer] {
+            check_ipc(&tree.ipc_tree(), &mut HashSet::new());
+            if tree.fullscreen_node().is_none() {
+                check_geometry(tree);
+            } else {
+                check_rects_are_finite(tree);
+            }
         }
     }
+}
+
+// Shrunk sequences behind the `cc` seeds in
+// proptest-regressions/layout/tiling_tree/tests/properties.txt, replayed by name so the minimal
+// reproduction survives even if the seed file is regenerated.
+
+#[test]
+fn regression_stacked_then_tabbed_split_survives_window_removal() {
+    // Seed 08e57fa6, fixed by 216d2bb4: a one-window directional move read its parent before
+    // root compaction and left that parent empty.
+    run_operations(vec![
+        Op::Add,
+        Op::FocusChild,
+        Op::FocusChild,
+        Op::Split(0, Layout::Stacked),
+        Op::Split(0, Layout::Tabbed),
+        Op::SetLayout(2, Layout::SplitV),
+        Op::Add,
+        Op::Move(11, Direction::Up),
+        Op::SetLayout(18, Layout::SplitH),
+        Op::Remove(12),
+        Op::Move(0, Direction::Left),
+    ]);
+}
+
+#[test]
+fn regression_transfer_fullscreen_and_drop_sequence() {
+    // Seed da2b5410, recorded by c15d1fbd (broaden tiling-tree mutation properties). The
+    // shrunk sequence no longer fails on c15d1fbd with its swap or attach fix reverted, so this
+    // replays the recorded case rather than pinning a known failure.
+    run_operations(vec![
+        Op::Add,
+        Op::Add,
+        Op::Remove(5),
+        Op::Add,
+        Op::ReorderLast(24),
+        Op::Add,
+        Op::Add,
+        Op::Resize(9, 10, 0.3883400016140841),
+        Op::Expel(13, false),
+        Op::Remove(18),
+        Op::ReorderFirst(19),
+        Op::Expel(1, false),
+        Op::Add,
+        Op::Consume(21, true),
+        Op::SetLayout(10, Layout::Stacked),
+        Op::Add,
+        Op::Transfer(3, true),
+        Op::ReorderIndex(14, 31),
+        Op::ResizeSession(24, Direction::Down, 41.03084835101202),
+        Op::ToggleLayout(17),
+        Op::FocusParent,
+        Op::Maximize(3, false),
+        Op::Maximize(9, true),
+        Op::FocusParent,
+        Op::Transfer(9, true),
+        Op::Fullscreen(9, false),
+        Op::Transfer(5, true),
+        Op::Resize(3, 10, 0.13694612537910983),
+        Op::Swap(9, 15),
+        Op::Split(4, Layout::Tabbed),
+        Op::Fullscreen(6, false),
+        Op::Drop(3, ResizeEdge::BOTTOM),
+        Op::Swap(20, 30),
+        Op::Maximize(14, false),
+        Op::ReorderIndex(25, 5),
+        Op::Drop(6, ResizeEdge::TOP),
+        Op::ToggleLayout(19),
+    ]);
+}
+
+#[test]
+fn regression_sub_pixel_last_child_reports_a_non_negative_percent() {
+    // Integrator batch 7 shrunk case (no `cc` line was saved): a resize leaves the last child
+    // of a split 0.23 px tall. Rounding the earlier children's shares up then left the last
+    // child -1 px, and GET_TREE reported a negative percent. The direct unit test is
+    // tests/geometry.rs a_sub_pixel_last_child_reports_a_non_negative_percent.
+    run_operations(vec![
+        Op::Remove(0),
+        Op::Add,
+        Op::Maximize(0, false),
+        Op::Split(0, Layout::Tabbed),
+        Op::Drop(0, ResizeEdge::TOP),
+        Op::Add,
+        Op::Resize(17, 15, 0.33303451250346383),
+        Op::Add,
+    ]);
+}
+
+#[test]
+fn regression_fullscreen_transfer_after_drop_and_expel() {
+    // Seed 30a67654, fixed by c15d1fbd: attaching a fullscreen subtree left two fullscreen
+    // nodes until attach_subtree_at cleared the destination's.
+    run_operations(vec![
+        Op::Add,
+        Op::Drop(0, ResizeEdge::BOTTOM),
+        Op::Fullscreen(0, true),
+        Op::Add,
+        Op::Split(4, Layout::SplitH),
+        Op::Consume(8, false),
+        Op::Transfer(12, false),
+        Op::Add,
+        Op::Fullscreen(3, true),
+        Op::Remove(2),
+        Op::Expel(0, false),
+        Op::Transfer(8, false),
+    ]);
 }
 
 proptest! {

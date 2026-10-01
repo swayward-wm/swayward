@@ -1,42 +1,62 @@
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
+/// One keyboard event as seen through each xkb view that bindings can match against.
+#[derive(Clone, Copy)]
+pub(super) struct KeyEventContext<'a> {
+    pub input_device: &'a str,
+    pub key_code: Keycode,
+    pub modified: Keysym,
+    pub raw: Option<Keysym>,
+    pub group: u32,
+    pub code_modifiers: ModifiersState,
+    pub raw_modifiers: ModifiersState,
+    pub translated_modifiers: ModifiersState,
+}
+
+/// Session state that decides which bindings may fire.
+#[derive(Clone, Copy)]
+pub(super) struct BindingPolicy {
+    pub mod_key: ModKey,
+    pub locked: bool,
+    pub inhibited: bool,
+    pub disable_power_key_handling: bool,
+}
+
+/// The device, layout group and session state one configured-binding lookup matches.
+#[derive(Clone, Copy)]
+pub(super) struct BindingContext<'a> {
+    pub input_device: &'a str,
+    pub group: u32,
+    pub locked: bool,
+    pub inhibited: bool,
+}
+
+/// Check whether the key should be intercepted and mark intercepted
+/// pressed keys as `suppressed`, thus preventing `releases` corresponding
+/// to them from being delivered.
 pub(super) fn should_intercept_key<'a>(
     suppressed_keys: &mut HashSet<Keycode>,
     held_release_bind: &mut Option<Bind>,
     bindings: impl IntoIterator<Item = &'a Bind> + Clone,
-    mod_key: ModKey,
-    input_device: &str,
-    key_code: Keycode,
-    modified: Keysym,
-    raw: Option<Keysym>,
-    group: u32,
+    event: KeyEventContext<'_>,
     pressed: bool,
-    code_modifiers: ModifiersState,
-    raw_modifiers: ModifiersState,
-    translated_modifiers: ModifiersState,
     screenshot_ui: &ScreenshotUi,
-    locked: bool,
-    disable_power_key_handling: bool,
-    is_inhibiting_shortcuts: bool,
+    policy: BindingPolicy,
 ) -> FilterResult<Option<Bind>> {
+    let KeyEventContext {
+        key_code,
+        modified,
+        raw,
+        raw_modifiers,
+        ..
+    } = event;
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let release_bind = pressed
         .then(|| {
             find_bind(
                 bindings.iter().copied().filter(|bind| bind.release),
-                mod_key,
-                input_device,
-                modified,
-                raw,
-                key_code,
-                group,
-                code_modifiers,
-                raw_modifiers,
-                translated_modifiers,
-                locked,
-                is_inhibiting_shortcuts,
-                disable_power_key_handling,
+                event,
+                policy,
             )
         })
         .flatten();
@@ -60,18 +80,8 @@ pub(super) fn should_intercept_key<'a>(
 
     let mut final_bind = find_bind(
         bindings.iter().copied().filter(|bind| !bind.release),
-        mod_key,
-        input_device,
-        modified,
-        raw,
-        key_code,
-        group,
-        code_modifiers,
-        raw_modifiers,
-        translated_modifiers,
-        locked,
-        is_inhibiting_shortcuts,
-        disable_power_key_handling,
+        event,
+        policy,
     );
 
     // Allow only a subset of compositor actions while the screenshot UI is open, since the user
@@ -114,7 +124,7 @@ pub(super) fn should_intercept_key<'a>(
 
     match (final_bind, pressed) {
         (Some(bind), true) => {
-            if is_inhibiting_shortcuts && bind.allow_inhibiting {
+            if policy.inhibited && bind.allow_inhibiting {
                 FilterResult::Forward
             } else {
                 suppressed_keys.insert(key_code);
@@ -128,22 +138,33 @@ pub(super) fn should_intercept_key<'a>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn find_bind<'a>(
     bindings: impl IntoIterator<Item = &'a Bind> + Clone,
-    mod_key: ModKey,
-    input_device: &str,
-    modified: Keysym,
-    raw: Option<Keysym>,
-    key_code: Keycode,
-    group: u32,
-    code_modifiers: ModifiersState,
-    raw_modifiers: ModifiersState,
-    translated_modifiers: ModifiersState,
-    locked: bool,
-    inhibited: bool,
-    disable_power_key_handling: bool,
+    event: KeyEventContext<'_>,
+    policy: BindingPolicy,
 ) -> Option<Bind> {
+    let KeyEventContext {
+        input_device,
+        key_code,
+        modified,
+        raw,
+        group,
+        code_modifiers,
+        raw_modifiers,
+        translated_modifiers,
+    } = event;
+    let BindingPolicy {
+        mod_key,
+        locked,
+        inhibited,
+        disable_power_key_handling,
+    } = policy;
+    let context = BindingContext {
+        input_device,
+        group,
+        locked,
+        inhibited,
+    };
     use keysyms::*;
 
     // Handle hardcoded binds.
@@ -186,10 +207,7 @@ pub(super) fn find_bind<'a>(
         mod_key,
         &[Trigger::Keysym(modified)],
         translated_modifiers,
-        input_device,
-        group,
-        locked,
-        inhibited,
+        context,
     );
     let numlock_changed_keypad_symbol = translated_modifiers.num_lock
         && raw != Some(modified)
@@ -204,10 +222,7 @@ pub(super) fn find_bind<'a>(
             mod_key,
             &[Trigger::Keysym(raw)],
             raw_modifiers,
-            input_device,
-            group,
-            locked,
-            inhibited,
+            context,
         )
     })
     .or_else(|| {
@@ -216,10 +231,7 @@ pub(super) fn find_bind<'a>(
             mod_key,
             &[Trigger::Keycode(key_code.raw())],
             code_modifiers,
-            input_device,
-            group,
-            locked,
-            inhibited,
+            context,
         )
     })
 }
@@ -254,24 +266,28 @@ pub(super) fn find_configured_bind_for_device<'a>(
         mod_key,
         &[trigger],
         mods,
-        input_device,
-        0,
-        false,
-        false,
+        BindingContext {
+            input_device,
+            group: 0,
+            locked: false,
+            inhibited: false,
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn find_configured_bind_with_context<'a>(
     bindings: impl IntoIterator<Item = &'a Bind> + Clone,
     mod_key: ModKey,
     triggers: &[Trigger],
     mods: ModifiersState,
-    input_device: &str,
-    group: u32,
-    locked: bool,
-    inhibited: bool,
+    context: BindingContext<'_>,
 ) -> Option<Bind> {
+    let BindingContext {
+        input_device,
+        group,
+        locked,
+        inhibited,
+    } = context;
     let mut modifiers = modifiers_from_state(mods);
     let mod_down = mod_key.is_pressed(modifiers);
     if mod_down {
@@ -366,10 +382,13 @@ pub(super) fn sway_binding_event(
         modifiers.remove(Modifiers::COMPOSITOR);
         modifiers.insert(mod_key.to_modifiers());
     }
+    // Sway's get_modifier_names order (sway/sway/input/keyboard.c:26-38).
     let event_state_mask = [
         (Modifiers::SHIFT, "Shift"),
+        (Modifiers::CAPS, "Lock"),
         (Modifiers::CTRL, "Control"),
         (Modifiers::ALT, "Mod1"),
+        (Modifiers::NUM, "Mod2"),
         (Modifiers::ISO_LEVEL5_SHIFT, "Mod3"),
         (Modifiers::SUPER, "Mod4"),
         (Modifiers::ISO_LEVEL3_SHIFT, "Mod5"),
@@ -393,16 +412,22 @@ pub(super) fn sway_binding_event(
         | Trigger::WheelScrollUp
         | Trigger::WheelScrollLeft
         | Trigger::WheelScrollRight => {
+            // Sway names BTN_LEFT..BTN_LEFT+8 "button{code - BTN_LEFT + 1}"
+            // (BTN_RIGHT is button2, BTN_MIDDLE button3, BTN_SIDE button4,
+            // BTN_EXTRA button5) and passes everything else to
+            // xkb_keysym_get_name. Scroll bindings are SWAY_SCROLL_UP..RIGHT =
+            // KEY_MAX + 1..4 (include/sway/input/cursor.h:13-16), which xkb
+            // names as raw hex (sway/sway/ipc-server.c:434-439).
             let symbol: String = match bind.key.trigger {
                 Trigger::MouseLeft => "button1",
                 Trigger::MouseRight => "button2",
                 Trigger::MouseMiddle => "button3",
                 Trigger::MouseBack => "button4",
                 Trigger::MouseForward => "button5",
-                Trigger::WheelScrollUp => "button4",
-                Trigger::WheelScrollDown => "button5",
-                Trigger::WheelScrollLeft => "button6",
-                Trigger::WheelScrollRight => "button7",
+                Trigger::WheelScrollUp => "0x00000300",
+                Trigger::WheelScrollDown => "0x00000301",
+                Trigger::WheelScrollLeft => "0x00000302",
+                Trigger::WheelScrollRight => "0x00000303",
                 _ => unreachable!(),
             }
             .into();

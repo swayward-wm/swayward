@@ -26,7 +26,7 @@ fn captured_workspace_event_sequences_pin_order_and_multiplicity() {
             &["move"][..],
         ),
     ] {
-        let events = serde_json::from_str::<Vec<Value>>(fixture).unwrap();
+        let events = serde_json::from_str::<Vec<Value>>(&fixture).unwrap();
         let changes = events
             .iter()
             .map(|event| event["change"].as_str().unwrap())
@@ -52,14 +52,13 @@ fn get_config_reports_not_implemented_rather_than_returning_kdl() {
     // serve (`sway/sway/ipc-server.c:919-925`, IPC_SYNC).
     let (mut fixture, socket) = ipc_fixture();
     let mut stream = UnixStream::connect(socket).unwrap();
-    let root = std::env::temp_dir().join(format!("swayward-get-config-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let scratch = ScratchDir::new("get-config");
+    let root = &scratch.0;
     std::fs::write(root.join("included.kdl"), "layout { gaps 7; }\n").unwrap();
     let source = "include \"included.kdl\"\n";
     let config = swayward_config::Config::parse(&root.join("config.kdl"), source)
         .config
         .unwrap();
-    std::fs::remove_dir_all(root).unwrap();
     fixture.niri_state().reload_config(Ok(config));
 
     let reply = query_ipc(&mut fixture, &mut stream, MessageType::GetConfig);
@@ -181,13 +180,7 @@ fn input_subscription_emits_xkb_keymap_and_layout_from_current_payload() {
     let config =
         swayward_config::Config::parse_mem(r#"input { keyboard { xkb { layout "us,ru"; }; }; }"#)
             .unwrap();
-    let mut fixture = Fixture::with_config(config);
-    let handle = fixture.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    fixture.swayward().ipc_server = Some(ipc_server);
-    fixture.niri_state().ipc_keyboard_layouts_changed();
+    let (mut fixture, socket) = ipc_fixture_with_config(config);
     fixture.niri_state().process_input_event::<TestInput>(
         smithay::backend::input::InputEvent::DeviceAdded {
             device: TestDevice::keyboard("test keyboard"),
@@ -234,13 +227,7 @@ fn input_xkb_switch_layout_changes_get_inputs_and_emits_layout_events() {
     let config =
         swayward_config::Config::parse_mem(r#"input { keyboard { xkb { layout "us,ru"; }; }; }"#)
             .unwrap();
-    let mut fixture = Fixture::with_config(config);
-    let handle = fixture.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    fixture.swayward().ipc_server = Some(ipc_server);
-    fixture.niri_state().ipc_keyboard_layouts_changed();
+    let (mut fixture, socket) = ipc_fixture_with_config(config);
     fixture.niri_state().process_input_event::<TestInput>(
         smithay::backend::input::InputEvent::DeviceAdded {
             device: TestDevice::keyboard("test keyboard"),

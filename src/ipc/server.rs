@@ -1,10 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::rc::Rc;
-#[cfg(not(test))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, io, process};
 
@@ -29,7 +28,7 @@ use swayward_ipc::{
     CommandOutcome, KeyboardLayouts, MessageType, Timestamp, Version, WindowLayout,
 };
 
-use crate::ipc::tree::{describe_tree, describe_workspaces_with_marks};
+use crate::ipc::tree::{describe_tree_with_power, describe_workspaces_with_marks};
 use crate::layout::workspace::WorkspaceId;
 use crate::swayward::State;
 use crate::utils::{version, with_toplevel_role, SWAYWARD_IPC_VERSION};
@@ -55,13 +54,31 @@ const INITIAL_WRITE_BUFFER_SIZE: usize = 128;
 const MAX_WRITE_BUFFER_SIZE: usize = 4_000_000;
 #[cfg(not(test))]
 static IPC_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn test_socket_path(label: &str) -> PathBuf {
+    env::var_os("SWAYWARD_TEST_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/tmp"))
+        .join(format!(
+            "swayward-{label}-{}.{}",
+            process::id(),
+            TEST_SOCKET_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+}
 
 pub struct IpcServer {
     pub socket_path: Option<PathBuf>,
     event_streams: Rc<RefCell<Vec<EventStreamSender>>>,
+    next_event_stream_id: Rc<Cell<u64>>,
     event_stream_state: Rc<RefCell<EventStreamState>>,
     query_state: Rc<RefCell<QueryState>>,
     workspace_events: RefCell<Option<WorkspaceEventTransaction>>,
+    /// Open `execute` calls. A runtime `for_window` rule re-enters the
+    /// executor mid-command; only the outermost commit flushes.
+    workspace_event_depth: Cell<u32>,
     commands: channel::Sender<CommandRequest>,
 }
 
@@ -130,9 +147,11 @@ impl IpcServer {
         Ok(Self {
             socket_path,
             event_streams: Rc::new(RefCell::new(Vec::new())),
+            next_event_stream_id: Rc::new(Cell::new(0)),
             event_stream_state: Rc::new(RefCell::new(EventStreamState::default())),
             query_state: Rc::new(RefCell::new(QueryState::default())),
             workspace_events: RefCell::new(None),
+            workspace_event_depth: Cell::new(0),
             commands,
         })
     }

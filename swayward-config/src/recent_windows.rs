@@ -4,7 +4,9 @@ use knuffel::errors::DecodeError;
 use smithay::input::keyboard::Keysym;
 
 use crate::utils::{expect_only_children, MergeWith};
-use crate::{Action, Bind, Color, FloatOrInt, Key, Modifiers, MouseRegions, Trigger};
+use crate::{
+    Action, Bind, Color, FloatOrInt, Key, Modifiers, MouseRegions, PositiveFloatOrInt, Trigger,
+};
 
 #[derive(Debug, PartialEq)]
 pub struct RecentWindows {
@@ -125,7 +127,7 @@ pub struct MruPreviewsPart {
     #[knuffel(child, unwrap(argument))]
     pub max_height: Option<FloatOrInt<1, 65535>>,
     #[knuffel(child, unwrap(argument))]
-    pub max_scale: Option<FloatOrInt<0, 1>>,
+    pub max_scale: Option<PositiveFloatOrInt<1>>,
 }
 
 impl MergeWith<MruPreviewsPart> for MruPreviews {
@@ -332,8 +334,8 @@ where
             ));
         }
 
-        // FIXME: To support this, all the mods_with_mouse_binds()/mods_with_wheel_binds()/etc.
-        // will need to learn about recent-windows bindings.
+        // Recent-window bindings are keyboard-only. Supporting other triggers also requires
+        // indexing their held modifiers; tracked by mu task config-mru-pointer-bindings.
         if !matches!(key.trigger, Trigger::Keysym(_)) {
             ctx.emit_error(DecodeError::unexpected(
                 &node.node_name,

@@ -19,7 +19,7 @@ pub(super) fn parse_client_colors(name: &str, args: &[&str]) -> Result<Command, 
         "client.focused_inactive" => "#484e50ff",
         "client.unfocused" => "#292d2eff",
         "client.urgent" => "#900000ff",
-        _ => unreachable!(),
+        _ => return Err(format!("Unknown/invalid command '{name}'")),
     };
     let [border, background, text, rest @ ..] = args else {
         return Err(format!(
@@ -101,6 +101,26 @@ pub(super) fn parse_gaps_kind(kind: &str) -> Option<(bool, [bool; 4])> {
         "bottom" => (false, [false, false, false, true]),
         _ => return None,
     })
+}
+
+/// C's `atoi`: optional leading whitespace and sign, then as many decimal
+/// digits as follow; anything else ends the number, and no digits give 0.
+/// Out-of-range values saturate, where C's behaviour is undefined.
+pub(super) fn atoi(raw: &str) -> i32 {
+    let raw = raw.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let (negative, digits) = match (raw.strip_prefix('-'), raw.strip_prefix('+')) {
+        (Some(digits), _) => (true, digits),
+        (None, Some(digits)) => (false, digits),
+        (None, None) => (false, raw),
+    };
+    let magnitude = digits
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0i64, |value, digit| {
+            (value * 10 + i64::from(digit - b'0')).min(i64::from(i32::MAX) + 1)
+        });
+    let value = if negative { -magnitude } else { magnitude };
+    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 /// Sway parses with `strtol` and accepts a bare number or a `px` suffix,
@@ -207,32 +227,6 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             ))),
             _ => Err("Expected 'force_focus_wrapping <yes|no>'".into()),
         },
-        "workspace_layout" => match rest {
-            [value]
-                if matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "default" | "stacking" | "tabbed"
-                ) =>
-            {
-                Ok(Command::SetLayoutOption(LayoutOption::WorkspaceLayout(
-                    value.to_ascii_lowercase(),
-                )))
-            }
-            _ => Err("Expected 'workspace_layout <default|stacking|tabbed>'".into()),
-        },
-        "default_orientation" | "orientation" => match rest {
-            [value]
-                if matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "horizontal" | "vertical" | "auto"
-                ) =>
-            {
-                Ok(Command::SetLayoutOption(LayoutOption::DefaultOrientation(
-                    value.to_ascii_lowercase(),
-                )))
-            }
-            _ => Err("Expected 'orientation <horizontal|vertical|auto>'".into()),
-        },
         "hide_edge_borders" => {
             // `sway/sway/commands/hide_edge_borders.c` accepts an --i3 flag
             // before the value; it selects i3's smart behaviour, which
@@ -320,23 +314,26 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             _ => Err("Expected 'tiling_drag_threshold <threshold>'".into()),
         },
         "force_display_urgency_hint" => {
-            let value = match rest {
-                [value, ..] => value.trim_end_matches("ms"),
-                _ => return Err("Expected 'force_display_urgency_hint <timeout> [ms]'".into()),
+            // `sway/sway/commands/force_display_urgency_hint.c:12-23`: strtol
+            // with nothing after the number but an optional "ms", then an
+            // optional argv[1] that must be "ms"; later arguments are
+            // ignored. strtol reads a long that sway casts to int, and a
+            // negative timeout is stored as 0.
+            let [value, rest @ ..] = rest else {
+                return Err("Expected 'force_display_urgency_hint <timeout> [ms]'".into());
             };
-            let value: i64 = value
-                .parse()
-                .map_err(|_| "timeout integer invalid".to_owned())?;
+            let value = value
+                .strip_suffix("ms")
+                .unwrap_or(value)
+                .parse::<i64>()
+                .map_err(|_| "timeout integer invalid".to_owned())? as i32;
+            if rest.first().is_some_and(|unit| *unit != "ms") {
+                return Err("Expected 'force_display_urgency_hint <timeout> [ms]'".into());
+            }
             Ok(Command::SetLayoutOption(
-                LayoutOption::ForceDisplayUrgencyHint(value.max(0).min(i64::from(u32::MAX)) as u32),
+                LayoutOption::ForceDisplayUrgencyHint(value.max(0) as u32),
             ))
         }
-        "primary_selection" => match rest {
-            [value] => Ok(Command::SetLayoutOption(LayoutOption::PrimarySelection(
-                parse_boolean(value, true),
-            ))),
-            _ => Err("Expected 'primary_selection enabled|disabled'".into()),
-        },
         "focus_on_window_activation" => match rest {
             [value] if matches!(*value, "smart" | "urgent" | "focus" | "none") => Ok(
                 Command::SetLayoutOption(LayoutOption::FocusOnWindowActivation((*value).into())),
@@ -377,21 +374,24 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             let usage = format!(
                 "Expected '{canonical} <none|normal|pixel>' or '{canonical} <normal|pixel> <px>'"
             );
+            // Sway accepts at least one argument and reads the width only when
+            // there are exactly two (`EXPECTED_AT_LEAST, 1`, `argc == 2`). The
+            // style is matched with strcmp, so case matters.
             let (style, width) = match rest {
-                [style] => (style, None),
-                [style, width] => {
-                    let width = width
-                        .parse::<i64>()
-                        .map(|width| width as u16)
-                        .map_err(|_| usage.clone())?;
-                    (style, Some(width))
-                }
-                _ => return Err(usage),
+                [style, width] => (*style, Some(*width)),
+                [style, ..] => (*style, None),
+                [] => return Err(usage),
             };
-            let style = style.to_ascii_lowercase();
-            if !matches!(style.as_str(), "none" | "normal" | "pixel") {
+            if !matches!(style, "none" | "normal" | "pixel") {
                 return Err(usage);
             }
+            let style = style.to_owned();
+            // Sway reads the width with atoi, so trailing text is ignored and
+            // a width without leading digits is 0. A negative width is stored
+            // as is and aborts sway when the next window maps
+            // (wlr_scene_rect_set_size asserts width >= 0), so there is no
+            // sway behaviour to copy: swayward clamps it to 0.
+            let width = width.map(|width| atoi(width).clamp(0, i32::from(u16::MAX)) as u16);
             Ok(Command::SetLayoutOption(LayoutOption::DefaultBorder {
                 floating: matches!(name, "default_floating_border" | "new_float"),
                 style,
@@ -483,14 +483,6 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             }
             _ => Err("Expected 'mouse_warping output|container|none'".into()),
         },
-        "xwayland" => match rest {
-            [value] => Ok(Command::SetLayoutOption(LayoutOption::Xwayland {
-                // sway treats `force` as enabled-immediately and routes
-                // everything else through parse_boolean with a true default.
-                enabled: *value == "force" || parse_boolean(value, true),
-            })),
-            _ => Err("Invalid xwayland command (expected 1 argument, got 0)".into()),
-        },
         "font" => {
             // `sway/sway/commands/font.c` joins the remaining words and strips
             // a leading `pango:`, then reparses the description.
@@ -562,6 +554,6 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
                 },
             ))
         }
-        _ => unreachable!("settings parser called with non-setting command"),
+        _ => Err(format!("Unknown/invalid command '{name}'")),
     }
 }

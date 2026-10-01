@@ -1,7 +1,33 @@
 use std::cell::{Cell, RefCell};
 
+use super::libinput::{apply_pointer_settings, PointerSetting};
 use super::*;
 use crate::animation::Clock;
+
+#[test]
+fn libinput_pointer_settings_report_failures_and_continue() {
+    let settings = [
+        PointerSetting::NaturalScroll(true),
+        PointerSetting::AccelSpeed(0.5),
+        PointerSetting::LeftHanded(true),
+    ];
+    let mut applied = Vec::new();
+
+    let failures = apply_pointer_settings(settings, |setting| {
+        applied.push(setting.name());
+        if matches!(setting, PointerSetting::AccelSpeed(_)) {
+            Err(input::DeviceConfigError::Unsupported)
+        } else {
+            Ok(())
+        }
+    });
+
+    assert_eq!(applied, ["natural-scroll", "accel-speed", "left-handed"]);
+    assert_eq!(
+        failures,
+        [("accel-speed", input::DeviceConfigError::Unsupported)]
+    );
+}
 
 #[test]
 fn mouse_region_matching_uses_intersection_except_for_workspace_background() {
@@ -50,10 +76,12 @@ fn exact_xkb_group_beats_the_wildcard_and_wrong_groups_do_not_match() {
             ModKey::Super,
             &[Trigger::Keysym(Keysym::q)],
             ModifiersState::default(),
-            "*",
-            1,
-            false,
-            false,
+            BindingContext {
+                input_device: "*",
+                group: 1,
+                locked: false,
+                inhibited: false,
+            },
         )
         .as_ref(),
         Some(&group_2)
@@ -64,10 +92,12 @@ fn exact_xkb_group_beats_the_wildcard_and_wrong_groups_do_not_match() {
             ModKey::Super,
             &[Trigger::Keysym(Keysym::q)],
             ModifiersState::default(),
-            "*",
-            0,
-            false,
-            false,
+            BindingContext {
+                input_device: "*",
+                group: 0,
+                locked: false,
+                inhibited: false,
+            },
         ),
         None
     );
@@ -86,10 +116,12 @@ fn exact_input_beats_group_lock_and_inhibition_matches() {
             ModKey::Super,
             &[Trigger::Keysym(Keysym::q)],
             ModifiersState::default(),
-            "0:0:keyboard",
-            1,
-            false,
-            false,
+            BindingContext {
+                input_device: "0:0:keyboard",
+                group: 1,
+                locked: false,
+                inhibited: false,
+            },
         )
         .as_ref(),
         Some(&exact)
@@ -106,10 +138,12 @@ fn group_agnostic_binding_matches_every_xkb_group() {
                 ModKey::Super,
                 &[Trigger::Keysym(Keysym::q)],
                 ModifiersState::default(),
-                "*",
-                group,
-                false,
-                false,
+                BindingContext {
+                    input_device: "*",
+                    group,
+                    locked: false,
+                    inhibited: false,
+                },
             )
             .as_ref(),
             Some(&wildcard),
@@ -149,20 +183,24 @@ fn release_bindings_fire_only_when_the_chord_is_released() {
         &mut suppressed_keys,
         &mut held_release_bind,
         &bindings.0,
-        ModKey::Super,
-        "*",
-        key_code,
-        keysym,
-        Some(keysym),
-        0,
+        KeyEventContext {
+            input_device: "*",
+            key_code,
+            modified: keysym,
+            raw: Some(keysym),
+            group: 0,
+            code_modifiers: mods,
+            raw_modifiers: mods,
+            translated_modifiers: mods,
+        },
         true,
-        mods,
-        mods,
-        mods,
         &screenshot_ui,
-        false,
-        false,
-        false,
+        BindingPolicy {
+            mod_key: ModKey::Super,
+            locked: false,
+            inhibited: false,
+            disable_power_key_handling: false,
+        },
     );
     assert!(matches!(press, FilterResult::Intercept(None)));
     assert!(held_release_bind.is_some());
@@ -171,20 +209,24 @@ fn release_bindings_fire_only_when_the_chord_is_released() {
         &mut suppressed_keys,
         &mut held_release_bind,
         &bindings.0,
-        ModKey::Super,
-        "*",
-        key_code,
-        keysym,
-        Some(keysym),
-        0,
+        KeyEventContext {
+            input_device: "*",
+            key_code,
+            modified: keysym,
+            raw: Some(keysym),
+            group: 0,
+            code_modifiers: mods,
+            raw_modifiers: mods,
+            translated_modifiers: mods,
+        },
         false,
-        mods,
-        mods,
-        mods,
         &screenshot_ui,
-        false,
-        false,
-        false,
+        BindingPolicy {
+            mod_key: ModKey::Super,
+            locked: false,
+            inhibited: false,
+            disable_power_key_handling: false,
+        },
     );
     assert!(matches!(
         release,
@@ -267,20 +309,24 @@ fn bindings_suppress_keys() {
             suppr,
             &mut held_release_bind.borrow_mut(),
             &bindings.0,
-            comp_mod,
-            "*",
-            close_key_code,
-            close_keysym,
-            Some(close_keysym),
-            0,
+            KeyEventContext {
+                input_device: "*",
+                key_code: close_key_code,
+                modified: close_keysym,
+                raw: Some(close_keysym),
+                group: 0,
+                code_modifiers: mods,
+                raw_modifiers: mods,
+                translated_modifiers: mods,
+            },
             pressed,
-            mods,
-            mods,
-            mods,
             &screenshot_ui,
-            false,
-            disable_power_key_handling,
-            is_inhibiting_shortcuts.get(),
+            BindingPolicy {
+                mod_key: comp_mod,
+                locked: false,
+                inhibited: is_inhibiting_shortcuts.get(),
+                disable_power_key_handling,
+            },
         )
     };
 
@@ -290,20 +336,24 @@ fn bindings_suppress_keys() {
             suppr,
             &mut held_release_bind.borrow_mut(),
             &bindings.0,
-            comp_mod,
-            "*",
-            Keycode::from(Keysym::l.raw() + 8),
-            Keysym::l,
-            Some(Keysym::l),
-            0,
+            KeyEventContext {
+                input_device: "*",
+                key_code: Keycode::from(Keysym::l.raw() + 8),
+                modified: Keysym::l,
+                raw: Some(Keysym::l),
+                group: 0,
+                code_modifiers: mods,
+                raw_modifiers: mods,
+                translated_modifiers: mods,
+            },
             pressed,
-            mods,
-            mods,
-            mods,
             &screenshot_ui,
-            false,
-            disable_power_key_handling,
-            is_inhibiting_shortcuts.get(),
+            BindingPolicy {
+                mod_key: comp_mod,
+                locked: false,
+                inhibited: is_inhibiting_shortcuts.get(),
+                disable_power_key_handling,
+            },
         )
     };
 
@@ -635,5 +685,23 @@ fn comp_mod_handling() {
             },
         ),
         None,
+    );
+}
+
+/// Sway lists binding modifiers in get_modifier_names order: Shift, Lock,
+/// Control, Mod1, Mod2, Mod3, Mod4, Mod5 (sway/sway/input/keyboard.c:26-38).
+#[test]
+fn binding_event_state_mask_uses_sways_modifier_names_and_order() {
+    let mut bind = binding("nop all", None);
+    bind.key.modifiers = Modifiers::all() - Modifiers::COMPOSITOR;
+    let Some(swayward_ipc::legacy::Event::SwayBinding {
+        event_state_mask, ..
+    }) = sway_binding_event(&bind, ModKey::Super)
+    else {
+        panic!("expected a binding event");
+    };
+    assert_eq!(
+        event_state_mask,
+        ["Shift", "Lock", "Control", "Mod1", "Mod2", "Mod3", "Mod4", "Mod5"]
     );
 }

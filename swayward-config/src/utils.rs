@@ -14,6 +14,9 @@ pub struct Percent(pub f64);
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct FloatOrInt<const MIN: i32, const MAX: i32>(pub f64);
 
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct PositiveFloatOrInt<const MAX: i32>(pub f64);
+
 /// Flag, with an optional explicit value.
 ///
 /// Intended to be used as an `Option<MaybeBool>` field, as a tri-state:
@@ -56,12 +59,22 @@ impl FromStr for Percent {
         }
 
         let value: f64 = value.parse().map_err(|_| miette!("error parsing value"))?;
+        if !value.is_finite() || value < 0. {
+            return Err(miette!("percentage must be finite and non-negative"));
+        }
+
         Ok(Percent(value / 100.))
     }
 }
 
 impl<const MIN: i32, const MAX: i32> MergeWith<FloatOrInt<MIN, MAX>> for f64 {
     fn merge_with(&mut self, part: &FloatOrInt<MIN, MAX>) {
+        *self = part.0;
+    }
+}
+
+impl<const MAX: i32> MergeWith<PositiveFloatOrInt<MAX>> for f64 {
+    fn merge_with(&mut self, part: &PositiveFloatOrInt<MAX>) {
         *self = part.0;
     }
 }
@@ -138,6 +151,33 @@ impl<S: knuffel::traits::ErrorSpan, const MIN: i32, const MAX: i32> knuffel::Dec
     }
 }
 
+impl<S: knuffel::traits::ErrorSpan, const MAX: i32> knuffel::DecodeScalar<S>
+    for PositiveFloatOrInt<MAX>
+{
+    fn type_check(
+        type_name: &Option<knuffel::span::Spanned<knuffel::ast::TypeName, S>>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) {
+        FloatOrInt::<0, MAX>::type_check(type_name, ctx);
+    }
+
+    fn raw_decode(
+        val: &knuffel::span::Spanned<knuffel::ast::Literal, S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        let value = FloatOrInt::<0, MAX>::raw_decode(val, ctx)?.0;
+        if value > 0. {
+            Ok(Self(value))
+        } else {
+            ctx.emit_error(DecodeError::conversion(
+                val,
+                format!("value must be greater than 0 and at most {MAX}"),
+            ));
+            Ok(Self::default())
+        }
+    }
+}
+
 pub fn expect_only_children<S>(
     node: &knuffel::ast::SpannedNode<S>,
     ctx: &mut knuffel::decode::Context<S>,
@@ -204,4 +244,16 @@ pub fn parse_arg_node<S: knuffel::traits::ErrorSpan, T: knuffel::traits::DecodeS
     }
 
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Percent;
+
+    #[test]
+    fn percent_rejects_non_finite_and_negative_values() {
+        for value in ["NaN%", "inf%", "-1%"] {
+            assert!(value.parse::<Percent>().is_err(), "accepted {value}");
+        }
+    }
 }

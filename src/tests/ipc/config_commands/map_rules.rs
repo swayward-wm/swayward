@@ -166,6 +166,49 @@ fn runtime_assign_supports_workspace_numbers() {
         .any(|(_, _, workspace)| workspace.sway_name().as_deref() == Some("7: target")));
 }
 
+/// Oracle: assign_number_matches_by_digit_prefix. Sway resolves an
+/// `assign ... number` target by its leading digits only
+/// (_workspace_by_number, sway/tree/workspace.c:493-502), so with "3: web"
+/// present, `number 3: mail` lands on "3: web" and creates nothing.
+#[test]
+fn runtime_assign_number_matches_an_existing_workspace_by_its_digits() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "workspace 3: web")[0].success);
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "workspace 1")[0].success);
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        r#"assign [app_id="^assigned$"] number 3: mail"#,
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+    map_test_window(&mut f, client, "assigned");
+
+    let swayward = f.swayward();
+    let names = swayward
+        .layout
+        .workspaces()
+        .filter_map(|(_, _, workspace)| workspace.sway_name())
+        .collect::<Vec<_>>();
+    assert!(!names.iter().any(|name| name == "3: mail"), "{names:?}");
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let holder = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|output| output["nodes"].as_array().unwrap())
+        .find(|workspace| find_json_node_with_app_id(workspace, "assigned").is_some())
+        .unwrap();
+    assert_eq!(holder["name"], "3: web");
+}
+
 #[test]
 fn runtime_assign_skips_a_missing_output_and_uses_the_next_match() {
     let mut f = Fixture::new();
@@ -463,4 +506,97 @@ fn marking_a_mapped_window_runs_each_newly_matching_for_window_rule_once() {
         sticky(&mut f, "first"),
         "moving a global mark away and back must not rerun the first view's rule"
     );
+}
+
+fn map_rule_window(fixture: &mut Fixture, client: super::client::ClientId, app_id: &str) {
+    let window = fixture.client(client).create_window();
+    window.xdg_toplevel.set_app_id(app_id.into());
+    let surface = window.surface.clone();
+    window.commit();
+    fixture.roundtrip(client);
+    let window = fixture.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    fixture.double_roundtrip(client);
+}
+
+fn rule_window_node(fixture: &mut Fixture, app_id: &str) -> Value {
+    let swayward = fixture.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    find_json_node_with_app_id(&tree, app_id).unwrap().clone()
+}
+
+/// A map-time floating rule runs once. Sway executes a view's criteria on map
+/// and skips any criterion it already ran for that view
+/// (`sway/sway/tree/view.c:569-593`); a floating change does not rerun them.
+/// Re-running every rule after the rule's own `floating` command recursed until
+/// the stack overflowed and aborted the compositor.
+#[test]
+fn map_time_floating_rule_does_not_recurse() {
+    for (command, floating) in [
+        ("floating enable", true),
+        ("floating toggle", true),
+        ("floating disable", false),
+    ] {
+        let config = swayward_config::Config::parse_mem(&format!(
+            r#"window-rule {{
+                match app-id="^flip$"
+                sway-for-window-command "{command}"
+            }}"#,
+        ))
+        .unwrap();
+        let mut fixture = Fixture::with_config(config);
+        fixture.add_output(1, (800, 600));
+        let client = fixture.add_client();
+        map_rule_window(&mut fixture, client, "flip");
+
+        let node = rule_window_node(&mut fixture, "flip");
+        assert_eq!(
+            node["type"] == "floating_con",
+            floating,
+            "{command}: {node}"
+        );
+    }
+}
+
+/// A floating change does not re-execute a window's map-time rules. Sway only
+/// runs `for_window` criteria on map, on mark, and on title or app_id change,
+/// and never twice for one view (`sway/sway/tree/view.c:569-593`).
+#[test]
+fn targeted_floating_toggle_does_not_rerun_map_time_rules() {
+    let config = swayward_config::Config::parse_mem(
+        r#"window-rule {
+            match app-id="^rerun$"
+            sway-for-window-command "mark --add --toggle seen"
+        }"#,
+    )
+    .unwrap();
+    let mut fixture = Fixture::with_config(config);
+    fixture.add_output(1, (800, 600));
+    let client = fixture.add_client();
+    map_rule_window(&mut fixture, client, "rerun");
+    let con_id = rule_window_node(&mut fixture, "rerun")["id"].clone();
+    assert_eq!(
+        rule_window_node(&mut fixture, "rerun")["marks"],
+        serde_json::json!(["seen"])
+    );
+
+    for _ in 0..2 {
+        let outcome = crate::command::execute(
+            fixture.niri_state(),
+            &format!("[con_id={con_id}] floating toggle"),
+        );
+        assert!(outcome[0].success, "{outcome:?}");
+        assert_eq!(
+            rule_window_node(&mut fixture, "rerun")["marks"],
+            serde_json::json!(["seen"]),
+            "a floating change must not rerun the map-time mark rule"
+        );
+    }
 }

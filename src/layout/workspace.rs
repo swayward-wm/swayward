@@ -45,13 +45,13 @@ use crate::window::ResolvedWindowRules;
 
 #[derive(Debug)]
 pub struct Workspace<W: LayoutElement> {
-    /// The scrollable-tiling layout.
+    /// The nested tiling layout.
     tiling: TilingTree<W>,
 
     /// The floating layout.
     floating: FloatingLayout<W>,
 
-    /// Whether the floating layout is active instead of the scrolling layout.
+    /// Whether the floating layout is active instead of the tiling layout.
     floating_is_active: FloatingActive,
 
     /// The original output of this workspace.
@@ -183,10 +183,10 @@ pub enum ResolvedSize {
 /// Whether the floating space is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FloatingActive {
-    /// The scrolling space is active.
+    /// The tiling space is active.
     No,
-    /// The scrolling space is active, but the floating space should render on top, even if the
-    /// active scrolling window is fullscreen.
+    /// The tiling space is active, but the floating space should render on top, even if the active
+    /// tiled window is fullscreen.
     ///
     /// This is necessary for focus-follows-mouse that activates but doesn't raise the window to
     /// avoid being annoying.
@@ -205,6 +205,14 @@ pub enum WorkspaceAddWindowTarget<'a, W: LayoutElement> {
     NewColumnAt(usize),
     /// Next to this existing window.
     NextTo(&'a W::Id),
+}
+
+pub struct AddTileOptions {
+    pub activate: ActivateWindow,
+    pub width: TiledWidth,
+    pub is_full_width: bool,
+    pub is_floating: bool,
+    pub anim: Option<swayward_config::Animation>,
 }
 
 impl OutputId {
@@ -799,6 +807,10 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.set_node_fullscreen(id, mode)
     }
 
+    pub(super) fn mark_tiling_fullscreen_arrived(&mut self) {
+        self.tiling.mark_fullscreen_arrived();
+    }
+
     pub fn disable_fullscreen(&mut self) {
         if let Some(fullscreen) = self.tiling.fullscreen_node() {
             self.tiling.set_node_fullscreen(fullscreen, None);
@@ -963,17 +975,19 @@ impl<W: LayoutElement> Workspace<W> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn add_tile(
         &mut self,
         mut tile: Tile<W>,
         target: WorkspaceAddWindowTarget<W>,
-        activate: ActivateWindow,
-        width: TiledWidth,
-        is_full_width: bool,
-        is_floating: bool,
-        anim: Option<swayward_config::Animation>,
+        options: AddTileOptions,
     ) {
+        let AddTileOptions {
+            activate,
+            width,
+            is_full_width,
+            is_floating,
+            anim,
+        } = options;
         self.enter_output_for_window(tile.window());
         tile.restore_to_floating = is_floating;
 
@@ -982,8 +996,8 @@ impl<W: LayoutElement> Workspace<W> {
                 // Don't steal focus from an active fullscreen window.
                 let activate = activate.map_smart(|| !self.is_active_pending_fullscreen());
 
-                // If the tile is pending maximized or fullscreen, open it in the scrolling layout
-                // where it can do that.
+                // If the tile is pending maximized or fullscreen, open it in the tiling layout,
+                // where it can enter those states.
                 if is_floating && tile.window().pending_sizing_mode().is_normal() {
                     self.floating.add_tile(tile, activate);
 
@@ -1116,8 +1130,8 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating_is_active = match (floating, tiling) {
             // No floating window carries a focus timestamp, which happens when
             // one has never been focused. Falling straight to No breaks the
-            // invariant that floating must be active when the scrolling space
-            // is empty but the floating space is not, so check for that case
+            // invariant that floating must be active when the tiling space is
+            // empty but the floating space is not, so check for that case
             // before deciding on timestamps.
             (None, _) if self.tiling.is_empty() && !self.floating.is_empty() => FloatingActive::Yes,
             (None, _) => FloatingActive::No,
@@ -1143,12 +1157,36 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn remove_tile(&mut self, id: &W::Id, transaction: Transaction) -> RemovedTile<W> {
+        self.remove_tile_inner(id, transaction, false)
+    }
+
+    /// Removes a window that moves to another workspace or the scratchpad, applying sway's
+    /// transfer focus rule rather than the close rule.
+    pub fn remove_tile_for_transfer(
+        &mut self,
+        id: &W::Id,
+        transaction: Transaction,
+    ) -> RemovedTile<W> {
+        self.remove_tile_inner(id, transaction, true)
+    }
+
+    fn remove_tile_inner(
+        &mut self,
+        id: &W::Id,
+        transaction: Transaction,
+        transfer: bool,
+    ) -> RemovedTile<W> {
         let mut from_floating = false;
         let removed = if self.floating.has_window(id) {
             from_floating = true;
             self.floating.remove_tile(id, transaction)
         } else {
-            let tile = self.tiling.remove_tile(id, transaction).unwrap();
+            let tile = if transfer {
+                self.tiling.remove_tile_for_transfer(id, transaction)
+            } else {
+                self.tiling.remove_tile(id, transaction)
+            }
+            .unwrap();
             let is_floating = tile.restore_to_floating;
             RemovedTile {
                 tile,
@@ -1249,7 +1287,9 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn clear_floating_tree_fullscreen(&mut self, root: NodeId) {
-        let tree = self.floating.tree_mut(root).unwrap();
+        let Some(tree) = self.floating.tree_mut(root) else {
+            return;
+        };
         if let Some(fullscreen) = tree.fullscreen_node() {
             tree.set_node_fullscreen(fullscreen, None);
         }
@@ -2174,7 +2214,7 @@ impl<W: LayoutElement> Workspace<W> {
                 return;
             }
         } else if !is_fullscreen {
-            // The window is in the scrolling layout and we're requesting an unfullscreen. If it is
+            // The window is tiled and we're requesting an unfullscreen. If it is
             // indeed fullscreen (i.e. this isn't a duplicate unfullscreen request), then we may
             // need to unfullscreen into floating.
             // When going from fullscreen to maximized, don't consider restore_to_floating yet.
@@ -2245,7 +2285,7 @@ impl<W: LayoutElement> Workspace<W> {
                 return;
             }
         } else if !maximize {
-            // The window is in the scrolling layout and we're requesting to unmaximize. If it is
+            // The window is tiled and we're requesting to unmaximize. If it is
             // indeed maximized (i.e. this isn't a duplicate unmaximize request), then we may
             // need to unmaximize into floating.
             let tile = self
@@ -2303,56 +2343,27 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         };
 
-        // Sway sizes a tiled window from the workspace box when it first enters
-        // the scratchpad (sway/tree/container.c:913-932).
-        let minimum = self.options.layout.floating_minimum_size;
-        let maximum = self.options.layout.floating_maximum_size;
-        let min_width = if minimum.width == -1 {
-            0.
-        } else if minimum.width == 0 {
-            75.
-        } else {
-            f64::from(minimum.width)
-        };
-        let min_height = if minimum.height == -1 {
-            0.
-        } else if minimum.height == 0 {
-            50.
-        } else {
-            f64::from(minimum.height)
-        };
-        let max_width = if maximum.width == -1 {
-            f64::INFINITY
-        } else if maximum.width == 0 {
-            f64::from(automatic_maximum.w)
-        } else {
-            f64::from(maximum.width)
-        };
-        let max_height = if maximum.height == -1 {
-            f64::INFINITY
-        } else if maximum.height == 0 {
-            f64::from(automatic_maximum.h)
-        } else {
-            f64::from(maximum.height)
-        };
-        let tile_width = (self.working_area.size.w * 0.5)
-            .min(max_width)
-            .max(min_width);
-        let tile_height = (self.working_area.size.h * 0.75)
-            .min(max_height)
-            .max(min_height);
+        // Sway sizes a tiled view from the workspace box when it first enters
+        // the scratchpad, and sizes its content, not the decorated container:
+        // container_floating_set_default_size sets content_width/height and
+        // derives the geometry from them (sway/tree/container.c:896-918).
+        let (minimum, maximum) = super::floating_tree::floating_constraints(
+            self.options.layout.floating_minimum_size,
+            self.options.layout.floating_maximum_size,
+            automatic_maximum.to_f64(),
+        );
+        let content_width = (self.working_area.size.w * 0.5)
+            .min(maximum.w)
+            .max(minimum.w);
+        let content_height = (self.working_area.size.h * 0.75)
+            .min(maximum.h)
+            .max(minimum.h);
         let min_size = tile.window().min_size();
         let max_size = tile.window().max_size();
-        let window_width = ensure_min_max_size(
-            tile.window_width_for_tile_width(tile_width).round() as i32,
-            min_size.w,
-            max_size.w,
-        );
-        let window_height = ensure_min_max_size(
-            tile.window_height_for_tile_height(tile_height).round() as i32,
-            min_size.h,
-            max_size.h,
-        );
+        let window_width =
+            ensure_min_max_size(content_width.round() as i32, min_size.w, max_size.w);
+        let window_height =
+            ensure_min_max_size(content_height.round() as i32, min_size.h, max_size.h);
         tile.floating_window_size = Some(Size::from((window_width.max(1), window_height.max(1))));
 
         let tile_size = Size::from((
@@ -2511,10 +2522,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn switch_focus_floating_tiling(&mut self) {
         if self.floating.is_empty() {
-            // If floating is empty, keep focus on scrolling.
+            // If floating is empty, keep focus on tiling.
             return;
         } else if self.tiling.is_empty() {
-            // If floating isn't empty but scrolling is, keep focus on floating.
+            // If floating isn't empty but tiling is, keep focus on floating.
             return;
         }
 
@@ -2594,6 +2605,30 @@ impl<W: LayoutElement> Workspace<W> {
                 .any(|root| !self.floating.tree_is_sticky(root))
     }
 
+    /// Moves a child of a multi-window floating group into the tiling tree. Sway treats only
+    /// the group root as floating (`container_is_floating`, sway/tree/container.c:1041-1049),
+    /// so a command aimed at the child moves it as a tiled container and leaves its siblings in
+    /// the group. Returns false when the window is not such a child.
+    pub fn detach_floating_group_child(&mut self, window: &W::Id) -> bool {
+        let Some(root) = self.floating.tree_root_for_window(window) else {
+            return false;
+        };
+        if self
+            .floating
+            .tree_window_ids(root)
+            .is_none_or(|windows| windows.len() < 2)
+        {
+            return false;
+        }
+        let removed = self.floating.remove_tile(window, Transaction::new());
+        let mut tile = removed.tile;
+        tile.restore_to_floating = false;
+        self.tiling
+            .add_tile_with_activation(tile, InsertTarget::Focused, true);
+        self.floating_is_active = FloatingActive::No;
+        true
+    }
+
     pub fn floating_tree_root_for_window(&self, window: &W::Id) -> Option<NodeId> {
         self.floating.tree_root_for_window(window)
     }
@@ -2617,6 +2652,28 @@ impl<W: LayoutElement> Workspace<W> {
                 .tiles()
                 .find(|tile| tile.window().id() == window)
                 .is_some_and(|tile| tile.is_sticky)
+    }
+
+    /// Sets sticky on a split container that is not a floating root; sway stores the flag on
+    /// every container, and it only takes effect once the container becomes floating.
+    pub fn set_split_sticky(&mut self, id: NodeId, value: &str) -> bool {
+        let tree = if self.tiling.is_split(id) {
+            &mut self.tiling
+        } else {
+            match self
+                .floating
+                .tree_root_for_node(id)
+                .filter(|root| *root != id)
+            {
+                Some(root) => match self.floating.tree_mut(root) {
+                    Some(tree) => tree,
+                    None => return false,
+                },
+                None => return false,
+            }
+        };
+        let sticky = swayward_ipc::command::parse_boolean(value, tree.is_split_sticky(id));
+        tree.set_split_sticky(id, sticky)
     }
 
     pub fn set_window_sticky(&mut self, window: &W::Id, sticky: bool) -> bool {
@@ -2756,8 +2813,15 @@ impl<W: LayoutElement> Workspace<W> {
             if floating {
                 return Some(root);
             }
-            let subtree = self.floating.remove_tree(root).unwrap();
-            let (root, _) = self.attach_tiling_subtree(subtree);
+            let subtree = self.floating.remove_tree(root)?;
+            if let Some(output) = &self.output {
+                subtree.for_each_window(|window| window.output_enter(output));
+            }
+            if subtree.has_fullscreen() {
+                self.disable_fullscreen();
+            }
+            self.floating_is_active = FloatingActive::No;
+            let (root, _) = self.tiling.attach_unfloated_subtree(subtree);
             if self.floating.is_empty() {
                 self.floating_is_active = FloatingActive::No;
             }

@@ -67,13 +67,7 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
         "layout { gaps 0; outer-gaps { left 0; right 0; top 0; bottom 0; }; border { on; width 2; }; }",
     )
     .unwrap();
-    let mut f = Fixture::with_config(config);
-    let handle = f.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    f.swayward().ipc_server = Some(ipc_server);
-    f.niri_state().ipc_keyboard_layouts_changed();
+    let (mut f, socket) = ipc_fixture_with_config(config);
     f.add_output(1, (1270, 1408));
     assert!(crate::command::execute(f.niri_state(), "split vertical")[0].success);
     let id = f.add_client();
@@ -91,7 +85,7 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
 
     let mut stream = UnixStream::connect(&socket).unwrap();
     let ours = query_ipc(&mut f, &mut stream, MessageType::GetTree);
-    let fixture: Value = serde_json::from_str(sway_fixture!("one_window.tree.json")).unwrap();
+    let fixture: Value = serde_json::from_str(&sway_fixture!("one_window.tree.json")).unwrap();
     assert_same_shape(&fixture, &ours, "$tree");
     assert_same_values(&fixture, &ours, "$tree");
     assert_tree_rectangles_match_fixture(&fixture, &ours, "$tree");
@@ -122,7 +116,7 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
     assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
 
     let ours = query_ipc(&mut f, &mut stream, MessageType::GetTree);
-    let fixture: Value = serde_json::from_str(sway_fixture!("one_floating.tree.json")).unwrap();
+    let fixture: Value = serde_json::from_str(&sway_fixture!("one_floating.tree.json")).unwrap();
     assert_same_shape(&fixture, &ours, "$tree");
     assert_rectangle_roles_match_fixture(&fixture, &ours, "$tree");
     assert_focus_matches_fixture(&fixture, &ours, "$tree");
@@ -156,7 +150,7 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
     ];
     let mut fixture_nodes = Vec::new();
     for fixture in fixture_trees {
-        collect_fixture_nodes(&serde_json::from_str(fixture).unwrap(), &mut fixture_nodes);
+        collect_fixture_nodes(&serde_json::from_str(&fixture).unwrap(), &mut fixture_nodes);
     }
     assert_node_schema_appears_in_fixtures(&ours, &fixture_nodes, "$tree");
 
@@ -167,7 +161,7 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
 
     let ours = query_ipc(&mut f, &mut stream, MessageType::GetWorkspaces);
     let fixture: Value =
-        serde_json::from_str(sway_fixture!("one_floating.workspaces.json")).unwrap();
+        serde_json::from_str(&sway_fixture!("one_floating.workspaces.json")).unwrap();
     assert_same_shape(&fixture, &ours, "$workspaces");
     let expected_focus = fixture[0]["focus"].as_array().unwrap();
     let actual_focus = ours[0]["focus"].as_array().unwrap();
@@ -178,7 +172,7 @@ fn live_ipc_descriptions_match_sway_schema_and_values() {
     assert_eq!(ours[0]["representation"], fixture[0]["representation"]);
 
     let ours = query_ipc(&mut f, &mut stream, MessageType::GetOutputs);
-    let fixture: Value = serde_json::from_str(sway_fixture!("one_window.outputs.json")).unwrap();
+    let fixture: Value = serde_json::from_str(&sway_fixture!("one_window.outputs.json")).unwrap();
     assert_same_shape(&fixture, &ours, "$outputs");
     assert_same_values(&fixture, &ours, "$outputs");
 
@@ -217,13 +211,7 @@ fn moved_workspace_keeps_destination_output_focus_order() {
         "#,
     )
     .unwrap();
-    let mut f = Fixture::with_config(config);
-    let handle = f.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    f.swayward().ipc_server = Some(ipc_server);
-    f.niri_state().ipc_keyboard_layouts_changed();
+    let (mut f, socket) = ipc_fixture_with_config(config);
     f.add_output(1, (1280, 720));
     f.add_output(2, (1280, 720));
     assert!(crate::command::execute(f.niri_state(), "workspace __fixture_reset")[0].success);
@@ -276,13 +264,7 @@ fn moved_workspace_keeps_destination_output_focus_order() {
 
 #[test]
 fn active_emptied_workspace_retains_its_layout_and_representation() {
-    let mut f = Fixture::new();
-    let handle = f.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    f.swayward().ipc_server = Some(ipc_server);
-    f.niri_state().ipc_keyboard_layouts_changed();
+    let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1280, 720));
     let client = f.add_client();
 
@@ -361,13 +343,7 @@ fn workspace_rect_includes_outer_and_edge_gaps() {
 
 #[test]
 fn split_children_report_their_arranged_share_including_gaps() {
-    let mut f = Fixture::new();
-    let handle = f.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    f.swayward().ipc_server = Some(ipc_server);
-    f.niri_state().ipc_keyboard_layouts_changed();
+    let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1270, 1408));
     assert!(crate::command::execute(f.niri_state(), "gaps inner all set 17")[0].success);
     assert!(crate::command::execute(f.niri_state(), "gaps outer all set 23")[0].success);
@@ -405,13 +381,7 @@ fn split_children_report_their_arranged_share_including_gaps() {
 
 #[test]
 fn tabbed_children_report_visibility_and_full_parent_percent() {
-    let mut f = Fixture::new();
-    let handle = f.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    f.swayward().ipc_server = Some(ipc_server);
-    f.niri_state().ipc_keyboard_layouts_changed();
+    let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1270, 1408));
     let client = f.add_client();
 
@@ -559,13 +529,7 @@ fn layout_tabbed_preserves_fullscreen_pending_percentages() {
 
 #[test]
 fn nested_tabbed_children_report_arranged_area_share() {
-    let mut f = Fixture::new();
-    let handle = f.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    f.swayward().ipc_server = Some(ipc_server);
-    f.niri_state().ipc_keyboard_layouts_changed();
+    let (mut f, socket) = ipc_fixture();
     f.add_output(1, (1270, 1408));
     let client = f.add_client();
 

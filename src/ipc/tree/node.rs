@@ -30,8 +30,7 @@ pub(crate) fn describe_tiling<'a, I>(
     find_window: &impl Fn(&I) -> Option<&'a Mapped>,
     workspace_rect: Rect,
     marks: &std::collections::HashMap<MappedId, Vec<String>>,
-    container_marks: &std::collections::HashMap<(WorkspaceId, NodeId), Vec<String>>,
-    workspace_id: WorkspaceId,
+    container_marks: &std::collections::HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
 ) -> Option<Node> {
     match node {
         IpcNode::Split {
@@ -43,6 +42,7 @@ pub(crate) fn describe_tiling<'a, I>(
             focus,
             focused,
             fullscreen_mode,
+            sticky,
             children,
         } => {
             let children = children
@@ -51,15 +51,8 @@ pub(crate) fn describe_tiling<'a, I>(
                     let id = match &child {
                         IpcNode::Split { id, .. } | IpcNode::Leaf { id, .. } => *id,
                     };
-                    describe_tiling(
-                        child,
-                        find_window,
-                        workspace_rect,
-                        marks,
-                        container_marks,
-                        workspace_id,
-                    )
-                    .map(|node| (id, node))
+                    describe_tiling(child, find_window, workspace_rect, marks, container_marks)
+                        .map(|node| (id, node))
                 })
                 .collect::<Vec<_>>();
             let focus = focus
@@ -88,10 +81,8 @@ pub(crate) fn describe_tiling<'a, I>(
             node.percent = percent;
             node.scratchpad_state = Some("none".into());
             node.fullscreen_mode = fullscreen_mode;
-            node.marks = container_marks
-                .get(&(workspace_id, id))
-                .cloned()
-                .unwrap_or_default();
+            node.sticky = sticky;
+            node.marks = container_marks.get(&id).cloned().unwrap_or_default();
             Some(node)
         }
         IpcNode::Leaf {
@@ -166,6 +157,16 @@ pub(crate) fn describe_tiling<'a, I>(
                     height: workspace_rect.height,
                     ..Rect::default()
                 };
+            } else if fullscreen_mode != 0 && node.rect.width > 0 && node.rect.height > 0 {
+                // A fullscreen view's content is the output box, even while
+                // its container reports a tiled slot (`view_autoconfigure`,
+                // sway/tree/view.c:358-363).
+                node.window_rect = Rect {
+                    x: workspace_rect.x - node.rect.x,
+                    y: workspace_rect.y - node.rect.y,
+                    width: workspace_rect.width,
+                    height: workspace_rect.height,
+                };
             } else {
                 node.window_rect = Rect {
                     x: left,
@@ -196,10 +197,7 @@ pub(super) fn empty_tiling_node(rect: Rect) -> Node {
 }
 
 pub(super) fn ipc_border_width(border: (swayward_ipc::command::BorderStyle, u16)) -> i32 {
-    match border.0 {
-        swayward_ipc::command::BorderStyle::None => 2,
-        _ => i32::from(border.1),
-    }
+    i32::from(border.1)
 }
 
 pub(super) fn ipc_border(style: swayward_ipc::command::BorderStyle) -> NodeBorder {

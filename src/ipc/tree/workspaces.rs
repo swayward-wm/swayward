@@ -8,7 +8,8 @@ pub(super) struct WorkspaceNodeContext<'a> {
     pub(super) rect: Rect,
     pub(super) output_origin: Rect,
     pub(super) marks: &'a std::collections::HashMap<MappedId, Vec<String>>,
-    pub(super) container_marks: &'a std::collections::HashMap<(WorkspaceId, NodeId), Vec<String>>,
+    pub(super) container_marks:
+        &'a std::collections::HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
 }
 
 pub fn describe_workspaces(
@@ -27,7 +28,7 @@ pub(crate) fn describe_workspaces_with_marks(
     layout: &Layout<Mapped>,
     global_space: &Space<Window>,
     marks: &std::collections::HashMap<MappedId, Vec<String>>,
-    container_marks: &std::collections::HashMap<(WorkspaceId, NodeId), Vec<String>>,
+    container_marks: &std::collections::HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
 ) -> Vec<Workspace> {
     layout
         .monitors()
@@ -138,7 +139,6 @@ pub(super) fn describe_workspace_node(context: WorkspaceNodeContext<'_>) -> Node
         output_origin,
         marks,
         container_marks,
-        workspace.id(),
     )
     .unwrap_or_else(|| empty_tiling_node(rect));
     let workspace_focused = compositor_layout
@@ -181,7 +181,6 @@ pub(super) fn describe_workspace_node(context: WorkspaceNodeContext<'_>) -> Node
                 output_origin,
                 marks,
                 container_marks,
-                workspace.id(),
             )?;
             node.node_type = NodeType::FloatingCon;
             node.floating = Some("user_on".into());
@@ -214,7 +213,7 @@ pub(super) fn describe_workspace_node(context: WorkspaceNodeContext<'_>) -> Node
                         visible: true,
                     });
                     node.focused = active_window == Some(tile.window().id());
-                    let border = tile.sway_border();
+                    let border = tile.sway_border_thickness();
                     node.border = ipc_border(border.0);
                     node.current_border_width = i32::from(border.1);
                     let deco_rect = workspace.floating().ipc_decoration_rect(tile, &layout);
@@ -281,11 +280,27 @@ pub(super) fn describe_workspace_node(context: WorkspaceNodeContext<'_>) -> Node
         .then(|| tree_representation(ipc_layout(workspace.tiling_representation_layout()), &nodes));
     let mut nodes = nodes;
     set_tabbed_percentages(layout, &mut nodes, rect);
-    if !apply_fullscreen_state(&mut nodes, workspace_visible) {
+    // A workspace fullscreen container hides every view outside it, across
+    // the tiling and floating layers (`view_is_visible`,
+    // `sway/tree/view.c:1187-1193`).
+    let floating_fullscreen = floating_nodes.iter().any(contains_fullscreen);
+    let tiling_fullscreen = if floating_fullscreen {
+        for node in &mut nodes {
+            set_windows_visible(node, false);
+        }
+        false
+    } else {
+        apply_fullscreen_state(&mut nodes, workspace_visible)
+    };
+    if !tiling_fullscreen && !floating_fullscreen {
         set_child_windows_visible(layout, &focus, &mut nodes, workspace_visible);
     }
     for node in &mut floating_nodes {
-        set_windows_visible(node, workspace_visible);
+        let shown = !tiling_fullscreen && (!floating_fullscreen || contains_fullscreen(node));
+        set_windows_visible(node, workspace_visible && shown);
+        if tiling_fullscreen {
+            clear_focused(node);
+        }
     }
     let mut node = common_node(CommonNodeContext {
         id: workspace_id(workspace.id().get()),

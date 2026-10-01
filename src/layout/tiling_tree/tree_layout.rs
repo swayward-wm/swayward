@@ -3,16 +3,22 @@ use super::*;
 impl<W: LayoutElement> TilingTree<W> {
     pub fn split(&mut self, id: NodeId, layout: Layout) {
         self.interactive_resize = None;
+        self.fullscreen_tile_slot = false;
         if id == self.root && self.split_len(id).is_some_and(|len| len > 0) {
-            let old_layout = match self.nodes[&id].value {
-                TreeNode::Split { layout, .. } => layout,
-                TreeNode::Leaf { .. } => unreachable!(),
+            if !self.can_wrap_root_children() {
+                return;
+            }
+            let Some(TreeNode::Split {
+                layout: old_layout, ..
+            }) = self.nodes.get(&id).map(|node| &node.value)
+            else {
+                return;
             };
-            let wrapper = self.wrap_root_children(old_layout);
-            if let TreeNode::Split {
+            let wrapper = self.wrap_root_children(*old_layout);
+            if let Some(TreeNode::Split {
                 layout: root_layout,
                 ..
-            } = &mut self.nodes.get_mut(&id).unwrap().value
+            }) = self.nodes.get_mut(&id).map(|node| &mut node.value)
             {
                 *root_layout = layout;
             }
@@ -62,7 +68,13 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     fn split_container(&mut self, id: NodeId, layout: Layout) {
-        let parent = self.nodes[&id].parent.unwrap_or(self.root);
+        let Some(parent) = self
+            .nodes
+            .get(&id)
+            .map(|node| node.parent.unwrap_or(self.root))
+        else {
+            return;
+        };
         let siblings = self.split_len(parent).unwrap_or_default();
         if id == self.root {
             if let Some(Node {
@@ -92,45 +104,16 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     fn wrap_split_child(&mut self, id: NodeId, parent: NodeId, layout: Layout) {
-        let index = self.child_index(parent, id).unwrap();
-        let old_percent = match &self.nodes[&parent].value {
-            TreeNode::Split { percents, .. } => percents[index],
-            TreeNode::Leaf { .. } => unreachable!(),
-        };
-        let wrapper = self.alloc(Node {
-            parent: Some(parent),
-            value: TreeNode::Split {
-                layout,
-                children: vec![id],
-                percents: vec![1.],
-            },
-        });
-        let TreeNode::Split {
-            children, percents, ..
-        } = &mut self.nodes.get_mut(&parent).unwrap().value
-        else {
-            unreachable!();
-        };
-        children[index] = wrapper;
-        percents[index] = old_percent;
-        self.nodes.get_mut(&id).unwrap().parent = Some(wrapper);
-        if let Some(fullscreen) = self
-            .pending_modes
-            .get_mut(&id)
-            .and_then(|mode| mode.fullscreen.take())
-        {
-            self.pending_modes
-                .entry(wrapper)
-                .or_insert(PendingMode {
-                    fullscreen: None,
-                    maximized: false,
-                })
-                .fullscreen = Some(fullscreen);
-        }
+        debug_assert_eq!(
+            self.nodes.get(&id).and_then(|node| node.parent),
+            Some(parent)
+        );
+        self.wrap_node(id, layout);
     }
 
     pub fn set_layout(&mut self, id: NodeId, layout: Layout) {
         self.interactive_resize = None;
+        self.fullscreen_tile_slot = false;
         if let Some(Node {
             value: TreeNode::Split {
                 layout: current, ..
@@ -168,8 +151,8 @@ impl<W: LayoutElement> TilingTree<W> {
             Some(TreeNode::Split { layout, .. }) => *layout,
             Some(TreeNode::Leaf { .. }) | None => unreachable!(),
         };
-        // Sway initializes or refreshes an empty workspace representation only
-        // when the command changes its layout.
+        // Preserve the empty representation until the command changes its layout, matching the
+        // old-layout comparison in sway's layout command (sway/commands/layout.c:152-189).
         if layout != root_layout {
             self.has_had_tile = true;
             self.empty_representation_layout = None;
@@ -187,9 +170,13 @@ impl<W: LayoutElement> TilingTree<W> {
             })
             && layout != root_layout
         {
+            if !self.can_wrap_root_children() {
+                return remapped;
+            }
             let pre_layout_ipc_rects = self
                 .fullscreen_node()
                 .map(|_| self.compute_geometry().ipc_nodes);
+            self.fullscreen_tile_slot = false;
             let wrapper = self.wrap_root_children(layout);
             if let Some(rects) = pre_layout_ipc_rects {
                 self.fullscreen_layout_wrappers.insert(wrapper);
@@ -222,8 +209,8 @@ impl<W: LayoutElement> TilingTree<W> {
         let TreeNode::Split { children, .. } = &mut self.nodes.get_mut(&grandparent)?.value else {
             return None;
         };
-        let index = children.iter().position(|child| *child == parent)?;
-        children[index] = id;
+        let slot = children.iter_mut().find(|child| **child == parent)?;
+        *slot = id;
         self.nodes.get_mut(&id)?.parent = Some(grandparent);
         if let Some(fullscreen) = self
             .pending_modes
@@ -415,12 +402,27 @@ impl<W: LayoutElement> TilingTree<W> {
         );
     }
 
+    /// Wraps `id` in a new container, or returns `id` unchanged when the
+    /// wrapper would exceed [`MAX_TREE_DEPTH`](super::depth::MAX_TREE_DEPTH).
     pub(super) fn wrap_node(&mut self, id: NodeId, layout: Layout) -> NodeId {
-        let parent = self.nodes[&id].parent.unwrap_or(self.root);
-        let index = self.child_index(parent, id).unwrap();
-        let old_percent = match &self.nodes[&parent].value {
-            TreeNode::Split { percents, .. } => percents[index],
-            TreeNode::Leaf { .. } => unreachable!(),
+        if !self.can_wrap(id) {
+            return id;
+        }
+        let Some(parent) = self
+            .nodes
+            .get(&id)
+            .map(|node| node.parent.unwrap_or(self.root))
+        else {
+            return id;
+        };
+        let Some(index) = self.child_index(parent, id) else {
+            return id;
+        };
+        let Some(&old_percent) = (match self.nodes.get(&parent).map(|node| &node.value) {
+            Some(TreeNode::Split { percents, .. }) => percents.get(index),
+            _ => None,
+        }) else {
+            return id;
         };
         let wrapper = self.alloc(Node {
             parent: Some(parent),
@@ -430,15 +432,20 @@ impl<W: LayoutElement> TilingTree<W> {
                 percents: vec![1.],
             },
         });
-        let TreeNode::Split {
+        if let Some(TreeNode::Split {
             children, percents, ..
-        } = &mut self.nodes.get_mut(&parent).unwrap().value
-        else {
-            unreachable!();
-        };
-        children[index] = wrapper;
-        percents[index] = old_percent;
-        self.nodes.get_mut(&id).unwrap().parent = Some(wrapper);
+        }) = self.nodes.get_mut(&parent).map(|node| &mut node.value)
+        {
+            if let (Some(child), Some(percent)) = (children.get_mut(index), percents.get_mut(index))
+            {
+                *child = wrapper;
+                *percent = old_percent;
+            }
+        }
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.parent = Some(wrapper);
+        }
+        self.raise_split_wrapper(id, wrapper);
         if let Some(fullscreen) = self
             .pending_modes
             .get_mut(&id)
@@ -455,27 +462,29 @@ impl<W: LayoutElement> TilingTree<W> {
         wrapper
     }
 
+    /// Moves the root's children into a new container, or returns the root
+    /// unchanged when that would exceed
+    /// [`MAX_TREE_DEPTH`](super::depth::MAX_TREE_DEPTH).
     fn wrap_root_children(&mut self, layout: Layout) -> NodeId {
-        let TreeNode::Split {
+        if !self.can_wrap_root_children() {
+            return self.root;
+        }
+        let Some(TreeNode::Split {
             layout: root_layout,
             children,
             percents,
-        } = std::mem::replace(
-            &mut self.nodes.get_mut(&self.root).unwrap().value,
-            TreeNode::Split {
-                layout: Layout::SplitH,
-                children: Vec::new(),
-                percents: Vec::new(),
-            },
-        )
+        }) = self.nodes.get_mut(&self.root).map(|node| &mut node.value)
         else {
-            unreachable!();
+            return self.root;
         };
+        let root_layout = *root_layout;
+        let children = std::mem::take(children);
+        let percents = std::mem::take(percents);
         let wrapper = self.alloc(Node {
             parent: Some(self.root),
             value: TreeNode::Split {
                 layout,
-                children,
+                children: children.clone(),
                 percents,
             },
         });
@@ -483,24 +492,18 @@ impl<W: LayoutElement> TilingTree<W> {
         if matches!(root_layout, Layout::SplitH | Layout::SplitV) {
             self.previous_split_layouts.insert(wrapper, root_layout);
         }
-        let children = match &self.nodes[&wrapper].value {
-            TreeNode::Split { children, .. } => children.clone(),
-            TreeNode::Leaf { .. } => unreachable!(),
-        };
         for child in children {
-            self.nodes.get_mut(&child).unwrap().parent = Some(wrapper);
+            if let Some(node) = self.nodes.get_mut(&child) {
+                node.parent = Some(wrapper);
+            }
         }
-        let TreeNode::Split {
-            layout: layout_slot,
-            children,
-            percents,
-        } = &mut self.nodes.get_mut(&self.root).unwrap().value
-        else {
-            unreachable!();
-        };
-        *layout_slot = root_layout;
-        *children = vec![wrapper];
-        *percents = vec![1.];
+        if let Some(TreeNode::Split {
+            children, percents, ..
+        }) = self.nodes.get_mut(&self.root).map(|node| &mut node.value)
+        {
+            *children = vec![wrapper];
+            *percents = vec![1.];
+        }
         wrapper
     }
 
@@ -508,14 +511,22 @@ impl<W: LayoutElement> TilingTree<W> {
         if !self.nodes.contains_key(&id) {
             return false;
         }
-        let target = self.nodes[&id].parent.unwrap_or(self.root);
+        let Some(target) = self
+            .nodes
+            .get(&id)
+            .map(|node| node.parent.unwrap_or(self.root))
+        else {
+            return false;
+        };
         self.set_layout_for_command(target, layout);
         true
     }
 
-    // Unlike general tree compaction, sway's `layout` command flattens at most one ancestor.
+    // Sway's `layout` command replaces at most one singleton parent
+    // (sway/commands/layout.c:134-149), unlike general tree compaction.
     fn set_layout_for_command(&mut self, id: NodeId, layout: Layout) {
         self.interactive_resize = None;
+        self.fullscreen_tile_slot = false;
         if let Some(Node {
             value: TreeNode::Split {
                 layout: current, ..
@@ -531,8 +542,9 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    // Sway operates on the focused container's parent. When both that parent and its parent are
-    // singletons, it replaces the parent with its child once and operates on the grandparent.
+    // Sway operates on the focused container's parent. If both that parent and its parent are
+    // singletons, it replaces the parent with its child once and targets the grandparent
+    // (sway/commands/layout.c:134-149).
     fn focused_layout_target(&mut self) -> (Option<NodeId>, Vec<(NodeId, NodeId)>) {
         let Some(focus) = self.focus else {
             return (None, Vec::new());
@@ -557,9 +569,11 @@ impl<W: LayoutElement> TilingTree<W> {
         if grandparent == self.root || self.split_len(grandparent) != Some(1) {
             return (Some(target), Vec::new());
         }
-        let child = match &self.nodes.get(&target).unwrap().value {
-            TreeNode::Split { children, .. } => children[0],
-            TreeNode::Leaf { .. } => return (Some(target), Vec::new()),
+        let Some(&child) = (match self.nodes.get(&target).map(|node| &node.value) {
+            Some(TreeNode::Split { children, .. }) => children.first(),
+            _ => None,
+        }) else {
+            return (Some(target), Vec::new());
         };
         let Some(remapped) = self.flatten_parent(child) else {
             return (Some(target), Vec::new());

@@ -106,7 +106,40 @@ impl ChildOutput {
     }
 }
 
+/// What one unchanged i3 file produced.
+struct I3Run {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
 fn run_i3_test(test: &str) {
+    let I3Run {
+        success,
+        stdout,
+        stderr,
+    } = run_i3_file(test);
+    let rejected = rejected_commands(&stderr).collect::<Vec<_>>();
+    let expected = expected_rejections(test)
+        .iter()
+        .map(|item| item.command)
+        .collect::<Vec<_>>();
+    let adapter_failed = stderr.contains("swayward xdotool adapter");
+    let skips = tap_skips(&stdout);
+    assert!(
+        success
+            && rejections_match(test, &rejected)
+            && !adapter_failed
+            && (!passing_tests().any(|green| green == test) || skips.is_empty()),
+        "i3 test {test} failed, its xdotool adapter failed, its rejected commands changed, or a green file skipped assertions\nTAP failures:\n{}\nTAP skips: {skips:?}\nexpected rejections: {expected:?}\nactual rejections: {rejected:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        tap_failure_summary(&stdout, &stderr),
+    );
+}
+
+/// Run one unchanged i3 file to completion and return its output without
+/// judging it. Panics only when the file times out or the harness itself
+/// fails.
+fn run_i3_file(test: &str) -> I3Run {
     let mut config = swayward_config::Config::default();
     config.layout.gaps = 0.;
     config.layout.border.off = false;
@@ -121,46 +154,18 @@ fn run_i3_test(test: &str) {
     fixture.add_output(1, (1280, 800));
     let client = fixture.add_client();
 
+    let scratch = I3Scratch::new();
     let handle = fixture.swayward().event_loop.clone();
-    let ipc_dir = socket_path("ipc");
-    std::fs::create_dir(&ipc_dir).unwrap();
-    let ipc_socket = ipc_dir.join("ipc.sock");
+    let ipc_socket = scratch.path("ipc.sock");
     let ipc_server =
         crate::ipc::server::IpcServer::start_at(&handle, Some(ipc_socket.clone())).unwrap();
     fixture.swayward().ipc_server = Some(ipc_server);
     fixture.niri_state().ipc_keyboard_layouts_changed();
     fixture.niri_state().ipc_refresh_layout();
 
-    let control_path = socket_path("control");
+    let control_path = scratch.path("control.sock");
     let control = UnixListener::bind(&control_path).unwrap();
     control.set_nonblocking(true).unwrap();
-    // Remove the socket even when a test panics or times out. Without this the
-    // whole suite leaks one file per conformance test per run, and a run left
-    // over 7000 of them in the temp directory. Unix socket paths are limited to
-    // about 108 bytes, so an accumulating temp directory eventually makes bind
-    // fail in whichever file happens to run next.
-    struct Scratch {
-        files: Vec<PathBuf>,
-        dirs: Vec<PathBuf>,
-    }
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            for path in &self.files {
-                let _ = std::fs::remove_file(path);
-            }
-            // remove_dir_all: the IPC server's socket still sits inside the
-            // directory when this runs, so a plain remove_dir fails and every
-            // conformance test left one directory behind (about 16,000 after
-            // a day of gate runs).
-            for path in &self.dirs {
-                let _ = std::fs::remove_dir_all(path);
-            }
-        }
-    }
-    let mut scratch = Scratch {
-        files: vec![control_path.clone()],
-        dirs: vec![ipc_dir],
-    };
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let oracle = oracle_i3_dir();
@@ -192,47 +197,34 @@ fn run_i3_test(test: &str) {
     // measured at 33s cold, and the suite runs these files in parallel. A
     // genuinely hung test still fails, just later.
     let deadline = started + Duration::from_secs(180);
-    let mut loaded_config_source = None;
-    let mut initially_floating = HashSet::new();
+    let mut session = Session {
+        test,
+        client,
+        loaded_config_source: None,
+        scratch: &scratch,
+        initially_floating: HashSet::new(),
+    };
     loop {
         fixture.dispatch();
         match control.accept() {
-            Ok((stream, _)) => handle_control(
-                &mut fixture,
-                client,
-                &mut loaded_config_source,
-                &mut scratch.files,
-                &mut initially_floating,
-                stream,
-            ),
+            Ok((stream, _)) => handle_control(&mut fixture, &mut session, stream),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => panic!("test control accept failed: {error}"),
         }
         if let Some(status) = child.child_mut().try_wait().unwrap() {
             child.disarm();
             let (stdout, stderr) = child_output.finish();
-            let stdout = String::from_utf8_lossy(&stdout);
+            let stdout = String::from_utf8_lossy(&stdout).into_owned();
             eprint!("{stdout}");
-            let stderr = String::from_utf8_lossy(&stderr);
+            let stderr = String::from_utf8_lossy(&stderr).into_owned();
             if !stderr.is_empty() {
                 eprint!("{stderr}");
             }
-            let rejected = rejected_commands(&stderr).collect::<Vec<_>>();
-            let expected = expected_rejections(test)
-                .iter()
-                .map(|item| item.command)
-                .collect::<Vec<_>>();
-            let adapter_failed = stderr.contains("swayward xdotool adapter");
-            let skips = tap_skips(&stdout);
-            assert!(
-                status.success()
-                    && rejections_match(test, &rejected)
-                    && !adapter_failed
-                    && (!passing_tests().any(|green| green == test) || skips.is_empty()),
-                "i3 test {test} failed, its xdotool adapter failed, its rejected commands changed, or a green file skipped assertions\nTAP failures:\n{}\nTAP skips: {skips:?}\nexpected rejections: {expected:?}\nactual rejections: {rejected:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                tap_failure_summary(&stdout, &stderr),
-            );
-            break;
+            return I3Run {
+                success: status.success(),
+                stdout,
+                stderr,
+            };
         }
         if Instant::now() >= deadline {
             child.child_mut().kill().unwrap();
@@ -247,7 +239,16 @@ fn run_i3_test(test: &str) {
                 tap_failure_summary(&stdout, &stderr),
             );
         }
-        thread::yield_now();
+        pause_i3_poll();
     }
+}
+
+#[test]
+fn i3_child_polling_yields_cpu_between_checks() {
+    let started = Instant::now();
+    for _ in 0..10 {
+        pause_i3_poll();
+    }
+    assert!(started.elapsed() >= Duration::from_millis(5));
 }
 

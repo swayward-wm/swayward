@@ -39,13 +39,22 @@ impl<W: LayoutElement> TilingTree<W> {
         if first_index.abs_diff(second_index) != 1 {
             return false;
         }
-        let first_percent = percents[first_index] + delta;
-        let second_percent = percents[second_index] - delta;
+        let (Some(&first_old), Some(&second_old)) =
+            (percents.get(first_index), percents.get(second_index))
+        else {
+            return false;
+        };
+        let first_percent = first_old + delta;
+        let second_percent = second_old - delta;
         if first_percent <= 0. || second_percent <= 0. {
             return false;
         }
-        percents[first_index] = first_percent;
-        percents[second_index] = second_percent;
+        if let Some(percent) = percents.get_mut(first_index) {
+            *percent = first_percent;
+        }
+        if let Some(percent) = percents.get_mut(second_index) {
+            *percent = second_percent;
+        }
         self.request_window_sizes();
         true
     }
@@ -333,8 +342,69 @@ impl<W: LayoutElement> TilingTree<W> {
         if presets.is_empty() {
             return;
         }
-        let index = if forwards { 0 } else { presets.len() - 1 };
-        let change = match presets[index] {
+        let Some(id) = self.resolve_node(window) else {
+            return;
+        };
+        let wanted = if width {
+            Layout::SplitH
+        } else {
+            Layout::SplitV
+        };
+        let geometries = self.compute_geometry();
+        let extent = |rect: &Rectangle<f64, Logical>| {
+            if width {
+                rect.size.w
+            } else {
+                rect.size.h
+            }
+        };
+        let mut branch = id;
+        let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
+        let current_and_available = loop {
+            let Some(parent_id) = parent else {
+                break None;
+            };
+            let Some(Node {
+                parent: grandparent,
+                value: TreeNode::Split {
+                    layout, children, ..
+                },
+            }) = self.nodes.get(&parent_id)
+            else {
+                break None;
+            };
+            if *layout == wanted && children.len() > 1 {
+                break geometries
+                    .ipc_nodes
+                    .get(&branch)
+                    .zip(geometries.ipc_nodes.get(&parent_id))
+                    .map(|(current, parent)| (extent(current), extent(parent)));
+            }
+            branch = parent_id;
+            parent = *grandparent;
+        };
+        let Some((current, available)) = current_and_available else {
+            return;
+        };
+        let resolved = |preset| match preset {
+            PresetSize::Fixed(value) => f64::from(value),
+            PresetSize::Proportion(value) => (available * value).trunc(),
+        };
+        let index = if forwards {
+            presets
+                .iter()
+                .position(|preset| current + 1. < resolved(*preset))
+                .unwrap_or(0)
+        } else {
+            presets
+                .iter()
+                .rposition(|preset| resolved(*preset) + 1. < current)
+                .unwrap_or(presets.len() - 1)
+        };
+        let Some(&preset) = presets.get(index) else {
+            return;
+        };
+        let change = match preset {
             PresetSize::Fixed(value) => SizeChange::SetFixed(value),
             PresetSize::Proportion(value) => SizeChange::SetProportion(value * 100.),
         };
@@ -422,8 +492,15 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(target_index) = children.iter().position(|child| *child == target) else {
             return false;
         };
-        let compensation = delta / (children.len() - 1) as f64;
-        if percents[target_index] + delta <= 0.
+        let Some(&target_percent) = percents.get(target_index) else {
+            return false;
+        };
+        // Siblings absorb the change; a lone child has none to take it from.
+        let Some(siblings) = children.len().checked_sub(1).filter(|count| *count > 0) else {
+            return false;
+        };
+        let compensation = delta / siblings as f64;
+        if target_percent + delta <= 0.
             || percents
                 .iter()
                 .enumerate()
@@ -513,8 +590,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 } else {
                     Some(index + 1).filter(|index| *index < children.len())
                 };
-                if let Some(neighbor_index) = neighbor_index {
-                    let neighbor = children[neighbor_index];
+                if let Some(&neighbor) = neighbor_index.and_then(|index| children.get(index)) {
                     let axis_size = self.node_geometry(parent_id).map(|rect| {
                         let extent = if layout == Layout::SplitH {
                             rect.size.w
@@ -531,8 +607,8 @@ impl<W: LayoutElement> TilingTree<W> {
                     return Some((
                         first,
                         second,
-                        percents[first_index],
-                        percents[second_index],
+                        *percents.get(first_index)?,
+                        *percents.get(second_index)?,
                         axis_size,
                         drag_sign,
                     ));

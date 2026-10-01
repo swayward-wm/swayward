@@ -48,7 +48,25 @@ pub fn describe_tree(
     layout: &Layout<Mapped>,
     global_space: &Space<Window>,
     marks: &std::collections::HashMap<MappedId, Vec<String>>,
-    container_marks: &std::collections::HashMap<(WorkspaceId, NodeId), Vec<String>>,
+    container_marks: &std::collections::HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
+) -> Node {
+    describe_tree_with_power(
+        layout,
+        global_space,
+        marks,
+        container_marks,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// [`describe_tree`] with runtime output power, which only the GET_TREE reply
+/// observes. Event payloads never carry output nodes.
+pub fn describe_tree_with_power(
+    layout: &Layout<Mapped>,
+    global_space: &Space<Window>,
+    marks: &std::collections::HashMap<MappedId, Vec<String>>,
+    container_marks: &std::collections::HashMap<crate::layout::tiling_tree::NodeId, Vec<String>>,
+    output_power: &std::collections::HashMap<String, bool>,
 ) -> Node {
     let outputs: Vec<_> = layout.monitors().collect();
     let root_rect = outputs
@@ -57,12 +75,13 @@ pub fn describe_tree(
         .reduce(|a, b| a.merge(b))
         .map(rect_from_rectangle)
         .unwrap_or_default();
-    let mut nodes = vec![scratch_output(layout, root_rect, marks)];
+    let mut nodes = vec![scratch_output(layout, root_rect, marks, container_marks)];
     nodes.extend(outputs.iter().map(|monitor| {
         describe_output_node(
             layout,
             global_space,
             monitor,
+            output_power,
             root_rect,
             marks,
             container_marks,
@@ -104,6 +123,7 @@ fn scratch_output(
     layout: &Layout<Mapped>,
     rect: Rect,
     marks: &std::collections::HashMap<MappedId, Vec<String>>,
+    container_marks: &std::collections::HashMap<NodeId, Vec<String>>,
 ) -> Node {
     let mut floating_nodes = layout
         .scratchpad_trees()
@@ -118,8 +138,10 @@ fn scratch_output(
                 },
                 Rect::default(),
                 marks,
-                &Default::default(),
-                crate::layout::workspace::WorkspaceId::specific(0),
+                // A hidden group keeps its marks, as sway's GET_TREE and
+                // GET_MARKS walk hidden scratchpad containers
+                // (`sway/sway/tree/root.c:250-257`).
+                container_marks,
             )?;
             node.node_type = NodeType::FloatingCon;
             node.floating = Some("user_on".into());
@@ -165,6 +187,10 @@ fn scratch_output(
                     node.border = ipc_border(border.0);
                     node.current_border_width = i32::from(border.1);
                 }
+                node.sticky = layout
+                    .scratchpad_tiles()
+                    .find_map(|(window, sticky)| (window.id() == mapped.id()).then_some(sticky))
+                    .unwrap_or(false);
                 node
             }),
     );

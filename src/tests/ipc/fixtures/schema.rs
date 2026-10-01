@@ -80,20 +80,31 @@ fn assert_event_shape(expected: &Value, actual: &Value, path: &str) {
     }
 }
 
+/// Pairs the `nodes` and `floating_nodes` children of two GET_TREE nodes,
+/// asserting first that both sides have the same number of each, so a
+/// dropped or extra child fails instead of being skipped by `zip`.
+fn tree_children<'a>(
+    expected: &'a Value,
+    actual: &'a Value,
+    path: &str,
+) -> Vec<(&'a Value, &'a Value, String)> {
+    let mut pairs = Vec::new();
+    for key in ["nodes", "floating_nodes"] {
+        let expected = expected[key].as_array().unwrap();
+        let actual = actual[key].as_array().unwrap();
+        assert_eq!(expected.len(), actual.len(), "{key} length at {path}");
+        for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+            pairs.push((expected, actual, format!("{path}.{key}[{index}]")));
+        }
+    }
+    pairs
+}
+
 fn assert_focus_matches_fixture(expected: &Value, actual: &Value, path: &str) {
-    let expected_children = expected["nodes"]
-        .as_array()
-        .unwrap()
+    let children = tree_children(expected, actual, path);
+    let id_map = children
         .iter()
-        .chain(expected["floating_nodes"].as_array().unwrap());
-    let actual_children = actual["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .chain(actual["floating_nodes"].as_array().unwrap());
-    let id_map = expected_children
-        .zip(actual_children)
-        .map(|(expected, actual)| (expected["id"].clone(), actual["id"].clone()))
+        .map(|(expected, actual, _)| (expected["id"].clone(), actual["id"].clone()))
         .collect::<Vec<_>>();
     let expected_focus = expected["focus"]
         .as_array()
@@ -112,16 +123,8 @@ fn assert_focus_matches_fixture(expected: &Value, actual: &Value, path: &str) {
         "focus at {path}"
     );
 
-    for key in ["nodes", "floating_nodes"] {
-        for (index, (expected, actual)) in expected[key]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(actual[key].as_array().unwrap())
-            .enumerate()
-        {
-            assert_focus_matches_fixture(expected, actual, &format!("{path}.{key}[{index}]"));
-        }
+    for (expected, actual, path) in children {
+        assert_focus_matches_fixture(expected, actual, &path);
     }
 }
 
@@ -175,20 +178,8 @@ fn assert_rectangle_roles_match_fixture(expected: &Value, actual: &Value, path: 
         }
     }
 
-    for key in ["nodes", "floating_nodes"] {
-        for (index, (expected, actual)) in expected[key]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(actual[key].as_array().unwrap())
-            .enumerate()
-        {
-            assert_rectangle_roles_match_fixture(
-                expected,
-                actual,
-                &format!("{path}.{key}[{index}]"),
-            );
-        }
+    for (expected, actual, path) in tree_children(expected, actual, path) {
+        assert_rectangle_roles_match_fixture(expected, actual, &path);
     }
 }
 
@@ -197,16 +188,8 @@ fn assert_percent_matches_fixture(expected: &Value, actual: &Value, path: &str) 
         assert_percent_value_matches_fixture(expected, actual, path);
     }
 
-    for key in ["nodes", "floating_nodes"] {
-        for (index, (expected, actual)) in expected[key]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(actual[key].as_array().unwrap())
-            .enumerate()
-        {
-            assert_percent_matches_fixture(expected, actual, &format!("{path}.{key}[{index}]"));
-        }
+    for (expected, actual, path) in tree_children(expected, actual, path) {
+        assert_percent_matches_fixture(expected, actual, &path);
     }
 
     let expected_children = expected["nodes"].as_array().unwrap();
@@ -235,28 +218,21 @@ fn assert_tree_rectangles_match_fixture(expected: &Value, actual: &Value, path: 
     // The sway capture used its host font, while the headless harness uses the
     // test environment's font. Keep enough tolerance for titlebar metrics, but
     // not enough for a wrong layout or unit-size placeholder rectangle.
-    for key in ["x", "y", "width", "height"] {
-        let expected = expected["rect"][key].as_i64().unwrap();
-        let actual = actual["rect"][key].as_i64().unwrap();
-        assert!(
-            (expected - actual).abs() <= 10,
-            "rect.{key} at {path}: expected {expected}, got {actual}"
-        );
-    }
-    for child_key in ["nodes", "floating_nodes"] {
-        for (index, (expected, actual)) in expected[child_key]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(actual[child_key].as_array().unwrap())
-            .enumerate()
-        {
-            assert_tree_rectangles_match_fixture(
-                expected,
-                actual,
-                &format!("{path}.{child_key}[{index}]"),
+    // `geometry` gets the same tolerance: the pinned capture's client
+    // geometry also moved with font metrics (c2fa773c), and callers assert
+    // their exact requested geometry separately.
+    for rectangle in ["rect", "deco_rect", "window_rect", "geometry"] {
+        for key in ["x", "y", "width", "height"] {
+            let expected = expected[rectangle][key].as_i64().unwrap();
+            let actual = actual[rectangle][key].as_i64().unwrap();
+            assert!(
+                (expected - actual).abs() <= 10,
+                "{rectangle}.{key} at {path}: expected {expected}, got {actual}"
             );
         }
+    }
+    for (expected, actual, path) in tree_children(expected, actual, path) {
+        assert_tree_rectangles_match_fixture(expected, actual, &path);
     }
 }
 
@@ -352,26 +328,19 @@ fn collect_fixture_nodes(value: &Value, nodes: &mut Vec<Value>) {
 
 fn nested_live_tree() -> Value {
     let config = swayward_config::Config::parse_mem("layout { border { on; }; }").unwrap();
-    let mut f = Fixture::with_config(config);
-    let handle = f.swayward().event_loop.clone();
-    let ipc_server =
-        crate::ipc::server::IpcServer::start_at(&handle, Some(test_socket_path())).unwrap();
-    let socket = ipc_server.socket_path.clone().unwrap();
-    f.swayward().ipc_server = Some(ipc_server);
-    f.niri_state().ipc_keyboard_layouts_changed();
+    let (mut f, socket) = ipc_fixture_with_config(config);
     f.add_output(1, (1920, 1080));
     let id = f.add_client();
     for title in ["fixture-1", "fixture-2", "fixture-3"] {
-        let window = f.client(id).create_window();
-        window.xdg_toplevel.set_app_id(title.into());
-        window.set_title(title);
-        let surface = window.surface.clone();
-        window.commit();
-        f.roundtrip(id);
-        let window = f.client(id).window(&surface);
-        window.attach_new_buffer();
-        window.ack_last_and_commit();
-        f.double_roundtrip(id);
+        windows::map_window(
+            &mut f,
+            id,
+            windows::WindowSpec {
+                app_id: Some(title),
+                title: Some(title),
+                ..Default::default()
+            },
+        );
     }
     f.swayward().layout.nest_or_unnest_window_left(None);
     f.swayward().layout.move_down();
@@ -380,7 +349,7 @@ fn nested_live_tree() -> Value {
 }
 
 fn nested_fixture_tree() -> Value {
-    serde_json::from_str(sway_fixture!("nested_h_in_v.tree.json")).unwrap()
+    serde_json::from_str(&sway_fixture!("nested_h_in_v.tree.json")).unwrap()
 }
 
 fn nested_representation_live_tree() -> Value {
@@ -395,16 +364,15 @@ fn nested_representation_live_tree() -> Value {
         if index == 2 {
             assert!(crate::command::execute(f.niri_state(), "split horizontal")[0].success);
         }
-        let window = f.client(client).create_window();
-        window.xdg_toplevel.set_app_id(title.into());
-        window.set_title(title);
-        let surface = window.surface.clone();
-        window.commit();
-        f.roundtrip(client);
-        let window = f.client(client).window(&surface);
-        window.attach_new_buffer();
-        window.ack_last_and_commit();
-        f.double_roundtrip(client);
+        windows::map_window(
+            &mut f,
+            client,
+            windows::WindowSpec {
+                app_id: Some(title),
+                title: Some(title),
+                ..Default::default()
+            },
+        );
     }
     let swayward = f.swayward();
     serde_json::to_value(describe_tree(
@@ -421,14 +389,7 @@ fn mixed_live_tree() -> Value {
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
     for floating in [false, true] {
-        let window = f.client(client).create_window();
-        window.commit();
-        let surface = window.surface.clone();
-        f.roundtrip(client);
-        let window = f.client(client).window(&surface);
-        window.attach_new_buffer();
-        window.ack_last_and_commit();
-        f.double_roundtrip(client);
+        windows::map_window(&mut f, client, windows::WindowSpec::default());
         if floating {
             assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
         }
@@ -444,6 +405,6 @@ fn mixed_live_tree() -> Value {
 }
 
 fn mixed_fixture_tree() -> Value {
-    serde_json::from_str(sway_fixture!("one_floating.tree.json")).unwrap()
+    serde_json::from_str(&sway_fixture!("one_floating.tree.json")).unwrap()
 }
 

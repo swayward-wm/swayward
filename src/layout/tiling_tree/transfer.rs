@@ -136,10 +136,12 @@ impl<W: LayoutElement> TilingTree<W> {
                 previous_layout: self.previous_split_layouts.remove(&id),
                 title_format: self.title_formats.remove(&id),
                 pending_mode: self.pending_modes.remove(&id),
+                sticky: self.sticky_splits.remove(&id),
             }
         } else {
             self.take_detached_node(id)?
         };
+        self.fullscreen_tile_slot = false;
         if moved_fullscreen {
             self.mapped_under_fullscreen.clear();
             self.fullscreen_layout_wrappers.clear();
@@ -170,6 +172,27 @@ impl<W: LayoutElement> TilingTree<W> {
         subtree: DetachedSubtree<W>,
         target: Option<NodeId>,
     ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        self.attach_subtree_with(subtree, target, true)
+    }
+
+    /// Attaches a floating group that is returning to tiling. Sway adds the group container
+    /// itself with `workspace_add_tiling`, keeping it as a split even on an empty workspace
+    /// (`container_set_floating`, sway/tree/container.c:976-1003), rather than unwrapping its
+    /// children into the workspace as a workspace move does.
+    pub fn attach_unfloated_subtree(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        let target = self.focus;
+        self.attach_subtree_with(subtree, target, false)
+    }
+
+    fn attach_subtree_with(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        target: Option<NodeId>,
+        unwrap_into_empty_root: bool,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
         if subtree.has_fullscreen() {
             if let Some(current) = self.fullscreen_node() {
                 self.replace_fullscreen_state(current, None);
@@ -177,7 +200,7 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         let focus_history = subtree.focus_history;
         let mut remapped = Vec::new();
-        let node = if self.is_empty() {
+        let node = if self.is_empty() && unwrap_into_empty_root {
             match subtree.node {
                 DetachedNode::Split {
                     old_id,
@@ -187,15 +210,19 @@ impl<W: LayoutElement> TilingTree<W> {
                     previous_layout,
                     title_format,
                     pending_mode,
+                    sticky,
                 } => {
                     self.attach_split_to_empty_root(
-                        old_id,
-                        layout,
-                        children,
-                        detached_percents,
-                        previous_layout,
-                        title_format,
-                        pending_mode,
+                        DetachedSplit {
+                            old_id,
+                            layout,
+                            children,
+                            percents: detached_percents,
+                            previous_layout,
+                            title_format,
+                            pending_mode,
+                            sticky,
+                        },
                         focus_history,
                         &mut remapped,
                     );
@@ -206,6 +233,7 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             subtree.node
         };
+        let height = node.height();
         let id = self.insert_detached_node(node, None, &mut remapped);
         let (parent, after) =
             match target.and_then(|target| self.nodes.get(&target).map(|node| (target, node))) {
@@ -225,7 +253,21 @@ impl<W: LayoutElement> TilingTree<W> {
                 )) => (target, None),
                 _ => (self.root, None),
             };
+        // Placing a deep subtree under a deep target could exceed the depth
+        // bound; the workspace root always has room, because the subtree came
+        // from a tree that respected it.
+        let (parent, after) = if self.fits_below(parent, height) {
+            (parent, after)
+        } else {
+            (self.root, None)
+        };
         self.insert_child(parent, id, after);
+        if self
+            .fullscreen_node()
+            .is_some_and(|fullscreen| self.contains_node(id, fullscreen))
+        {
+            self.fullscreen_arrived = true;
+        }
         self.restore_transferred_focus(focus_history);
         if self.focus.is_none() {
             self.set_focus_id(self.focused_leaf_in(id));
@@ -234,26 +276,29 @@ impl<W: LayoutElement> TilingTree<W> {
         (id, remapped)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn attach_split_to_empty_root(
         &mut self,
-        old_id: NodeId,
-        layout: Layout,
-        children: Vec<DetachedNode<W>>,
-        detached_percents: Vec<f64>,
-        previous_layout: Option<Layout>,
-        title_format: Option<String>,
-        pending_mode: Option<PendingMode>,
+        split: DetachedSplit<W>,
         focus_history: Vec<W::Id>,
         remapped: &mut Vec<(NodeId, NodeId)>,
     ) {
+        let DetachedSplit {
+            old_id,
+            layout,
+            children,
+            percents: detached_percents,
+            previous_layout,
+            title_format,
+            pending_mode,
+            sticky,
+        } = split;
         if old_id != self.root {
             remapped.push((old_id, self.root));
         }
-        let TreeNode::Split {
+        let Some(TreeNode::Split {
             layout: root_layout,
             ..
-        } = &mut self.nodes.get_mut(&self.root).unwrap().value
+        }) = self.nodes.get_mut(&self.root).map(|node| &mut node.value)
         else {
             unreachable!();
         };
@@ -264,6 +309,9 @@ impl<W: LayoutElement> TilingTree<W> {
         if let Some(format) = title_format {
             self.title_formats.insert(self.root, format);
         }
+        if sticky {
+            self.sticky_splits.insert(self.root);
+        }
         if let Some(mode) = pending_mode {
             self.pending_modes.insert(self.root, mode);
         }
@@ -271,9 +319,9 @@ impl<W: LayoutElement> TilingTree<W> {
             .into_iter()
             .map(|child| self.insert_detached_node(child, Some(self.root), remapped))
             .collect::<Vec<_>>();
-        let TreeNode::Split {
+        let Some(TreeNode::Split {
             children, percents, ..
-        } = &mut self.nodes.get_mut(&self.root).unwrap().value
+        }) = self.nodes.get_mut(&self.root).map(|node| &mut node.value)
         else {
             unreachable!();
         };
@@ -299,11 +347,17 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn finish_subtree_detach(&mut self, old_parent: Option<NodeId>) {
+        // Sway refocuses the most recent focus entry under the old parent before reaping it,
+        // falling back to the workspace (sway/commands/move.c:598-608).
+        // The subtree is already detached, so nothing under the old parent needs excluding.
+        let target = old_parent.and_then(|_| self.transfer_focus_target(None, old_parent));
         if let Some(parent) = old_parent {
             self.reap_empty_from(parent);
         }
         self.compact_tree();
-        self.focus = self.focused_leaf_in(self.root);
+        if !self.resolve_transfer_focus(target) {
+            self.focus = self.focused_leaf_in(self.root);
+        }
         self.request_window_sizes();
     }
 
@@ -311,6 +365,7 @@ impl<W: LayoutElement> TilingTree<W> {
         let previous_layout = self.previous_split_layouts.get(&id).copied();
         let title_format = self.title_formats.get(&id).cloned();
         let pending_mode = self.pending_modes.get(&id).copied();
+        let sticky = self.sticky_splits.contains(&id);
         let mapped_under_fullscreen = self.mapped_under_fullscreen.contains(&id);
         let node = self.remove_node(id)?;
         match node.value {
@@ -329,6 +384,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 previous_layout,
                 title_format,
                 pending_mode,
+                sticky,
             }),
             TreeNode::Leaf { tile } => Some(DetachedNode::Leaf {
                 old_id: id,
@@ -354,14 +410,18 @@ impl<W: LayoutElement> TilingTree<W> {
                 previous_layout,
                 title_format,
                 pending_mode,
+                sticky,
             } => self.insert_detached_split(
-                old_id,
-                layout,
-                children,
-                percents,
-                previous_layout,
-                title_format,
-                pending_mode,
+                DetachedSplit {
+                    old_id,
+                    layout,
+                    children,
+                    percents,
+                    previous_layout,
+                    title_format,
+                    pending_mode,
+                    sticky,
+                },
                 parent,
                 remapped,
             ),
@@ -393,19 +453,22 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn insert_detached_split(
         &mut self,
-        old_id: NodeId,
-        layout: Layout,
-        children: Vec<DetachedNode<W>>,
-        percents: Vec<f64>,
-        previous_layout: Option<Layout>,
-        title_format: Option<String>,
-        pending_mode: Option<PendingMode>,
+        split: DetachedSplit<W>,
         parent: Option<NodeId>,
         remapped: &mut Vec<(NodeId, NodeId)>,
     ) -> NodeId {
+        let DetachedSplit {
+            old_id,
+            layout,
+            children,
+            percents,
+            previous_layout,
+            title_format,
+            pending_mode,
+            sticky,
+        } = split;
         let id = self.insert_with_id(
             old_id,
             Node {
@@ -438,6 +501,9 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         if let Some(format) = title_format {
             self.title_formats.insert(id, format);
+        }
+        if sticky {
+            self.sticky_splits.insert(id);
         }
         if let Some(mode) = pending_mode {
             self.pending_modes.insert(id, mode);

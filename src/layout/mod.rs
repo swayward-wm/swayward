@@ -3,8 +3,8 @@
 //! Each output owns an ordered set of workspaces. Each workspace contains a nested
 //! [`tiling_tree::TilingTree`] and a [`floating_tree::FloatingLayout`]. Empty inactive workspaces
 //! are destroyed unless configuration makes them persistent; every output still keeps an active
-//! workspace. [`scrolling`] contains compatibility types from niri's removed scrolling engine,
-//! not the active layout model.
+//! workspace. Some public names still use column and scrolling terminology for compatibility with
+//! the inherited configuration and legacy IPC schemas; the active layout model is the tiling tree.
 //!
 //! One output is designated as primary. When one of several outputs disappears, workspaces with
 //! non-sticky windows are appended to the primary output. Workspaces without non-sticky windows
@@ -84,7 +84,7 @@ pub const RESIZE_ANIMATION_THRESHOLD: f64 = 10.;
 /// Pointer needs to move this far to pull a window from the layout.
 const INTERACTIVE_MOVE_START_THRESHOLD: f64 = 256. * 256.;
 
-/// Opacity of interactively moved tiles targeting the scrolling layout.
+/// Opacity of interactively moved tiles targeting the tiling layout.
 const INTERACTIVE_MOVE_ALPHA: f64 = 0.75;
 
 /// Amount of touchpad movement to toggle the overview.
@@ -478,9 +478,9 @@ struct InteractiveMoveData<W: LayoutElement> {
     pub(self) output: Output,
     /// Current pointer position within output.
     pub(self) pointer_pos_within_output: Point<f64, Logical>,
-    /// Window column width.
+    /// Tiled window width.
     pub(self) width: TiledWidth,
-    /// Whether the window column was full-width.
+    /// Whether the tiled window was full-width.
     pub(self) is_full_width: bool,
     /// Whether the window targets the floating layout.
     pub(self) is_floating: bool,
@@ -547,9 +547,9 @@ pub enum ConfigureIntent {
 #[derive(Debug)]
 pub struct RemovedTile<W: LayoutElement> {
     tile: Tile<W>,
-    /// Width of the column the tile was in.
+    /// Width of the tiled window.
     width: TiledWidth,
-    /// Whether the column the tile was in was full-width.
+    /// Whether the tiled window was full-width.
     is_full_width: bool,
     /// Whether the tile was floating.
     is_floating: bool,
@@ -807,12 +807,6 @@ pub(crate) fn sway_workspace_num(name: &str) -> i32 {
     parse_workspace_num(name).unwrap_or(-1)
 }
 
-fn workspace_number_matches(workspace_name: &str, number: &str) -> bool {
-    workspace_name
-        .strip_prefix(number)
-        .is_some_and(|suffix| !suffix.starts_with(|character: char| character.is_ascii_digit()))
-}
-
 fn workspace_matches_target<W: LayoutElement>(
     workspace: &Workspace<W>,
     target: &crate::command::WorkspaceTarget,
@@ -844,15 +838,18 @@ fn sway_workspace_identity(
                 .ok_or_else(|| format!("invalid workspace number '{name}'"))?;
             Ok(((name != number.to_string()).then_some(name), Some(number)))
         }
-        crate::command::WorkspaceTarget::Name(name) => {
-            let number = parse_workspace_num(&name);
-            Ok((
-                (number.is_none() || name != number.unwrap().to_string()).then_some(name),
-                number,
-            ))
-        }
+        crate::command::WorkspaceTarget::Name(name) => Ok(sway_identity_from_name(name)),
         _ => Err("relative workspace target cannot be created".into()),
     }
+}
+
+/// The sway identity of a workspace created by name: its parsed number, and
+/// the name too unless it is exactly that number. Unlike
+/// [`sway_workspace_identity`], a name always yields an identity.
+fn sway_identity_from_name(name: String) -> (Option<String>, Option<i32>) {
+    let number = parse_workspace_num(&name);
+    let keep_name = number.is_none_or(|number| name != number.to_string());
+    (keep_name.then_some(name), number)
 }
 
 fn initial_workspace_name_from_action(action: &swayward_config::Action) -> Option<String> {
@@ -1064,12 +1061,31 @@ impl<W: LayoutElement> Layout<W> {
     /// (`sway/sway/tree/workspace.c:224-243`), so every creation path consults
     /// it, not just the eager startup one.
     fn workspace_layout_config(&self, name: Option<&str>) -> Option<swayward_config::LayoutPart> {
-        let name = name?;
-        self.workspace_configs
-            .iter()
-            .find(|config| config.name.0.eq_ignore_ascii_case(name))
-            .and_then(|config| config.layout.clone())
-            .map(|layout| layout.0)
+        layout_config_for(&self.workspace_configs, name)
+    }
+
+    /// The output and index of the workspace `target` names, preferring a
+    /// named workspace when duplicate numeric identities match.
+    fn find_sway_workspace_position(
+        &self,
+        target: &crate::command::WorkspaceTarget,
+    ) -> Option<(Option<Output>, usize)> {
+        let mut found = self
+            .workspaces()
+            .filter(|(_, _, workspace)| workspace_matches_target(workspace, target))
+            .map(|(monitor, index, workspace)| {
+                (
+                    monitor.map(|monitor| monitor.output().clone()),
+                    index,
+                    workspace.name().is_some(),
+                )
+            })
+            .collect::<Vec<_>>();
+        found.sort_by_key(|(_, _, named)| !*named);
+        found
+            .into_iter()
+            .next()
+            .map(|(output, index, _)| (output, index))
     }
 
     /// The ordered output list a workspace config assigns, under either
@@ -1114,6 +1130,68 @@ impl<W: LayoutElement> Layout<W> {
                         .any(|monitor| output_matches_name(monitor.output(), name))
             })
             .is_some_and(|name| output_matches_name(output, name))
+    }
+
+    /// The monitor a newly created workspace called `name` belongs on.
+    ///
+    /// Sway creates every workspace on the first RESOLVING output in its
+    /// workspace config, else on the focused output
+    /// (workspace_get_initial_output, sway/tree/workspace.c:153-175), so
+    /// `workspace`, `move container to workspace` and `assign` agree.
+    fn initial_monitor_for_workspace(&self, name: &str) -> Option<usize> {
+        let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &self.monitor_set
+        else {
+            return None;
+        };
+        let assigned = self
+            .workspace_configs
+            .iter()
+            .find(|config| config.name.0.eq_ignore_ascii_case(name))
+            .and_then(Self::workspace_assignment)
+            .and_then(|outputs| {
+                outputs.iter().find_map(|output| {
+                    monitors
+                        .iter()
+                        .position(|monitor| output_matches_name(&monitor.output, output))
+                })
+            });
+        Some(assigned.unwrap_or(*active_monitor_idx))
+    }
+
+    /// Creates a sway workspace on its initial output and returns that output
+    /// and the workspace's index there. Sway sorts an output's workspaces on
+    /// every creation (workspace_create calls output_sort_workspaces,
+    /// sway/tree/workspace.c:259; ordering in sway/tree/output.c:387-405).
+    fn create_sway_workspace(
+        &mut self,
+        name: Option<String>,
+        number: Option<i32>,
+    ) -> Result<(Output, usize), String> {
+        let workspace_name = name
+            .clone()
+            .or_else(|| number.map(|number| number.to_string()))
+            .unwrap_or_default();
+        let monitor_idx = self
+            .initial_monitor_for_workspace(&workspace_name)
+            .ok_or_else(|| "cannot create a workspace without an output".to_owned())?;
+        let layout_config = layout_config_for(&self.workspace_configs, name.as_deref());
+        let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
+            return Err("cannot create a workspace without an output".into());
+        };
+        let monitor = &mut monitors[monitor_idx];
+        let index = monitor.workspaces_len().saturating_sub(1);
+        if monitor.workspaces_len() == 1 && !monitor.active_workspace_ref().tiling_has_had_window()
+        {
+            monitor.refresh_empty_auto_layout(0);
+        }
+        let id = monitor.add_sway_workspace_at(index, name, number, layout_config);
+        monitor.sort_sway_workspaces();
+        let index = monitor.idx_of_ws(id).unwrap_or(index);
+        Ok((monitor.output().clone(), index))
     }
 
     fn next_initial_workspace_name_for_output(&self, output: Option<&Output>) -> Option<String> {
@@ -1190,9 +1268,7 @@ impl<W: LayoutElement> Layout<W> {
             // with the index-derived identity the workspace model forbids.
             let (name, number) = match self.next_initial_workspace_name_for_output(output.as_ref())
             {
-                Some(name) => {
-                    sway_workspace_identity(crate::command::WorkspaceTarget::Name(name)).unwrap()
-                }
+                Some(name) => sway_identity_from_name(name),
                 None => self.next_free_workspace_identity_for_output(output.as_ref()),
             };
             self.workspaces_mut()
@@ -1241,9 +1317,8 @@ impl<W: LayoutElement> Layout<W> {
                             .retain(|candidate| *candidate != ws.id());
                         reclaimed_any = true;
 
-                        // FIXME: this can be coded in a way that the workspace switch won't be
-                        // affected if the removed workspace is invisible. But this is good enough
-                        // for now.
+                        // Retaining the switch when only invisible workspaces move is tracked by
+                        // mu task layout-invisible-workspace-switch.
                         if primary.workspace_switch.is_some() {
                             primary.workspace_switch = None;
                             stopped_primary_ws_switch = true;
@@ -1288,17 +1363,17 @@ impl<W: LayoutElement> Layout<W> {
 
                 let ws_id_to_activate = self.last_active_workspace_id.remove(&output.name());
 
-                let mut monitor = Monitor::new(
+                let mut monitor = Monitor::new(monitor::MonitorInit {
                     output,
                     workspaces,
                     ws_id_to_activate,
-                    initial_workspace_name.clone(),
+                    initial_workspace_name: initial_workspace_name.clone(),
                     initial_workspace_number,
                     preserve_initial_auto_layout,
-                    self.clock.clone(),
-                    self.options.clone(),
+                    clock: self.clock.clone(),
+                    base_options: self.options.clone(),
                     layout_config,
-                );
+                });
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
                 // Monitor::new adopts workspaces reclaimed from the primary
@@ -1327,17 +1402,17 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces } => {
                 let ws_id_to_activate = self.last_active_workspace_id.remove(&output.name());
 
-                let mut monitor = Monitor::new(
+                let mut monitor = Monitor::new(monitor::MonitorInit {
                     output,
                     workspaces,
                     ws_id_to_activate,
                     initial_workspace_name,
                     initial_workspace_number,
                     preserve_initial_auto_layout,
-                    self.clock.clone(),
-                    self.options.clone(),
+                    clock: self.clock.clone(),
+                    base_options: self.options.clone(),
                     layout_config,
-                );
+                });
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
 
@@ -1417,11 +1492,13 @@ impl<W: LayoutElement> Layout<W> {
                         target_workspace.add_tile(
                             removed.tile,
                             WorkspaceAddWindowTarget::Auto,
-                            ActivateWindow::No,
-                            removed.width,
-                            removed.is_full_width,
-                            true,
-                            None,
+                            workspace::AddTileOptions {
+                                activate: ActivateWindow::No,
+                                width: removed.width,
+                                is_full_width: removed.is_full_width,
+                                is_floating: true,
+                                anim: None,
+                            },
                         );
                     }
                     primary.append_workspaces(workspaces);
@@ -1643,11 +1720,13 @@ impl<W: LayoutElement> Layout<W> {
                 ws.add_tile(
                     tile,
                     target,
-                    activate,
-                    scrolling_width,
-                    is_full_width,
-                    is_floating,
-                    None,
+                    workspace::AddTileOptions {
+                        activate,
+                        width: scrolling_width,
+                        is_full_width,
+                        is_floating,
+                        anim: None,
+                    },
                 );
 
                 // Set the default height for scrolling windows.
@@ -1678,6 +1757,15 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         window: &W::Id,
         transaction: Transaction,
+    ) -> Option<(RemovedTile<W>, Option<WorkspaceId>)> {
+        self.detach_window_inner(window, transaction, false)
+    }
+
+    fn detach_window_inner(
+        &mut self,
+        window: &W::Id,
+        transaction: Transaction,
+        transfer: bool,
     ) -> Option<(RemovedTile<W>, Option<WorkspaceId>)> {
         if let Some(index) = self
             .scratchpad
@@ -1748,7 +1836,11 @@ impl<W: LayoutElement> Layout<W> {
                         .find(|workspace| workspace.has_window(window))
                     {
                         let source_workspace = ws.id();
-                        let removed = ws.remove_tile(window, transaction);
+                        let removed = if transfer {
+                            ws.remove_tile_for_transfer(window, transaction)
+                        } else {
+                            ws.remove_tile(window, transaction)
+                        };
                         return Some((removed, Some(source_workspace)));
                     }
                 }
@@ -1770,11 +1862,24 @@ impl<W: LayoutElement> Layout<W> {
         None
     }
 
+    /// Drops the empty, non-persistent workspaces held while no output exists.
+    ///
+    /// Sway destroys such a workspace as soon as nothing retains it
+    /// (workspace_consider_destroy, sway/tree/workspace.c:313-332), and
+    /// `Monitor::new` adopts the outputless list assuming every entry must be
+    /// kept.
+    fn reap_outputless_workspaces(&mut self) {
+        if let MonitorSet::NoOutputs { workspaces } = &mut self.monitor_set {
+            workspaces.retain(Workspace::must_be_kept);
+        }
+    }
+
     fn clean_up_removed_window_workspace(&mut self, source_workspace: WorkspaceId) {
         let Some(monitor) = self
             .monitors_mut()
             .find(|monitor| monitor.has_ws(source_workspace))
         else {
+            self.reap_outputless_workspaces();
             return;
         };
         monitor.workspace_switch = None;
@@ -1875,7 +1980,7 @@ impl<W: LayoutElement> Layout<W> {
             .filter(|(_, _, workspace)| {
                 workspace
                     .sway_name()
-                    .is_some_and(|name| workspace_number_matches(&name, number))
+                    .is_some_and(|name| workspace_name_matches_number(&name, number))
             })
             .map(|(_, index, workspace)| (index, workspace))
             .collect::<Vec<_>>();
@@ -1918,28 +2023,11 @@ impl<W: LayoutElement> Layout<W> {
         if self.find_workspace_by_name(workspace_name).is_some() {
             return;
         }
-        let (name, number) = sway_workspace_identity(crate::command::WorkspaceTarget::Name(
-            workspace_name.to_owned(),
-        ))
-        .unwrap();
-        if let MonitorSet::Normal {
-            monitors,
-            active_monitor_idx,
-            ..
-        } = &mut self.monitor_set
-        {
-            let layout_config = layout_config_for(&self.workspace_configs, name.as_deref());
-            let monitor = &mut monitors[*active_monitor_idx];
-            let index = monitor.workspaces.len().saturating_sub(1);
-            monitor.add_sway_workspace_at(index, name, number, layout_config);
-            // Sway sorts an output's workspaces on every creation:
-            // workspace_create calls output_sort_workspaces
-            // (sway/sway/tree/workspace.c:259), which puts numeric names in
-            // numeric order and ahead of non-numeric ones
-            // (sway/sway/tree/output.c:387-405). Appending without sorting left
-            // GET_WORKSPACES in creation order.
-            monitor.sort_sway_workspaces();
-        }
+        let (name, number) = sway_identity_from_name(workspace_name.to_owned());
+        // An outputless layout has nowhere to create it; sway would use its
+        // fallback output, and the assigned window lands on the active
+        // workspace instead.
+        let _ = self.create_sway_workspace(name, number);
     }
 
     pub fn find_workspace_by_ref(
@@ -2095,8 +2183,8 @@ impl<W: LayoutElement> Layout<W> {
     pub fn popup_target_rect(&self, window: &W::Id) -> Rectangle<f64, Logical> {
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             if move_.tile.window().id() == window {
-                // Follow the scrolling layout logic and fit the popup horizontally within the
-                // window geometry.
+                // Follow the tiling-layout logic and fit the popup horizontally within the window
+                // geometry.
                 let width = move_.tile.window_size().w;
                 let height = output_size(&move_.output).h;
                 let mut target = Rectangle::from_size(Size::from((width, height)));
@@ -3165,31 +3253,9 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         target: crate::command::WorkspaceTarget,
     ) -> Result<(), String> {
-        use crate::command::WorkspaceTarget;
-
         let existing = self.workspaces().find_map(|(monitor, index, workspace)| {
-            let matches = match &target {
-                // Sway matches the digit PREFIX of the name, not a stored
-                // number: _workspace_by_number (sway/sway/tree/workspace.c:
-                // 493-502) walks the digits of the target against the name and
-                // requires the name to have no further digits. So "1" matches
-                // "1:first" but not "11". Comparing a stored number missed a
-                // workspace whose number was derived rather than stored, and a
-                // duplicate was created instead.
-                // Only a workspace with a real identity can be matched by
-                // number.
-                WorkspaceTarget::Number(value) => {
-                    workspace.has_sway_identity()
-                        && workspace
-                            .sway_name()
-                            .is_some_and(|name| workspace_name_matches_number(&name, value))
-                }
-                WorkspaceTarget::Name(value) => workspace
-                    .sway_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(value)),
-                _ => false,
-            };
-            matches.then(|| (monitor.map(|monitor| monitor.output().clone()), index))
+            workspace_matches_target(workspace, &target)
+                .then(|| (monitor.map(|monitor| monitor.output().clone()), index))
         });
         let Some((output, index)) = existing else {
             return self.activate_sway_workspace(target);
@@ -3250,38 +3316,7 @@ impl<W: LayoutElement> Layout<W> {
 
         // Collect every candidate so duplicate numeric identities resolve to
         // the explicitly named workspace.
-        let mut candidates = self
-            .workspaces()
-            .filter_map(|(monitor, index, workspace)| {
-                let matches = match &target {
-                    // Match the digit prefix of the name, as sway's
-                    // _workspace_by_number does (sway/sway/tree/workspace.c:
-                    // 493-502), and only for a workspace with a real identity.
-                    WorkspaceTarget::Number(value) => {
-                        workspace.has_sway_identity()
-                            && workspace
-                                .sway_name()
-                                .is_some_and(|name| workspace_name_matches_number(&name, value))
-                    }
-                    WorkspaceTarget::Name(value) => workspace
-                        .sway_name()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(value)),
-                    _ => false,
-                };
-                matches.then(|| {
-                    (
-                        monitor.map(|monitor| monitor.output().clone()),
-                        index,
-                        workspace.name().is_some(),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by_key(|(_, _, named)| !*named);
-        let existing = candidates
-            .into_iter()
-            .next()
-            .map(|(output, index, _)| (output, index));
+        let existing = self.find_sway_workspace_position(&target);
 
         if let Some((output, index)) = existing {
             if let Some(output) = output.as_ref() {
@@ -3297,47 +3332,10 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         let (name, number) = sway_workspace_identity(target)?;
-        let workspace_name = name
-            .as_deref()
-            .map(str::to_owned)
-            .unwrap_or_else(|| number.unwrap().to_string());
-        let MonitorSet::Normal {
-            monitors,
-            active_monitor_idx,
-            ..
-        } = &mut self.monitor_set
-        else {
-            return Err("cannot create a workspace without an output".into());
-        };
-        let monitor_idx = self
-            .workspace_configs
-            .iter()
-            .find(|config| config.name.0.eq_ignore_ascii_case(&workspace_name))
-            .and_then(|config| config.sway_output_assignment.as_ref())
-            .and_then(|outputs| {
-                outputs.iter().find_map(|name| {
-                    monitors
-                        .iter()
-                        .position(|monitor| output_matches_name(&monitor.output, name))
-                })
-            })
-            .unwrap_or(*active_monitor_idx);
-        let layout_config = layout_config_for(&self.workspace_configs, name.as_deref());
-        let monitor = &mut monitors[monitor_idx];
-        let index = monitor.workspaces_len().saturating_sub(1);
-        if monitor.workspaces_len() == 1 && !monitor.active_workspace_ref().tiling_has_had_window()
-        {
-            monitor.refresh_empty_auto_layout(0);
-        }
-        let id = monitor.add_sway_workspace_at(index, name, number, layout_config);
-        // Sway sorts on every creation: workspace_create calls
-        // output_sort_workspaces (sway/sway/tree/workspace.c:259), which orders
-        // numeric names numerically and ahead of non-numeric ones
-        // (sway/sway/tree/output.c:387-405). The new workspace therefore does
-        // not stay where it was inserted, so re-find it before activating.
-        monitor.sort_sway_workspaces();
-        let index = monitor.idx_of_ws(id).unwrap_or(index);
-        monitor.activate_workspace(index);
+        let (output, index) = self.create_sway_workspace(name, number)?;
+        // Sway's workspace_switch focuses the new workspace, and with it the
+        // output it was created on.
+        self.activate_workspace_at(Some(&output), index);
         Ok(())
     }
 
@@ -3392,25 +3390,45 @@ impl<W: LayoutElement> Layout<W> {
         ) {
             return Err(format!("Cannot use special workspace name '{new_name}'"));
         }
-        // Ignore a workspace that sway would already have destroyed. Sway
+        // Destroy a workspace sway would already have destroyed. Sway
         // destroys an empty, non-visible workspace no seat retains, and does so
         // when focus LEAVES it (seat_set_focus, sway/sway/input/seat.c:1244),
-        // so by the time a rename runs the name is free. We keep such a
-        // workspace, so a stale one blocked the rename with `Workspace already
-        // exists`.
-        if let Some(existing) = self.workspaces().find_map(|(monitor, index, workspace)| {
-            // Sway also retains the workspace a seat's focus-inactive points
-            // at (workspace_consider_destroy, sway/sway/tree/workspace.c:
-            // 322-329), which is the one we would return to via
-            // back_and_forth, so do not treat that one as destroyed.
-            let retained_by_seat = monitor
-                .is_some_and(|monitor| monitor.previous_workspace_id() == Some(workspace.id()));
-            let destroyed_by_sway = !workspace.has_windows()
-                && !retained_by_seat
-                && monitor.is_some_and(|monitor| monitor.active_workspace_idx() != index);
-            if destroyed_by_sway {
-                return None;
+        // so by the time a rename runs the name is free. We can still hold
+        // such a workspace, and skipping it without removing it let the rename
+        // produce two workspaces with one name.
+        if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
+            for monitor in monitors
+                .iter_mut()
+                .filter(|monitor| monitor.workspace_switch.is_none())
+            {
+                let stale = monitor
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, workspace)| {
+                        // Sway also retains the workspace a seat's
+                        // focus-inactive points at (workspace_consider_destroy,
+                        // sway/sway/tree/workspace.c:322-329), which is the one
+                        // we would return to via back_and_forth.
+                        workspace.id() != id
+                            && !workspace.has_windows()
+                            && *index != monitor.active_workspace_idx()
+                            && monitor.previous_workspace_id() != Some(workspace.id())
+                            && workspace
+                                .sway_name()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(&new_name))
+                    })
+                    .map(|(_, workspace)| workspace.id())
+                    .collect::<Vec<_>>();
+                for stale in stale {
+                    monitor.consider_destroy_workspace(stale);
+                }
             }
+        }
+        // Whatever survived (a persistent or still-visible workspace) is live,
+        // and sway refuses to rename onto a live name
+        // (sway/sway/commands/rename.c:84-91).
+        if let Some(existing) = self.workspaces().find_map(|(_, _, workspace)| {
             workspace
                 .sway_name()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&new_name))
@@ -3428,14 +3446,14 @@ impl<W: LayoutElement> Layout<W> {
             .workspace_configs
             .iter()
             .any(|config| config.name.0.eq_ignore_ascii_case(&new_name));
-        let (name, number) =
-            sway_workspace_identity(crate::command::WorkspaceTarget::Name(new_name))?;
+        let (name, number) = sway_identity_from_name(new_name);
         let workspace = self
             .workspaces_mut()
             .find(|workspace| workspace.id() == id)
             .unwrap();
         workspace.set_sway_identity(name, number);
         workspace.set_persistent(declared);
+        self.reap_outputless_workspaces();
         if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
             if let Some(monitor) = monitors.iter_mut().find(|monitor| monitor.has_ws(id)) {
                 monitor.sort_sway_workspaces();
@@ -3589,6 +3607,12 @@ impl<W: LayoutElement> Layout<W> {
         Some((Some(output), monitor.previous_workspace_idx()?))
     }
 
+    pub fn detach_floating_group_child(&mut self, window: &W::Id) -> bool {
+        self.workspaces_mut()
+            .find(|workspace| workspace.has_window(window))
+            .is_some_and(|workspace| workspace.detach_floating_group_child(window))
+    }
+
     pub fn move_window_to_sway_workspace(
         &mut self,
         window: &W::Id,
@@ -3643,45 +3667,27 @@ impl<W: LayoutElement> Layout<W> {
         second_workspace: WorkspaceId,
         second: tiling_tree::NodeId,
     ) -> Result<SwapRemap, String> {
+        let fits = |workspace: WorkspaceId, slot: tiling_tree::NodeId, other_ws, other| {
+            let height = self
+                .workspaces()
+                .find(|(_, _, candidate)| candidate.id() == other_ws)
+                .map(|(_, _, candidate)| candidate.tiling().node_height(other));
+            self.workspaces()
+                .find(|(_, _, candidate)| candidate.id() == workspace)
+                .zip(height)
+                .is_some_and(|((_, _, candidate), height)| candidate.tiling().fits_at(slot, height))
+        };
+        if !fits(first_workspace, first, second_workspace, second)
+            || !fits(second_workspace, second, first_workspace, first)
+        {
+            return Err(tiling_tree::TOO_DEEP.to_owned());
+        }
         let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
             return Err("cannot swap containers without an output".into());
         };
-        let first_monitor = monitors
-            .iter()
-            .position(|monitor| monitor.has_ws(first_workspace))
-            .ok_or_else(|| "No matching node.".to_owned())?;
-        let second_monitor = monitors
-            .iter()
-            .position(|monitor| monitor.has_ws(second_workspace))
-            .ok_or_else(|| "No matching node.".to_owned())?;
-        let (first_ws, second_ws) = if first_monitor == second_monitor {
-            let monitor = &mut monitors[first_monitor];
-            let first_idx = monitor.idx_of_ws(first_workspace).unwrap();
-            let second_idx = monitor.idx_of_ws(second_workspace).unwrap();
-            if first_idx < second_idx {
-                let (before, after) = monitor.workspaces.split_at_mut(second_idx);
-                (&mut before[first_idx], &mut after[0])
-            } else {
-                let (before, after) = monitor.workspaces.split_at_mut(first_idx);
-                (&mut after[0], &mut before[second_idx])
-            }
-        } else if first_monitor < second_monitor {
-            let (before, after) = monitors.split_at_mut(second_monitor);
-            let first_idx = before[first_monitor].idx_of_ws(first_workspace).unwrap();
-            let second_idx = after[0].idx_of_ws(second_workspace).unwrap();
-            (
-                &mut before[first_monitor].workspaces[first_idx],
-                &mut after[0].workspaces[second_idx],
-            )
-        } else {
-            let (before, after) = monitors.split_at_mut(first_monitor);
-            let first_idx = after[0].idx_of_ws(first_workspace).unwrap();
-            let second_idx = before[second_monitor].idx_of_ws(second_workspace).unwrap();
-            (
-                &mut after[0].workspaces[first_idx],
-                &mut before[second_monitor].workspaces[second_idx],
-            )
-        };
+        let (first_ws, second_ws) =
+            Self::distinct_workspaces_mut(monitors, first_workspace, second_workspace)
+                .ok_or_else(|| "No matching node.".to_owned())?;
         let (mut first_subtree, first_slot) = first_ws
             .detach_tiling_subtree_for_swap(first)
             .ok_or_else(|| "No matching node.".to_owned())?;
@@ -3701,6 +3707,55 @@ impl<W: LayoutElement> Layout<W> {
             first: first_remapped,
             second: second_remapped,
         })
+    }
+
+    /// Mutable borrows of two distinct workspaces, wherever they live.
+    ///
+    /// Returns `None` when either is missing or both name the same workspace,
+    /// so callers report "No matching node." instead of panicking on a stale
+    /// id or an aliasing borrow.
+    fn distinct_workspaces_mut(
+        monitors: &mut [Monitor<W>],
+        first: WorkspaceId,
+        second: WorkspaceId,
+    ) -> Option<(&mut Workspace<W>, &mut Workspace<W>)> {
+        if first == second {
+            return None;
+        }
+        let first_monitor = monitors.iter().position(|monitor| monitor.has_ws(first))?;
+        let second_monitor = monitors.iter().position(|monitor| monitor.has_ws(second))?;
+        if first_monitor == second_monitor {
+            let monitor = &mut monitors[first_monitor];
+            let first_idx = monitor.idx_of_ws(first)?;
+            let second_idx = monitor.idx_of_ws(second)?;
+            if first_idx < second_idx {
+                let (before, after) = monitor.workspaces.split_at_mut(second_idx);
+                Some((&mut before[first_idx], after.first_mut()?))
+            } else {
+                let (before, after) = monitor.workspaces.split_at_mut(first_idx);
+                Some((after.first_mut()?, &mut before[second_idx]))
+            }
+        } else if first_monitor < second_monitor {
+            let (before, after) = monitors.split_at_mut(second_monitor);
+            let first_monitor = &mut before[first_monitor];
+            let second_monitor = after.first_mut()?;
+            let first_idx = first_monitor.idx_of_ws(first)?;
+            let second_idx = second_monitor.idx_of_ws(second)?;
+            Some((
+                &mut first_monitor.workspaces[first_idx],
+                &mut second_monitor.workspaces[second_idx],
+            ))
+        } else {
+            let (before, after) = monitors.split_at_mut(first_monitor);
+            let first_monitor = after.first_mut()?;
+            let second_monitor = &mut before[second_monitor];
+            let first_idx = first_monitor.idx_of_ws(first)?;
+            let second_idx = second_monitor.idx_of_ws(second)?;
+            Some((
+                &mut first_monitor.workspaces[first_idx],
+                &mut second_monitor.workspaces[second_idx],
+            ))
+        }
     }
 
     pub fn move_tiling_subtree_to_node(
@@ -3728,38 +3783,9 @@ impl<W: LayoutElement> Layout<W> {
                 .iter()
                 .position(|monitor| monitor.has_ws(source_workspace))
                 .ok_or_else(|| "No matching node.".to_owned())?;
-            let target_monitor = monitors
-                .iter()
-                .position(|monitor| monitor.has_ws(target_workspace))
-                .ok_or_else(|| "No matching node.".to_owned())?;
-            let (source_ws, target_ws) = if source_monitor == target_monitor {
-                let monitor = &mut monitors[source_monitor];
-                let source_idx = monitor.idx_of_ws(source_workspace).unwrap();
-                let target_idx = monitor.idx_of_ws(target_workspace).unwrap();
-                if source_idx < target_idx {
-                    let (before, after) = monitor.workspaces.split_at_mut(target_idx);
-                    (&mut before[source_idx], &mut after[0])
-                } else {
-                    let (before, after) = monitor.workspaces.split_at_mut(source_idx);
-                    (&mut after[0], &mut before[target_idx])
-                }
-            } else if source_monitor < target_monitor {
-                let (before, after) = monitors.split_at_mut(target_monitor);
-                let source_idx = before[source_monitor].idx_of_ws(source_workspace).unwrap();
-                let target_idx = after[0].idx_of_ws(target_workspace).unwrap();
-                (
-                    &mut before[source_monitor].workspaces[source_idx],
-                    &mut after[0].workspaces[target_idx],
-                )
-            } else {
-                let (before, after) = monitors.split_at_mut(source_monitor);
-                let source_idx = after[0].idx_of_ws(source_workspace).unwrap();
-                let target_idx = before[target_monitor].idx_of_ws(target_workspace).unwrap();
-                (
-                    &mut after[0].workspaces[source_idx],
-                    &mut before[target_monitor].workspaces[target_idx],
-                )
-            };
+            let (source_ws, target_ws) =
+                Self::distinct_workspaces_mut(monitors, source_workspace, target_workspace)
+                    .ok_or_else(|| "No matching node.".to_owned())?;
             let (subtree, old_parent) = source_ws
                 .detach_tiling_subtree(source)
                 .ok_or_else(|| "No matching node.".to_owned())?;
@@ -3968,50 +3994,14 @@ impl<W: LayoutElement> Layout<W> {
                 let next = target == WorkspaceTarget::NextOnOutput;
                 self.relative_sway_workspace_position_on_output(next)
             }
-            _ => {
-                // Prefer a named workspace when duplicate numeric identities
-                // match the target.
-                let mut found = self
-                    .workspaces()
-                    .filter(|(_, _, workspace)| workspace_matches_target(workspace, &target))
-                    .map(|(monitor, index, workspace)| {
-                        (
-                            monitor.map(|monitor| monitor.output().clone()),
-                            index,
-                            workspace.name().is_some(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                found.sort_by_key(|(_, _, named)| !*named);
-                found
-                    .into_iter()
-                    .next()
-                    .map(|(output, index, _)| (output, index))
-            }
+            _ => self.find_sway_workspace_position(&target),
         };
         if let Some(position) = target_position {
             Ok(position)
         } else {
             let (name, number) = sway_workspace_identity(target)?;
-            let MonitorSet::Normal {
-                monitors,
-                active_monitor_idx,
-                ..
-            } = &mut self.monitor_set
-            else {
-                return Err("cannot create a workspace without an output".into());
-            };
-            let layout_config = layout_config_for(&self.workspace_configs, name.as_deref());
-            let monitor = &mut monitors[*active_monitor_idx];
-            let id = monitor.add_sway_workspace_at(
-                monitor.workspaces.len(),
-                name,
-                number,
-                layout_config,
-            );
-            monitor.sort_sway_workspaces();
-            let index = monitor.idx_of_ws(id).unwrap();
-            Ok((Some(monitor.output().clone()), index))
+            let (output, index) = self.create_sway_workspace(name, number)?;
+            Ok((Some(output), index))
         }
     }
 
@@ -4088,10 +4078,14 @@ impl<W: LayoutElement> Layout<W> {
             self.move_to_workspace_id(window, target_workspace, ActivateWindow::No);
         }
         if let Some(window) = moved_window.filter(|_| moved_window_was_focused) {
-            self.workspaces_mut()
+            // The move may have been refused, so the target need not exist or
+            // hold the window any more.
+            if let Some(workspace) = self
+                .workspaces_mut()
                 .find(|workspace| workspace.id() == target_workspace)
-                .unwrap()
-                .activate_window(&window);
+            {
+                workspace.activate_window(&window);
+            }
         }
         Ok(())
     }
@@ -4144,6 +4138,17 @@ impl<W: LayoutElement> Layout<W> {
             .set_window_border(window, style, width)
     }
 
+    pub fn set_split_sticky(
+        &mut self,
+        workspace_id: WorkspaceId,
+        node: NodeId,
+        value: &str,
+    ) -> bool {
+        self.workspaces_mut()
+            .find(|workspace| workspace.id() == workspace_id)
+            .is_some_and(|workspace| workspace.set_split_sticky(node, value))
+    }
+
     pub fn set_window_sticky(&mut self, window: &W::Id, value: &str) -> bool {
         self.set_sticky(window, None, value)
     }
@@ -4188,7 +4193,9 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return false;
         };
-        let source_idx = monitor.idx_of_ws(source).unwrap();
+        let Some(source_idx) = monitor.idx_of_ws(source) else {
+            return false;
+        };
         let whole_tree =
             group.is_some() || monitor.workspaces[source_idx].window_is_floating_root(window);
         let changed = match group {
@@ -4200,9 +4207,13 @@ impl<W: LayoutElement> Layout<W> {
         }
         let target = monitor.active_workspace_ref().id();
         if whole_tree && sticky && source != target {
+            // The active workspace is on this monitor by construction.
+            let Some(target_idx) = monitor.idx_of_ws(target) else {
+                warn!("set_sticky: active workspace is not on its own monitor");
+                return true;
+            };
             let removed_trees = monitor.workspaces[source_idx].take_sticky_trees();
             let removed = monitor.workspaces[source_idx].take_sticky_tiles();
-            let target_idx = monitor.idx_of_ws(target).unwrap();
             for removed in removed_trees {
                 monitor.workspaces[target_idx].add_floating_tree(removed, false);
             }
@@ -4210,11 +4221,13 @@ impl<W: LayoutElement> Layout<W> {
                 monitor.workspaces[target_idx].add_tile(
                     removed.tile,
                     WorkspaceAddWindowTarget::Auto,
-                    ActivateWindow::Yes,
-                    removed.width,
-                    removed.is_full_width,
-                    true,
-                    None,
+                    workspace::AddTileOptions {
+                        activate: ActivateWindow::Yes,
+                        width: removed.width,
+                        is_full_width: removed.is_full_width,
+                        is_floating: true,
+                        anim: None,
+                    },
                 );
             }
             if monitor.workspace_switch.is_none() {
@@ -4250,12 +4263,18 @@ impl<W: LayoutElement> Layout<W> {
         });
         if let Some((source_workspace, root)) = floating_tree {
             let removed = {
-                let workspace = self
+                let Some(workspace) = self
                     .workspaces_mut()
                     .find(|workspace| workspace.id() == source_workspace)
-                    .unwrap();
+                else {
+                    return;
+                };
                 workspace.clear_floating_tree_fullscreen(root);
-                workspace.remove_floating_tree(root).unwrap()
+                let Some(removed) = workspace.remove_floating_tree(root) else {
+                    warn!("move_to_scratchpad: floating tree root reported for the window is gone");
+                    return;
+                };
+                removed
             };
             for id in removed.window_ids() {
                 if !self.scratchpad_windows.contains(id) {
@@ -4275,7 +4294,8 @@ impl<W: LayoutElement> Layout<W> {
             }
             floating_working_area = Some(workspace.working_area());
         }
-        let Some((mut removed, source_workspace)) = self.detach_window(&window, Transaction::new())
+        let Some((mut removed, source_workspace)) =
+            self.detach_window_inner(&window, Transaction::new(), true)
         else {
             return;
         };
@@ -4287,6 +4307,29 @@ impl<W: LayoutElement> Layout<W> {
         if let Some(source_workspace) = source_workspace {
             self.clean_up_removed_window_workspace(source_workspace);
         }
+    }
+
+    /// Moves scratchpad tree `index` onto `workspace` and returns the window
+    /// it shows. The tree stays hidden if the workspace or its first window is
+    /// missing, instead of being dropped.
+    fn show_scratchpad_tree(&mut self, index: usize, workspace: WorkspaceId) -> Option<W::Id> {
+        let shown = self
+            .scratchpad_trees
+            .get(index)?
+            .window_ids()
+            .first()?
+            .clone();
+        if !self
+            .workspaces()
+            .any(|(_, _, candidate)| candidate.id() == workspace)
+        {
+            return None;
+        }
+        let removed = self.scratchpad_trees.remove(index)?;
+        self.workspaces_mut()
+            .find(|candidate| candidate.id() == workspace)?
+            .add_floating_tree(removed, true);
+        Some(shown)
     }
 
     pub fn show_scratchpad(&mut self, window: Option<&W::Id>) -> Option<W::Id> {
@@ -4319,13 +4362,7 @@ impl<W: LayoutElement> Layout<W> {
                     workspace.disable_fullscreen();
                 }
             }
-            let removed = self.scratchpad_trees.remove(index)?;
-            let shown = removed.window_ids().first()?.clone();
-            self.workspaces_mut()
-                .find(|workspace| workspace.id() == active_workspace)
-                .unwrap()
-                .add_floating_tree(removed, true);
-            return Some(shown);
+            return self.show_scratchpad_tree(index, active_workspace);
         }
         let mut target_index = window.and_then(|window| {
             self.scratchpad
@@ -4358,13 +4395,7 @@ impl<W: LayoutElement> Layout<W> {
                 .position(|removed| removed.contains_window(&shown))
             {
                 let active_workspace = self.active_workspace()?.id();
-                let removed = self.scratchpad_trees.remove(index)?;
-                let shown = removed.window_ids().first()?.clone();
-                self.workspaces_mut()
-                    .find(|workspace| workspace.id() == active_workspace)
-                    .unwrap()
-                    .add_floating_tree(removed, true);
-                return Some(shown);
+                return self.show_scratchpad_tree(index, active_workspace);
             }
             target_index = self
                 .scratchpad
@@ -4383,24 +4414,39 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        // Find the destination before taking the window out of the scratchpad,
+        // so a missing workspace leaves it hidden rather than dropping it.
+        if !self
+            .workspaces()
+            .any(|(_, _, workspace)| workspace.id() == active_workspace)
+        {
+            return None;
+        }
         let mut removed = self.scratchpad.remove(index)?;
         removed.is_floating = true;
         let shown = removed.tile.window().id().clone();
         let workspace = self
             .workspaces_mut()
-            .find(|workspace| workspace.id() == active_workspace)
-            .unwrap();
+            .find(|workspace| workspace.id() == active_workspace)?;
         workspace.remap_floating_position(&mut removed.tile, removed.floating_working_area);
         workspace.add_tile(
             removed.tile,
             WorkspaceAddWindowTarget::Auto,
-            ActivateWindow::Yes,
-            removed.width,
-            removed.is_full_width,
-            true,
-            None,
+            workspace::AddTileOptions {
+                activate: ActivateWindow::Yes,
+                width: removed.width,
+                is_full_width: removed.is_full_width,
+                is_floating: true,
+                anim: None,
+            },
         );
         Some(shown)
+    }
+
+    pub fn scratchpad_tiles(&self) -> impl Iterator<Item = (&W, bool)> {
+        self.scratchpad
+            .iter()
+            .map(|removed| (removed.tile.window(), removed.tile.is_sticky))
     }
 
     pub fn scratchpad_windows(&self) -> impl Iterator<Item = &W> {
@@ -4420,6 +4466,23 @@ impl<W: LayoutElement> Layout<W> {
         self.scratchpad_trees
             .iter()
             .map(|removed| (removed.ipc_tree(), removed.is_sticky()))
+    }
+
+    /// Every node of each hidden scratchpad group, with one of its windows.
+    ///
+    /// Sway's criteria and GET_MARKS walk hidden scratchpad containers too
+    /// (`sway/sway/tree/root.c:250-257`), so a mark on a hidden group still
+    /// finds it. The window is the group's representative for commands such
+    /// as `scratchpad show`, which act on the whole group.
+    pub fn scratchpad_tree_nodes(&self) -> impl Iterator<Item = (NodeId, &W::Id)> + '_ {
+        self.scratchpad_trees.iter().flat_map(|removed| {
+            let window = removed.window_ids().first();
+            removed
+                .ipc_tree()
+                .nodes()
+                .into_iter()
+                .filter_map(move |(node, _)| Some((node, window?)))
+        })
     }
 
     pub fn scratchpad_is_empty(&self) -> bool {
@@ -4635,6 +4698,13 @@ impl<W: LayoutElement> Layout<W> {
         self.workspaces_mut()
             .find(|workspace| workspace.id() == workspace_id)?
             .set_container_floating(node, floating)
+    }
+
+    /// The workspace whose tiling tree or floating groups hold `node`.
+    pub fn workspace_containing_node(&self, node: NodeId) -> Option<WorkspaceId> {
+        self.workspaces()
+            .find(|(_, _, workspace)| workspace.contains_swap_node(node))
+            .map(|(_, _, workspace)| workspace.id())
     }
 
     pub fn window_in_node(&self, workspace_id: WorkspaceId, node: NodeId) -> Option<W::Id> {
@@ -5020,18 +5090,9 @@ impl<W: LayoutElement> Layout<W> {
 
                 let has_view_offset_gesture = workspace.tiling().has_view_offset_gesture();
                 if self.dnd.is_some() || self.interactive_move.is_some() {
-                    // We'd like to check that all workspaces have the gesture here, furthermore we
-                    // want to check that they have the gesture only if the interactive move
-                    // targets the scrolling layout. However, we cannot do that because we start
-                    // and stop the gesture lazily. Otherwise the gesture code would pollute a lot
-                    // of places like adding new workspaces, implicitly moving windows between
-                    // floating and tiling on fullscreen, etc.
-                    //
-                    // assert!(
-                    //     has_view_offset_gesture,
-                    //     "during an interactive move in the scrolling layout, \
-                    //      all workspaces should be in a view offset gesture"
-                    // );
+                    // We would like to check that all workspaces have the gesture here, and only
+                    // while an interactive move targets the tiling layout. The gesture starts and
+                    // stops lazily, so that invariant does not hold at this boundary.
                 } else if saw_view_offset_gesture {
                     assert!(
                         !has_view_offset_gesture,
@@ -5236,7 +5297,8 @@ impl<W: LayoutElement> Layout<W> {
                 // We're not on any specific workspace so we can't compute a "workspace view" rect.
                 // Let's instead compute a rect relative to the output.
                 //
-                // FIXME: we could make the colors match up better in the overview by figuring out
+                // Matching these colors to overview backgrounds is tracked by mu task
+                // layout-overview-move-colors. We could do that by figuring out
                 // where a centered workspace would currently be, and computing the view rect
                 // against that. Since most of the time the dragged window will be on a centered
                 // workspace.
@@ -5916,10 +5978,9 @@ impl<W: LayoutElement> Layout<W> {
             ..
         } = &mut self.monitor_set
         {
-            let new_idx = monitors
-                .iter()
-                .position(|mon| &mon.output == output)
-                .unwrap();
+            let Some(new_idx) = monitors.iter().position(|mon| &mon.output == output) else {
+                return;
+            };
 
             let (mon_idx, ws_idx) = if let Some(window) = window {
                 let Some(location) = monitors.iter().enumerate().find_map(|(mon_idx, mon)| {
@@ -5956,11 +6017,19 @@ impl<W: LayoutElement> Layout<W> {
             else {
                 unreachable!()
             };
-            let new_idx = monitors
-                .iter()
-                .position(|mon| mon.output == destination_output)
-                .unwrap();
-            let ws_idx = monitors[mon_idx].idx_of_ws(source_ws_id).unwrap();
+            // prepare_workspace_at may have created or reaped workspaces, so
+            // find both ends again by identity.
+            let (Some(new_idx), Some(ws_idx)) = (
+                monitors
+                    .iter()
+                    .position(|mon| mon.output == destination_output),
+                monitors
+                    .get(mon_idx)
+                    .and_then(|mon| mon.idx_of_ws(source_ws_id)),
+            ) else {
+                warn!("move_to_output: source or destination vanished while preparing the target");
+                return;
+            };
 
             let mon = &mut monitors[mon_idx];
             let activate = activate.map_smart(|| {
@@ -5982,7 +6051,10 @@ impl<W: LayoutElement> Layout<W> {
             let window = window.clone();
 
             if let Some(root) = ws.floating_tree_root_for_window(&window) {
-                let removed = ws.remove_floating_tree(root).unwrap();
+                let Some(removed) = ws.remove_floating_tree(root) else {
+                    warn!("move_to_output: floating tree root reported for the window is gone");
+                    return;
+                };
                 monitors[new_idx].workspaces[workspace_idx].add_floating_tree(removed, true);
                 if activate.map_smart(|| false) {
                     *active_monitor_idx = new_idx;
@@ -6088,28 +6160,32 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return;
         };
-        let source_monitor = monitors
-            .iter()
-            .position(|monitor| monitor.has_ws(source_workspace))
-            .unwrap();
-        let target_monitor = monitors
-            .iter()
-            .position(|monitor| monitor.has_ws(target))
-            .unwrap();
+        // prepare_workspace_at may have created or reaped workspaces.
+        let (Some(source_monitor), Some(target_monitor)) = (
+            monitors
+                .iter()
+                .position(|monitor| monitor.has_ws(source_workspace)),
+            monitors.iter().position(|monitor| monitor.has_ws(target)),
+        ) else {
+            warn!("move_focused_to_output: source or target workspace vanished");
+            return;
+        };
         if source_monitor == target_monitor {
             monitors[source_monitor].move_focused_to_workspace(target, activate);
             return;
         }
 
-        let source_idx = monitors[source_monitor]
-            .idx_of_ws(source_workspace)
-            .unwrap();
+        let (Some(source_idx), Some(target_idx)) = (
+            monitors[source_monitor].idx_of_ws(source_workspace),
+            monitors[target_monitor].idx_of_ws(target),
+        ) else {
+            return;
+        };
         let Some(tile) =
             monitors[source_monitor].workspaces[source_idx].remove_active_tiling_tile()
         else {
             return;
         };
-        let target_idx = monitors[target_monitor].idx_of_ws(target).unwrap();
         monitors[target_monitor].add_tiling_tile(target_idx, tile, activate);
         if activate {
             *active_monitor_idx = target_monitor;
@@ -6147,9 +6223,7 @@ impl<W: LayoutElement> Layout<W> {
         let replacement_identity = old_output
             .as_ref()
             .and_then(|output| self.next_initial_workspace_name_for_output(Some(output)))
-            .map(|name| {
-                sway_workspace_identity(crate::command::WorkspaceTarget::Name(name)).unwrap()
-            })
+            .map(sway_identity_from_name)
             .unwrap_or_else(|| self.next_free_workspace_identity_for_output(old_output.as_ref()));
         let replacement_layout_config =
             self.workspace_layout_config(replacement_identity.0.as_deref());
@@ -6793,8 +6867,8 @@ impl<W: LayoutElement> Layout<W> {
                 // to the pointer. Otherwise, we just teleport it as the layout code is not aware
                 // of monitor positions.
                 //
-                // FIXME: when and if the layout code knows about monitor positions, this will be
-                // potentially animatable.
+                // Using monitor positions here is tracked by mu task layout-monitor-position-dnd.
+                // It will make cross-output movement potentially animatable.
                 let mut tile_pos = None;
                 if let Some((mon, (ws, ws_geo))) = self.monitors().find_map(|mon| {
                     mon.workspaces_with_render_geo()
@@ -7283,11 +7357,13 @@ impl<W: LayoutElement> Layout<W> {
                 ws.add_tile(
                     move_.tile,
                     WorkspaceAddWindowTarget::Auto,
-                    ActivateWindow::Yes,
-                    move_.width,
-                    move_.is_full_width,
-                    move_.is_floating,
-                    None,
+                    workspace::AddTileOptions {
+                        activate: ActivateWindow::Yes,
+                        width: move_.width,
+                        is_full_width: move_.is_full_width,
+                        is_floating: move_.is_floating,
+                        anim: None,
+                    },
                 );
             }
         }
@@ -7502,9 +7578,7 @@ impl<W: LayoutElement> Layout<W> {
                     monitor.reap_empty_workspaces();
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
-                workspaces.retain(Workspace::must_be_kept);
-            }
+            MonitorSet::NoOutputs { .. } => self.reap_outputless_workspaces(),
         }
     }
 

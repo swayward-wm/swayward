@@ -290,7 +290,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 }
                 DecorationLayer::Titlebars => {
                     for (id, titlebar) in &geometries.titlebars {
-                        let leaf = geometries.titlebar_leaves[id];
+                        // A strip entry maps to the leaf it labels; anything
+                        // else is its own leaf.
+                        let leaf = geometries.titlebar_leaves.get(id).copied().unwrap_or(*id);
                         let mut titlebar = titlebar.clone();
                         titlebar.state = self.titlebar_state(leaf, focus_ring);
                         if titlebar.visible {
@@ -472,15 +474,6 @@ impl<W: LayoutElement> TilingTree<W> {
         0.
     }
 
-    fn node_depth(&self, mut id: NodeId) -> usize {
-        let mut depth = 0;
-        while let Some(parent) = self.nodes.get(&id).and_then(|node| node.parent) {
-            depth += 1;
-            id = parent;
-        }
-        depth
-    }
-
     fn first_tile_in(&self, id: NodeId) -> Option<&Tile<W>> {
         self.first_leaf_in(id).and_then(|id| self.tile(id))
     }
@@ -541,7 +534,7 @@ impl<W: LayoutElement> TilingTree<W> {
             let Some((area, _)) = self.tab_area(id, geometries) else {
                 continue;
             };
-            let active = self.active_tab(&children);
+            let active = self.shown_child_in(id);
             if self.tab_active.get(&id).copied() != active {
                 let movement = self.options.animations.window_movement.0;
                 let previous = self.tab_active.insert(id, active.unwrap_or(id));
@@ -596,16 +589,5 @@ impl<W: LayoutElement> TilingTree<W> {
                 self.scale,
             );
         }
-    }
-
-    fn active_tab(&self, children: &[NodeId]) -> Option<NodeId> {
-        self.focus
-            .and_then(|focus| {
-                children
-                    .iter()
-                    .find(|child| self.contains_node(**child, focus))
-            })
-            .copied()
-            .or_else(|| children.first().copied())
     }
 }

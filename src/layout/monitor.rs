@@ -50,9 +50,8 @@ pub struct Monitor<W: LayoutElement> {
     /// Latest known working area for this output.
     ///
     /// Not rounded to physical pixels.
-    // FIXME: since this is used for things like DnD scrolling edges in the overview, ideally this
-    // should only consider overlay and top layer-shell surfaces. However, Smithay doesn't easily
-    // let you do this at the moment.
+    // Restricting this to overlay and top layer-shell surfaces for overview DnD is tracked by mu
+    // task layout-dnd-edge-scroll-size.
     working_area: Rectangle<f64, Logical>,
     // Must always contain at least one.
     pub(super) workspaces: Vec<Workspace<W>>,
@@ -174,7 +173,7 @@ pub enum MonitorAddWindowTarget<'a, W: LayoutElement> {
     Workspace {
         /// Id of the target workspace.
         id: WorkspaceId,
-        /// Override where the window will open as a new column.
+        /// Override the tiled insertion index.
         column_idx: Option<usize>,
     },
     /// Next to this existing window.
@@ -294,19 +293,31 @@ impl From<&super::OverviewProgress> for OverviewProgress {
     }
 }
 
+pub struct MonitorInit<W: LayoutElement> {
+    pub output: Output,
+    pub workspaces: Vec<Workspace<W>>,
+    pub ws_id_to_activate: Option<WorkspaceId>,
+    pub initial_workspace_name: Option<String>,
+    pub initial_workspace_number: Option<i32>,
+    pub preserve_initial_auto_layout: bool,
+    pub clock: Clock,
+    pub base_options: Rc<Options>,
+    pub layout_config: Option<LayoutPart>,
+}
+
 impl<W: LayoutElement> Monitor<W> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        output: Output,
-        mut workspaces: Vec<Workspace<W>>,
-        ws_id_to_activate: Option<WorkspaceId>,
-        initial_workspace_name: Option<String>,
-        initial_workspace_number: Option<i32>,
-        preserve_initial_auto_layout: bool,
-        clock: Clock,
-        base_options: Rc<Options>,
-        layout_config: Option<LayoutPart>,
-    ) -> Self {
+    pub fn new(init: MonitorInit<W>) -> Self {
+        let MonitorInit {
+            output,
+            mut workspaces,
+            ws_id_to_activate,
+            initial_workspace_name,
+            initial_workspace_number,
+            preserve_initial_auto_layout,
+            clock,
+            base_options,
+            layout_config,
+        } = init;
         let options =
             Rc::new(Options::clone(&base_options).with_merged_layout(layout_config.as_ref()));
 
@@ -317,9 +328,14 @@ impl<W: LayoutElement> Monitor<W> {
         // Prepare the workspaces: set output, pick the active one.
         let mut active_workspace_idx = 0;
 
-        for (idx, ws) in workspaces.iter_mut().enumerate() {
-            assert!(ws.must_be_kept());
+        // Callers hand over only workspaces that must be kept. Should one slip
+        // through, drop it as sway would have destroyed it
+        // (workspace_consider_destroy, sway/tree/workspace.c:313-332) rather
+        // than abort the session while an output is being added.
+        debug_assert!(workspaces.iter().all(Workspace::must_be_kept));
+        workspaces.retain(Workspace::must_be_kept);
 
+        for (idx, ws) in workspaces.iter_mut().enumerate() {
             if preserve_initial_auto_layout {
                 ws.preserve_empty_auto_layout();
             }
@@ -340,9 +356,7 @@ impl<W: LayoutElement> Monitor<W> {
             // configured mode, then keeps that workspace's original split.
             ws.preserve_empty_auto_layout();
             if let Some(name) = initial_workspace_name {
-                let (name, number) =
-                    super::sway_workspace_identity(crate::command::WorkspaceTarget::Name(name))
-                        .unwrap();
+                let (name, number) = super::sway_identity_from_name(name);
                 ws.set_sway_identity(name, number);
             } else if let Some(number) = initial_workspace_number {
                 ws.set_sway_identity(None, Some(number));
@@ -610,7 +624,7 @@ impl<W: LayoutElement> Monitor<W> {
         idx: usize,
         config: Option<swayward_config::Animation>,
     ) {
-        // FIXME: also compute and use current velocity.
+        // Preserving velocity is tracked by mu task layout-workspace-switch-velocity.
         let current_idx = self.workspace_render_idx();
 
         if self.active_workspace_idx != idx {
@@ -736,7 +750,8 @@ impl<W: LayoutElement> Monitor<W> {
         tile: Tile<W>,
         target: MonitorAddWindowTarget<W>,
         activate: ActivateWindow,
-        // FIXME: Refactor ActivateWindow enum to make this better.
+        // Kept separate from window activation until mu task layout-activate-window-api gives the
+        // API an explicit workspace-activation policy.
         allow_to_activate_workspace: bool,
         width: TiledWidth,
         is_full_width: bool,
@@ -750,11 +765,13 @@ impl<W: LayoutElement> Monitor<W> {
         workspace.add_tile(
             tile,
             target,
-            activate,
-            width,
-            is_full_width,
-            is_floating,
-            anim,
+            super::workspace::AddTileOptions {
+                activate,
+                width,
+                is_full_width,
+                is_floating,
+                anim,
+            },
         );
 
         // After adding a new window, workspace becomes this output's own.
@@ -774,7 +791,8 @@ impl<W: LayoutElement> Monitor<W> {
         edge: ResizeEdge,
         tile: Tile<W>,
         activate: bool,
-        // FIXME: Refactor ActivateWindow enum to make this better.
+        // Kept separate from window activation until mu task layout-activate-window-api gives the
+        // API an explicit workspace-activation policy.
         allow_to_activate_workspace: bool,
     ) {
         let workspace = &mut self.workspaces[workspace_idx];
@@ -805,11 +823,13 @@ impl<W: LayoutElement> Monitor<W> {
             target.add_tile(
                 removed.tile,
                 WorkspaceAddWindowTarget::Auto,
-                ActivateWindow::No,
-                removed.width,
-                removed.is_full_width,
-                true,
-                None,
+                super::workspace::AddTileOptions {
+                    activate: ActivateWindow::No,
+                    width: removed.width,
+                    is_full_width: removed.is_full_width,
+                    is_floating: true,
+                    anim: None,
+                },
             );
         }
         if target_was_empty {
@@ -985,8 +1005,8 @@ impl<W: LayoutElement> Monitor<W> {
         self.reap_empty_workspaces();
         self.active_workspace_idx = self.idx_of_ws(active).unwrap();
 
-        // FIXME: if we're adding workspaces to currently invisible positions
-        // (outside the workspace switch), we don't need to cancel it.
+        // Avoiding this cancellation for invisible insertions is tracked by mu task
+        // layout-invisible-workspace-switch.
         self.workspace_switch = None;
         self.clean_up_workspaces();
     }
@@ -1055,10 +1075,11 @@ impl<W: LayoutElement> Monitor<W> {
         activate: ActivateWindow,
     ) {
         let source_workspace_idx = if let Some(window) = window {
-            self.workspaces
-                .iter()
-                .position(|ws| ws.has_window(window))
-                .unwrap()
+            let Some(idx) = self.workspaces.iter().position(|ws| ws.has_window(window)) else {
+                warn!("move_to_workspace: window is not on this monitor");
+                return;
+            };
+            idx
         } else {
             self.active_workspace_idx
         };
@@ -1094,9 +1115,11 @@ impl<W: LayoutElement> Monitor<W> {
                     .flatten()
             });
         if let Some(root) = tree_root {
-            let removed = self.workspaces[source_workspace_idx]
-                .remove_floating_tree(root)
-                .unwrap();
+            let Some(removed) = self.workspaces[source_workspace_idx].remove_floating_tree(root)
+            else {
+                warn!("move_to_workspace: floating tree root reported for the window is gone");
+                return;
+            };
             self.workspaces[new_idx].add_floating_tree(removed, false);
             if self.workspace_switch.is_none() {
                 self.consider_destroy_workspace(source_id);
@@ -1110,15 +1133,21 @@ impl<W: LayoutElement> Monitor<W> {
         };
         let window = window.clone();
 
+        if !workspace.has_window(&window) {
+            warn!("move_to_workspace: active window is not on its workspace");
+            return;
+        }
+        // A tile with no render position (one whose geometry was not assigned)
+        // still moves; only its animation starts from the origin.
         let mut old_render_pos = workspace
             .tiles_with_render_positions()
             .find_map(|(tile, offset, _visible)| (tile.window().id() == &window).then_some(offset))
-            .unwrap();
+            .unwrap_or_default();
 
         let fullscreen = workspace.fullscreen_mode();
         let fullscreen_window = workspace.fullscreen_window().cloned();
         let transaction = Transaction::new();
-        let removed = workspace.remove_tile(&window, transaction);
+        let removed = workspace.remove_tile_for_transfer(&window, transaction);
 
         // If the view is following the tile, match the animation.
         let config = if activate {
@@ -1146,13 +1175,20 @@ impl<W: LayoutElement> Monitor<W> {
         );
         if let (Some(fullscreen), Some(fullscreen_window)) = (fullscreen, fullscreen_window) {
             self.workspaces[new_idx].set_window_fullscreen(&fullscreen_window, Some(fullscreen));
+            if fullscreen_window == window {
+                self.workspaces[new_idx].mark_tiling_fullscreen_arrived();
+            }
         }
 
         if self.workspace_switch.is_none() {
             self.consider_destroy_workspace(source_id);
         }
 
-        let new_idx = self.idx_of_ws(new_id).unwrap();
+        // The target holds the moved window, so clean-up keeps it.
+        let Some(new_idx) = self.idx_of_ws(new_id) else {
+            warn!("move_to_workspace: target workspace vanished after the move");
+            return;
+        };
 
         // Animate vertical movement between workspaces.
         //
@@ -1164,12 +1200,13 @@ impl<W: LayoutElement> Monitor<W> {
                 self.workspace_size_with_gap(1.).h * (source_workspace_idx as f64 - new_idx as f64);
         }
 
-        let (tile, new_render_pos) = self.workspaces[new_idx]
+        if let Some((tile, new_render_pos)) = self.workspaces[new_idx]
             .tiles_with_render_positions_mut(false)
             .find(|(tile, _)| tile.window().id() == &window)
-            .unwrap();
-        tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
-        tile.set_anim_y_between_workspaces();
+        {
+            tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
+            tile.set_anim_y_between_workspaces();
+        }
     }
 
     pub fn move_focused_to_workspace(&mut self, target: WorkspaceId, activate: bool) {
@@ -1178,8 +1215,12 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        let source_idx = self.idx_of_ws(source_workspace).unwrap();
-        let target_idx = self.idx_of_ws(target).unwrap();
+        let (Some(source_idx), Some(target_idx)) =
+            (self.idx_of_ws(source_workspace), self.idx_of_ws(target))
+        else {
+            warn!("move_focused_to_workspace: source or target workspace is not on this monitor");
+            return;
+        };
         let workspace = &mut self.workspaces[source_idx];
         if workspace.floating_is_active() {
             let activate = if activate {
@@ -1197,8 +1238,11 @@ impl<W: LayoutElement> Monitor<W> {
         let mut old_render_pos = workspace
             .tiles_with_render_positions()
             .find_map(|(tile, pos, _)| (tile.window().id() == &window).then_some(pos))
-            .unwrap();
-        let tile = workspace.remove_active_tiling_tile().unwrap();
+            .unwrap_or_default();
+        let Some(tile) = workspace.remove_active_tiling_tile() else {
+            warn!("move_focused_to_workspace: active window has no tiling tile");
+            return;
+        };
 
         old_render_pos.y +=
             self.workspace_size_with_gap(1.).h * (source_idx as f64 - target_idx as f64);
@@ -1213,13 +1257,18 @@ impl<W: LayoutElement> Monitor<W> {
             self.consider_destroy_workspace(source_workspace);
         }
 
-        let target_idx = self.idx_of_ws(target).unwrap();
-        let (tile, new_render_pos) = self.workspaces[target_idx]
+        // The target holds the moved window, so clean-up keeps it.
+        let Some(target_idx) = self.idx_of_ws(target) else {
+            warn!("move_focused_to_workspace: target workspace vanished after the move");
+            return;
+        };
+        if let Some((tile, new_render_pos)) = self.workspaces[target_idx]
             .tiles_with_render_positions_mut(false)
             .find(|(tile, _)| tile.window().id() == &window)
-            .unwrap();
-        tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
-        tile.set_anim_y_between_workspaces();
+        {
+            tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
+            tile.set_anim_y_between_workspaces();
+        }
     }
 
     pub fn switch_workspace_up(&mut self) {
@@ -1673,7 +1722,7 @@ impl<W: LayoutElement> Monitor<W> {
         // the workspace switch to avoid jumps.
         if prev_render_idx != new_render_idx {
             if let Some(WorkspaceSwitch::Animation(anim)) = &mut self.workspace_switch {
-                // FIXME: maintain velocity.
+                // Preserving velocity is tracked by mu task layout-workspace-switch-velocity.
                 *anim = anim.restarted(prev_render_idx, anim.to(), 0.);
             }
         }

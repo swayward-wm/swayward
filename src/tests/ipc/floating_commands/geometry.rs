@@ -469,7 +469,7 @@ fn move_position_targets_floating_windows_by_criteria() {
 
 #[test]
 fn floating_ipc_rect_uses_final_position_during_animation() {
-    let mut f = Fixture::new();
+    let (mut f, _) = ipc_fixture();
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
     let window = f.client(client).create_window();
@@ -489,14 +489,7 @@ fn floating_ipc_rect_uses_final_position_during_animation() {
         true,
     );
 
-    let swayward = f.swayward();
-    let tree = serde_json::to_value(describe_tree(
-        &swayward.layout,
-        &swayward.global_space,
-        &Default::default(),
-        &Default::default(),
-    ))
-    .unwrap();
+    let tree = get_tree(&mut f);
     let node = find_json_node(&tree, "floating_con", false).unwrap();
     assert_eq!(node["rect"]["x"], 100);
     assert_eq!(node["rect"]["y"], 200);
@@ -631,7 +624,7 @@ fn floating_input_region_holes_click_through_but_decorations_activate() {
 
 #[test]
 fn floating_stacking_and_focus_match_sway_before_and_after_raise() {
-    let two: Value = serde_json::from_str(sway_fixture!("two_floating.tree.json")).unwrap();
+    let two: Value = serde_json::from_str(&sway_fixture!("two_floating.tree.json")).unwrap();
     assert_eq!(
         floating_order(&two),
         (
@@ -670,12 +663,12 @@ fn floating_stacking_and_focus_match_sway_before_and_after_raise() {
         .unwrap()
     };
     let before: Value =
-        serde_json::from_str(sway_fixture!("three_floating_before_raise.tree.json")).unwrap();
+        serde_json::from_str(&sway_fixture!("three_floating_before_raise.tree.json")).unwrap();
     assert_eq!(floating_order(&describe(&mut f)), floating_order(&before));
 
     assert!(crate::command::execute(f.niri_state(), r#"[app_id="^fixture-1$"] focus"#)[0].success);
     let after: Value =
-        serde_json::from_str(sway_fixture!("three_floating_after_raise.tree.json")).unwrap();
+        serde_json::from_str(&sway_fixture!("three_floating_after_raise.tree.json")).unwrap();
     assert_eq!(floating_order(&describe(&mut f)), floating_order(&after));
 }
 

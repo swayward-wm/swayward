@@ -5,32 +5,52 @@ impl<W: LayoutElement> TilingTree<W> {
         apply_struts(self.parent_area, self.scale, self.options.layout.struts)
     }
 
+    /// Nodes left out of their parent's split: views mapped under fullscreen,
+    /// and a fullscreen node that arrived fullscreen. Sway zeroes only the
+    /// moved container's width fraction and never re-arranges its new parent
+    /// while the workspace is fullscreen, so the siblings keep their boxes.
+    pub(super) fn split_excluded(&self) -> std::borrow::Cow<'_, HashSet<NodeId>> {
+        match self
+            .fullscreen_arrived
+            .then(|| self.fullscreen_node())
+            .flatten()
+        {
+            Some(fullscreen) => {
+                let mut excluded = self.mapped_under_fullscreen.clone();
+                excluded.insert(fullscreen);
+                std::borrow::Cow::Owned(excluded)
+            }
+            None => std::borrow::Cow::Borrowed(&self.mapped_under_fullscreen),
+        }
+    }
+
     pub(super) fn compute_geometry(&self) -> geometry::Geometry<W::Id> {
+        let excluded = self.split_excluded();
         let fullscreen = self.fullscreen_node().into_iter().collect();
         let visible_leaves = self.visible_leaves();
-        geometry::compute(
-            &self.nodes,
-            &self.title_formats,
-            self.root,
-            self.view_size,
-            self.parent_area,
-            self.scale,
-            if self.resident_root {
+        geometry::compute(geometry::GeometryInput {
+            nodes: &self.nodes,
+            title_formats: &self.title_formats,
+            root: self.root,
+            view_size: self.view_size,
+            parent_area: self.parent_area,
+            scale: self.scale,
+            struts: if self.resident_root {
                 Default::default()
             } else {
                 self.options.layout.struts
             },
-            self.gaps,
-            self.options.layout.outer_gaps_configured || self.resident_root,
-            self.gaps_to_edge,
-            self.titlebar_height,
-            &fullscreen,
-            &self.mapped_under_fullscreen,
-            self.options.layout.hide_edge_borders,
-            self.options.layout.smart_borders,
-            &visible_leaves,
-            self.options.layout.draw_uncovered_top_border,
-        )
+            gaps: self.gaps,
+            outer_gaps_configured: self.options.layout.outer_gaps_configured || self.resident_root,
+            gaps_to_edge: self.gaps_to_edge,
+            titlebar_height: self.titlebar_height,
+            fullscreen: &fullscreen,
+            mapped_under_fullscreen: &excluded,
+            hide_edge_borders: self.options.layout.hide_edge_borders,
+            smart_borders: self.options.layout.smart_borders,
+            visible_leaves: &visible_leaves,
+            draw_uncovered_top_border: self.options.layout.draw_uncovered_top_border,
+        })
     }
 
     pub(super) fn animate_geometry_changes(
@@ -113,13 +133,8 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout, children, ..
             } => {
                 if matches!(layout, Layout::Tabbed | Layout::Stacked) {
-                    let focused_branch = self.focus.and_then(|focus| {
-                        children
-                            .iter()
-                            .find(|child| self.contains_node(**child, focus))
-                    });
-                    if let Some(child) = focused_branch.or_else(|| children.first()) {
-                        self.collect_visible(*child, visible);
+                    if let Some(child) = self.shown_child_in(id) {
+                        self.collect_visible(child, visible);
                     }
                 } else {
                     for child in children {
@@ -179,7 +194,7 @@ impl<W: LayoutElement> TilingTree<W> {
         };
         let first = children.iter().position(|id| *id == first)?;
         let second = children.iter().position(|id| *id == second)?;
-        Some((percents[first], percents[second]))
+        Some((*percents.get(first)?, *percents.get(second)?))
     }
 
     pub fn node_geometry(&self, id: NodeId) -> Option<Rectangle<f64, Logical>> {

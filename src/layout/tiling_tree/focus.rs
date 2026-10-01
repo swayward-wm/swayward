@@ -56,6 +56,85 @@ impl<W: LayoutElement> TilingTree<W> {
         self.focus_history = history.into_iter().map(|(node, _)| node).collect();
     }
 
+    /// The most recent focus entry strictly inside `node`, like sway's
+    /// `seat_get_focus_inactive` (sway/input/seat.c:1357-1372).
+    pub fn focus_inactive_in(&self, node: NodeId) -> Option<NodeId> {
+        self.focus_inactive_in_excluding(node, node)
+    }
+
+    /// As `focus_inactive_in`, ignoring `excluded` and everything inside it: sway runs this
+    /// after detaching the moved container, so its entries are no longer under `node`.
+    pub fn focus_inactive_in_excluding(&self, node: NodeId, excluded: NodeId) -> Option<NodeId> {
+        self.focus_history.iter().copied().find(|candidate| {
+            *candidate != node
+                && self.nodes.contains_key(candidate)
+                && self.contains_node(node, *candidate)
+                && !self.contains_node(excluded, *candidate)
+        })
+    }
+
+    /// Picks sway's refocus target for a container leaving `old_parent`: the most recent entry
+    /// under the old parent, else under the workspace (sway/commands/move.c:598-608). `moved`
+    /// names the container when it is still attached, so its own entries are skipped. Returns
+    /// the target with its ancestors so `resolve_transfer_focus` can follow a reaped target.
+    pub(super) fn transfer_focus_target(
+        &self,
+        moved: Option<NodeId>,
+        old_parent: Option<NodeId>,
+    ) -> Option<(NodeId, Vec<NodeId>)> {
+        let search = |node: NodeId| match moved {
+            Some(moved) => self.focus_inactive_in_excluding(node, moved),
+            None => self.focus_inactive_in(node),
+        };
+        let target = old_parent
+            .filter(|parent| *parent != self.root)
+            .and_then(search)
+            .or_else(|| search(self.root))?;
+        let mut ancestors = Vec::new();
+        let mut parent = self.nodes.get(&target).and_then(|node| node.parent);
+        while let Some(ancestor) = parent {
+            ancestors.push(ancestor);
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        Some((target, ancestors))
+    }
+
+    /// Focuses a target from `transfer_focus_target` after the move reaped empty containers.
+    /// When the target itself was reaped, sway's destroy handler focuses the most recent view
+    /// under its nearest surviving ancestor (sway/input/seat.c:273-286).
+    pub(super) fn resolve_transfer_focus(&mut self, target: Option<(NodeId, Vec<NodeId>)>) -> bool {
+        let Some((target, ancestors)) = target else {
+            return false;
+        };
+        let focus = if self.nodes.contains_key(&target) {
+            Some(target)
+        } else {
+            ancestors
+                .into_iter()
+                .find(|ancestor| self.nodes.contains_key(ancestor))
+                .and_then(|ancestor| self.focused_leaf_in(ancestor))
+        };
+        if focus.is_some() {
+            self.set_focus_id(focus);
+        }
+        focus.is_some()
+    }
+
+    /// Sway raises a split's new wrapper just below its focused child (`container_split`,
+    /// sway/tree/container.c:1554-1560).
+    pub(super) fn raise_split_wrapper(&mut self, child: NodeId, wrapper: NodeId) {
+        if self.focus != Some(child) {
+            return;
+        }
+        self.focus_history.retain(|candidate| *candidate != wrapper);
+        let index = self
+            .focus_history
+            .iter()
+            .position(|candidate| *candidate == child)
+            .map_or(0, |index| index + 1);
+        self.focus_history.insert(index, wrapper);
+    }
+
     pub fn root_is_focused(&self) -> bool {
         self.focus == Some(self.root)
     }
@@ -127,9 +206,9 @@ impl<W: LayoutElement> TilingTree<W> {
         let target = if let Some(fullscreen) = self.fullscreen_node() {
             self.focused_leaf_in(fullscreen)
         } else {
-            let TreeNode::Split {
+            let Some(TreeNode::Split {
                 layout, children, ..
-            } = &self.nodes[&self.root].value
+            }) = self.nodes.get(&self.root).map(|node| &node.value)
             else {
                 return false;
             };
@@ -177,7 +256,9 @@ impl<W: LayoutElement> TilingTree<W> {
         let active = self.focused_child_in(parent)?;
         let index = children.iter().position(|child| *child == active)?;
         let desired = (index as i32 + steps).clamp(0, children.len() as i32 - 1) as usize;
-        let focus = self.focused_leaf_in(children[desired]);
+        let focus = children
+            .get(desired)
+            .and_then(|child| self.focused_leaf_in(*child));
         self.set_focus_id(focus);
         focus.and_then(|focus| self.tile(focus).map(|tile| tile.window().id().clone()))
     }
@@ -189,7 +270,8 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(parent) = self.nodes.get(&focus).and_then(|node| node.parent) else {
             return false;
         };
-        let TreeNode::Split { layout, .. } = &self.nodes[&parent].value else {
+        let Some(TreeNode::Split { layout, .. }) = self.nodes.get(&parent).map(|node| &node.value)
+        else {
             return false;
         };
         let direction_layout = match layout {
@@ -199,14 +281,16 @@ impl<W: LayoutElement> TilingTree<W> {
         let mut current = focus;
         let mut wrap = None;
         while let Some(parent) = self.nodes.get(&current).and_then(|node| node.parent) {
-            let TreeNode::Split {
+            let Some(TreeNode::Split {
                 layout, children, ..
-            } = &self.nodes[&parent].value
+            }) = self.nodes.get(&parent).map(|node| &node.value)
             else {
                 return false;
             };
             if Self::layouts_parallel(*layout, direction_layout) {
-                let index = children.iter().position(|child| *child == current).unwrap();
+                let Some(index) = children.iter().position(|child| *child == current) else {
+                    return false;
+                };
                 let target = if next {
                     children.get(index + 1).copied()
                 } else {
@@ -249,7 +333,8 @@ impl<W: LayoutElement> TilingTree<W> {
         else {
             return false;
         };
-        let TreeNode::Split { layout, .. } = self.nodes[&parent].value else {
+        let Some(&TreeNode::Split { layout, .. }) = self.nodes.get(&parent).map(|node| &node.value)
+        else {
             return false;
         };
         let direction = match (next, layout) {
@@ -289,9 +374,9 @@ impl<W: LayoutElement> TilingTree<W> {
             if Some(current) == barrier {
                 break;
             }
-            let TreeNode::Split {
+            let Some(TreeNode::Split {
                 layout, children, ..
-            } = &self.nodes[&parent].value
+            }) = self.nodes.get(&parent).map(|node| &node.value)
             else {
                 return None;
             };
@@ -303,7 +388,9 @@ impl<W: LayoutElement> TilingTree<W> {
                     children.get(index + 1).map(|_| index + 1)
                 };
                 if let Some(desired) = desired {
-                    return self.focused_leaf_in(children[desired]);
+                    return children
+                        .get(desired)
+                        .and_then(|child| self.focused_leaf_in(*child));
                 }
                 if allow_wrap
                     && self.options.layout.focus_wrapping != swayward_config::FocusWrapping::No
@@ -317,7 +404,9 @@ impl<W: LayoutElement> TilingTree<W> {
                     if self.options.layout.focus_wrapping == swayward_config::FocusWrapping::Force {
                         return candidate.and_then(|id| self.focused_leaf_in(id));
                     }
-                    wrap.get_or_insert(candidate.unwrap());
+                    if let Some(candidate) = candidate {
+                        wrap.get_or_insert(candidate);
+                    }
                 }
             }
             if Some(parent) == barrier {

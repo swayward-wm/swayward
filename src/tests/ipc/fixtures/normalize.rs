@@ -1,10 +1,12 @@
-fn oracle_fixture(path: &str) -> &'static str {
+fn oracle_fixture(path: &str) -> String {
     let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache/sway-ipc-oracle");
-    Box::leak(
-        oracle_fixture_at(&cache, path)
-            .unwrap_or_else(|error| panic!("{error}"))
-            .into_boxed_str(),
-    )
+    oracle_fixture_at(&cache, path).unwrap_or_else(|error| panic!("{error}"))
+}
+
+#[test]
+fn oracle_fixture_contents_are_owned() {
+    fn assert_owned(_: String) {}
+    assert_owned(oracle_fixture("one_window.tree.json"));
 }
 
 fn oracle_fixture_at(cache: &std::path::Path, path: &str) -> Result<String, String> {
@@ -171,6 +173,64 @@ fn mutate_scalar(value: &mut Value) {
 }
 
 #[test]
+fn tree_fixture_comparison_rejects_every_rectangle_coordinate() {
+    let original: Value = serde_json::from_str(&sway_fixture!("one_window.tree.json")).unwrap();
+    let mut paths = Vec::new();
+    for rectangle in ["rect", "deco_rect", "window_rect", "geometry"] {
+        for coordinate in ["x", "y", "width", "height"] {
+            paths.push(format!(
+                "/nodes/1/nodes/0/nodes/0/{rectangle}/{coordinate}"
+            ));
+        }
+    }
+
+    for pointer in paths {
+        let mut mutated = original.clone();
+        *mutated.pointer_mut(&pointer).unwrap() = Value::from(
+            mutated.pointer(&pointer).unwrap().as_i64().unwrap() + 100,
+        );
+        let rejected = std::panic::catch_unwind(|| {
+            assert_tree_rectangles_match_fixture(&original, &mutated, "$tree");
+            assert_rectangle_roles_match_fixture(&original, &mutated, "$tree");
+        });
+        assert!(rejected.is_err(), "rectangle mutation survived at {pointer}");
+    }
+}
+
+#[test]
+fn tree_fixture_comparators_reject_a_missing_or_extra_child() {
+    type Comparator = fn(&Value, &Value, &str);
+    let comparators: [(&str, Comparator); 4] = [
+        ("focus", assert_focus_matches_fixture),
+        ("rectangle roles", assert_rectangle_roles_match_fixture),
+        ("percent", assert_percent_matches_fixture),
+        ("rectangles", assert_tree_rectangles_match_fixture),
+    ];
+    let original: Value = serde_json::from_str(&sway_fixture!("one_floating.tree.json")).unwrap();
+    let workspace = "/nodes/1/nodes/0";
+    for (name, compare) in comparators {
+        compare(&original, &original, "$tree");
+        for key in ["nodes", "floating_nodes"] {
+            let pointer = format!("{workspace}/{key}");
+            let mut missing = original.clone();
+            let children = missing.pointer_mut(&pointer).unwrap().as_array_mut().unwrap();
+            let child = children.pop().expect("fixture workspace has the child");
+            let mut extra = original.clone();
+            extra
+                .pointer_mut(&pointer)
+                .unwrap()
+                .as_array_mut()
+                .unwrap()
+                .push(child);
+            for (shape, actual) in [("missing", &missing), ("extra", &extra)] {
+                let rejected = std::panic::catch_unwind(|| compare(&original, actual, "$tree"));
+                assert!(rejected.is_err(), "{shape} {key} child accepted by {name}");
+            }
+        }
+    }
+}
+
+#[test]
 fn normalized_fixture_comparison_rejects_every_retained_value() {
     for (path, fixture, expected_scalars, expected_arrays) in [
         ("$tree", sway_fixture!("one_window.tree.json"), 111, 18),
@@ -182,7 +242,7 @@ fn normalized_fixture_comparison_rejects_every_retained_value() {
         ),
         ("$outputs", sway_fixture!("one_window.outputs.json"), 29, 4),
     ] {
-        let original: Value = serde_json::from_str(fixture).unwrap();
+        let original: Value = serde_json::from_str(&fixture).unwrap();
         let (normalized, _) = normalized_fixture_values(&original, &original, path);
         let mut paths = Vec::new();
         checked_scalar_paths(&normalized, "", &mut paths);

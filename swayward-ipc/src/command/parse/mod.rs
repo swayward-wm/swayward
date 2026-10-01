@@ -78,16 +78,16 @@ pub fn parse_with_variables(
 
         let mut criteria_start = false;
         if criteria_allowed && text.starts_with('[') {
-            match criteria_end(text) {
-                Some(end) => {
-                    let raw = text[..=end].to_owned();
+            match criteria_end(text).and_then(|end| text.split_at_checked(end + ']'.len_utf8())) {
+                Some((raw, tail)) => {
+                    let raw = raw.to_owned();
                     if let Err(error) = crate::criteria::Criteria::parse(&raw, None) {
                         results.push(Err(parse_error(error)));
                         break;
                     }
                     criteria = Some(raw);
                     criteria_start = true;
-                    text = text[end + 1..].trim_start();
+                    text = tail.trim_start();
                 }
                 None => {
                     // Sway's criteria parser reports a more specific token or
@@ -111,6 +111,11 @@ pub fn parse_with_variables(
             // quoting, instead of asking the generic argument parser to
             // tokenize it (`sway/sway/commands/nop.c`).
             Ok(Command::Nop)
+        } else if let Some(name) = quoted_command_name(text) {
+            // Sway strips quotes from argv[1..] only and looks argv[0] up
+            // verbatim, so a quoted name matches no handler
+            // (`sway/sway/commands.c:264-277`).
+            Err(format!("Unknown/invalid command '{name}'"))
         } else if variables.is_empty() {
             // Preserve the exact old path for commands such as `exec` and
             // `for_window`, whose parsers intentionally consume their raw
@@ -207,6 +212,37 @@ fn parse_one(input: &str) -> Result<Command, String> {
     parse_words(&args, input)
 }
 
+/// The raw first token when it contains a quote character.
+///
+/// Sway's `split_args` keeps quote characters in every token, and argv[0] is
+/// never unquoted, so any quote in it makes the name unknown. Tokens split on
+/// ASCII whitespace only (`sway/common/stringop.c:13,92-140`). Quoted spaces
+/// stay inside the token, so `"focus left"` is one name.
+fn quoted_command_name(text: &str) -> Option<&str> {
+    let text = text.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let mut quote = None;
+    let mut escaped = false;
+    let mut end = text.len();
+    for (index, character) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if let Some(open) = quote {
+            if character == open {
+                quote = None;
+            }
+        } else if matches!(character, '"' | '\'') {
+            quote = Some(character);
+        } else if character.is_ascii_whitespace() {
+            end = index;
+            break;
+        }
+    }
+    let name = text.get(..end)?;
+    name.contains(['"', '\'']).then_some(name)
+}
+
 fn parse_words(args: &[&str], input: &str) -> Result<Command, String> {
     let Some(name) = args.first().copied() else {
         return Err("expected a command".into());
@@ -297,11 +333,15 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, String> {
             [value] if *value == "disable" => Ok(Command::ShortcutsInhibitor(false)),
             _ => Err("Expected `shortcuts_inhibitor enable|disable`".into()),
         },
-        // Session-wide layout settings. Sway serves these from the same table
-        // as the config file (`sway/sway/commands.c:162-173`), so they are
-        // runtime commands there; swayward stores the same settings in KDL and
-        // re-applies the config after changing one. Accepted values and error
-        // strings follow sway's own command files.
+        // Session-wide layout settings from sway's shared `handlers` table,
+        // which serves both the config file and IPC
+        // (`sway/sway/commands.c:43-100,160-173`). swayward stores the same
+        // settings in KDL and re-applies the config after changing one.
+        // Accepted values and error strings follow sway's own command files.
+        // The config-only `config_handlers` (workspace_layout,
+        // default_orientation, primary_selection, xwayland, ...) are not
+        // searched at run time (commands.c:102-110,156-163), so they fall
+        // through to the unknown-command arm.
         name if matches!(
             name,
             "client.focused"
@@ -311,9 +351,6 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, String> {
                 | "client.urgent"
                 | "focus_wrapping"
                 | "force_focus_wrapping"
-                | "workspace_layout"
-                | "default_orientation"
-                | "orientation"
                 | "hide_edge_borders"
                 | "smart_borders"
                 | "smart_gaps"
@@ -322,7 +359,6 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, String> {
                 | "tiling_drag"
                 | "tiling_drag_threshold"
                 | "force_display_urgency_hint"
-                | "primary_selection"
                 | "focus_on_window_activation"
                 | "focus_follows_mouse"
                 | "workspace_auto_back_and_forth"
@@ -333,7 +369,6 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, String> {
                 | "popup_during_fullscreen"
                 | "floating_modifier"
                 | "mouse_warping"
-                | "xwayland"
                 | "font"
                 | "titlebar_border_thickness"
                 | "titlebar_padding"

@@ -272,6 +272,52 @@ fn floating_group_command_serializes_one_recursive_root() {
 }
 
 #[test]
+fn move_position_moves_a_focused_floating_group() {
+    let mut fixture = nested_split_fixture();
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+
+    let outcomes = crate::command::execute(fixture.niri_state(), "move position 120 100");
+
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert!(outcomes[0].success, "{outcomes:?}");
+    let tree = command_tree(&mut fixture);
+    let floating = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(floating["rect"]["x"], 120);
+    assert_eq!(floating["rect"]["y"], 100);
+
+    let id = floating["id"].as_u64().unwrap();
+    let outcomes = crate::command::execute(
+        fixture.niri_state(),
+        &format!("[con_id={id}] move position 75 50"),
+    );
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert!(outcomes[0].success, "{outcomes:?}");
+    let tree = command_tree(&mut fixture);
+    let floating = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(floating["rect"]["x"], 75);
+    assert_eq!(floating["rect"]["y"], 50);
+
+    let outcomes = crate::command::execute(fixture.niri_state(), "move position center");
+    assert!(outcomes[0].success, "{outcomes:?}");
+    let tree = command_tree(&mut fixture);
+    let floating = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(floating["rect"]["x"], 200);
+    assert_eq!(floating["rect"]["y"], 75);
+
+    assert!(crate::command::execute(fixture.niri_state(), "focus child")[0].success);
+    let outcomes = crate::command::execute(fixture.niri_state(), "move position 300 250");
+    assert_eq!(
+        outcomes[0].error.as_deref(),
+        Some("Only floating containers can be moved to an absolute position"),
+        "{outcomes:?}"
+    );
+    let tree = command_tree(&mut fixture);
+    let floating = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(floating["rect"]["x"], 200);
+    assert_eq!(floating["rect"]["y"], 75);
+}
+
+#[test]
 fn criteria_targeted_floating_group_commands_operate_on_the_root() {
     let mut fixture = nested_split_fixture();
     assert!(crate::command::execute(fixture.niri_state(), "mark floating-group")[0].success);
@@ -443,5 +489,74 @@ fn floating_sizes_accept_i32_values_and_reject_malformed_values() {
         assert_eq!(outcome[0].parse_error, Some(true), "{command}");
         assert_eq!(f.swayward().config.borrow().layout, before, "{command}");
     }
+}
+
+
+/// Oracle: scratchpad_group_marked (hidden and shown). Sway keeps a marked
+/// floating group's marks while it is in the scratchpad: GET_TREE shows them
+/// on the hidden root, GET_MARKS lists them (`sway/sway/ipc-server.c:604-610`
+/// walks hidden scratchpad containers through `root_for_each_container`), and
+/// `[con_mark=...] scratchpad show` finds the group again.
+#[test]
+fn marked_floating_group_keeps_its_mark_through_the_scratchpad() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for command in [None, Some("splitv"), Some("splith")] {
+        if let Some(command) = command {
+            assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        }
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    for command in [
+        "focus parent",
+        "mark oracle-group",
+        "floating enable",
+        "move scratchpad",
+    ] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success, "{command}");
+    }
+
+    fn marked(node: &Value, out: &mut Vec<(String, String)>) {
+        if node["marks"]
+            .as_array()
+            .is_some_and(|marks| marks.iter().any(|mark| mark == "oracle-group"))
+        {
+            out.push((
+                node["type"].as_str().unwrap().to_owned(),
+                node["scratchpad_state"].as_str().unwrap_or_default().to_owned(),
+            ));
+        }
+        for key in ["nodes", "floating_nodes"] {
+            for child in node[key].as_array().into_iter().flatten() {
+                marked(child, out);
+            }
+        }
+    }
+    let mut hidden = Vec::new();
+    marked(&command_tree(&mut f), &mut hidden);
+    assert_eq!(hidden, [("floating_con".to_owned(), "fresh".to_owned())]);
+
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        "[con_mark=\"oracle-group\"] scratchpad show",
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+    let tree = command_tree(&mut f);
+    let mut shown = Vec::new();
+    marked(&tree, &mut shown);
+    // Only the mark and the group's placement are pinned here; the shown
+    // group's scratchpad_state is a separate known difference.
+    assert_eq!(shown.len(), 1, "{tree:#}");
+    assert_eq!(shown[0].0, "floating_con");
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["floating_nodes"].as_array().unwrap().len(), 1, "{tree:#}");
 }
 

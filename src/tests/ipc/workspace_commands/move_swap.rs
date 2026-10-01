@@ -709,26 +709,69 @@ fn floating_toggle_after_moving_scratchpad_window_between_workspaces_does_not_pa
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
     for _ in 0..5 {
+        windows::map_window(&mut f, client, windows::WindowSpec::default());
+    }
+
+    for (command, expected_success) in [
+        ("focus parent", true),
+        ("move scratchpad", true),
+        ("scratchpad show", true),
+        ("move container to workspace 2", true),
+        ("floating toggle", false),
+        ("move container to workspace 2", false),
+        ("workspace 2", true),
+        ("floating toggle", true),
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert_eq!(outcome[0].success, expected_success, "{command}: {outcome:?}");
+        f.swayward().layout.verify_invariants();
+    }
+}
+
+#[test]
+fn moving_a_window_away_refocuses_the_most_recent_container_under_its_parent() {
+    // Oracle random seeds 217 step 8 and 124 step 8: sway refocuses
+    // `seat_get_focus_inactive(old_parent)` after a move (sway/commands/move.c:598-608),
+    // and its focus stack holds a split whenever a descendant was focused
+    // (sway/input/seat.c:1178-1190), so a vacated split can be refocused as a container.
+    // Seed 474 step 15: when the move reaps a container, sway raises the most recent view
+    // under its parent instead (sway/input/seat.c:273-323).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id: &str| {
         let window = f.client(client).create_window();
-        window.commit();
+        window.xdg_toplevel.set_app_id(app_id.into());
         let surface = window.surface.clone();
+        window.commit();
         f.roundtrip(client);
         let window = f.client(client).window(&surface);
         window.attach_new_buffer();
         window.ack_last_and_commit();
         f.double_roundtrip(client);
-    }
+    };
+    let focused = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let node = find_json_node(&tree, "con", true).unwrap();
+        (node["layout"].clone(), node["app_id"].clone())
+    };
 
-    for command in [
-        "focus parent",
-        "move scratchpad",
-        "scratchpad show",
-        "move container to workspace 2",
-        "floating toggle",
-        "move container to workspace 2",
-        "workspace 2",
-        "floating toggle",
-    ] {
-        let _ = crate::command::execute(f.niri_state(), command);
+    map(&mut f, "first");
+    map(&mut f, "second");
+    for command in ["layout splitv", "focus up", "move right"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success, "{command}");
     }
+    assert!(crate::command::execute(f.niri_state(), "move container to workspace 2")[0].success);
+    assert_eq!(
+        focused(&mut f),
+        (serde_json::json!("splitv"), serde_json::Value::Null),
+        "the vacated split was focused through its window, so sway refocuses the split"
+    );
 }

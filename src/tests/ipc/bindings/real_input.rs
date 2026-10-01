@@ -176,7 +176,7 @@ fn release_key_binding_survives_config_reload_after_press() {
     assert!(crate::command::execute(fixture.niri_state(), "mode held")[0].success);
 
     key_event(&mut fixture, 53, true);
-    super::i3_conformance::reload_test_config(&mut fixture, "font monospace\n").unwrap();
+    super::i3_conformance::reload_test_config(&mut fixture, "", "font monospace\n").unwrap();
     assert_eq!(fixture.swayward().binding_mode, "default");
     key_event(&mut fixture, 53, false);
 
@@ -313,25 +313,26 @@ fn binding_modes_switch_binds_emit_events_and_list_over_ipc() {
     assert!(crate::command::execute(fixture.niri_state(), "mode resize")[0].success);
     let (event_type, payload) = read_ipc_reply(&mut fixture, &mut subscriber);
     assert_eq!(event_type, (1 << 31) | 2);
-    let expected: Value = serde_json::from_str(sway_fixture!("events/mode.resize.json")).unwrap();
+    let expected: Value = serde_json::from_str(&sway_fixture!("events/mode.resize.json")).unwrap();
     assert_event_shape(&expected, &serde_json::from_str(&payload).unwrap(), "$mode");
 
     type_key_chords(&mut fixture, &[&[133, 10]]);
     let (event_type, payload) = read_ipc_reply(&mut fixture, &mut subscriber);
     assert_eq!(event_type, (1 << 31) | 5);
-    let expected: Value = serde_json::from_str(sway_fixture!("events/binding.run.json")).unwrap();
+    let expected: Value = serde_json::from_str(&sway_fixture!("events/binding.run.json")).unwrap();
     assert_event_shape(
         &expected,
         &serde_json::from_str(&payload).unwrap(),
         "$binding",
     );
 
-    let swayward = fixture.swayward();
     // The bind switched to workspace 7, which is what this asserts. It is not
     // necessarily first: sway sorts numbered workspaces numerically
     // (sway/sway/tree/output.c:387-405), so the startup workspace 1 precedes it.
+    let workspaces: Vec<swayward_ipc::Workspace> =
+        serde_json::from_value(get_workspaces(&mut fixture)).unwrap();
     assert!(
-        describe_workspaces(&swayward.layout, &swayward.global_space)
+        workspaces
             .iter()
             .any(|workspace| workspace.num == 7 && workspace.focused)
     );
@@ -339,7 +340,7 @@ fn binding_modes_switch_binds_emit_events_and_list_over_ipc() {
     assert!(crate::command::execute(fixture.niri_state(), "mode default")[0].success);
     let (event_type, payload) = read_ipc_reply(&mut fixture, &mut subscriber);
     assert_eq!(event_type, (1 << 31) | 2);
-    let expected: Value = serde_json::from_str(sway_fixture!("events/mode.default.json")).unwrap();
+    let expected: Value = serde_json::from_str(&sway_fixture!("events/mode.default.json")).unwrap();
     assert_event_shape(&expected, &serde_json::from_str(&payload).unwrap(), "$mode");
 
     let mut query = UnixStream::connect(socket).unwrap();

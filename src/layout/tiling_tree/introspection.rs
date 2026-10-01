@@ -18,7 +18,7 @@ impl<W: LayoutElement> TilingTree<W> {
         geometry
             .titlebars
             .into_iter()
-            .find(|(titlebar_id, _)| geometry.titlebar_leaves[titlebar_id] == id)
+            .find(|(titlebar_id, _)| geometry.titlebar_leaves.get(titlebar_id) == Some(&id))
             .map(|(_, bar)| bar.ipc_rect)
     }
 
@@ -91,11 +91,39 @@ impl<W: LayoutElement> TilingTree<W> {
         true
     }
 
+    pub fn is_split_sticky(&self, id: NodeId) -> bool {
+        self.sticky_splits.contains(&id)
+    }
+
+    pub fn set_split_sticky(&mut self, id: NodeId, sticky: bool) -> bool {
+        if !self.is_split(id) {
+            return false;
+        }
+        if sticky {
+            self.sticky_splits.insert(id);
+        } else {
+            self.sticky_splits.remove(&id);
+        }
+        true
+    }
+
     pub fn windows(&self) -> impl Iterator<Item = (NodeId, &W)> {
         self.iter_depth_first().filter_map(|(id, node)| match node {
             TreeNode::Leaf { tile } => Some((id, tile.window())),
             TreeNode::Split { .. } => None,
         })
+    }
+
+    /// The tiled slot a fullscreen node reports after sway re-arranged its
+    /// parent without re-arranging the workspace.
+    fn fullscreen_tile_slot_rect(
+        &self,
+        id: NodeId,
+        geometries: &geometry::Geometry<W::Id>,
+    ) -> Option<Rectangle<f64, Logical>> {
+        (self.fullscreen_tile_slot && self.fullscreen_node() == Some(id))
+            .then(|| geometries.tiled_ipc_nodes.get(&id).copied())
+            .flatten()
     }
 
     pub fn ipc_tree(&self) -> IpcNode<W::Id> {
@@ -122,9 +150,8 @@ impl<W: LayoutElement> TilingTree<W> {
                     || !geometries.titlebars.contains_key(&id)
                     || tree.pre_layout_ipc_rects.contains_key(&id));
             let mut rect = tree
-                .pre_layout_ipc_rects
-                .get(&id)
-                .copied()
+                .fullscreen_tile_slot_rect(id, geometries)
+                .or_else(|| tree.pre_layout_ipc_rects.get(&id).copied())
                 .or_else(|| {
                     (!inside_pending_wrapper)
                         .then(|| geometries.leaf_ipc_rects.get(&id).copied())
@@ -157,7 +184,7 @@ impl<W: LayoutElement> TilingTree<W> {
                             )
                         })
                     }),
-                border: tile.sway_border(),
+                border: tile.sway_border_thickness(),
                 border_edges: geometries
                     .border_edges
                     .get(&id)
@@ -173,13 +200,13 @@ impl<W: LayoutElement> TilingTree<W> {
             id: NodeId,
             percent: Option<f64>,
             geometries: &geometry::Geometry<W::Id>,
-        ) -> IpcNode<W::Id> {
+        ) -> Option<IpcNode<W::Id>> {
             let inside_pending_wrapper = tree.fullscreen_node().is_some()
                 && tree
                     .fullscreen_layout_wrappers
                     .iter()
                     .any(|wrapper| tree.contains_node(*wrapper, id));
-            match &tree.nodes[&id].value {
+            Some(match &tree.nodes.get(&id)?.value {
                 TreeNode::Split {
                     layout,
                     children,
@@ -196,6 +223,8 @@ impl<W: LayoutElement> TilingTree<W> {
                         && tree.fullscreen_layout_wrappers.contains(&id)
                     {
                         Rectangle::default()
+                    } else if let Some(slot) = tree.fullscreen_tile_slot_rect(id, geometries) {
+                        slot
                     } else {
                         geometries.ipc_nodes.get(&id).copied().unwrap_or_default()
                     },
@@ -218,11 +247,12 @@ impl<W: LayoutElement> TilingTree<W> {
                         }),
                     focused: tree.focus == Some(id),
                     fullscreen_mode: tree.fullscreen_mode(id).map_or(0, |mode| mode as i32),
+                    sticky: tree.sticky_splits.contains(&id),
                     children: children
                         .iter()
                         .zip(percents)
                         .enumerate()
-                        .map(|(index, (child, stored_percent))| {
+                        .filter_map(|(index, (child, stored_percent))| {
                             let percent = match layout {
                                 Layout::Tabbed | Layout::Stacked
                                     if tree.fullscreen_node().is_some()
@@ -247,49 +277,58 @@ impl<W: LayoutElement> TilingTree<W> {
                                     };
                                     let parent_rect = rect(&id).unwrap_or_default();
                                     let parent_extent = extent(parent_rect).round();
+                                    // Sway's last child takes the parent's remainder
+                                    // (sway/tree/arrange.c:171-174); a sub-pixel last child
+                                    // can leave that negative, which sway never reports.
                                     let allocated = if index + 1 == children.len() {
-                                        parent_extent
-                                            - percents[..index]
+                                        (parent_extent
+                                            - percents
                                                 .iter()
+                                                .take(index)
                                                 .map(|percent| (parent_extent * percent).round())
-                                                .sum::<f64>()
+                                                .sum::<f64>())
+                                        .max(0.)
                                     } else {
                                         (parent_extent * stored_percent).round()
                                     };
-                                    Some(if tree.mapped_under_fullscreen.contains(child) {
-                                        0.
-                                    } else if !tree.mapped_under_fullscreen.is_empty()
-                                        && tree.fullscreen_node() != Some(*child)
-                                    {
-                                        let visible_total = children
-                                            .iter()
-                                            .zip(percents)
-                                            .filter(|(child, _)| {
-                                                !tree.mapped_under_fullscreen.contains(child)
-                                            })
-                                            .map(|(_, percent)| percent)
-                                            .sum::<f64>();
-                                        *stored_percent / visible_total
-                                    } else if tree.fullscreen_node() == Some(*child) {
-                                        let child_rect = geometries
-                                            .ipc_nodes
-                                            .get(child)
-                                            .copied()
-                                            .unwrap_or_default();
-                                        let parent_area =
-                                            parent_rect.size.w.round() * parent_rect.size.h.round();
-                                        let child_area =
-                                            child_rect.size.w.round() * child_rect.size.h.round();
-                                        if parent_area > 0. {
-                                            child_area / parent_area
+                                    let excluded = tree.split_excluded();
+                                    Some(
+                                        if excluded.contains(child)
+                                            && tree.fullscreen_node() != Some(*child)
+                                        {
+                                            0.
+                                        } else if !excluded.is_empty()
+                                            && tree.fullscreen_node() != Some(*child)
+                                        {
+                                            let visible_total = children
+                                                .iter()
+                                                .zip(percents)
+                                                .filter(|(child, _)| !excluded.contains(child))
+                                                .map(|(_, percent)| percent)
+                                                .sum::<f64>();
+                                            *stored_percent / visible_total
+                                        } else if tree.fullscreen_node() == Some(*child) {
+                                            let child_rect = tree
+                                                .fullscreen_tile_slot_rect(*child, geometries)
+                                                .or_else(|| {
+                                                    geometries.ipc_nodes.get(child).copied()
+                                                })
+                                                .unwrap_or_default();
+                                            let parent_area = parent_rect.size.w.round()
+                                                * parent_rect.size.h.round();
+                                            let child_area = child_rect.size.w.round()
+                                                * child_rect.size.h.round();
+                                            if parent_area > 0. {
+                                                child_area / parent_area
+                                            } else {
+                                                *stored_percent
+                                            }
+                                        } else if parent_extent > 0. {
+                                            allocated / parent_extent
                                         } else {
                                             *stored_percent
-                                        }
-                                    } else if parent_extent > 0. {
-                                        allocated / parent_extent
-                                    } else {
-                                        *stored_percent
-                                    })
+                                        },
+                                    )
                                 }
                                 Layout::SplitH | Layout::SplitV => {
                                     let rounded_extent =
@@ -316,12 +355,17 @@ impl<W: LayoutElement> TilingTree<W> {
                                         })
                                         .map(raw_extent)
                                         .sum::<f64>();
+                                    // Sway's last child takes the parent's remainder
+                                    // (sway/tree/arrange.c:171-174); a sub-pixel last child
+                                    // can leave that negative, which sway never reports.
                                     let allocated = if index + 1 == children.len() {
-                                        available.round()
-                                            - percents[..index]
+                                        (available.round()
+                                            - percents
                                                 .iter()
+                                                .take(index)
                                                 .map(|percent| (available * percent).round())
-                                                .sum::<f64>()
+                                                .sum::<f64>())
+                                        .max(0.)
                                     } else {
                                         (available * stored_percent).round()
                                     };
@@ -332,7 +376,7 @@ impl<W: LayoutElement> TilingTree<W> {
                                     })
                                 }
                             };
-                            let mut node = snapshot(tree, *child, percent, geometries);
+                            let mut node = snapshot(tree, *child, percent, geometries)?;
                             let titlebar_rows = match layout {
                                 Layout::Tabbed | Layout::Stacked
                                     if tree.fullscreen_node().is_some()
@@ -348,19 +392,30 @@ impl<W: LayoutElement> TilingTree<W> {
                                 &mut node,
                                 tree.titlebar_height * titlebar_rows as f64,
                             );
-                            node
+                            Some(node)
                         })
                         .collect(),
                 },
                 TreeNode::Leaf { tile } => {
                     snapshot_leaf(tree, id, tile, percent, geometries, inside_pending_wrapper)
                 }
-            }
+            })
         }
 
         let geometries = self.compute_geometry();
         let root = self.resident_root().unwrap_or(self.root);
-        snapshot(self, root, None, &geometries)
+        snapshot(self, root, None, &geometries).unwrap_or_else(|| IpcNode::Split {
+            id: root,
+            layout: Layout::SplitH,
+            title: None,
+            percent: None,
+            rect: Rectangle::default(),
+            focus: Vec::new(),
+            focused: false,
+            fullscreen_mode: 0,
+            sticky: false,
+            children: Vec::new(),
+        })
     }
 
     /// Which decoration layers the tiling tree collects, front to back.
@@ -377,10 +432,10 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// Nodes in the order their render elements are collected, front to back.
     ///
-    /// The focused node comes first so its decorations sit above sibling
-    /// shadows, as sway's active container is above its siblings. Plain
-    /// depth-first order lets a preceding sibling's shadow darken the focused
-    /// border where the two meet.
+    /// The focused node comes first so its decorations sit above sibling shadows. This mirrors
+    /// sway's arranged tabbed and stacked scene, where only the active child's border is enabled
+    /// (sway/desktop/transaction.c:313-370). Plain depth-first order lets a preceding sibling's
+    /// shadow darken the focused border where the two meet.
     pub(super) fn leaf_render_order(
         &self,
         focus: Option<NodeId>,
