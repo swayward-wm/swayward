@@ -813,7 +813,12 @@ impl<W: LayoutElement> Workspace<W> {
                 }
             }
             WorkspaceAddWindowTarget::NextTo(next_to) => {
-                let activate = activate.map_smart(|| self.active_window().unwrap().id() == next_to);
+                // With the workspace itself focused no window is active, so a window placed
+                // next to another does not take focus from it.
+                let activate = activate.map_smart(|| {
+                    self.active_window()
+                        .is_some_and(|window| window.id() == next_to)
+                });
 
                 let floating_has_window = self.floating.has_window(next_to);
 
@@ -1217,7 +1222,7 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.toggle_window_width(None, forwards);
         } else {
-            self.tiling.toggle_width(forwards);
+            self.tiling.toggle_window_width(None, forwards);
         }
     }
 
@@ -1470,7 +1475,7 @@ impl<W: LayoutElement> Workspace<W> {
             let rank = self.tiling.focus_rank_for_window(&id);
             let parent = self.tiling.non_root_parent_for_window(&id);
             let mut tile = if parent.is_some() {
-                self.tiling.remove_tile_preserving_parent(&id).unwrap()
+                self.tiling.remove_tile_without_transaction(&id).unwrap()
             } else {
                 self.tiling.remove_tile(&id, Transaction::new()).unwrap()
             };
@@ -1906,14 +1911,6 @@ impl<W: LayoutElement> Workspace<W> {
             .refresh(is_active && self.floating_is_active.get(), is_focused);
     }
 
-    pub fn scroll_amount_to_activate(&self, window: &W::Id) -> f64 {
-        if self.floating.has_window(window) {
-            return 0.;
-        }
-
-        self.tiling.scroll_amount_to_activate(window)
-    }
-
     pub fn is_urgent(&self) -> bool {
         self.windows().any(|win| win.is_urgent())
     }
@@ -1999,62 +1996,33 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn view_offset_gesture_begin(&mut self, is_touchpad: bool) {
-        self.tiling.view_offset_gesture_begin(is_touchpad);
-    }
+    /// The tiling tree has no view offset to scroll, so these keep niri's gesture plumbing
+    /// compiling while never starting or reporting a gesture.
+    pub fn view_offset_gesture_begin(&mut self, _is_touchpad: bool) {}
 
     pub fn view_offset_gesture_update(
         &mut self,
-        delta_x: f64,
-        timestamp: Duration,
-        is_touchpad: bool,
+        _delta_x: f64,
+        _timestamp: Duration,
+        _is_touchpad: bool,
     ) -> Option<bool> {
-        self.tiling
-            .view_offset_gesture_update(delta_x, timestamp, is_touchpad)
+        None
     }
 
-    pub fn view_offset_gesture_end(&mut self, is_touchpad: Option<bool>) -> bool {
-        self.tiling.view_offset_gesture_end(is_touchpad)
+    pub fn view_offset_gesture_end(&mut self, _is_touchpad: Option<bool>) -> bool {
+        false
     }
 
-    pub fn dnd_scroll_gesture_begin(&mut self) {
-        self.tiling.dnd_scroll_gesture_begin();
+    /// The tiling tree has no view to scroll while dragging near an output edge, so the
+    /// per-workspace part of niri's DnD edge scroll is a no-op; the monitor-level workspace
+    /// scroll in Monitor::dnd_scroll_gesture_* is real.
+    pub fn dnd_scroll_gesture_begin(&mut self) {}
+
+    pub fn dnd_scroll_gesture_scroll(&mut self, _pos: Point<f64, Logical>, _speed: f64) -> bool {
+        false
     }
 
-    pub fn dnd_scroll_gesture_scroll(&mut self, pos: Point<f64, Logical>, speed: f64) -> bool {
-        let config = &self.options.gestures.dnd_edge_view_scroll;
-        let trigger_width = config.trigger_width;
-
-        // This working area intentionally does not include extra struts from Options.
-        let x = pos.x - self.working_area.loc.x;
-        let width = self.working_area.size.w;
-
-        let x = x.clamp(0., width);
-        let trigger_width = trigger_width.clamp(0., width / 2.);
-
-        let delta = if x < trigger_width {
-            -(trigger_width - x)
-        } else if width - x < trigger_width {
-            trigger_width - (width - x)
-        } else {
-            0.
-        };
-
-        let delta = if trigger_width < 0.01 {
-            // Sanity check for trigger-width 0 or small window sizes.
-            0.
-        } else {
-            // Normalize to [0, 1].
-            delta / trigger_width
-        };
-        let delta = delta * speed;
-
-        self.tiling.dnd_scroll_gesture_scroll(delta)
-    }
-
-    pub fn dnd_scroll_gesture_end(&mut self) {
-        self.tiling.dnd_scroll_gesture_end();
-    }
+    pub fn dnd_scroll_gesture_end(&mut self) {}
 
     pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
         if self.floating.has_window(&window) {
@@ -2098,6 +2066,29 @@ impl<W: LayoutElement> Workspace<W> {
         logical_pos: Point<f64, Logical>,
     ) -> Point<f64, SizeFrac> {
         self.floating.logical_to_size_frac(logical_pos)
+    }
+
+    pub fn adjust_floating_tree_size(
+        &mut self,
+        root: NodeId,
+        edge: Option<ResizeEdge>,
+        horizontal: bool,
+        amount: i32,
+        automatic_maximum: Size<f64, Logical>,
+    ) -> bool {
+        self.floating
+            .adjust_tree_size(root, edge, horizontal, amount, automatic_maximum)
+    }
+
+    pub fn set_floating_tree_size(
+        &mut self,
+        root: NodeId,
+        width: Option<f64>,
+        height: Option<f64>,
+        automatic_maximum: Size<f64, Logical>,
+    ) -> bool {
+        self.floating
+            .set_tree_size(root, width, height, automatic_maximum)
     }
 
     pub fn working_area(&self) -> Rectangle<f64, Logical> {
@@ -2163,7 +2154,7 @@ impl<W: LayoutElement> Workspace<W> {
         assert_eq!(self.working_area, self.tiling.parent_area());
         assert_eq!(&self.clock, self.tiling.clock());
         assert!(Rc::ptr_eq(&self.options, self.tiling.options()));
-        self.tiling.verify_invariants();
+        self.tiling.check_invariants();
 
         assert_eq!(self.view_size, self.floating.view_size());
         assert_eq!(self.working_area, self.floating.working_area());

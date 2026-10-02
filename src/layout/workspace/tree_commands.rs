@@ -148,11 +148,14 @@ impl<W: LayoutElement> Workspace<W> {
             if self.floating.focus_parent() {
                 return true;
             }
-            if self.tiling.is_empty() {
-                return false;
-            }
+            // A floating root's parent is the workspace (`focus_parent`,
+            // sway/commands/focus.c:339-351), even when nothing is tiled. An empty tiling tree
+            // keeps no focus of its own, so the raised-but-inactive floating state alone stands
+            // for the focused workspace there.
             self.floating_is_active = FloatingActive::NoButRaised;
-            self.tiling.focus_root();
+            if !self.tiling.is_empty() {
+                self.tiling.focus_root();
+            }
             true
         } else {
             let changed = self.tiling.focus_parent();
@@ -220,7 +223,9 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn is_workspace_focused(&self) -> bool {
-        !self.floating_is_active.get() && self.tiling.root_is_focused()
+        !self.floating_is_active.get()
+            && (self.tiling.root_is_focused()
+                || self.tiling.is_empty() && self.floating_is_active == FloatingActive::NoButRaised)
     }
 
     pub fn toggle_tiling_target_layout(
@@ -408,7 +413,7 @@ impl<W: LayoutElement> Workspace<W> {
         }) {
             return;
         }
-        self.tiling.nest_or_unnest_window_left(window);
+        self.tiling.expel_or_consume(window, false);
     }
 
     pub fn nest_or_unnest_window_right(&mut self, window: Option<&W::Id>) {
@@ -417,35 +422,39 @@ impl<W: LayoutElement> Workspace<W> {
         }) {
             return;
         }
-        self.tiling.nest_or_unnest_window_right(window);
+        self.tiling.expel_or_consume(window, true);
     }
 
     pub fn nest_focused_window(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.nest_focused_window();
+        self.tiling.consume_focused();
     }
 
     pub fn unnest_focused_window(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.unnest_focused_window();
+        self.tiling.expel_focused();
     }
 
     pub fn swap_window_horizontal(&mut self, right: bool) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.swap_window_horizontal(right);
+        if right {
+            self.tiling.move_right();
+        } else {
+            self.tiling.move_left();
+        }
     }
 
     pub fn toggle_focused_tabbed_display(&mut self) {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.toggle_focused_tabbed_display();
+        self.tiling.toggle_focused_tabbed();
     }
 
     pub fn set_focused_layout(
@@ -463,7 +472,9 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn split_focused(&mut self, layout: crate::layout::tiling_tree::Layout) {
-        if !self.floating_is_active.get() {
+        if self.floating_is_active.get() {
+            self.floating.split_active(layout);
+        } else {
             self.tiling.split_focused(layout);
         }
     }
@@ -520,7 +531,13 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.set_focused_display(display);
+        // niri's column display maps onto the parent split: tabbed, or a vertical stack.
+        self.tiling
+            .set_focused_parent_layout(if display == ColumnDisplay::Tabbed {
+                crate::layout::tiling_tree::Layout::Tabbed
+            } else {
+                crate::layout::tiling_tree::Layout::SplitV
+            });
     }
 
     pub fn set_focused_width(&mut self, change: SizeChange) {
@@ -572,7 +589,7 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             return;
         }
-        self.tiling.expand_focused_to_available_width();
+        self.tiling.toggle_full_width();
     }
 
     pub(in crate::layout) fn focus_workspace_node(&mut self) {

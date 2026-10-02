@@ -9,19 +9,6 @@ impl<W: LayoutElement> TilingTree<W> {
         self.compute_geometry().leaf_boxes.remove(&id)
     }
 
-    pub fn ipc_decoration_rect(&self, window: &W::Id) -> Option<Rectangle<f64, Logical>> {
-        let id = self.node_for_window(window)?;
-        let mut geometry = self.compute_geometry();
-        if let Some(bar) = geometry.titlebars.remove(&id) {
-            return Some(bar.ipc_rect);
-        }
-        geometry
-            .titlebars
-            .into_iter()
-            .find(|(titlebar_id, _)| geometry.titlebar_leaves.get(titlebar_id) == Some(&id))
-            .map(|(_, bar)| bar.ipc_rect)
-    }
-
     #[cfg(test)]
     pub fn titlebar_titles(&self) -> Vec<String> {
         self.compute_geometry()
@@ -39,6 +26,12 @@ impl<W: LayoutElement> TilingTree<W> {
             .collect()
     }
 
+    /// Where a tiled drag drops: the closest edge of the hovered view within
+    /// 0.3 * min(w, h) of it, else a swap (sway/input/seatop_move_tiling.c:271-308). Sway's two
+    /// earlier passes are not implemented: a drop on a titlebar groups the views as tabs
+    /// (L203-218) and a drop within 30 px of an ancestor's perpendicular edge inserts beside
+    /// that ancestor (L220-268). Task review2-tiling-drop-target-missing-sway-passes tracks
+    /// them; it is blocked on an oracle harness that can drive real pointer motion.
     pub fn tiled_drop_target(&self, pos: Point<f64, Logical>) -> Option<(NodeId, ResizeEdge)> {
         let geometries = self.compute_geometry();
         let visible = self.visible_leaves();
@@ -79,31 +72,37 @@ impl<W: LayoutElement> TilingTree<W> {
         self.tile(id).map(Tile::window)
     }
 
+    pub(super) fn split_meta(&self, id: NodeId) -> Option<&SplitMeta> {
+        match &self.nodes.get(&id)?.value {
+            TreeNode::Split { meta, .. } => Some(meta),
+            TreeNode::Leaf { .. } => None,
+        }
+    }
+
+    pub(super) fn split_meta_mut(&mut self, id: NodeId) -> Option<&mut SplitMeta> {
+        match &mut self.nodes.get_mut(&id)?.value {
+            TreeNode::Split { meta, .. } => Some(meta),
+            TreeNode::Leaf { .. } => None,
+        }
+    }
+
     pub fn set_title_format(&mut self, id: NodeId, format: String) -> bool {
-        if !self.is_split(id) {
+        let Some(meta) = self.split_meta_mut(id) else {
             return false;
-        }
-        if format == "%title" {
-            self.title_formats.remove(&id);
-        } else {
-            self.title_formats.insert(id, format);
-        }
+        };
+        meta.title_format = (format != "%title").then_some(format);
         true
     }
 
     pub fn is_split_sticky(&self, id: NodeId) -> bool {
-        self.sticky_splits.contains(&id)
+        self.split_meta(id).is_some_and(|meta| meta.sticky)
     }
 
     pub fn set_split_sticky(&mut self, id: NodeId, sticky: bool) -> bool {
-        if !self.is_split(id) {
+        let Some(meta) = self.split_meta_mut(id) else {
             return false;
-        }
-        if sticky {
-            self.sticky_splits.insert(id);
-        } else {
-            self.sticky_splits.remove(&id);
-        }
+        };
+        meta.sticky = sticky;
         true
     }
 
@@ -142,68 +141,6 @@ impl<W: LayoutElement> TilingTree<W> {
             sticky: false,
             children: Vec::new(),
         })
-    }
-
-    /// Which decoration layers the tiling tree collects, front to back.
-    ///
-    /// Render elements are collected front to back, so an element pushed earlier
-    /// is drawn on top. The uncovered top border sits exactly where an inactive
-    /// tab's titlebar ring is drawn, so it must be collected before titlebars, or
-    /// the ring paints over it and the line breaks under every inactive tab.
-    pub(super) const DECORATION_LAYERS: [DecorationLayer; 3] = [
-        DecorationLayer::UncoveredTopBorders,
-        DecorationLayer::Titlebars,
-        DecorationLayer::Tiles,
-    ];
-
-    /// Nodes in the order their render elements are collected, front to back.
-    ///
-    /// The focused node comes first so its decorations sit above sibling shadows. This mirrors
-    /// sway's arranged tabbed and stacked scene, where only the active child's border is enabled
-    /// (sway/desktop/transaction.c:313-370). Plain depth-first order lets a preceding sibling's
-    /// shadow darken the focused border where the two meet.
-    pub(super) fn leaf_render_order(
-        &self,
-        focus: Option<NodeId>,
-    ) -> impl Iterator<Item = (NodeId, &TreeNode<W>)> {
-        let focused = focus
-            .and_then(|id| self.nodes.get(&id).map(|node| (id, &node.value)))
-            .into_iter();
-        focused.chain(
-            self.iter_depth_first()
-                .filter(move |(id, _)| Some(*id) != focus),
-        )
-    }
-
-    pub fn iter_depth_first(&self) -> impl Iterator<Item = (NodeId, &TreeNode<W>)> {
-        let mut ids = Vec::new();
-        self.collect_depth_first(self.root, &mut ids);
-        ids.into_iter()
-            .filter_map(|id| self.nodes.get(&id).map(|node| (id, &node.value)))
-    }
-
-    pub fn contains_node(&self, ancestor: NodeId, mut id: NodeId) -> bool {
-        loop {
-            if id == ancestor {
-                return true;
-            }
-            let Some(parent) = self.nodes.get(&id).and_then(|node| node.parent) else {
-                return false;
-            };
-            id = parent;
-        }
-    }
-
-    fn collect_depth_first(&self, id: NodeId, ids: &mut Vec<NodeId>) {
-        let Some(node) = self.nodes.get(&id) else {
-            return;
-        };
-        ids.push(id);
-        if let TreeNode::Split { children, .. } = &node.value {
-            for child in children {
-                self.collect_depth_first(*child, ids);
-            }
-        }
     }
 }
 
@@ -258,6 +195,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                 layout,
                 children,
                 percents,
+                ..
             } => self.split(id, *layout, children, percents, percent),
             TreeNode::Leaf { tile } => self.leaf(id, tile, percent, inside_pending_wrapper),
         })
@@ -278,7 +216,9 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         IpcNode::Split {
             id,
             layout,
-            title: tree.title_formats.get(&id).cloned(),
+            title: tree
+                .split_meta(id)
+                .and_then(|meta| meta.title_format.clone()),
             percent: pending_wrapper.then_some(0.).or(percent),
             rect: if pending_wrapper {
                 Rectangle::default()
@@ -294,7 +234,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             focus: self.focus_order(children),
             focused: tree.focus == Some(id),
             fullscreen_mode: tree.fullscreen_mode(id).map_or(0, |mode| mode as i32),
-            sticky: tree.sticky_splits.contains(&id),
+            sticky: tree.is_split_sticky(id),
             children: children
                 .iter()
                 .zip(child_percents)

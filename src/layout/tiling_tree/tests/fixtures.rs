@@ -13,6 +13,7 @@ pub(super) struct TestWindowInner {
     pub(super) interactive_resize: Cell<Option<InteractiveResizeData>>,
     pub(super) has_xdg_decoration: Cell<bool>,
     pub(super) server_side_decoration_requested: Cell<Option<bool>>,
+    pub(super) bounds: Cell<Option<Size<i32, Logical>>>,
     pub(super) rules: ResolvedWindowRules,
 }
 
@@ -35,6 +36,7 @@ impl TestWindow {
             interactive_resize: Cell::new(None),
             has_xdg_decoration: Cell::new(false),
             server_side_decoration_requested: Cell::new(None),
+            bounds: Cell::new(None),
             rules,
         }))
     }
@@ -65,8 +67,14 @@ pub(super) fn tree(size: (f64, f64), gaps: f64) -> TilingTree<TestWindow> {
 }
 
 pub(super) fn tile(id: usize, size: Size<f64, Logical>) -> Tile<TestWindow> {
+    tile_from(TestWindow::new(id), size)
+}
+
+/// A tile with default options and its own clock around `window`, for tests that keep a handle
+/// on the window or give it rules.
+pub(super) fn tile_from(window: TestWindow, size: Size<f64, Logical>) -> Tile<TestWindow> {
     Tile::new(
-        TestWindow::new(id),
+        window,
         size,
         1.,
         Clock::with_time(Duration::ZERO),
@@ -129,7 +137,9 @@ impl LayoutElement for TestWindow {
             .set(Some(server_side));
     }
     fn set_activated(&mut self, _: bool) {}
-    fn set_bounds(&self, _: Size<i32, Logical>) {}
+    fn set_bounds(&self, bounds: Size<i32, Logical>) {
+        self.0.bounds.set(Some(bounds));
+    }
     fn is_ignoring_opacity_window_rule(&self) -> bool {
         false
     }
@@ -171,4 +181,25 @@ impl LayoutElement for TestWindow {
     fn is_urgent(&self) -> bool {
         false
     }
+}
+
+/// The `deco_rect` GET_TREE reports for `window`: the IPC leaf's, from the
+/// same snapshot the wire serialises.
+pub(super) fn ipc_deco_rect(
+    t: &TilingTree<TestWindow>,
+    window: usize,
+) -> Option<Rectangle<f64, Logical>> {
+    fn find(node: &IpcNode<usize>, window: usize) -> Option<Option<Rectangle<f64, Logical>>> {
+        match node {
+            IpcNode::Leaf {
+                window: id,
+                deco_rect,
+                ..
+            } => (*id == window).then_some(*deco_rect),
+            IpcNode::Split { children, .. } => {
+                children.iter().find_map(|child| find(child, window))
+            }
+        }
+    }
+    find(&t.ipc_tree(), window).unwrap_or_else(|| panic!("window {window} not in the IPC tree"))
 }

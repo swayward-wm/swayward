@@ -2,21 +2,7 @@ use super::*;
 
 impl<W: LayoutElement> TilingTree<W> {
     pub fn swap_nodes(&mut self, first: NodeId, second: NodeId) -> Result<(), &'static str> {
-        if !self.nodes.contains_key(&first) || !self.nodes.contains_key(&second) {
-            return Err("No matching node.");
-        }
-        if first == second {
-            return Err("Cannot swap a container with itself");
-        }
-        if self.contains_node(first, second) || self.contains_node(second, first) {
-            return Err("Cannot swap ancestor and descendant");
-        }
-        if !self.fits_at(first, self.subtree_height(second))
-            || !self.fits_at(second, self.subtree_height(first))
-        {
-            return Err(TOO_DEEP);
-        }
-
+        self.check_swappable(first, second)?;
         // The workspace root is not a container (sway's swap only accepts
         // containers and views, sway/commands/swap.c:73-75); its missing
         // parent is what the lookups below would trip over.
@@ -33,46 +19,11 @@ impl<W: LayoutElement> TilingTree<W> {
             return Err("No matching node.");
         };
         let old = self.compute_geometry();
-        let parent_is_tabbed = |parent| {
-            matches!(
-                self.nodes.get(&parent).map(|node| &node.value),
-                Some(TreeNode::Split {
-                    layout: Layout::Tabbed | Layout::Stacked,
-                    ..
-                })
-            )
-        };
-        let focus_after_swap = if self.focus == Some(first) && parent_is_tabbed(second_parent) {
-            Some(second)
-        } else if self.focus == Some(second) && parent_is_tabbed(first_parent) {
-            Some(first)
-        } else {
-            self.focus
-        };
-        // Both parents and indices were resolved above and nothing has
-        // mutated the arena since.
-        if first_parent == second_parent {
-            if let Some(TreeNode::Split { children, .. }) = self
-                .nodes
-                .get_mut(&first_parent)
-                .map(|node| &mut node.value)
-            {
-                children.swap(first_index, second_index);
-            }
-        } else {
-            for (parent, index, child) in [
-                (first_parent, first_index, second),
-                (second_parent, second_index, first),
-            ] {
-                if let Some(TreeNode::Split { children, .. }) =
-                    self.nodes.get_mut(&parent).map(|node| &mut node.value)
-                {
-                    if let Some(slot) = children.get_mut(index) {
-                        *slot = child;
-                    }
-                }
-            }
-        }
+        let focus_after_swap = self.focus_after_swap(first, first_parent, second, second_parent);
+        // Both parents and indices were resolved above and nothing has mutated the arena since.
+        // Writing each slot works for a shared parent too: the two indices simply trade nodes.
+        self.replace_child(first_parent, first_index, second);
+        self.replace_child(second_parent, second_index, first);
         for (id, parent) in [(first, second_parent), (second, first_parent)] {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.parent = Some(parent);
@@ -87,6 +38,61 @@ impl<W: LayoutElement> TilingTree<W> {
         Ok(())
     }
 
+    fn check_swappable(&self, first: NodeId, second: NodeId) -> Result<(), &'static str> {
+        if !self.nodes.contains_key(&first) || !self.nodes.contains_key(&second) {
+            return Err("No matching node.");
+        }
+        if first == second {
+            return Err("Cannot swap a container with itself");
+        }
+        if self.contains_node(first, second) || self.contains_node(second, first) {
+            return Err("Cannot swap ancestor and descendant");
+        }
+        if !self.fits_at(first, self.subtree_height(second))
+            || !self.fits_at(second, self.subtree_height(first))
+        {
+            return Err(TOO_DEEP);
+        }
+        Ok(())
+    }
+
+    /// A focused node moving into a tabbed or stacked parent keeps the focus with it, so that
+    /// parent shows it; otherwise focus stays where it is.
+    fn focus_after_swap(
+        &self,
+        first: NodeId,
+        first_parent: NodeId,
+        second: NodeId,
+        second_parent: NodeId,
+    ) -> Option<NodeId> {
+        let parent_is_tabbed = |parent| {
+            matches!(
+                self.nodes.get(&parent).map(|node| &node.value),
+                Some(TreeNode::Split {
+                    layout: Layout::Tabbed | Layout::Stacked,
+                    ..
+                })
+            )
+        };
+        if self.focus == Some(first) && parent_is_tabbed(second_parent) {
+            Some(second)
+        } else if self.focus == Some(second) && parent_is_tabbed(first_parent) {
+            Some(first)
+        } else {
+            self.focus
+        }
+    }
+
+    fn replace_child(&mut self, parent: NodeId, index: usize, child: NodeId) {
+        if let Some(TreeNode::Split { children, .. }) =
+            self.nodes.get_mut(&parent).map(|node| &mut node.value)
+        {
+            if let Some(slot) = children.get_mut(index) {
+                *slot = child;
+            }
+        }
+    }
+
     fn swap_fullscreen_modes(&mut self, first: NodeId, second: NodeId) {
         let first_fullscreen = self
             .pending_modes
@@ -97,17 +103,7 @@ impl<W: LayoutElement> TilingTree<W> {
             .get(&second)
             .and_then(|mode| mode.fullscreen);
         for (id, fullscreen) in [(first, second_fullscreen), (second, first_fullscreen)] {
-            if let Some(mode) = self.pending_modes.get_mut(&id) {
-                mode.fullscreen = fullscreen;
-            } else if let Some(fullscreen) = fullscreen {
-                self.pending_modes.insert(
-                    id,
-                    PendingMode {
-                        fullscreen: Some(fullscreen),
-                        maximized: false,
-                    },
-                );
-            }
+            self.set_pending_fullscreen(id, fullscreen);
         }
     }
 
@@ -158,22 +154,10 @@ impl<W: LayoutElement> TilingTree<W> {
         self.insert_child(parent, id, after);
         self.reap_empty_from(old_parent);
         self.compact_tree();
-        self.restore_moved_focus_history(moved);
+        self.reinsert_focus_history(moved, usize::from(self.focus.is_some()));
         self.animate_geometry_changes(old, None);
         self.request_window_sizes();
         true
-    }
-
-    fn restore_moved_focus_history(&mut self, moved: Vec<W::Id>) {
-        let insertion = usize::from(self.focus.is_some());
-        for window in moved.into_iter().rev() {
-            let Some(leaf) = self.node_for_window(&window) else {
-                continue;
-            };
-            self.focus_history.retain(|candidate| *candidate != leaf);
-            self.focus_history
-                .insert(insertion.min(self.focus_history.len()), leaf);
-        }
     }
 
     pub fn move_direction(&mut self, id: NodeId, direction: Direction) -> bool {
@@ -236,10 +220,7 @@ impl<W: LayoutElement> TilingTree<W> {
             return false;
         }
         self.interactive_resize = None;
-        let wanted_layout = match direction {
-            Direction::Left | Direction::Right => Layout::SplitH,
-            Direction::Up | Direction::Down => Layout::SplitV,
-        };
+        let wanted_layout = direction.axis();
         let boundary_root = self.resident_root().unwrap_or(self.root);
         if self.windows().nth(1).is_none() {
             if boundary_root == self.root {
@@ -251,7 +232,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.set_layout(self.root, wanted_layout);
             return false;
         }
-        let backwards = matches!(direction, Direction::Left | Direction::Up);
+        let backwards = direction.is_backwards();
         let mut branch = id;
         let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
         let mut exhausted_axis = false;
@@ -296,24 +277,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     );
                 }
                 if parent_id == boundary_root {
-                    if branch == id {
-                        return false;
-                    }
-                    let Some(boundary) = children
-                        .get(if backwards { 0 } else { children.len() - 1 })
-                        .copied()
-                    else {
-                        return false;
-                    };
-                    let insert_index = if backwards { 0 } else { children.len() };
-                    let Some(old_parent) = self.detach_subtree_only(id) else {
-                        return false;
-                    };
-                    self.insert_existing_child(boundary_root, id, insert_index, boundary);
-                    self.reap_empty_from(old_parent);
-                    self.compact_tree();
-                    self.finish_directional_move(id);
-                    return true;
+                    return branch != id && self.promote_to_boundary(id, boundary_root, backwards);
                 }
             }
             branch = parent_id;
@@ -322,11 +286,48 @@ impl<W: LayoutElement> TilingTree<W> {
         if boundary_root != self.root || !self.can_wrap_root_children() {
             return false;
         }
+        self.promote_by_wrapping_root(id, direction, exhausted_axis && !vacated_explicit_split)
+    }
+
+    /// Promotes `id` to the outer end of `boundary_root`, a parallel root it has escaped
+    /// ("Container will be promoted", sway/commands/move.c:394-412).
+    fn promote_to_boundary(&mut self, id: NodeId, boundary_root: NodeId, backwards: bool) -> bool {
+        let Some(TreeNode::Split { children, .. }) =
+            self.nodes.get(&boundary_root).map(|node| &node.value)
+        else {
+            return false;
+        };
+        let Some(boundary) = children
+            .get(if backwards { 0 } else { children.len() - 1 })
+            .copied()
+        else {
+            return false;
+        };
+        let insert_index = if backwards { 0 } else { children.len() };
+        let Some(old_parent) = self.detach_subtree_only(id) else {
+            return false;
+        };
+        self.insert_existing_child(boundary_root, id, insert_index, boundary);
+        self.reap_empty_from(old_parent);
+        self.compact_tree();
+        self.finish_directional_move(id);
+        true
+    }
+
+    /// No ancestor runs along the move axis, so the root's children are wrapped and `id` becomes
+    /// their sibling along that axis (sway/commands/move.c:333-344). `collapse` flattens the
+    /// old parent instead of only reaping it when empty.
+    fn promote_by_wrapping_root(
+        &mut self,
+        id: NodeId,
+        direction: Direction,
+        collapse: bool,
+    ) -> bool {
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
         };
         self.wrap_root_for_direction(id, direction);
-        if exhausted_axis && !vacated_explicit_split {
+        if collapse {
             self.collapse_from(old_parent);
         } else {
             self.reap_empty_from(old_parent);
@@ -344,27 +345,55 @@ impl<W: LayoutElement> TilingTree<W> {
         else {
             return;
         };
-        if Self::layouts_parallel(root_layout, wanted_layout) {
+        if !Self::layouts_parallel(root_layout, wanted_layout) {
+            self.set_layout(self.root, wanted_layout);
+            // `set_layout` compacts the tree, which squashes a singleton split.
+            // When the moved node was that split, continue with the one window
+            // that survives the compaction.
+            let Some(id) = self
+                .nodes
+                .contains_key(&id)
+                .then_some(id)
+                .or_else(|| self.windows().next().map(|(leaf, _)| leaf))
+            else {
+                return;
+            };
+            let old_parent = self.nodes.get(&id).and_then(|node| node.parent);
+            if let Some(parent) = old_parent.filter(|parent| *parent != self.root) {
+                self.detach_subtree_only(id);
+                self.insert_child_at(self.root, id, 0);
+                self.reap_empty_from(parent);
+                self.finish_directional_move(id);
+            }
             return;
         }
-        self.set_layout(self.root, wanted_layout);
-        // `set_layout` compacts the tree, which squashes a singleton split.
-        // When the moved node was that split, continue with the one window
-        // that survives the compaction.
-        let Some(id) = self
-            .nodes
-            .contains_key(&id)
-            .then_some(id)
-            .or_else(|| self.windows().next().map(|(leaf, _)| leaf))
-        else {
+        // A same-axis command cannot move the only window out of the
+        // workspace, but sway still promotes a window nested two or more
+        // levels deep to workspace level, reaps the emptied wrappers and
+        // squashes the workspace (`container_move_in_direction`,
+        // sway/commands/move.c:394-412). A window whose parent is a singleton
+        // workspace child is treated as already at workspace level and stays
+        // put (sway/commands/move.c:387-393).
+        let Some(leaf) = self.windows().next().map(|(leaf, _)| leaf) else {
             return;
         };
-        let old_parent = self.nodes.get(&id).and_then(|node| node.parent);
-        if let Some(parent) = old_parent.filter(|parent| *parent != self.root) {
-            self.detach_subtree_only(id);
-            self.insert_child_at(self.root, id, 0);
+        let parent = self
+            .nodes
+            .get(&leaf)
+            .and_then(|node| node.parent)
+            .filter(|parent| *parent != self.root)
+            .filter(|parent| {
+                self.nodes
+                    .get(parent)
+                    .and_then(|node| node.parent)
+                    .is_some_and(|grandparent| grandparent != self.root)
+            });
+        if let Some(parent) = parent {
+            self.detach_subtree_only(leaf);
+            self.insert_child_at(self.root, leaf, 0);
             self.reap_empty_from(parent);
-            self.finish_directional_move(id);
+            self.compact_tree();
+            self.finish_directional_move(leaf);
         }
     }
 
@@ -375,11 +404,8 @@ impl<W: LayoutElement> TilingTree<W> {
         direction: Direction,
         descended_perpendicularly: bool,
     ) -> bool {
-        let wanted_layout = match direction {
-            Direction::Left | Direction::Right => Layout::SplitH,
-            Direction::Up | Direction::Down => Layout::SplitV,
-        };
-        let backwards = matches!(direction, Direction::Left | Direction::Up);
+        let wanted_layout = direction.axis();
+        let backwards = direction.is_backwards();
         match self.nodes.get(&destination).map(|node| &node.value) {
             Some(TreeNode::Leaf { .. }) => {
                 let Some(parent) = self.nodes.get(&destination).and_then(|node| node.parent) else {
@@ -514,47 +540,199 @@ impl<W: LayoutElement> TilingTree<W> {
             .is_some_and(|id| self.move_subtree_to_index(id, index))
     }
 
-    pub fn nest_or_unnest_window_left(&mut self, window: Option<&W::Id>) {
+    /// Expels `window` (or the focused leaf) from its split toward `right`, or consumes the
+    /// neighbour into it when there is nothing to expel. This backs niri's consume-or-expel
+    /// actions.
+    pub fn expel_or_consume(&mut self, window: Option<&W::Id>, right: bool) {
         let id = window
             .and_then(|window| self.node_for_window(window))
             .or(self.focus);
         if let Some(id) = id {
             self.set_focus_id(Some(id));
-            if !self.expel(id, false) {
-                self.consume(id, false);
+            if !self.expel(id, right) {
+                self.consume(id, right);
             }
         }
     }
 
-    pub fn nest_or_unnest_window_right(&mut self, window: Option<&W::Id>) {
-        let id = window
-            .and_then(|window| self.node_for_window(window))
-            .or(self.focus);
-        if let Some(id) = id {
-            self.set_focus_id(Some(id));
-            if !self.expel(id, true) {
-                self.consume(id, true);
-            }
-        }
-    }
-
-    pub fn nest_focused_window(&mut self) {
+    pub fn consume_focused(&mut self) {
         if let Some(id) = self.focus {
             self.consume(id, true);
         }
     }
 
-    pub fn unnest_focused_window(&mut self) {
+    pub fn expel_focused(&mut self) {
         if let Some(id) = self.focus {
             self.expel(id, true);
         }
     }
 
-    pub fn swap_window_horizontal(&mut self, right: bool) {
-        if right {
-            self.move_right();
+    pub(super) fn consume(&mut self, id: NodeId, right: bool) -> bool {
+        let Some(parent) = self.nodes.get(&id).and_then(|node| node.parent) else {
+            return false;
+        };
+        let Some(index) = self.child_index(parent, id) else {
+            return false;
+        };
+        let sibling_index = if right {
+            Some(index + 1)
         } else {
-            self.move_left();
+            index.checked_sub(1)
+        };
+        let Some(sibling) = sibling_index.and_then(|index| self.child_at(parent, index)) else {
+            return false;
+        };
+        // The new wrapper holds both `id` and its sibling one level deeper.
+        if !self.can_wrap(id) || !self.can_wrap(sibling) {
+            return false;
         }
+
+        self.interactive_resize = None;
+        let old = self.compute_geometry();
+        self.remove_child(parent, id);
+        if !self.wrap_pair(parent, sibling, id, right) {
+            return false;
+        }
+        self.compact_tree();
+        self.animate_geometry_changes(old, None);
+        self.request_window_sizes();
+        true
+    }
+
+    /// Replaces `sibling` in `parent` with a new SplitV holding `sibling` and the detached `id`,
+    /// `id` after the sibling when `right`. The wrapper takes the sibling's share.
+    fn wrap_pair(&mut self, parent: NodeId, sibling: NodeId, id: NodeId, right: bool) -> bool {
+        let Some(sibling_percent) = self
+            .child_index(parent, sibling)
+            .and_then(|index| match &self.nodes.get(&parent)?.value {
+                TreeNode::Split { percents, .. } => percents.get(index).copied(),
+                TreeNode::Leaf { .. } => None,
+            })
+        else {
+            return false;
+        };
+        let wrapper = self.alloc(Node {
+            parent: Some(parent),
+            value: TreeNode::Split {
+                layout: Layout::SplitV,
+                children: if right {
+                    vec![sibling, id]
+                } else {
+                    vec![id, sibling]
+                },
+                percents: vec![0.5, 0.5],
+                meta: SplitMeta::default(),
+            },
+        });
+        if let Some(Node {
+            value: TreeNode::Split {
+                children, percents, ..
+            },
+            ..
+        }) = self.nodes.get_mut(&parent)
+        {
+            if let Some(index) = children.iter().position(|child| *child == sibling) {
+                if let (Some(child), Some(percent)) =
+                    (children.get_mut(index), percents.get_mut(index))
+                {
+                    *child = wrapper;
+                    *percent = sibling_percent;
+                }
+            }
+        }
+        self.nodes
+            .get_mut(&sibling)
+            .expect("invariant: a sibling child remains in the arena while it is wrapped")
+            .parent = Some(wrapper);
+        self.nodes
+            .get_mut(&id)
+            .expect("invariant: the consumed node remains in the arena while it is wrapped")
+            .parent = Some(wrapper);
+        true
+    }
+
+    pub(super) fn expel(&mut self, id: NodeId, after: bool) -> bool {
+        let Some(parent) = self.nodes.get(&id).and_then(|node| node.parent) else {
+            return false;
+        };
+        let Some(grandparent) = self.nodes.get(&parent).and_then(|node| node.parent) else {
+            return false;
+        };
+        self.interactive_resize = None;
+        let old = self.compute_geometry();
+        let Some(parent_index) = self.child_index(grandparent, parent) else {
+            return false;
+        };
+        self.remove_child(parent, id);
+        let index = parent_index + usize::from(after);
+        self.insert_existing_child(grandparent, id, index, parent);
+        self.collapse_from(parent);
+        self.compact_tree();
+        self.animate_geometry_changes(old, None);
+        self.request_window_sizes();
+        true
+    }
+
+    pub(super) fn wrap_root_for_direction(&mut self, id: NodeId, direction: Direction) {
+        let layout = direction.axis();
+        let mut old_value = std::mem::replace(
+            &mut self
+                .nodes
+                .get_mut(&self.root)
+                .expect("invariant: the root is always present in the arena")
+                .value,
+            TreeNode::Split {
+                layout,
+                children: Vec::new(),
+                percents: Vec::new(),
+                meta: SplitMeta::default(),
+            },
+        );
+        // The root's metadata belongs to the workspace and stays with it; the container that
+        // takes over the root's children starts fresh.
+        let root_meta = match &mut old_value {
+            TreeNode::Split { meta, .. } => std::mem::take(meta),
+            TreeNode::Leaf { .. } => SplitMeta::default(),
+        };
+        let old = self.alloc(Node {
+            parent: Some(self.root),
+            value: old_value,
+        });
+        if let TreeNode::Split { children, .. } = &self
+            .nodes
+            .get(&old)
+            .expect("invariant: the freshly allocated old root remains in the arena")
+            .value
+        {
+            for child in children.clone() {
+                self.nodes
+                    .get_mut(&child)
+                    .expect("invariant: every split child is present in the arena")
+                    .parent = Some(old);
+            }
+        }
+        self.nodes
+            .get_mut(&old)
+            .expect("invariant: the freshly allocated old root remains in the arena")
+            .parent = Some(self.root);
+        let moving_first = direction.is_backwards();
+        let (children, percents) = if moving_first {
+            (vec![id, old], vec![0.5, 0.5])
+        } else {
+            (vec![old, id], vec![0.5, 0.5])
+        };
+        self.nodes
+            .get_mut(&id)
+            .expect("invariant: a node detached for a root wrap remains in the arena")
+            .parent = Some(self.root);
+        self.nodes
+            .get_mut(&self.root)
+            .expect("invariant: the root is always present in the arena")
+            .value = TreeNode::Split {
+            layout,
+            children,
+            percents,
+            meta: root_meta,
+        };
     }
 }

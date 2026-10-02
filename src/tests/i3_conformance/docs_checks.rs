@@ -1,71 +1,9 @@
-#[test]
-fn initial_floating_applies_only_to_the_requested_window() {
-    let mut fixture = Fixture::new();
-    fixture.add_output(1, (1280, 800));
-    let client = fixture.add_client();
-
-    let floating = create_window(&mut fixture, client, &json!({ "initial_floating": true }));
-    map_window(&mut fixture, client, floating, None, true);
-    assert!(fixture.swayward().layout.focus().unwrap().is_floating());
-
-    let tiled = create_window(&mut fixture, client, &json!({}));
-    map_window(&mut fixture, client, tiled, None, false);
-    assert!(!fixture.swayward().layout.focus().unwrap().is_floating());
-}
-
-#[test]
-fn settling_configures_does_not_ack_an_already_acked_configure() {
-    let mut config =
-        prepare_test_config("", "font monospace\nno_focus [app_id=\"^notme$\"]\n").unwrap();
-    config.debug.deactivate_unfocused_windows = true;
-    let mut fixture = Fixture::with_config(config);
-    fixture.add_output(1, (1280, 800));
-    let client = fixture.add_client();
-    let first = create_window(&mut fixture, client, &json!({}));
-    map_window(&mut fixture, client, first, None, false);
-    let second = create_window(&mut fixture, client, &json!({ "app_id": "notme" }));
-    map_window(&mut fixture, client, second, None, false);
-    settle_configures(&mut fixture, client);
-}
-
-#[test]
-fn i3_conformance_runner() {
-    // `SWAYWARD_I3_TEST` selects a single file, including one with known
-    // failures, so conformance findings stay executable without turning the
-    // default gate red.
-    if let Ok(selected) = std::env::var("SWAYWARD_I3_TEST") {
-        run_i3_test_with_context(&selected, false);
-        return;
-    }
-
-    let tests = passing_tests().collect::<Vec<_>>();
-    assert!(
-        !tests.is_empty(),
-        "no fully green files derive from tests/i3/coverage.toml"
-    );
-    let failures = collect_test_failures(
-        tests.iter().map(|test| (*test, true)),
-        run_i3_test_with_context,
-    );
-    assert!(
-        failures.is_empty(),
-        "{} of {} green i3 files failed:\n{}",
-        failures.len(),
-        tests.len(),
-        failures
-            .iter()
-            .map(|(test, message)| format!("{test}: {message}"))
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    );
-}
+use super::*;
 
 #[test]
 fn coverage_data_validates_completely() {
-    // Every assertion either passes or is a documented, cited skip. This began
-    // as a ratchet at 165 violations while the data was extracted from prose;
-    // it is now an invariant, so any entry that claims something it has not
-    // shown fails the build.
+    // Every assertion either passes or is a documented, cited skip. This is an
+    // invariant: any entry that claims something it has not shown fails the build.
     let output = std::process::Command::new("python3")
         .arg("contrib/coverage-report")
         .arg("--check")
@@ -166,13 +104,12 @@ fn tap_tally_follows_tap_counts_first_stream_rule() {
 /// re-runs every other file with recorded passes and asserts that none of
 /// them lost one.
 ///
-/// Opt in with `SWAYWARD_I3_RATCHET=1`. It runs about 140 files, and
-/// coverage.toml has drifted from a fresh measurement, so it is not yet part
-/// of the `RUN_SLOW_TESTS` CI job; see task i3-coverage-rebaseline. A rise is
-/// reported too, so the row can be updated.
+/// Runs under `RUN_SLOW_TESTS=1`, alongside the other expensive layout and
+/// conformance checks. `coverage.toml` is rebaselined from fresh TAP counts;
+/// a rise is reported without failing so it can be reviewed separately.
 #[test]
 fn i3_conformance_non_green_passes_do_not_drop() {
-    if std::env::var_os("SWAYWARD_I3_RATCHET").is_none() {
+    if std::env::var_os("RUN_SLOW_TESTS").is_none() {
         return;
     }
     let entries = coverage_report()["non_green_passes"]

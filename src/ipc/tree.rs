@@ -149,6 +149,11 @@ fn scratch_output(
             node.scratchpad_state = Some("fresh".into());
             node.sticky = sticky;
             set_windows_visible(&mut node, false);
+            // The tree keeps its internal focus for when it is shown again,
+            // but a hidden container never holds the seat focus: hiding it
+            // refocuses the parent's focus-inactive node
+            // (root_scratchpad_add_container, sway/tree/root.c:91-104).
+            clear_focused(&mut node);
             Some(node)
         })
         .collect::<Vec<_>>();
@@ -218,6 +223,7 @@ fn scratch_output(
         focused: false,
         properties: NodeProperties::None {},
     });
+    // Sway reports 1 on the scratch workspace (`sway/sway/ipc-json.c:473`).
     workspace.fullscreen_mode = 1;
     common_node(CommonNodeContext {
         id: SCRATCH_OUTPUT_ID,

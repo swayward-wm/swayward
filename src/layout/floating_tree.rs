@@ -730,6 +730,23 @@ impl<W: LayoutElement> FloatingLayout<W> {
         self.tree_entries.get_mut(idx)
     }
 
+    /// Pick the next floating focus when the active entry disappears.
+    ///
+    /// Sway asks the seat focus stack for the inactive container
+    /// (`seat_get_focus_inactive`, sway/sway/input/seat.c). Swayward stores
+    /// recursive floating roots and standalone windows separately; use one
+    /// fallback order everywhere so removal API choice cannot change focus.
+    fn fallback_active_window(&self) -> Option<W::Id> {
+        self.entries
+            .first()
+            .map(|entry| entry.tile.window().id().clone())
+            .or_else(|| {
+                self.tree_entries
+                    .iter()
+                    .find_map(|entry| entry.tree.active_window().map(|window| window.id().clone()))
+            })
+    }
+
     pub fn active_window(&self) -> Option<&W> {
         let id = self.active_window_id.as_ref()?;
         self.entries
@@ -789,6 +806,45 @@ impl<W: LayoutElement> FloatingLayout<W> {
 
     pub fn add_tile(&mut self, tile: Tile<W>, activate: bool) {
         self.add_tile_at(0, tile, activate);
+    }
+
+    /// Apply a split command to the active floating container. Sway wraps a
+    /// standalone floating view in a new split container (`container_split`,
+    /// sway/tree/container.c:1565-1620), so a lone leaf is promoted into a
+    /// resident floating tree with its geometry kept.
+    pub fn split_active(&mut self, layout: super::tiling_tree::Layout) {
+        self.interactive_resize = None;
+        let Some(active) = self.active_window_id.clone() else {
+            return;
+        };
+        if let Some((idx, _)) = self.tree_entry_for_window(&active) {
+            if let Some(entry) = self.tree_entries.get_mut(idx) {
+                entry.tree.split_focused(layout);
+            }
+            return;
+        }
+        let Some(index) = self.idx_of(&active) else {
+            return;
+        };
+        let FloatingEntry { tile, data } = self.entries.remove(index);
+        let rect = Rectangle::new(data.logical_pos, data.size);
+        let mut tree = TilingTree::new(
+            self.view_size,
+            rect,
+            false,
+            self.scale,
+            self.clock.clone(),
+            self.options.clone(),
+        );
+        tree.add_tile(tile, super::tiling_tree::InsertTarget::Focused);
+        tree.split_focused(layout);
+        let Some(root) = tree.parent_of_window(&active) else {
+            return;
+        };
+        let Some((subtree, _)) = tree.detach_subtree(root) else {
+            return;
+        };
+        self.add_tree(subtree, rect);
     }
 
     pub fn add_tree(
@@ -877,16 +933,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .as_ref()
             .is_some_and(|active| window_ids.contains(active))
         {
-            self.active_window_id = self
-                .tree_entries
-                .first()
-                .and_then(|entry| entry.tree.active_window())
-                .map(|window| window.id().clone())
-                .or_else(|| {
-                    self.entries
-                        .first()
-                        .map(|entry| entry.tile.window().id().clone())
-                });
+            self.active_window_id = self.fallback_active_window();
         }
         Some(RemovedFloatingTree {
             tree: entry.tree,
@@ -1176,6 +1223,88 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .into_iter()
             .filter_map(|root| self.remove_tree_for_transfer(root))
             .collect()
+    }
+
+    /// Grows or shrinks a floating group root by `amount` px along `edge`, as
+    /// sway's resize_adjust_floating does (sway/commands/resize.c:180-230):
+    /// the size is clamped to the floating constraints, a width or height
+    /// change keeps the centre, and LEFT or TOP keeps the opposite edge.
+    /// Returns false when nothing changes ("Cannot resize any further").
+    pub fn adjust_tree_size(
+        &mut self,
+        root: NodeId,
+        edge: Option<ResizeEdge>,
+        horizontal: bool,
+        amount: i32,
+        automatic_maximum: Size<f64, Logical>,
+    ) -> bool {
+        let Some(mut rect) = self.tree_rect(root) else {
+            return false;
+        };
+        let (min, max) = floating_constraints(
+            self.options.layout.floating_minimum_size,
+            self.options.layout.floating_maximum_size,
+            automatic_maximum,
+        );
+        let clamp_grow = |current: f64, min: f64, max: f64| {
+            let grown = current + f64::from(amount);
+            if grown < min {
+                min - current
+            } else if grown > max {
+                max - current
+            } else {
+                f64::from(amount)
+            }
+        };
+        let (grow_w, grow_h) = if horizontal {
+            (clamp_grow(rect.size.w, min.w, max.w), 0.)
+        } else {
+            (0., clamp_grow(rect.size.h, min.h, max.h))
+        };
+        if grow_w == 0. && grow_h == 0. {
+            return false;
+        }
+        match edge {
+            None if horizontal => rect.loc.x -= (grow_w / 2.).trunc(),
+            None => rect.loc.y -= (grow_h / 2.).trunc(),
+            Some(edge) if edge.contains(ResizeEdge::LEFT) => rect.loc.x -= grow_w,
+            Some(edge) if edge.contains(ResizeEdge::TOP) => rect.loc.y -= grow_h,
+            Some(_) => {}
+        }
+        rect.size.w += grow_w;
+        rect.size.h += grow_h;
+        self.move_tree(root, rect)
+    }
+
+    /// Sets a floating group root's outer size, keeping its centre, as sway's
+    /// resize_set_floating does (sway/commands/resize.c:341-401). `None`
+    /// leaves that dimension unchanged.
+    pub fn set_tree_size(
+        &mut self,
+        root: NodeId,
+        width: Option<f64>,
+        height: Option<f64>,
+        automatic_maximum: Size<f64, Logical>,
+    ) -> bool {
+        let Some(mut rect) = self.tree_rect(root) else {
+            return false;
+        };
+        let (min, max) = floating_constraints(
+            self.options.layout.floating_minimum_size,
+            self.options.layout.floating_maximum_size,
+            automatic_maximum,
+        );
+        if let Some(width) = width {
+            let width = width.min(max.w).max(min.w);
+            rect.loc.x -= ((width - rect.size.w) / 2.).trunc();
+            rect.size.w = width;
+        }
+        if let Some(height) = height {
+            let height = height.min(max.h).max(min.h);
+            rect.loc.y -= ((height - rect.size.h) / 2.).trunc();
+            rect.size.h = height;
+        }
+        self.move_tree(root, rect)
     }
 
     pub fn move_tree(&mut self, root: NodeId, rect: Rectangle<f64, Logical>) -> bool {

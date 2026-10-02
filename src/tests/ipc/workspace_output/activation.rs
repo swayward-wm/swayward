@@ -136,7 +136,7 @@ fn urgent_criteria_selects_windows_by_urgency_timestamp() {
 #[test]
 fn cross_workspace_focus_delays_urgency_clear_without_restarting_timer() {
     let config = swayward_config::Config {
-        urgent_timeout_ms: 60_000,
+        urgent_timeout_ms: swayward_config::UrgentTimeout(60_000),
         ..Default::default()
     };
     let mut f = Fixture::with_config(config);
@@ -175,7 +175,7 @@ fn cross_workspace_focus_delays_urgency_clear_without_restarting_timer() {
 #[test]
 fn closing_a_window_cancels_its_pending_urgency_timer() {
     let config = swayward_config::Config {
-        urgent_timeout_ms: 60_000,
+        urgent_timeout_ms: swayward_config::UrgentTimeout(60_000),
         ..Default::default()
     };
     let mut f = Fixture::with_config(config);
@@ -341,6 +341,30 @@ fn move_no_auto_back_and_forth_changes_the_same_workspace_destination() {
 /// move_to_assigned_workspace_creates_on_its_output,
 /// assign_rule_creates_workspace_on_its_output and
 /// switch_to_assigned_workspace_focuses_its_output.
+#[test]
+fn workspace_output_assignment_names_are_case_sensitive() {
+    let config = swayward_config::Config::parse_mem(
+        r#"
+workspace "5" { sway-output-assignment "headless-1"; }
+workspace "Web" { sway-output-assignment "headless-1"; }
+"#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    assert!(crate::command::execute(f.niri_state(), "focus output headless-2")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "workspace web")[0].success);
+
+    let swayward = f.swayward();
+    let workspaces = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let web = workspaces
+        .iter()
+        .find(|workspace| workspace.name == "web")
+        .unwrap();
+    assert_eq!(web.output, "headless-2");
+}
+
 #[test]
 fn new_workspaces_are_created_on_their_assigned_output() {
     for command in [

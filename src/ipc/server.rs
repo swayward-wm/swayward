@@ -165,8 +165,7 @@ impl IpcServer {
 
     /// Record the config path that GET_VERSION reports.
     ///
-    /// Called at startup and on reload. Without it the field stays empty in a
-    /// real session, which is how it shipped until a hardware boot showed it.
+    /// Called at startup and on reload; without it the field is empty.
     pub fn set_loaded_config_file_name(&self, path: String) {
         self.query_state.borrow_mut().loaded_config_file_name = path;
     }
@@ -181,6 +180,12 @@ impl IpcServer {
 
     fn send_event_now(&self, event: Event) {
         trace!(event_type = event.kind(), "emitting IPC event");
+        // Legacy-only events would take a slot in each subscriber's bounded
+        // queue, and a full queue disconnects the client, for an event the
+        // client is never sent.
+        if !transport::reaches_sway_clients(&event) {
+            return;
+        }
         let mut streams = self.event_streams.borrow_mut();
         let mut to_remove = Vec::new();
         for (idx, stream) in streams.iter_mut().enumerate() {

@@ -607,3 +607,75 @@ fn moving_a_focused_split_to_scratchpad_preserves_the_subtree() {
         crate::layout::tiling_tree::IpcNode::Split { children, .. } if children.len() == 3
     ));
 }
+
+// random seeds 21 step 9 and 127 step 4 (sway-1.12-random): a split command on
+// a focused floating view wraps it in a floating split container
+// (`container_split`, sway/tree/container.c:1565-1620).
+#[test]
+fn split_wraps_a_focused_floating_leaf() {
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    let window = fixture.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    fixture.roundtrip(client);
+    let window = fixture.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    fixture.double_roundtrip(client);
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+
+    assert!(crate::command::execute(fixture.niri_state(), "split v")[0].success);
+
+    let workspace = fixture.swayward().layout.active_workspace().unwrap();
+    let (_, tree, _) = workspace.ipc_floating_trees().next().unwrap();
+    assert!(
+        matches!(
+            tree,
+            crate::layout::tiling_tree::IpcNode::Split {
+                layout: crate::layout::tiling_tree::Layout::SplitV,
+                ref children,
+                ..
+            } if matches!(children.as_slice(), [crate::layout::tiling_tree::IpcNode::Leaf { .. }])
+        ),
+        "{tree:?}"
+    );
+}
+
+/// Every layout option is a sway global handler, and sway runs a handler once
+/// per criteria match whether or not it reads the matched container
+/// (`sway/sway/commands.c:305-326`). So the settings that do not look at a
+/// container change the session value under criteria, rather than failing
+/// with a container-shaped error.
+#[test]
+fn criteria_scoped_layout_options_apply_like_sway() {
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "matched");
+
+    for command in [
+        "hide_edge_borders both",
+        "default_border pixel 3",
+        "default_floating_border none",
+        "focus_follows_mouse no",
+        "mouse_warping none",
+        "font monospace 13",
+        "titlebar_padding 7 3",
+        "titlebar_border_thickness 2",
+        "floating_modifier none",
+    ] {
+        let outcome = crate::command::execute(
+            fixture.niri_state(),
+            &format!(r#"[app_id="matched"] {command}"#),
+        );
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    let config = fixture.swayward().config.borrow();
+    assert_eq!(
+        config.layout.hide_edge_borders,
+        swayward_config::layout::HideEdgeBorders::Both
+    );
+    assert_eq!(config.layout.titlebar.font, "monospace 13");
+}

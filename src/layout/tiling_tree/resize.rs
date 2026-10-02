@@ -59,10 +59,6 @@ impl<W: LayoutElement> TilingTree<W> {
         true
     }
 
-    pub fn toggle_width(&mut self, forwards: bool) {
-        self.toggle_window_width(None, forwards);
-    }
-
     pub fn toggle_full_width(&mut self) {
         let Some(id) = self.focus else { return };
         let Some(rect) = self.geometry(id) else {
@@ -116,15 +112,6 @@ impl<W: LayoutElement> TilingTree<W> {
         self.set_node_size_sway(id, width, height);
     }
 
-    pub fn resize_node_dimension_command(
-        &mut self,
-        id: NodeId,
-        width: bool,
-        change: SizeChange,
-    ) -> bool {
-        self.resize_node_dimension(id, width, change)
-    }
-
     pub fn resize_node_edge_command(
         &mut self,
         id: NodeId,
@@ -138,7 +125,9 @@ impl<W: LayoutElement> TilingTree<W> {
             Layout::SplitV
         };
         let before = edge.intersects(ResizeEdge::LEFT | ResizeEdge::TOP);
-        let Some((first, second, _, _, axis_size, _)) = self.resize_boundary(id, layout, before)
+        let ipc_nodes = self.compute_geometry().ipc_nodes;
+        let Some((first, second, _, _, axis_size, _)) =
+            self.resize_boundary(&ipc_nodes, id, layout, before)
         else {
             return false;
         };
@@ -149,7 +138,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     .nodes
                     .get(&first)
                     .and_then(|node| node.parent)
-                    .and_then(|parent| self.node_geometry(parent))
+                    .and_then(|parent| ipc_nodes.get(&parent))
                     .map(|rect| if horizontal { rect.size.w } else { rect.size.h })
                     .unwrap_or(axis_size);
                 parent_extent * value / 100. / axis_size.max(1.)
@@ -167,10 +156,10 @@ impl<W: LayoutElement> TilingTree<W> {
         height: Option<SizeChange>,
     ) {
         if let Some(change) = width {
-            self.resize_node_dimension_sway(id, true, change);
+            self.resize_node_dimension(id, true, change);
         }
         if let Some(change) = height {
-            self.resize_node_dimension_sway(id, false, change);
+            self.resize_node_dimension(id, false, change);
         }
     }
 
@@ -199,6 +188,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     layout: Layout::SplitV,
                     children,
                     percents,
+                    ..
                 },
             ..
         }) = self.nodes.get_mut(&parent)
@@ -217,10 +207,6 @@ impl<W: LayoutElement> TilingTree<W> {
         self.toggle_preset(window, false, forwards);
     }
 
-    pub fn expand_focused_to_available_width(&mut self) {
-        self.toggle_full_width();
-    }
-
     pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
         if self.interactive_resize.is_some() {
             return false;
@@ -237,8 +223,9 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         // A corner resizes both axes, each against its own sibling boundary,
         // as sway's seatop_begin_resize_tiling does
-        // (`sway/sway/input/seatop_resize_tiling.c:106-127`). An axis with no
+        // (`sway/input/seatop_resize_tiling.c:106-127`). An axis with no
         // boundary in that direction is skipped, not fatal.
+        let ipc_nodes = self.compute_geometry().ipc_nodes;
         let axes: Vec<_> = [
             (true, edges.intersection(ResizeEdge::LEFT_RIGHT)),
             (false, edges.intersection(ResizeEdge::TOP_BOTTOM)),
@@ -253,7 +240,7 @@ impl<W: LayoutElement> TilingTree<W> {
             };
             let toward_before = edge.intersects(ResizeEdge::LEFT | ResizeEdge::TOP);
             let (first, second, initial_first, initial_second, axis_size, sign) =
-                self.resize_boundary(id, layout, toward_before)?;
+                self.resize_boundary(&ipc_nodes, id, layout, toward_before)?;
             Some(ResizeAxis {
                 horizontal,
                 first,
@@ -333,6 +320,45 @@ impl<W: LayoutElement> TilingTree<W> {
             .or(self.focus)
     }
 
+    /// The extent along the preset axis of `id`'s branch in the nearest split that runs along
+    /// that axis and has siblings, and of that split itself.
+    fn preset_extents(&self, id: NodeId, width: bool) -> Option<(f64, f64)> {
+        let wanted = if width {
+            Layout::SplitH
+        } else {
+            Layout::SplitV
+        };
+        let extent = |rect: &Rectangle<f64, Logical>| {
+            if width {
+                rect.size.w
+            } else {
+                rect.size.h
+            }
+        };
+        let mut branch = id;
+        let mut parent = self.nodes.get(&id)?.parent;
+        while let Some(parent_id) = parent {
+            let Node {
+                parent: grandparent,
+                value: TreeNode::Split {
+                    layout, children, ..
+                },
+            } = self.nodes.get(&parent_id)?
+            else {
+                return None;
+            };
+            if *layout == wanted && children.len() > 1 {
+                let geometries = self.compute_geometry();
+                let current = geometries.ipc_nodes.get(&branch)?;
+                let available = geometries.ipc_nodes.get(&parent_id)?;
+                return Some((extent(current), extent(available)));
+            }
+            branch = parent_id;
+            parent = *grandparent;
+        }
+        None
+    }
+
     fn toggle_preset(&mut self, window: Option<&W::Id>, width: bool, forwards: bool) {
         let presets = if width {
             &self.options.layout.preset_column_widths
@@ -345,45 +371,7 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(id) = self.resolve_node(window) else {
             return;
         };
-        let wanted = if width {
-            Layout::SplitH
-        } else {
-            Layout::SplitV
-        };
-        let geometries = self.compute_geometry();
-        let extent = |rect: &Rectangle<f64, Logical>| {
-            if width {
-                rect.size.w
-            } else {
-                rect.size.h
-            }
-        };
-        let mut branch = id;
-        let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
-        let current_and_available = loop {
-            let Some(parent_id) = parent else {
-                break None;
-            };
-            let Some(Node {
-                parent: grandparent,
-                value: TreeNode::Split {
-                    layout, children, ..
-                },
-            }) = self.nodes.get(&parent_id)
-            else {
-                break None;
-            };
-            if *layout == wanted && children.len() > 1 {
-                break geometries
-                    .ipc_nodes
-                    .get(&branch)
-                    .zip(geometries.ipc_nodes.get(&parent_id))
-                    .map(|(current, parent)| (extent(current), extent(parent)));
-            }
-            branch = parent_id;
-            parent = *grandparent;
-        };
-        let Some((current, available)) = current_and_available else {
+        let Some((current, available)) = self.preset_extents(id, width) else {
             return;
         };
         let resolved = |preset| match preset {
@@ -415,7 +403,7 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    fn resize_node_dimension(&mut self, id: NodeId, width: bool, change: SizeChange) -> bool {
+    pub fn resize_node_dimension(&mut self, id: NodeId, width: bool, change: SizeChange) -> bool {
         let wanted = if width {
             Layout::SplitH
         } else {
@@ -471,10 +459,9 @@ impl<W: LayoutElement> TilingTree<W> {
         false
     }
 
-    fn resize_node_dimension_sway(&mut self, id: NodeId, width: bool, change: SizeChange) {
-        self.resize_node_dimension(id, width, change);
-    }
-
+    /// Grows or shrinks `target` by taking the change evenly from all its siblings, refusing
+    /// if any would drop below sway's sane minimum (`container_resize_tiled`,
+    /// sway/commands/resize.c:66-175).
     fn resize_across_siblings(&mut self, parent: NodeId, target: NodeId, delta: f64) -> bool {
         if !delta.is_finite() {
             return false;
@@ -523,7 +510,7 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// Whether `edge` of `window` borders a sibling rather than the
     /// workspace, following sway's `edge_is_external`
-    /// (`sway/sway/input/seatop_default.c:39-74`): some ancestor with exactly
+    /// (`sway/input/seatop_default.c:39-74`): some ancestor with exactly
     /// the parallel split layout has a sibling on that side. A combined edge
     /// matches no layout in sway, so corners are always external.
     pub fn is_internal_edge(&self, window: &W::Id, edge: ResizeEdge) -> bool {
@@ -562,8 +549,10 @@ impl<W: LayoutElement> TilingTree<W> {
         false
     }
 
+    /// `ipc_nodes` is the IPC rect map of a geometry computed for the current tree.
     fn resize_boundary(
         &self,
+        ipc_nodes: &HashMap<NodeId, Rectangle<f64, Logical>>,
         id: NodeId,
         layout: Layout,
         toward_before: bool,
@@ -576,13 +565,14 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout: parent_layout,
                 children,
                 percents,
+                ..
             } = &node.value
             else {
                 return None;
             };
             // Only a split of exactly the resized orientation has a boundary
             // to move: tabs and stacks share one box, so their siblings are
-            // not neighbours (`sway/sway/commands/resize.c:45-64`).
+            // not neighbours (`sway/commands/resize.c:45-64`).
             if *parent_layout == layout {
                 let index = children.iter().position(|child| *child == branch)?;
                 let neighbor_index = if toward_before {
@@ -591,7 +581,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     Some(index + 1).filter(|index| *index < children.len())
                 };
                 if let Some(&neighbor) = neighbor_index.and_then(|index| children.get(index)) {
-                    let axis_size = self.node_geometry(parent_id).map(|rect| {
+                    let axis_size = ipc_nodes.get(&parent_id).map(|rect| {
                         let extent = if layout == Layout::SplitH {
                             rect.size.w
                         } else {

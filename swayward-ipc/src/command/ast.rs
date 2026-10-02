@@ -119,9 +119,9 @@ pub enum XkbLayoutTarget {
 
 /// A session-wide layout setting changed at runtime.
 ///
-/// Each variant names a sway directive that swayward also accepts in KDL. The
-/// string is validated by the config crate's own `FromStr`, so IPC and the
-/// config file accept exactly the same values.
+/// Each variant names a sway directive that swayward also accepts in KDL.
+/// String-valued variants are checked when the setting is applied, against
+/// the config crate's `FromStr` or a hand-written match in the executor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutOption {
     FocusWrapping(FocusWrappingArg),
@@ -182,35 +182,6 @@ pub enum LayoutOption {
         style: String,
         width: Option<u16>,
     },
-}
-
-impl LayoutOption {
-    /// Whether a criteria-scoped form still changes the session-wide
-    /// setting, once per match, rather than being refused.
-    ///
-    /// Sway runs a handler once per criteria match whether or not it looks at
-    /// the matched container (`sway/sway/commands.c:288-330`), so these
-    /// global handlers simply repeat.
-    pub fn is_global(&self) -> bool {
-        matches!(
-            self,
-            Self::FloatingMinimumSize(..)
-                | Self::FloatingMaximumSize(..)
-                | Self::FocusWrapping(..)
-                | Self::ForceFocusWrapping(..)
-                | Self::PopupDuringFullscreen(..)
-                | Self::SmartBorders(..)
-                | Self::HideEdgeBordersSmart(..)
-                | Self::SmartGaps(..)
-                | Self::ShowMarks(..)
-                | Self::TitleAlignment(..)
-                | Self::TilingDrag(..)
-                | Self::TilingDragThreshold(..)
-                | Self::ForceDisplayUrgencyHint(..)
-                | Self::FocusOnWindowActivation(..)
-                | Self::WorkspaceAutoBackAndForth(..)
-        )
-    }
 }
 
 /// A `focus_wrapping` argument. `Toggle` depends on the current value, so it

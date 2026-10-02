@@ -99,30 +99,25 @@ impl<W: LayoutElement> TilingTree<W> {
                 *current = layout;
             }
         } else {
-            self.wrap_split_child(id, parent, layout);
+            self.wrap_node(id, layout);
         }
-    }
-
-    fn wrap_split_child(&mut self, id: NodeId, parent: NodeId, layout: Layout) {
-        debug_assert_eq!(
-            self.nodes.get(&id).and_then(|node| node.parent),
-            Some(parent)
-        );
-        self.wrap_node(id, layout);
     }
 
     pub fn set_layout(&mut self, id: NodeId, layout: Layout) {
         self.interactive_resize = None;
         self.fullscreen_tile_slot = false;
         if let Some(Node {
-            value: TreeNode::Split {
-                layout: current, ..
-            },
+            value:
+                TreeNode::Split {
+                    layout: current,
+                    meta,
+                    ..
+                },
             ..
         }) = self.nodes.get_mut(&id)
         {
             if matches!(*current, Layout::SplitH | Layout::SplitV) && *current != layout {
-                self.previous_split_layouts.insert(id, *current);
+                meta.previous_layout = Some(*current);
             }
             *current = layout;
             self.compact_tree();
@@ -132,7 +127,9 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    pub fn toggle_focused_tabbed_display(&mut self) {
+    /// Toggles the focused leaf's parent between tabbed and SplitH, splitting the leaf when it
+    /// has no parent split. This backs niri's toggle-column-tabbed-display action.
+    pub fn toggle_focused_tabbed(&mut self) {
         let Some(parent) = self.focus.and_then(|id| self.nodes.get(&id)?.parent) else {
             return;
         };
@@ -217,13 +214,7 @@ impl<W: LayoutElement> TilingTree<W> {
             .get(&parent)
             .and_then(|mode| mode.fullscreen)
         {
-            self.pending_modes
-                .entry(id)
-                .or_insert(PendingMode {
-                    fullscreen: None,
-                    maximized: false,
-                })
-                .fullscreen = Some(fullscreen);
+            self.set_pending_fullscreen(id, Some(fullscreen));
         }
         if self.focus == Some(parent) {
             self.set_focus_id(Some(id));
@@ -325,10 +316,14 @@ impl<W: LayoutElement> TilingTree<W> {
         true
     }
 
+    pub(super) fn previous_layout(&self, id: NodeId) -> Option<Layout> {
+        self.split_meta(id).and_then(|meta| meta.previous_layout)
+    }
+
     pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
         let (target, remapped) = self.focused_layout_target();
         let target = target?;
-        self.previous_split_layouts.contains_key(&target).then(|| {
+        self.previous_layout(target).is_some().then(|| {
             self.restore_node_layout(target);
             remapped
         })
@@ -342,7 +337,7 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn restore_node_layout(&mut self, target: NodeId) -> bool {
-        let Some(layout) = self.previous_split_layouts.get(&target).copied() else {
+        let Some(layout) = self.previous_layout(target) else {
             return self.nodes.contains_key(&target);
         };
         self.set_layout_for_command(target, layout);
@@ -367,11 +362,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout: Layout::SplitV,
                 ..
             }) => Layout::SplitH,
-            _ => self
-                .previous_split_layouts
-                .get(&target)
-                .copied()
-                .unwrap_or(Layout::SplitH),
+            _ => self.previous_layout(target).unwrap_or(Layout::SplitH),
         };
         self.set_layout_for_command(target, layout);
     }
@@ -388,18 +379,12 @@ impl<W: LayoutElement> TilingTree<W> {
         self.split(focus, layout);
     }
 
-    pub fn set_focused_display(&mut self, display: ColumnDisplay) {
+    /// Sets the layout of the focused leaf's parent split.
+    pub fn set_focused_parent_layout(&mut self, layout: Layout) {
         let Some(parent) = self.focus.and_then(|id| self.nodes.get(&id)?.parent) else {
             return;
         };
-        self.set_layout(
-            parent,
-            if display == ColumnDisplay::Tabbed {
-                Layout::Tabbed
-            } else {
-                Layout::SplitV
-            },
-        );
+        self.set_layout(parent, layout);
     }
 
     /// Wraps `id` in a new container, or returns `id` unchanged when the
@@ -430,6 +415,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout,
                 children: vec![id],
                 percents: vec![1.],
+                meta: SplitMeta::default(),
             },
         });
         if let Some(TreeNode::Split {
@@ -451,13 +437,7 @@ impl<W: LayoutElement> TilingTree<W> {
             .get_mut(&id)
             .and_then(|mode| mode.fullscreen.take())
         {
-            self.pending_modes
-                .entry(wrapper)
-                .or_insert(PendingMode {
-                    fullscreen: None,
-                    maximized: false,
-                })
-                .fullscreen = Some(fullscreen);
+            self.set_pending_fullscreen(wrapper, Some(fullscreen));
         }
         wrapper
     }
@@ -465,6 +445,17 @@ impl<W: LayoutElement> TilingTree<W> {
     /// Moves the root's children into a new container, or returns the root
     /// unchanged when that would exceed
     /// [`MAX_TREE_DEPTH`](super::depth::MAX_TREE_DEPTH).
+    /// Wrap the workspace's tiling children in one new container that keeps
+    /// the workspace layout (`workspace_wrap_children`,
+    /// sway/tree/workspace.c:898-910).
+    pub fn wrap_workspace_children(&mut self) {
+        let layout = self.representation_layout();
+        if self.split_len(self.root).is_some_and(|len| len > 0) {
+            self.wrap_root_children(layout);
+            self.request_window_sizes();
+        }
+    }
+
     fn wrap_root_children(&mut self, layout: Layout) -> NodeId {
         if !self.can_wrap_root_children() {
             return self.root;
@@ -473,6 +464,7 @@ impl<W: LayoutElement> TilingTree<W> {
             layout: root_layout,
             children,
             percents,
+            ..
         }) = self.nodes.get_mut(&self.root).map(|node| &mut node.value)
         else {
             return self.root;
@@ -486,12 +478,14 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout,
                 children: children.clone(),
                 percents,
+                meta: SplitMeta {
+                    previous_layout: matches!(root_layout, Layout::SplitH | Layout::SplitV)
+                        .then_some(root_layout),
+                    ..SplitMeta::default()
+                },
             },
         });
         self.ipc_stale_nodes.insert(wrapper);
-        if matches!(root_layout, Layout::SplitH | Layout::SplitV) {
-            self.previous_split_layouts.insert(wrapper, root_layout);
-        }
         for child in children {
             if let Some(node) = self.nodes.get_mut(&child) {
                 node.parent = Some(wrapper);
@@ -528,14 +522,17 @@ impl<W: LayoutElement> TilingTree<W> {
         self.interactive_resize = None;
         self.fullscreen_tile_slot = false;
         if let Some(Node {
-            value: TreeNode::Split {
-                layout: current, ..
-            },
+            value:
+                TreeNode::Split {
+                    layout: current,
+                    meta,
+                    ..
+                },
             ..
         }) = self.nodes.get_mut(&id)
         {
             if matches!(*current, Layout::SplitH | Layout::SplitV) && *current != layout {
-                self.previous_split_layouts.insert(id, *current);
+                meta.previous_layout = Some(*current);
             }
             *current = layout;
             self.request_window_sizes();

@@ -12,11 +12,12 @@ impl<W: LayoutElement> TilingTree<W> {
             .position(|candidate| *candidate == node)
     }
 
+    pub(crate) fn parent_of_window(&self, window: &W::Id) -> Option<NodeId> {
+        self.nodes.get(&self.node_for_window(window)?)?.parent
+    }
+
     pub fn non_root_parent_for_window(&self, window: &W::Id) -> Option<NodeId> {
-        let node = self.node_for_window(window)?;
-        self.nodes
-            .get(&node)?
-            .parent
+        self.parent_of_window(window)
             .filter(|parent| *parent != self.root && self.split_len(*parent).is_some_and(|n| n > 1))
     }
 
@@ -223,7 +224,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 )
             );
             if matching_axis {
-                let branch = if matches!(dir, Direction::Left | Direction::Up) {
+                let branch = if dir.is_backwards() {
                     children.last()
                 } else {
                     children.first()
@@ -360,14 +361,14 @@ impl<W: LayoutElement> TilingTree<W> {
         next.is_some()
     }
 
+    /// The container `focus <direction>` lands on: the neighbour in the nearest ancestor along
+    /// that axis, or with wrapping the far end of that ancestor
+    /// (`node_get_in_direction_tiling`, sway/commands/focus.c:138-224).
     fn directional_focus_target(&self, dir: Direction, allow_wrap: bool) -> Option<NodeId> {
         let mut current = self.focus?;
         let barrier = self.fullscreen_node();
-        let direction_layout = match dir {
-            Direction::Left | Direction::Right => Layout::SplitH,
-            Direction::Up | Direction::Down => Layout::SplitV,
-        };
-        let backwards = matches!(dir, Direction::Left | Direction::Up);
+        let direction_layout = dir.axis();
+        let backwards = dir.is_backwards();
         let mut wrap = None;
 
         while let Some(parent) = self.nodes.get(&current).and_then(|node| node.parent) {
@@ -558,21 +559,90 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     fn focus_extreme(&mut self, bottom: bool) {
+        // Hidden tabs share the shown tab's box, so only visible leaves compete. Ties go to the
+        // first in tree order, not to HashMap order.
         let geometries = self.compute_geometry();
-        let focus = geometries
-            .leaf_boxes
-            .iter()
-            .min_by(|(_, a), (_, b)| {
-                let a = a.loc.y + if bottom { a.size.h } else { 0. };
-                let b = b.loc.y + if bottom { b.size.h } else { 0. };
-                if bottom {
-                    b.total_cmp(&a)
-                } else {
-                    a.total_cmp(&b)
-                }
-            })
-            .map(|(id, _)| *id)
+        let visible = self.visible_leaves();
+        let edge = |rect: &Rectangle<f64, Logical>| {
+            if bottom {
+                -(rect.loc.y + rect.size.h)
+            } else {
+                rect.loc.y
+            }
+        };
+        let focus = self
+            .iter_depth_first()
+            .filter(|(id, _)| visible.contains(id))
+            .filter_map(|(id, _)| Some((id, edge(geometries.leaf_boxes.get(&id)?))))
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(id, _)| id)
             .or(self.focus);
         self.set_focus_id(focus);
+    }
+
+    pub(super) fn set_focus_id(&mut self, focus: Option<NodeId>) {
+        self.focus = focus;
+        self.ipc_focus_follows_history = false;
+        if let Some(id) = focus {
+            // Sway raises every ancestor, outermost last, before the focused node itself, so the
+            // node's parents become focus-inactive entries (`seat_set_workspace_focus`,
+            // sway/input/seat.c:1178-1190).
+            let mut ancestors = Vec::new();
+            let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
+            while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+                ancestors.push(ancestor);
+                parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+            }
+            self.focus_history
+                .retain(|candidate| *candidate != id && !ancestors.contains(candidate));
+            for ancestor in ancestors {
+                self.focus_history.insert(0, ancestor);
+            }
+            self.focus_history.insert(0, id);
+            let mut stale = std::mem::take(&mut self.ipc_stale_nodes);
+            stale.retain(|candidate| !self.contains_node(*candidate, id));
+            self.ipc_stale_nodes = stale;
+        }
+    }
+
+    /// The child a tabbed or stacked `parent` shows: the one holding focus,
+    /// else the one its focus last visited. Sway arranges the container's
+    /// focused-inactive child (sway/desktop/transaction.c:468-470) and
+    /// disables the rest (:316-321).
+    pub(super) fn shown_child_in(&self, parent: NodeId) -> Option<NodeId> {
+        let TreeNode::Split { children, .. } = &self.nodes.get(&parent)?.value else {
+            return None;
+        };
+        self.focus
+            .and_then(|focus| {
+                children
+                    .iter()
+                    .copied()
+                    .find(|child| self.contains_node(*child, focus))
+            })
+            .or_else(|| self.focused_child_in(parent))
+    }
+
+    pub(super) fn focused_child_in(&self, parent: NodeId) -> Option<NodeId> {
+        let TreeNode::Split { children, .. } = &self.nodes.get(&parent)?.value else {
+            return None;
+        };
+        self.focus_history
+            .iter()
+            .find_map(|focused| {
+                children
+                    .iter()
+                    .copied()
+                    .find(|child| self.contains_node(*child, *focused))
+            })
+            .or_else(|| children.first().copied())
+    }
+
+    pub(super) fn focused_leaf_in(&self, id: NodeId) -> Option<NodeId> {
+        self.focus_history
+            .iter()
+            .copied()
+            .find(|candidate| self.tile(*candidate).is_some() && self.contains_node(id, *candidate))
+            .or_else(|| self.first_leaf_in(id))
     }
 }

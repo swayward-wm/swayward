@@ -53,8 +53,8 @@ pub(super) fn query_reply(state: &State, msg_type: MessageType) -> Option<Vec<u8
         MessageType::GetOutputs => to_reply(&describe_all_outputs(state)),
         MessageType::GetMarks => {
             // Sway walks the container tree and appends each container's
-            // marks in the order it meets them (`sway/tree/root.c:246-260`,
-            // `sway/ipc-server.c:604-610,825-834`). Collecting from the tree
+            // marks in the order it meets them (`sway/sway/tree/root.c:243-262`,
+            // `sway/sway/ipc-server.c:604-610,825-834`). Collecting from the tree
             // gives that order, and reaches marks on split containers as well
             // as on views.
             let mut all_marks = Vec::new();
@@ -126,13 +126,18 @@ pub(super) fn describe_input(
     device: &crate::input::IpcInputDevice,
 ) -> serde_json::Value {
     let mut value = serde_json::to_value(device).unwrap_or_default();
-    if device.device_type == "pointer" {
+    if matches!(device.device_type, "pointer" | "touchpad") {
         if let Some(object) = value.as_object_mut() {
             let config = swayward.config.borrow();
-            let factor = config
-                .input
-                .mouse
-                .scroll_factor
+            // Each device reports its own config's factor
+            // (`sway/sway/ipc-json.c:1189-1197`); swayward keeps one for
+            // touchpads and one for other pointers.
+            let factor = if device.device_type == "touchpad" {
+                config.input.touchpad.scroll_factor
+            } else {
+                config.input.mouse.scroll_factor
+            };
+            let factor = factor
                 .and_then(|factor| {
                     let (horizontal, vertical) = factor.h_v_factors();
                     (horizontal == vertical).then_some(horizontal)
@@ -195,7 +200,7 @@ fn seat_capabilities(devices: &[serde_json::Value]) -> u32 {
     devices.iter().fold(0, |capabilities, device| {
         capabilities
             | match device["type"].as_str() {
-                Some("pointer" | "tablet_tool") => 1,
+                Some("pointer" | "touchpad" | "tablet_tool") => 1,
                 Some("keyboard") => 2,
                 Some("touch") => 4,
                 _ => 0,

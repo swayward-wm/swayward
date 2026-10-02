@@ -28,7 +28,6 @@ pub(crate) struct Geometry<I> {
 
 struct AssignContext<'a, W: LayoutElement> {
     nodes: &'a HashMap<NodeId, Node<W>>,
-    title_formats: &'a HashMap<NodeId, String>,
     gaps: f64,
     titlebar_height: f64,
     fullscreen: &'a HashSet<NodeId>,
@@ -54,7 +53,6 @@ struct Assignment {
 /// Everything one tree geometry pass reads, borrowed from the tree and its layout options.
 pub(crate) struct GeometryInput<'a, W: LayoutElement> {
     pub nodes: &'a HashMap<NodeId, Node<W>>,
-    pub title_formats: &'a HashMap<NodeId, String>,
     pub root: NodeId,
     pub view_size: Size<f64, Logical>,
     pub parent_area: Rectangle<f64, Logical>,
@@ -77,7 +75,6 @@ pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry
     let workspace_area = workspace_area(&input, gaps);
     let mut context = AssignContext {
         nodes: input.nodes,
-        title_formats: input.title_formats,
         gaps,
         titlebar_height: input.titlebar_height,
         fullscreen: &HashSet::new(),
@@ -171,7 +168,7 @@ fn apply_fullscreen_pass<W: LayoutElement>(
 
 /// A tabbed or stacked container shows only its active child; sway sends the rest to
 /// disable_container, which hides the whole subtree, strips included
-/// (sway/desktop/transaction.c:316-321). Titlebars are emitted for every strip in the tree, so
+/// (sway/desktop/transaction.c:313-323). Titlebars are emitted for every strip in the tree, so
 /// hide those whose branch is not shown. A branch is shown exactly when it holds a visible
 /// leaf, because visible_leaves already walks only the active child of each tab level.
 ///
@@ -363,7 +360,7 @@ fn assign_leaf<W: LayoutElement>(
 /// The border edges a leaf draws. `hide_edge_borders` drops the edges that touch the
 /// workspace's outer edge on the chosen axes, and `smart_borders` drops every edge when only
 /// one view is visible (with `no_gaps`, only when gaps do not reach the edge), as sway's
-/// view_autoconfigure does (sway/tree/view.c).
+/// view_autoconfigure does (sway/tree/view.c:377-401).
 fn border_edges<W: LayoutElement>(
     context: &AssignContext<'_, W>,
     rect: Rectangle<f64, Logical>,
@@ -452,7 +449,7 @@ fn emit_leaf_titlebar<W: LayoutElement>(
 }
 
 /// A leaf's content inside its borders. The titlebar occupies the top slot and the side
-/// borders begin below it, matching arrange_container() (sway/desktop/transaction.c:409-440).
+/// borders begin below it, matching arrange_container() (sway/desktop/transaction.c:409-446).
 fn content_rect(
     mut rect: Rectangle<f64, Logical>,
     edges: ResizeEdge,
@@ -567,7 +564,11 @@ fn assign_linear_split<W: LayoutElement>(
             context.gaps,
             extent,
             children.len(),
-            if layout == Layout::SplitH { 100. } else { 60. },
+            if layout == Layout::SplitH {
+                MIN_SANE_W
+            } else {
+                MIN_SANE_H
+            },
         )
     };
     let available = extent - gap * children.len().saturating_sub(1) as f64;
@@ -623,7 +624,6 @@ fn assign_strip<W: LayoutElement>(
     result: &mut Geometry<W::Id>,
 ) {
     let nodes = context.nodes;
-    let title_formats = context.title_formats;
     let titlebar_height = context.titlebar_height;
     let fullscreen = context.fullscreen;
 
@@ -639,7 +639,7 @@ fn assign_strip<W: LayoutElement>(
     content.loc.y += total_height;
     content.size.h = (content.size.h - total_height).max(0.);
     for (index, child) in children.iter().enumerate() {
-        if let Some(entry) = first_window(nodes, title_formats, *child) {
+        if let Some(entry) = first_window(nodes, *child) {
             emit_strip_titlebar(
                 context,
                 layout,
@@ -762,6 +762,7 @@ fn assign<W: LayoutElement>(
             layout,
             children,
             percents,
+            ..
         } => match layout {
             Layout::SplitH | Layout::SplitV => assign_linear_split(
                 context,
@@ -811,6 +812,13 @@ fn subtract_horizontal(
     .collect()
 }
 
+/// Sway's smallest sane container width and height (include/sway/tree/node.h:8-9).
+const MIN_SANE_W: f64 = 100.;
+const MIN_SANE_H: f64 = 60.;
+
+/// The inner gap between a split's children, shrunk so that every child keeps at least
+/// `minimum_child_extent`, and floored to whole pixels (`apply_horiz_layout` and
+/// `apply_vert_layout`, sway/tree/arrange.c:70-73 and 155-158).
 fn split_gap(requested: f64, extent: f64, children: usize, minimum_child_extent: f64) -> f64 {
     let separators = children.saturating_sub(1);
     if separators == 0 {
@@ -823,30 +831,33 @@ fn split_gap(requested: f64, extent: f64, children: usize, minimum_child_extent:
 
 fn first_window<W: LayoutElement>(
     nodes: &HashMap<NodeId, Node<W>>,
-    title_formats: &HashMap<NodeId, String>,
     id: NodeId,
 ) -> Option<(NodeId, W::Id, String)> {
     match &nodes.get(&id)?.value {
         TreeNode::Leaf { tile } => Some((id, tile.window().id().clone(), tile.window().title())),
         TreeNode::Split {
-            layout, children, ..
+            layout,
+            children,
+            meta,
+            ..
         } => {
-            let (leaf, target, _) = first_window(nodes, title_formats, *children.first()?)?;
+            let (leaf, target, _) = first_window(nodes, *children.first()?)?;
             Some((
                 leaf,
                 target,
                 format_representation(
-                    title_formats.get(&id).map(String::as_str),
-                    &tree_representation(nodes, title_formats, *layout, children),
+                    meta.title_format.as_deref(),
+                    &tree_representation(nodes, *layout, children),
                 ),
             ))
         }
     }
 }
 
+/// A split's `representation`, such as `H[a V[b c]]` (`container_build_representation`,
+/// sway/tree/container.c:702-748).
 fn tree_representation<W: LayoutElement>(
     nodes: &HashMap<NodeId, Node<W>>,
-    title_formats: &HashMap<NodeId, String>,
     layout: Layout,
     children: &[NodeId],
 ) -> String {
@@ -861,10 +872,13 @@ fn tree_representation<W: LayoutElement>(
         .filter_map(|child| match &nodes.get(child)?.value {
             TreeNode::Leaf { tile } => Some(tile.window().title()),
             TreeNode::Split {
-                layout, children, ..
+                layout,
+                children,
+                meta,
+                ..
             } => Some(format_representation(
-                title_formats.get(child).map(String::as_str),
-                &tree_representation(nodes, title_formats, *layout, children),
+                meta.title_format.as_deref(),
+                &tree_representation(nodes, *layout, children),
             )),
         })
         .collect::<Vec<_>>()
@@ -872,6 +886,9 @@ fn tree_representation<W: LayoutElement>(
     format!("{prefix}[{children}]")
 }
 
+/// A split's titlebar text: its `title_format` with `%title` replaced by the representation, as
+/// for a container without a view (`parse_title_format` and `container_update_representation`,
+/// sway/tree/container.c:632-695 and 750-773).
 fn format_representation(format: Option<&str>, representation: &str) -> String {
     format.filter(|format| *format != "%title").map_or_else(
         || representation.to_owned(),

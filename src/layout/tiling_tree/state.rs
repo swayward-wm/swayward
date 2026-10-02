@@ -1,5 +1,36 @@
 use super::*;
 
+/// The xdg toplevel bounds for a tiled window: the strut-reduced working area minus gaps and
+/// the window's border, as niri's compute_toplevel_bounds.
+pub(super) fn toplevel_bounds(
+    options: &Options,
+    working_area: Rectangle<f64, Logical>,
+    gaps: f64,
+    rules: &ResolvedWindowRules,
+) -> Size<i32, Logical> {
+    let border = options.layout.border.merged_with(&rules.border);
+    let padding = gaps * 2. + if border.off { 0. } else { border.width * 2. };
+    Size::from((
+        (working_area.size.w - padding).max(1.),
+        (working_area.size.h - padding).max(1.),
+    ))
+    .to_i32_floor()
+}
+
+/// The layout a new or emptied workspace root takes: the configured orientation, or for `auto`
+/// SplitV on a portrait output and SplitH otherwise.
+fn default_layout(
+    orientation: swayward_config::DefaultOrientation,
+    view_size: Size<f64, Logical>,
+) -> Layout {
+    match orientation {
+        swayward_config::DefaultOrientation::Horizontal => Layout::SplitH,
+        swayward_config::DefaultOrientation::Vertical => Layout::SplitV,
+        swayward_config::DefaultOrientation::Auto if view_size.h > view_size.w => Layout::SplitV,
+        swayward_config::DefaultOrientation::Auto => Layout::SplitH,
+    }
+}
+
 impl<W: LayoutElement> TilingTree<W> {
     pub fn new(
         view_size: Size<f64, Logical>,
@@ -10,14 +41,7 @@ impl<W: LayoutElement> TilingTree<W> {
         options: Rc<Options>,
     ) -> Self {
         let root = NodeId(NODE_ID_COUNTER.next());
-        let root_layout = match options.layout.default_orientation {
-            swayward_config::DefaultOrientation::Horizontal => Layout::SplitH,
-            swayward_config::DefaultOrientation::Vertical => Layout::SplitV,
-            swayward_config::DefaultOrientation::Auto if view_size.h > view_size.w => {
-                Layout::SplitV
-            }
-            swayward_config::DefaultOrientation::Auto => Layout::SplitH,
-        };
+        let root_layout = default_layout(options.layout.default_orientation, view_size);
         let nodes = HashMap::from([(
             root,
             Node {
@@ -26,6 +50,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     layout: root_layout,
                     children: Vec::new(),
                     percents: Vec::new(),
+                    meta: SplitMeta::default(),
                 },
             },
         )]);
@@ -37,9 +62,6 @@ impl<W: LayoutElement> TilingTree<W> {
             has_had_tile: false,
             empty_representation_layout: None,
             focus_history: Vec::new(),
-            previous_split_layouts: HashMap::new(),
-            title_formats: HashMap::new(),
-            sticky_splits: HashSet::new(),
             pending_modes: HashMap::new(),
             mapped_under_fullscreen: HashSet::new(),
             moved_under_fullscreen: HashMap::new(),
@@ -136,16 +158,7 @@ impl<W: LayoutElement> TilingTree<W> {
         assert!(self.is_empty());
         let layout = match self.preserved_auto_layout {
             Some(layout) => layout,
-            None => match self.options.layout.default_orientation {
-                swayward_config::DefaultOrientation::Horizontal => Layout::SplitH,
-                swayward_config::DefaultOrientation::Vertical => Layout::SplitV,
-                swayward_config::DefaultOrientation::Auto
-                    if self.view_size.h > self.view_size.w =>
-                {
-                    Layout::SplitV
-                }
-                swayward_config::DefaultOrientation::Auto => Layout::SplitH,
-            },
+            None => default_layout(self.options.layout.default_orientation, self.view_size),
         };
         self.set_layout(self.root, layout);
         self.empty_representation_layout = Some(layout);
@@ -176,16 +189,9 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub(super) fn update_empty_auto_layout(&mut self, view_size: Size<f64, Logical>) {
-        let old_auto_layout = if self.view_size.h > self.view_size.w {
-            Layout::SplitV
-        } else {
-            Layout::SplitH
-        };
-        let new_auto_layout = if view_size.h > view_size.w {
-            Layout::SplitV
-        } else {
-            Layout::SplitH
-        };
+        let auto = swayward_config::DefaultOrientation::Auto;
+        let old_auto_layout = default_layout(auto, self.view_size);
+        let new_auto_layout = default_layout(auto, view_size);
         if self.preserved_auto_layout.is_none()
             && self.is_empty()
             && self.options.layout.default_orientation == swayward_config::DefaultOrientation::Auto
@@ -280,19 +286,14 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn new_window_toplevel_bounds(&self, rules: &ResolvedWindowRules) -> Size<i32, Logical> {
-        let border = self.options.layout.border.merged_with(&rules.border);
-        let mut size = self.working_area().size;
-        let padding = self.gaps * 2. + if border.off { 0. } else { border.width * 2. };
-        size.w = (size.w - padding).max(1.);
-        size.h = (size.h - padding).max(1.);
-        size.to_i32_floor()
+        toplevel_bounds(&self.options, self.working_area(), self.gaps, rules)
     }
 
     /// Return a new tiled view's initial size.
     ///
-    /// Tree leaves consume the complete allocated width. Applying niri's default column width
-    /// before insertion would make the first leaf too narrow until it acknowledges another
-    /// configure. The inherited height preset remains supported independently.
+    /// Sway configures a new tiled view to its future allocation, the slot it will occupy once
+    /// arranged (`view_autoconfigure`, sway/tree/view.c:349-465), so the first configure is
+    /// already the final size. A height preset from a window rule still applies.
     pub fn new_window_size(
         &self,
         height: Option<PresetSize>,

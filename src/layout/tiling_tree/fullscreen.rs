@@ -1,6 +1,26 @@
 use super::*;
 
 impl<W: LayoutElement> TilingTree<W> {
+    /// Sets `id`'s pending fullscreen mode, creating its pending entry only when there is a
+    /// mode to record.
+    pub(super) fn set_pending_fullscreen(
+        &mut self,
+        id: NodeId,
+        fullscreen: Option<FullscreenMode>,
+    ) {
+        if let Some(mode) = self.pending_modes.get_mut(&id) {
+            mode.fullscreen = fullscreen;
+        } else if fullscreen.is_some() {
+            self.pending_modes.insert(
+                id,
+                PendingMode {
+                    fullscreen,
+                    ..PendingMode::default()
+                },
+            );
+        }
+    }
+
     pub fn set_fullscreen(&mut self, window: &W::Id, fullscreen: bool) -> bool {
         let Some(id) = self.node_for_window(window) else {
             return false;
@@ -43,13 +63,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.pre_layout_ipc_rects.clear();
         }
         if let Some(fullscreen) = fullscreen {
-            self.pending_modes
-                .entry(id)
-                .or_insert(PendingMode {
-                    fullscreen: None,
-                    maximized: false,
-                })
-                .fullscreen = Some(fullscreen);
+            self.set_pending_fullscreen(id, Some(fullscreen));
             if self.focus != Some(id) {
                 self.set_focus_id(self.focused_leaf_in(id));
             }
@@ -60,6 +74,32 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// Record that the current fullscreen node was moved into this tree while
     /// fullscreen, so its branch keeps no share of the parent split.
+    /// Re-arrange the split holding the fullscreen node without a workspace
+    /// arrange, so the fullscreen container reports its tiled slot.
+    pub fn arrange_fullscreen_parent(&mut self) {
+        let Some(fullscreen) = self.fullscreen_node() else {
+            return;
+        };
+        let focused_in_fullscreen = self
+            .focus
+            .is_some_and(|focus| self.contains_node(fullscreen, focus));
+        let parent = self.nodes.get(&fullscreen).and_then(|node| node.parent);
+        if focused_in_fullscreen
+            && parent.is_some_and(|parent| {
+                parent != self.root
+                    && matches!(
+                        self.nodes.get(&parent).map(|node| &node.value),
+                        Some(TreeNode::Split {
+                            layout: Layout::SplitH | Layout::SplitV,
+                            ..
+                        })
+                    )
+            })
+        {
+            self.fullscreen_tile_slot = true;
+        }
+    }
+
     pub fn mark_fullscreen_arrived(&mut self) {
         if self.fullscreen_node().is_some() {
             self.fullscreen_arrived = true;
@@ -92,10 +132,7 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(id) = self.node_for_window(window) else {
             return false;
         };
-        let mode = self.pending_modes.entry(id).or_insert(PendingMode {
-            fullscreen: None,
-            maximized: false,
-        });
+        let mode = self.pending_modes.entry(id).or_default();
         if mode.maximized == maximized {
             return false;
         }

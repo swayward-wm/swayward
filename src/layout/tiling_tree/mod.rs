@@ -1,6 +1,8 @@
 // A live-session path must not panic (AGENTS.md). Outside tests, look nodes
 // up with `get` and handle a miss, or state the invariant with `expect`.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::indexing_slicing))]
+mod arena;
+mod configure;
 mod depth;
 mod focus;
 mod fullscreen;
@@ -10,29 +12,28 @@ mod invariants;
 mod movement;
 mod mutation;
 mod node;
+mod normalize;
 mod rendering;
 mod resize;
-mod sizing;
 mod state;
 mod transfer;
 mod tree_layout;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Duration;
 
 #[cfg(test)]
 pub(crate) use depth::MAX_TREE_DEPTH;
 pub(crate) use depth::TOO_DEEP;
 use geometry::apply_struts;
 use node::Node;
-pub use node::{NodeId, TreeNode};
+pub use node::{NodeId, SplitMeta, TreeNode};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
 use swayward_config::utils::MergeWith as _;
 use swayward_config::PresetSize;
 use swayward_ipc::command::{LayoutToggle, LayoutToggleEntry};
-use swayward_ipc::{ColumnDisplay, SizeChange, WindowLayout};
+use swayward_ipc::{SizeChange, WindowLayout};
 
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
@@ -91,10 +92,8 @@ struct DetachedSplit<W: LayoutElement> {
     layout: Layout,
     children: Vec<DetachedNode<W>>,
     percents: Vec<f64>,
-    previous_layout: Option<Layout>,
-    title_format: Option<String>,
+    meta: SplitMeta,
     pending_mode: Option<PendingMode>,
-    sticky: bool,
 }
 
 #[derive(Debug)]
@@ -104,10 +103,8 @@ enum DetachedNode<W: LayoutElement> {
         layout: Layout,
         children: Vec<DetachedNode<W>>,
         percents: Vec<f64>,
-        previous_layout: Option<Layout>,
-        title_format: Option<String>,
+        meta: SplitMeta,
         pending_mode: Option<PendingMode>,
-        sticky: bool,
     },
     Leaf {
         old_id: NodeId,
@@ -118,18 +115,54 @@ enum DetachedNode<W: LayoutElement> {
 }
 
 impl<W: LayoutElement> DetachedNode<W> {
-    fn has_fullscreen(&self) -> bool {
+    fn into_split(self) -> Result<DetachedSplit<W>, Self> {
         match self {
             Self::Split {
+                old_id,
+                layout,
                 children,
+                percents,
+                meta,
                 pending_mode,
-                ..
-            } => {
-                pending_mode.is_some_and(|mode| mode.fullscreen.is_some())
-                    || children.iter().any(Self::has_fullscreen)
-            }
-            Self::Leaf { pending_mode, .. } => {
-                pending_mode.is_some_and(|mode| mode.fullscreen.is_some())
+            } => Ok(DetachedSplit {
+                old_id,
+                layout,
+                children,
+                percents,
+                meta,
+                pending_mode,
+            }),
+            leaf @ Self::Leaf { .. } => Err(leaf),
+        }
+    }
+
+    fn pending_mode(&self) -> Option<PendingMode> {
+        match self {
+            Self::Split { pending_mode, .. } | Self::Leaf { pending_mode, .. } => *pending_mode,
+        }
+    }
+
+    fn pending_mode_mut(&mut self) -> &mut Option<PendingMode> {
+        match self {
+            Self::Split { pending_mode, .. } | Self::Leaf { pending_mode, .. } => pending_mode,
+        }
+    }
+
+    fn fullscreen(&self) -> Option<FullscreenMode> {
+        self.pending_mode().and_then(|mode| mode.fullscreen)
+    }
+
+    fn has_fullscreen(&self) -> bool {
+        self.fullscreen().is_some()
+            || matches!(self, Self::Split { children, .. } if children.iter().any(Self::has_fullscreen))
+    }
+
+    /// Calls `f` on this node and then on every descendant, depth first.
+    fn walk_mut(&mut self, f: &mut impl FnMut(&mut Self)) {
+        f(self);
+        if let Self::Split { children, .. } = self {
+            for child in children {
+                child.walk_mut(f);
             }
         }
     }
@@ -169,59 +202,26 @@ impl<W: LayoutElement> DetachedSubtree<W> {
         self.node.has_fullscreen()
     }
 
+    /// Swaps which subtree root holds fullscreen, clearing fullscreen everywhere below the roots.
     pub fn swap_fullscreen_position(&mut self, other: &mut Self) {
-        fn root_fullscreen<W: LayoutElement>(node: &DetachedNode<W>) -> Option<FullscreenMode> {
-            match node {
-                DetachedNode::Split { pending_mode, .. }
-                | DetachedNode::Leaf { pending_mode, .. } => {
-                    pending_mode.and_then(|mode| mode.fullscreen)
+        let first = self.node.fullscreen();
+        let second = other.node.fullscreen();
+        for node in [&mut self.node, &mut other.node] {
+            node.walk_mut(&mut |node| {
+                if let Some(mode) = node.pending_mode_mut() {
+                    mode.fullscreen = None;
                 }
-            }
+            });
         }
-        fn set_root_fullscreen<W: LayoutElement>(
-            node: &mut DetachedNode<W>,
-            fullscreen: Option<FullscreenMode>,
-        ) {
-            match node {
-                DetachedNode::Split { pending_mode, .. }
-                | DetachedNode::Leaf { pending_mode, .. } => {
-                    pending_mode
-                        .get_or_insert(PendingMode {
-                            fullscreen: None,
-                            maximized: false,
-                        })
-                        .fullscreen = fullscreen;
-                }
-            }
-        }
-        fn clear_fullscreen<W: LayoutElement>(node: &mut DetachedNode<W>) {
-            match node {
-                DetachedNode::Split {
-                    children,
-                    pending_mode,
-                    ..
-                } => {
-                    if let Some(mode) = pending_mode {
-                        mode.fullscreen = None;
-                    }
-                    for child in children {
-                        clear_fullscreen(child);
-                    }
-                }
-                DetachedNode::Leaf { pending_mode, .. } => {
-                    if let Some(mode) = pending_mode {
-                        mode.fullscreen = None;
-                    }
-                }
-            }
-        }
-
-        let first = root_fullscreen(&self.node);
-        let second = root_fullscreen(&other.node);
-        clear_fullscreen(&mut self.node);
-        clear_fullscreen(&mut other.node);
-        set_root_fullscreen(&mut self.node, second);
-        set_root_fullscreen(&mut other.node, first);
+        self.node
+            .pending_mode_mut()
+            .get_or_insert_default()
+            .fullscreen = second;
+        other
+            .node
+            .pending_mode_mut()
+            .get_or_insert_default()
+            .fullscreen = first;
     }
 }
 
@@ -266,6 +266,13 @@ impl<I> IpcNode<I> {
         }
     }
 
+    pub fn any_window(&self, f: &impl Fn(&I) -> bool) -> bool {
+        match self {
+            IpcNode::Leaf { window, .. } => f(window),
+            IpcNode::Split { children, .. } => children.iter().any(|child| child.any_window(f)),
+        }
+    }
+
     pub fn nodes(&self) -> Vec<(NodeId, IpcNodeKind)> {
         fn collect<I>(node: &IpcNode<I>, nodes: &mut Vec<(NodeId, IpcNodeKind)>) {
             match node {
@@ -292,13 +299,28 @@ pub enum Direction {
     Down,
 }
 
+impl Direction {
+    /// The split layout whose children are ordered along this direction.
+    pub(super) fn axis(self) -> Layout {
+        match self {
+            Direction::Left | Direction::Right => Layout::SplitH,
+            Direction::Up | Direction::Down => Layout::SplitV,
+        }
+    }
+
+    /// Whether this direction points toward lower child indices.
+    pub(super) fn is_backwards(self) -> bool {
+        matches!(self, Direction::Left | Direction::Up)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FullscreenMode {
     Workspace = 1,
     Global = 2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PendingMode {
     fullscreen: Option<FullscreenMode>,
     maximized: bool,
@@ -309,7 +331,7 @@ struct InteractiveResize<I> {
     window: I,
     target: NodeId,
     /// One sibling boundary per resized axis, like sway's separate `h_con`
-    /// and `v_con` (`sway/sway/input/seatop_resize_tiling.c:12-27`).
+    /// and `v_con` (`sway/input/seatop_resize_tiling.c:12-27`).
     axes: Vec<ResizeAxis>,
     data: InteractiveResizeData,
 }
@@ -345,6 +367,59 @@ pub(super) enum DecorationLayer {
 
 static NODE_ID_COUNTER: IdCounter = IdCounter::new();
 
+/// A collection keyed by node id that must forget a node when it leaves the arena.
+trait SideTable {
+    fn ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_>;
+    fn forget(&mut self, id: NodeId);
+}
+
+impl<V> SideTable for HashMap<NodeId, V> {
+    fn ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_> {
+        Box::new(self.keys().copied())
+    }
+    fn forget(&mut self, id: NodeId) {
+        self.remove(&id);
+    }
+}
+
+impl SideTable for HashSet<NodeId> {
+    fn ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_> {
+        Box::new(self.iter().copied())
+    }
+    fn forget(&mut self, id: NodeId) {
+        self.remove(&id);
+    }
+}
+
+impl SideTable for Vec<NodeId> {
+    fn ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_> {
+        Box::new(self.iter().copied())
+    }
+    fn forget(&mut self, id: NodeId) {
+        self.retain(|candidate| *candidate != id);
+    }
+}
+
+/// Every NodeId-keyed side table of a TilingTree, named for invariant messages. remove_node
+/// forgets a node in each, and check_side_state checks each for stale ids, so a table added
+/// here gets both. Call as `side_tables!(tree, &)` or `side_tables!(tree, &mut)`.
+macro_rules! side_tables {
+    ($tree:expr, $($ref:tt)+) => {
+        [
+            ("focus_history", $($ref)+ $tree.focus_history as $($ref)+ dyn SideTable),
+            ("ipc_stale_nodes", $($ref)+ $tree.ipc_stale_nodes),
+            ("pending_modes", $($ref)+ $tree.pending_modes),
+            ("mapped_under_fullscreen", $($ref)+ $tree.mapped_under_fullscreen),
+            ("moved_under_fullscreen", $($ref)+ $tree.moved_under_fullscreen),
+            ("fullscreen_layout_wrappers", $($ref)+ $tree.fullscreen_layout_wrappers),
+            ("pre_layout_ipc_rects", $($ref)+ $tree.pre_layout_ipc_rects),
+            ("tab_indicators", $($ref)+ $tree.tab_indicators),
+            ("tab_active", $($ref)+ $tree.tab_active),
+        ]
+    };
+}
+use side_tables;
+
 #[derive(Debug)]
 pub struct TilingTree<W: LayoutElement> {
     nodes: HashMap<NodeId, Node<W>>,
@@ -354,9 +429,6 @@ pub struct TilingTree<W: LayoutElement> {
     has_had_tile: bool,
     empty_representation_layout: Option<Layout>,
     focus_history: Vec<NodeId>,
-    previous_split_layouts: HashMap<NodeId, Layout>,
-    title_formats: HashMap<NodeId, String>,
-    sticky_splits: HashSet<NodeId>,
     pending_modes: HashMap<NodeId, PendingMode>,
     mapped_under_fullscreen: HashSet<NodeId>,
     /// Leaves moved into this tree while it was fullscreen. Like mapped ones

@@ -12,7 +12,7 @@ fn mapping_under_fullscreen_preserves_focus_and_sibling_percents() {
     assert_eq!(t.focus(), Some(fullscreen));
     let first_geometry = t.geometry(first).unwrap();
     assert_eq!(first_geometry.size.w, t.view_size().w / 2.);
-    assert_eq!(t.ipc_decoration_rect(&3), None);
+    assert_eq!(ipc_deco_rect(&t, 3), None);
     let TreeNode::Split { percents, .. } = &t.nodes[&t.root].value else {
         panic!("root must be a split");
     };
@@ -163,25 +163,13 @@ fn mapping_fullscreen_window_replaces_existing_fullscreen() {
     let first_window = TestWindow::new(1);
     first_window.0.requested_mode.set(SizingMode::Fullscreen);
     let first = t.add_tile(
-        Tile::new(
-            first_window,
-            t.view_size(),
-            1.,
-            Clock::with_time(Duration::ZERO),
-            Rc::new(Options::default()),
-        ),
+        tile_from(first_window, t.view_size()),
         InsertTarget::Focused,
     );
     let second_window = TestWindow::new(2);
     second_window.0.requested_mode.set(SizingMode::Fullscreen);
     let second = t.add_tile(
-        Tile::new(
-            second_window,
-            t.view_size(),
-            1.,
-            Clock::with_time(Duration::ZERO),
-            Rc::new(Options::default()),
-        ),
+        tile_from(second_window, t.view_size()),
         InsertTarget::Focused,
     );
 
@@ -275,13 +263,7 @@ fn fullscreen_and_maximize_survive_tree_mutations() {
     let first_window = TestWindow::new(1);
     let first_state = first_window.clone();
     let first = t.add_tile(
-        Tile::new(
-            first_window,
-            t.view_size(),
-            1.,
-            Clock::with_time(Duration::ZERO),
-            Rc::new(Options::default()),
-        ),
+        tile_from(first_window, t.view_size()),
         InsertTarget::Focused,
     );
     let second = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
@@ -318,13 +300,15 @@ fn stacked_siblings_keep_their_geometry_while_one_is_fullscreen() {
     );
 }
 
+/// Sway zeroes a fullscreen container's deco_rect (`get_deco_rect`,
+/// sway/sway/ipc-json.c:543-553); swayward reports no titlebar box.
 #[test]
 fn fullscreen_suppresses_titlebar() {
     let mut t = tree((1000., 800.), 0.);
     let id = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
-    assert!(t.ipc_decoration_rect(&1).is_some());
+    assert!(ipc_deco_rect(&t, 1).is_some());
     assert!(t.set_fullscreen(&1, true));
-    assert!(t.ipc_decoration_rect(&1).is_none());
+    assert!(ipc_deco_rect(&t, 1).is_none());
     assert_eq!(t.geometry(id).unwrap().loc.y, 0.);
 }
 
@@ -427,5 +411,34 @@ fn fullscreen_arriving_in_a_tab_keeps_the_tabbed_container_sized() {
     };
     assert_eq!(*percent, Some(0.5));
     assert_eq!(rect.size.w, 640.);
+    t.check_invariants();
+}
+
+// random seed 30 step 16 (sway-1.12-random): `move container to workspace`
+// naming the current workspace still arranges the fullscreen container's
+// parent split, so the fullscreen container reports its tiled slot.
+#[test]
+fn arranging_the_fullscreen_parent_reports_the_tile_slot() {
+    let mut t = tree((1280., 720.), 0.);
+    t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let fullscreen = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(fullscreen, Layout::SplitV);
+    t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+    t.activate_window(&2);
+    assert!(t.set_node_fullscreen(fullscreen, Some(FullscreenMode::Workspace)));
+
+    t.arrange_fullscreen_parent();
+
+    let IpcNode::Split { children, .. } = t.ipc_tree() else {
+        panic!("IPC root must be a split");
+    };
+    let IpcNode::Split { children, .. } = &children[1] else {
+        panic!("second child must be the split container");
+    };
+    let IpcNode::Leaf { id, percent, .. } = &children[0] else {
+        panic!("fullscreen view must be a leaf");
+    };
+    assert_eq!(*id, fullscreen);
+    assert_eq!(*percent, Some(0.5));
     t.check_invariants();
 }

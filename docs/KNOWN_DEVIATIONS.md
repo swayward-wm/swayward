@@ -3,7 +3,9 @@ internal changes inherited from the niri fork. See
 [Divergence from upstream niri](DIVERGENCE.md) for that engineering ledger.
 
 Start here. If a row sounds relevant to your setup, its details include the
-exact behaviour, the reason for it, and the sway source citations.
+exact behaviour, the reason for it, and the sway source citations. [Testing and
+conformance](https://github.com/martintrojer/swayward/wiki/Testing-and-Conformance#intentional-differences-from-sway)
+explains how the tests encode these differences.
 
 | Deviation | What you will notice | Details |
 |-----------|----------------------|---------|
@@ -200,23 +202,23 @@ including bar outputs, fonts, colors, status commands, and tray settings.
 
 ## Desktop integration
 
-### GNOME portal backend by default
+### GNOME portal backend for capture
 
 **Deliberate.**
 
 Sway ships no portal policy of its own; wlroots sessions conventionally use
-`xdg-desktop-portal-wlr`. Swayward instead defaults to
-`xdg-desktop-portal-gnome` in `resources/swayward-portals.conf`. The inherited
+`xdg-desktop-portal-wlr`. Swayward uses `xdg-desktop-portal-gnome` for
+ScreenCast and Screenshot in `resources/swayward-portals.conf`. The inherited
 Mutter interfaces provide an integrated window and monitor picker, PipeWire
-streams, and swayward's dynamic cast target. These features are a product
-reason for retaining niri's compositor foundation, so protocol compatibility
-does not determine the portal backend choice.
+streams, and swayward's dynamic cast target. GTK provides file choosers,
+printing, settings, and the other general desktop portals. These features are a
+product reason for retaining niri's compositor foundation, so protocol
+compatibility does not determine the capture backend choice.
 
 `xdg-desktop-portal-wlr` remains an optional fallback. It uses swayward's
 `wlr-screencopy` support but does not provide the GNOME window picker or dynamic
-cast target. With `xdg-desktop-portal-gnome` 47 or later, Nautilus provides the
-FileChooser implementation. Install Nautilus, or route only FileChooser to the
-GTK backend as documented in [Important software](https://github.com/martintrojer/swayward/wiki/Important-Software).
+cast target. RemoteDesktop is disabled because swayward does not implement
+remote control or input injection.
 
 ## IPC requests and commands
 
@@ -416,6 +418,34 @@ expectations in `524-move.t` therefore do not apply.
 This rule is distinct from splitting a singleton horizontal or vertical
 container. In that case, sway changes the existing parent layout instead of
 creating another container (`sway/sway/tree/container.c:1565-1582`).
+
+### Tiled drag-and-drop targets
+
+**Infrastructure gap.**
+
+Sway picks a tiled drop target in three passes
+(`sway/input/seatop_move_tiling.c:handle_motion_tiling`, sway 1.12):
+
+1. Over a container's titlebar, the drop joins that container's tab group.
+   Sway wraps the target in a tabbed container unless its parent is already
+   tabbed or stacked (lines 203-219, 353-358).
+2. Within 30 px of an edge perpendicular to an ancestor's layout, the drop
+   goes beside that ancestor (lines 221-268).
+3. Otherwise the drop splits the hovered view at its closest edge, within
+   30 percent of the view's smaller side, or swaps with it (lines 270-306).
+
+Swayward implements only the third pass. Dropping on a titlebar does not make
+a tab group, and dropping near the outer edge of a nested split cannot place
+the window beside the ancestor. Sway also treats a tabbed parent as horizontal
+and a stacked parent as vertical when matching the edge (line 322), so a left
+or right drop into a tabbed parent joins it. Swayward wraps the target in a
+new split instead.
+
+The gap stays open until the IPC oracle can capture pinned sway after a real
+pointer drag. Scripting the drag over IPC does not work: `seat - cursor set`
+only rebases the cursor, and the tiling-move seat operation has no rebase hook,
+so sway's tree never changes. Capturing the drag needs a
+`zwlr_virtual_pointer_v1` client in the oracle harness.
 
 ### Workspace names beginning with `__`
 

@@ -1754,24 +1754,6 @@ impl<W: LayoutElement> Layout<W> {
         mon.update_output_size();
     }
 
-    pub fn scroll_amount_to_activate(&self, window: &W::Id) -> f64 {
-        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
-            if move_.tile.window().id() == window {
-                return 0.;
-            }
-        }
-
-        for mon in self.monitors() {
-            for ws in &mon.workspaces {
-                if ws.has_window(window) {
-                    return ws.scroll_amount_to_activate(window);
-                }
-            }
-        }
-
-        0.
-    }
-
     pub fn scroll_tab_indicator(&mut self, window: &W::Id, steps: i32) -> Option<W::Id> {
         self.workspaces_mut()
             .find(|workspace| workspace.has_window(window))?
@@ -2904,8 +2886,6 @@ impl<W: LayoutElement> Layout<W> {
         assert!(primary_idx < monitors.len());
         assert!(active_monitor_idx < monitors.len());
 
-        let mut saw_view_offset_gesture = false;
-
         for (idx, monitor) in monitors.iter().enumerate() {
             assert_eq!(self.clock, monitor.clock);
             assert_eq!(
@@ -2966,19 +2946,6 @@ impl<W: LayoutElement> Layout<W> {
                 }
 
                 workspace.verify_invariants(move_win_id.as_ref());
-
-                let has_view_offset_gesture = workspace.tiling().has_view_offset_gesture();
-                if self.dnd.is_some() || self.interactive_move.is_some() {
-                    // We would like to check that all workspaces have the gesture here, and only
-                    // while an interactive move targets the tiling layout. The gesture starts and
-                    // stops lazily, so that invariant does not hold at this boundary.
-                } else if saw_view_offset_gesture {
-                    assert!(
-                        !has_view_offset_gesture,
-                        "only one workspace can have an ongoing view offset gesture"
-                    );
-                }
-                saw_view_offset_gesture = has_view_offset_gesture;
             }
         }
     }
@@ -3511,8 +3478,59 @@ impl<W: LayoutElement> Layout<W> {
         self.workspace_mut(workspace_id).map(|workspace| {
             workspace
                 .tiling_mut()
-                .resize_node_dimension_command(node, width, change)
+                .resize_node_dimension(node, width, change)
         })
+    }
+
+    /// Whether `window` sits inside a floating group rather than being a
+    /// floating root itself.
+    pub fn is_floating_group_child(&self, window: &W::Id) -> bool {
+        self.workspaces()
+            .any(|(_, _, ws)| ws.floating_tree_root_for_window(window).is_some())
+    }
+
+    /// The floating group root `node` names on `workspace_id`, if it is one.
+    pub fn floating_tree_root(
+        &self,
+        workspace_id: workspace::WorkspaceId,
+        node: tiling_tree::NodeId,
+    ) -> Option<tiling_tree::NodeId> {
+        let workspace = self
+            .workspaces()
+            .find(|(_, _, ws)| ws.id() == workspace_id)?
+            .2;
+        (workspace.floating().tree_root_for_node(node) == Some(node)).then_some(node)
+    }
+
+    /// Grows or shrinks a floating group root in px; see
+    /// [`floating_tree::FloatingLayout::adjust_tree_size`].
+    pub fn adjust_floating_tree_size(
+        &mut self,
+        workspace_id: workspace::WorkspaceId,
+        root: tiling_tree::NodeId,
+        edge: Option<ResizeEdge>,
+        horizontal: bool,
+        amount: i32,
+    ) -> Option<bool> {
+        let automatic_maximum = self.output_layout_size().to_f64();
+        self.workspace_mut(workspace_id).map(|workspace| {
+            workspace.adjust_floating_tree_size(root, edge, horizontal, amount, automatic_maximum)
+        })
+    }
+
+    /// Sets a floating group root's outer size; see
+    /// [`floating_tree::FloatingLayout::set_tree_size`].
+    pub fn set_floating_tree_size(
+        &mut self,
+        workspace_id: workspace::WorkspaceId,
+        root: tiling_tree::NodeId,
+        width: Option<f64>,
+        height: Option<f64>,
+    ) {
+        let automatic_maximum = self.output_layout_size().to_f64();
+        if let Some(workspace) = self.workspace_mut(workspace_id) {
+            workspace.set_floating_tree_size(root, width, height, automatic_maximum);
+        }
     }
 
     pub fn resize_tiling_node_edge(

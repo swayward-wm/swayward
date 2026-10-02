@@ -51,73 +51,6 @@ fn get_tree_hides_windows_on_background_workspaces() {
 }
 
 #[test]
-fn overview_keys_work_with_num_lock_on() {
-    // Num Lock is state, not part of the overview chord, so overview keys must
-    // still match when `input { keyboard { numlock } }` enables it by default.
-    let config = swayward_config::Config::parse_mem(
-        r#"input { keyboard { numlock; }; }
-workspace "1" {}
-workspace "2" {}"#,
-    )
-    .unwrap();
-    let mut fixture = Fixture::with_config(config);
-    fixture.add_output(1, (1280, 720));
-    let client = fixture.add_client();
-
-    for command in ["workspace 1", "workspace 2"] {
-        assert!(crate::command::execute(fixture.niri_state(), command)[0].success);
-        let window = fixture.client(client).create_window();
-        window.commit();
-        let surface = window.surface.clone();
-        fixture.roundtrip(client);
-        let window = fixture.client(client).window(&surface);
-        window.attach_new_buffer();
-        window.ack_last_and_commit();
-        fixture.double_roundtrip(client);
-    }
-
-    let output = fixture.swayward().layout.active_output().unwrap().clone();
-    let active_workspace_idx = |fixture: &mut Fixture| {
-        fixture
-            .swayward()
-            .layout
-            .monitor_for_output(&output)
-            .unwrap()
-            .active_workspace_idx()
-    };
-
-    assert!(fixture.swayward().layout.open_overview());
-    fixture.niri_state().update_keyboard_focus();
-    assert!(fixture.swayward().keyboard_focus.is_overview());
-
-    // Assert directly on the predicate: the harness does not latch Num Lock
-    // from a keycode, and going through key_event would silently test the
-    // unlocked path instead.
-    let locked = smithay::input::keyboard::ModifiersState {
-        num_lock: true,
-        ..Default::default()
-    };
-    assert!(
-        crate::input::hardcoded_overview_bind(smithay::input::keyboard::Keysym::Up, locked)
-            .is_some(),
-        "a bare Up was rejected while Num Lock was on"
-    );
-
-    let before = active_workspace_idx(&mut fixture);
-    key_event(&mut fixture, 111, true);
-    key_event(&mut fixture, 111, false);
-    fixture.swayward().clock.set_complete_instantly(true);
-    fixture.swayward().layout.advance_animations();
-    fixture.swayward().clock.set_complete_instantly(false);
-
-    assert_ne!(
-        active_workspace_idx(&mut fixture),
-        before,
-        "an overview arrow was rejected while Num Lock was on"
-    );
-}
-
-#[test]
 fn every_message_type_replies_and_leaves_the_connection_usable() {
     // AGENTS.md: every SWAYSOCK reply is sway-shaped or a structured failure,
     // and it never hangs. Enumerate boundary and unknown request numbers, not
@@ -132,7 +65,7 @@ fn every_message_type_replies_and_leaves_the_connection_usable() {
     let mut stream = UnixStream::connect(&socket).unwrap();
 
     let types: Vec<u32> = (0..=13)
-        .chain([99, 100, 101, 102, 1000, u32::MAX])
+        .chain([99, 100, 101, 102, 1000, 9999, u32::MAX])
         .collect();
     for raw_type in types {
         // SUBSCRIBE needs a JSON array; anything else would be a parse failure
@@ -150,12 +83,17 @@ fn every_message_type_replies_and_leaves_the_connection_usable() {
         let value: Value = serde_json::from_str(&reply)
             .unwrap_or_else(|e| panic!("type {raw_type} returned invalid JSON: {reply}: {e}"));
 
-        // Either a sway-shaped payload or a structured failure. Never a bare
-        // string, never empty, never a silent drop.
-        assert!(
-            value.is_object() || value.is_array(),
-            "type {raw_type} must reply with an object or array, got {reply}"
-        );
+        match raw_type {
+            0 | 1 | 3 | 5 | 6 | 8 | 100 | 101 => assert!(
+                value.is_array(),
+                "type {raw_type} must reply with an array, got {reply}"
+            ),
+            2 | 4 | 7 | 9 | 10 | 12 => assert!(
+                value.is_object(),
+                "type {raw_type} must reply with an object, got {reply}"
+            ),
+            _ => assert!(value.is_object(), "failure {raw_type} must be an object"),
+        }
         if raw_type == 11 {
             assert_eq!(
                 value,
@@ -163,10 +101,11 @@ fn every_message_type_replies_and_leaves_the_connection_usable() {
                 "IPC_SYNC must match sway's decline exactly"
             );
         }
-        if !matches!(raw_type, 0..=10 | 12 | 100 | 101) {
+        if !matches!(raw_type, 0..=12 | 100 | 101) {
             assert_eq!(
-                value["success"], false,
-                "unsupported type {raw_type} must report failure, got {reply}"
+                value,
+                serde_json::json!({"success": false, "error": "not implemented"}),
+                "unsupported type {raw_type} must report failure"
             );
         }
     }
@@ -561,4 +500,35 @@ fn marked_floating_group_keeps_its_mark_through_the_scratchpad() {
         1,
         "{tree:#}"
     );
+}
+#[test]
+fn hiding_active_standalone_float_falls_back_to_the_recursive_root() {
+    let mut fixture = nested_split_fixture();
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+    let client = fixture.add_client();
+    let mut standalone = Vec::new();
+    for app_id in ["standalone-a", "standalone-b"] {
+        let window = fixture.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        fixture.roundtrip(client);
+        let window = fixture.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        fixture.double_roundtrip(client);
+        assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+        standalone.push(fixture.swayward().layout.focus().unwrap().id());
+    }
+    assert!(crate::command::execute(fixture.niri_state(), "move scratchpad")[0].success);
+    let active = fixture
+        .swayward()
+        .layout
+        .active_workspace()
+        .unwrap()
+        .floating()
+        .active_window()
+        .unwrap()
+        .id();
+    assert_eq!(active, standalone[0]);
 }

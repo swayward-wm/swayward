@@ -167,7 +167,7 @@ and mildly inconvenient news for snapshots made from older swayward builds.
   (`sway/commands/layout.c`; `sway/tree/container.c`).
 - Output and workspace focus arrays retain the complete most-recently-used
   order instead of only the active and previous workspace
-  (`sway/tree/root.c:246-260`; `sway/ipc-server.c:604-610,825-834`).
+  (`sway/ipc-json.c:786-832`).
 - Tiled windows now expose their stored sticky state in `GET_TREE`, like
   floating windows (`sway/commands/sticky.c`; `sway/ipc-json.c:710-744`).
 
@@ -181,8 +181,10 @@ than asking the compositor to send two protocols under one name.
 The unchanged i3 tests, sway captures, calibration tools, and black-box runners
 now live in
 [`sway-ipc-oracle`](https://github.com/martintrojer/sway-ipc-oracle). Swayward
-pins commit `3d8159e7dbc1b296d52b00e45c12befcdcae605b` in
-[`tests/oracle.toml`](../tests/oracle.toml), and CI fetches that exact revision.
+pins one oracle commit in [`tests/oracle.toml`](../tests/oracle.toml), and CI
+fetches that exact revision. [Testing and
+conformance](https://github.com/martintrojer/swayward/wiki/Testing-and-Conformance)
+describes the whole test suite.
 Run `./contrib/fetch-oracle` before the in-process conformance tests and coverage
 tools.
 

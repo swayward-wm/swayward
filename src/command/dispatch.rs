@@ -7,8 +7,8 @@ use super::targeted::{
     unmark_focused, unmark_target,
 };
 use super::{
-    bindings, command_failure, failure, focus, gaps, layout, movement, output, rules, scratchpad,
-    session, success, window, workspace, Command, CommandTarget, ParsedCommand,
+    bindings, failure, focus, gaps, layout, movement, output, rules, scratchpad, session, success,
+    window, workspace, Command, CommandTarget, ParsedCommand,
 };
 use crate::swayward::State;
 
@@ -86,7 +86,9 @@ fn for_each_match<T>(
 fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
     match command {
         Command::Swap(target) => movement::swap_focused(state, target),
-        Command::Focus => Err(command_failure("No container to focus was specified.")),
+        // A bare `focus` without criteria has no container to focus
+        // (sway/sway/commands/focus.c:381-383).
+        Command::Focus => Err(failure("No container to focus was specified.")),
         Command::FocusWorkspace => Err(failure("No container to focus was specified.")),
         Command::FocusDirection(direction) => Ok(focus::direction(state, direction)),
         Command::FocusOutput(identifier) => super::handled(focus::output(state, &identifier)),
@@ -265,10 +267,11 @@ fn execute_one(
             };
             return failure(format!("criteria are not supported for {name}"));
         }
+        // Every layout option is a sway global handler, and sway runs a
+        // handler once per criteria match whether or not it reads the matched
+        // container (`sway/sway/commands.c:305-326`).
         if let Command::SetLayoutOption(option) = &parsed.command {
-            if option.is_global() {
-                return for_each_match(targets, |_| execute_global_setting(state, option));
-            }
+            return for_each_match(targets, |_| execute_global_setting(state, option));
         }
         if let Command::Unmark(identifier) = &parsed.command {
             for target in targets {
