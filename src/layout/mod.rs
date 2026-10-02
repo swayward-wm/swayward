@@ -571,6 +571,19 @@ pub enum ActivateWindow {
     No,
 }
 
+/// Whether adding a window may switch the monitor's active workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceActivation {
+    Allow,
+    KeepCurrent,
+}
+
+impl WorkspaceActivation {
+    fn allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
 /// Where to put a newly added window.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AddWindowTarget<'a, W: LayoutElement> {
@@ -898,20 +911,9 @@ impl<W: LayoutElement> Layout<W> {
                             workspaces.push(ws);
                         }
 
-                        if i <= primary.active_workspace_idx
-                            // Generally when moving the currently active workspace, we want to
-                            // fall back to the workspace above, so as not to end up on the last
-                            // empty workspace. However, with empty workspace above first, when
-                            // moving the workspace at index 1 (first non-empty), we want to stay
-                            // at index 1, so as once again not to end up on an empty workspace.
-                            //
-                            // This comes into play at compositor startup when having named
-                            // workspaces set up across multiple monitors. Without this check, the
-                            // first monitor to connect can end up with the first empty workspace
-                            // focused instead of the first named workspace.
-                            && !(false
-                                && primary.active_workspace_idx == 1)
-                        {
+                        // A reclaimed workspace at or before the active one shifts the
+                        // active index down.
+                        if i <= primary.active_workspace_idx {
                             primary.active_workspace_idx =
                                 primary.active_workspace_idx.saturating_sub(1);
                         }
@@ -919,7 +921,7 @@ impl<W: LayoutElement> Layout<W> {
                 }
 
                 // If we stopped a workspace switch, then we might need to clean up workspaces.
-                if stopped_primary_ws_switch || (false && primary.workspaces.len() == 2) {
+                if stopped_primary_ws_switch {
                     primary.clean_up_workspaces();
                 }
 
@@ -944,8 +946,7 @@ impl<W: LayoutElement> Layout<W> {
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
                 // Monitor::new adopts workspaces reclaimed from the primary
-                // monitor, which can include one holding windows, so the new
-                // monitor need not end in an empty placeholder.
+                // monitor; drop any that are empty and inactive.
                 monitor.reap_empty_workspaces();
                 monitors.push(monitor);
                 if restores_focused_workspace {
@@ -1517,8 +1518,6 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn find_workspace_by_number(&self, number: &str) -> Option<(usize, &Workspace<W>)> {
         // Prefer a named workspace when duplicate numeric identities exist.
-        // This preserves the resolution order established before the trailing
-        // placeholder workspace was removed.
         let mut candidates = self
             .workspaces()
             .filter(|(_, _, workspace)| {
@@ -3787,6 +3786,13 @@ impl<W: LayoutElement> Layout<W> {
         })
     }
 
+    /// Moves the focused child of the active floating group inside the group.
+    pub fn move_focused_floating_tree_child(&mut self, direction: tiling_tree::Direction) {
+        if let Some(workspace) = self.active_workspace_mut() {
+            workspace.move_focused_floating_tree_child(direction);
+        }
+    }
+
     pub fn move_floating_window(
         &mut self,
         id: Option<&W::Id>,
@@ -3959,12 +3965,9 @@ impl<W: LayoutElement> Layout<W> {
             let mon = &mut monitors[new_idx];
             mon.add_tile(
                 removed.tile,
-                MonitorAddWindowTarget::Workspace {
-                    id: ws_id,
-                    column_idx: None,
-                },
+                MonitorAddWindowTarget::Move(ws_id),
                 activate,
-                true,
+                WorkspaceActivation::Allow,
                 removed.is_floating,
             );
             if activate.map_smart(|| false) {
@@ -4821,7 +4824,11 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         // Dragging in the overview shouldn't switch the workspace and so on.
-        let allow_to_activate_workspace = !self.overview_open;
+        let workspace_activation = if self.overview_open {
+            WorkspaceActivation::KeepCurrent
+        } else {
+            WorkspaceActivation::Allow
+        };
         let new_workspace_identity = self.monitor_for_output(&move_.output).and_then(|monitor| {
             matches!(
                 monitor.insert_position(move_.pointer_pos_within_output).0,
@@ -4917,7 +4924,7 @@ impl<W: LayoutElement> Layout<W> {
                                 column_idx: Some(column_idx),
                             },
                             ActivateWindow::Yes,
-                            allow_to_activate_workspace,
+                            workspace_activation,
                             false,
                         );
                     }
@@ -4928,7 +4935,7 @@ impl<W: LayoutElement> Layout<W> {
                             target,
                             move_.tile,
                             move_.source_workspace,
-                            allow_to_activate_workspace,
+                            workspace_activation,
                         );
                     }
                     InsertPosition::InsertAt(target, edge) => {
@@ -4938,7 +4945,7 @@ impl<W: LayoutElement> Layout<W> {
                             edge,
                             move_.tile,
                             true,
-                            allow_to_activate_workspace,
+                            workspace_activation,
                         );
                     }
                     InsertPosition::Floating => {
@@ -4979,7 +4986,7 @@ impl<W: LayoutElement> Layout<W> {
                                 column_idx: None,
                             },
                             ActivateWindow::Yes,
-                            allow_to_activate_workspace,
+                            workspace_activation,
                             true,
                         );
                     }
@@ -5016,7 +5023,7 @@ impl<W: LayoutElement> Layout<W> {
                                 column_idx: None,
                             },
                             ActivateWindow::No,
-                            false,
+                            WorkspaceActivation::KeepCurrent,
                             displaced.is_floating,
                         );
                     }

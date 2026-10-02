@@ -204,6 +204,7 @@ impl<W: LayoutElement> Layout<W> {
         auto_back_and_forth: bool,
     ) -> Result<(WorkspaceId, Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>), String> {
         if let Some(window) = self.floating_group_window(source_workspace, node) {
+            self.refuse_sticky_move_on_same_output(&window, &target, auto_back_and_forth)?;
             let target_workspace =
                 self.move_floating_group_to_sway_workspace(&window, target, auto_back_and_forth)?;
             return Ok((target_workspace, Vec::new()));
@@ -367,7 +368,7 @@ impl<W: LayoutElement> Layout<W> {
         target: tiling_tree::NodeId,
         tile: Tile<W>,
         source_workspace: WorkspaceId,
-        allow_to_activate_workspace: bool,
+        workspace_activation: WorkspaceActivation,
     ) -> Option<RemovedTile<W>> {
         let mut displaced = None;
         let ws_id = mon.workspaces[ws_idx].id();
@@ -389,7 +390,7 @@ impl<W: LayoutElement> Layout<W> {
                 column_idx: None,
             },
             ActivateWindow::Yes,
-            allow_to_activate_workspace,
+            workspace_activation,
             false,
         );
         if source_workspace == ws_id {

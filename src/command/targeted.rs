@@ -302,6 +302,7 @@ fn run_targeted(
         Command::ShortcutsInhibitor(enable) => {
             super::handled(set_shortcuts_inhibitor(state, target, *enable))
         }
+        Command::InhibitIdle(mode) => super::handled(set_inhibit_idle(state, target, *mode)),
         Command::Sticky(value) => super::handled(window::sticky(state, target, value)),
         Command::SetClientColors { class, colors } => {
             set_client_colors(state, *class, *colors);
@@ -458,7 +459,23 @@ pub(super) fn mark_target(
             state.ipc_send_window_change("mark", container);
         }
     }
+    // container_find_and_unmark emits `mark` on the container that loses the mark
+    // (sway/tree/container.c:1582-1600). A window's change reaches clients through the event
+    // diff, but a split container's would otherwise go unreported.
+    let losing_container = state
+        .swayward
+        .marks_by_container
+        .iter()
+        .find_map(|(node, marks)| {
+            marks
+                .iter()
+                .any(|existing| existing == mark)
+                .then_some(*node)
+        });
     unmark_globally(state, Some(mark));
+    if let Some(node) = losing_container {
+        state.ipc_emit_window_change("mark", crate::ipc::tree::container_id(node), |_| {});
+    }
     if !toggle || !had_mark {
         match target {
             CommandTarget::Window(window) => state.swayward.set_mark(window, mark, true, false),
@@ -513,6 +530,28 @@ pub(super) fn unmark_target(state: &mut State, target: CommandTarget, mark: Opti
         }
     }
     refresh_titlebar_marks(state);
+}
+
+pub(super) fn set_inhibit_idle(
+    state: &mut State,
+    target: CommandTarget,
+    mode: swayward_ipc::command::InhibitIdleMode,
+) -> Result<(), CommandOutcome> {
+    let CommandTarget::Window(target) = target else {
+        return Err(failure("Only views can have idle inhibitors"));
+    };
+    let mut found = false;
+    state.swayward.layout.with_windows_mut(|window, _| {
+        if window.id() == target {
+            window.set_inhibit_idle_mode(mode);
+            found = true;
+        }
+    });
+    if !found {
+        return Err(failure("No matching node."));
+    }
+    state.swayward.refresh_idle_inhibit();
+    Ok(())
 }
 
 pub(super) fn set_shortcuts_inhibitor(

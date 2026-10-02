@@ -41,6 +41,13 @@ fn directional_move_squashes_the_whole_tree() {
     t.check_invariants();
 }
 
+// random seeds 335 step 10 and 182 step 7 (sway-1.12-random): with no
+// parallel ancestor, sway wraps the workspace children in the old layout
+// (`workspace_wrap_children`, sway/commands/move.c:333-344) and promotes the
+// moved view beside that wrapper. The vacated singleton split is reaped, but
+// the wrapper around the remaining view stays: `container_squash`
+// (sway/tree/container.c:1686-1716) keeps a
+// split whose only child is a view.
 #[test]
 fn directional_move_escapes_a_singleton_parallel_parent() {
     let mut t = tree((1200., 800.), 0.);
@@ -59,8 +66,11 @@ fn directional_move_escapes_a_singleton_parallel_parent() {
     assert_eq!(layout, Layout::SplitV);
     assert!(matches!(
         &children[..],
-        [IpcNode::Leaf { id: top, .. }, IpcNode::Leaf { id: bottom, .. }]
-            if *top == first && *bottom == second
+        [
+            IpcNode::Split { layout: Layout::SplitH, children: wrapped, .. },
+            IpcNode::Leaf { id: bottom, .. },
+        ] if *bottom == second
+            && matches!(&wrapped[..], [IpcNode::Leaf { id, .. }] if *id == first)
     ));
     t.check_invariants();
 }
@@ -208,8 +218,12 @@ fn directional_move_preserves_a_nonsquashable_singleton_source() {
     t.check_invariants();
 }
 
+// random seed 102 step 6 (sway-1.12-random): moving right into a
+// perpendicular branch descends to its focus-inactive view and promotes the
+// moved container to a sibling of that cousin, before it when moving right
+// or down (sway/commands/move.c:124-138, 152-165).
 #[test]
-fn directional_move_descends_after_the_inactive_child_of_a_perpendicular_branch() {
+fn directional_move_descends_before_the_inactive_child_of_a_perpendicular_branch() {
     let mut t = tree((1200., 800.), 0.);
     let left = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
     let top_right = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
@@ -230,8 +244,8 @@ fn directional_move_descends_after_the_inactive_child_of_a_perpendicular_branch(
             ..
         } if matches!(&children[..], [
             IpcNode::Leaf { id: top, .. },
-            IpcNode::Leaf { id: inactive, .. },
             IpcNode::Leaf { id, .. },
+            IpcNode::Leaf { id: inactive, .. },
         ] if *top == top_right && *inactive == bottom_right && *id == left)
     ));
     let parent = t.nodes[&left].parent.unwrap();
@@ -436,5 +450,382 @@ fn directional_move_reaps_nested_wrappers_around_the_only_window() {
         ),
         "{tree:?}"
     );
+    t.check_invariants();
+}
+
+// random seed 7 step 15 (sway-1.12-random): the only window, inside a split
+// inside a tabbed container, moves along the tabbed axis. Sway walks up to
+// the tabbed container (the first ancestor whose parent is parallel to the
+// move), promotes the window beside it, and reaps the emptied split.
+#[test]
+fn lone_window_same_axis_move_promotes_beside_the_parallel_ancestor() {
+    let mut t = tree((1200., 800.), 0.);
+    let window = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let split = t.wrap_node(window, Layout::SplitV);
+    t.wrap_node(split, Layout::Tabbed);
+
+    t.move_direction(window, Direction::Right);
+
+    let tree = t.ipc_tree();
+    assert!(
+        matches!(
+            tree,
+            IpcNode::Split {
+                layout: Layout::SplitH,
+                ref children,
+                ..
+            } if matches!(
+                &children[..],
+                [IpcNode::Split { layout: Layout::Tabbed, children: tabs, .. }]
+                    if matches!(&tabs[..], [IpcNode::Leaf { id, .. }] if *id == window)
+            )
+        ),
+        "{tree:?}"
+    );
+    t.check_invariants();
+}
+
+// random seed 185 step 6 (sway-1.12-random): `move left` from
+// V[H[a b] c] wraps the workspace, promotes c, and squashes the redundant
+// V[H] pair. `container_squash` reinserts the grandchildren at one index,
+// reversing them, and keeps each one's own fraction, so c, which arrives
+// with no fraction, takes the average and all three end equal
+// (sway/tree/container.c:1686-1716; `apply_horiz_layout`,
+// sway/tree/arrange.c).
+#[test]
+fn reorienting_move_squashes_like_sway() {
+    let mut t = tree((1200., 800.), 0.);
+    let a = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let b = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    let c = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+    assert!(t.move_direction(c, Direction::Down));
+    assert!(t.move_direction(c, Direction::Left));
+
+    let tree = t.ipc_tree();
+    let IpcNode::Split {
+        layout,
+        ref children,
+        ..
+    } = tree
+    else {
+        panic!("{tree:?}");
+    };
+    assert_eq!(layout, Layout::SplitH, "{tree:?}");
+    let ids: Vec<_> = children
+        .iter()
+        .map(|child| match child {
+            IpcNode::Leaf { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, [Some(c), Some(b), Some(a)], "{tree:?}");
+    let TreeNode::Split { percents, .. } = &t.nodes[&t.root].value else {
+        unreachable!()
+    };
+    for percent in percents {
+        assert!((percent - 1. / 3.).abs() < 1e-9, "{percents:?}");
+    }
+    t.check_invariants();
+}
+
+// random seed 405 step 19 (sway-1.12-random): in H[V[b] a], `move left` on b
+// does nothing. Sway treats a view whose parent is a singleton workspace
+// child as already at workspace level (sway/commands/move.c:387-393).
+#[test]
+fn move_out_of_a_singleton_workspace_child_is_a_no_op() {
+    let mut t = tree((1200., 800.), 0.);
+    let b = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(b, Layout::SplitV);
+    let before = format!("{:?}", t.ipc_tree());
+
+    assert!(!t.move_direction(b, Direction::Left));
+
+    assert_eq!(format!("{:?}", t.ipc_tree()), before);
+    t.check_invariants();
+}
+
+// random seed 9 step 5 (sway-1.12-random): the only window sits in a split
+// inside a stacked container on an H workspace. `move up` finds the stacked
+// container as a parallel ancestor and promotes the window into it; sway
+// reorients the workspace only when the walk finds no parallel parent
+// (sway/commands/move.c:322-349).
+#[test]
+fn lone_window_move_stops_at_a_parallel_stacked_ancestor() {
+    let mut t = tree((1200., 800.), 0.);
+    let window = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let split = t.wrap_node(window, Layout::SplitH);
+    t.wrap_node(split, Layout::Stacked);
+
+    t.move_direction(window, Direction::Up);
+
+    let tree = t.ipc_tree();
+    assert!(
+        matches!(
+            tree,
+            IpcNode::Split {
+                layout: Layout::SplitH,
+                ref children,
+                ..
+            } if matches!(
+                &children[..],
+                [IpcNode::Split { layout: Layout::Stacked, children: stack, .. }]
+                    if matches!(&stack[..], [IpcNode::Leaf { id, .. }] if *id == window)
+            )
+        ),
+        "{tree:?}"
+    );
+    t.check_invariants();
+}
+
+// random seed 168 step 20 (sway-1.12-random): in H[S[T[a b] c]], `move up`
+// on b climbs past its tabbed parent to the stacked container, which is
+// parallel; b has no sibling above the tabbed container, so sway promotes
+// it into the stack before that container instead of reorienting the
+// workspace (sway/commands/move.c:355-380, 394-412).
+#[test]
+fn move_promotes_into_the_first_parallel_ancestor_at_its_edge() {
+    let mut t = tree((1200., 800.), 0.);
+    let a = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let b = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    let c = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+    let tabs = t.alloc(Node {
+        parent: None,
+        value: TreeNode::Split {
+            layout: Layout::Tabbed,
+            children: vec![a, b],
+            percents: vec![0.5, 0.5],
+            meta: SplitMeta::default(),
+        },
+    });
+    let stack = t.alloc(Node {
+        parent: Some(t.root),
+        value: TreeNode::Split {
+            layout: Layout::Stacked,
+            children: vec![tabs, c],
+            percents: vec![0.5, 0.5],
+            meta: SplitMeta::default(),
+        },
+    });
+    t.nodes.get_mut(&tabs).unwrap().parent = Some(stack);
+    t.nodes.get_mut(&a).unwrap().parent = Some(tabs);
+    t.nodes.get_mut(&b).unwrap().parent = Some(tabs);
+    t.nodes.get_mut(&c).unwrap().parent = Some(stack);
+    t.nodes.get_mut(&t.root).unwrap().value = TreeNode::Split {
+        layout: Layout::SplitH,
+        children: vec![stack],
+        percents: vec![1.],
+        meta: SplitMeta::default(),
+    };
+    t.set_focus(b);
+    t.check_invariants();
+
+    assert!(t.move_direction(b, Direction::Up));
+
+    let tree = t.ipc_tree();
+    let ok = matches!(
+        tree,
+        IpcNode::Split { layout: Layout::SplitH, ref children, .. }
+            if matches!(
+                &children[..],
+                [IpcNode::Split { layout: Layout::Stacked, children: stacked, .. }]
+                    if matches!(
+                        &stacked[..],
+                        [IpcNode::Leaf { id: first, .. }, IpcNode::Split { layout: Layout::Tabbed, .. }, IpcNode::Leaf { id: last, .. }]
+                            if *first == b && *last == c
+                    )
+            )
+    );
+    assert!(ok, "{tree:?}");
+    t.check_invariants();
+}
+
+// random seed 335 step 8 (sway-1.12-random): in H[a V[b c*]], `move right`
+// promotes c beside the V. Sway zeroes the V's fraction and c has none on
+// this axis (sway/commands/move.c:394-412), so the next arrange gives both
+// the average share and the three children come out equal.
+#[test]
+fn promotion_beside_an_ancestor_shares_like_sway() {
+    let mut t = tree((1200., 800.), 0.);
+    t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let b = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(b, Layout::SplitV);
+    let c = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+
+    assert!(t.move_direction(c, Direction::Right));
+
+    let TreeNode::Split {
+        children, percents, ..
+    } = &t.nodes[&t.root].value
+    else {
+        unreachable!()
+    };
+    assert_eq!(children.len(), 3);
+    assert_eq!(children.last(), Some(&c));
+    for percent in percents {
+        assert!((percent - 1. / 3.).abs() < 1e-9, "{percents:?}");
+    }
+    t.check_invariants();
+}
+
+// random seed 267 step 16 (sway-1.12-random): in H[V[H[a b] c*]], `move up`
+// puts c into H[a b] at the end, then `workspace_squash` removes the
+// redundant H[V[H]] pair by reinserting its grandchildren at one index, so
+// they come out reversed: H[c b a] (sway/commands/move.c:142-151;
+// sway/tree/container.c:1686-1716).
+#[test]
+fn move_into_a_parallel_branch_squashes_like_sway() {
+    let mut t = tree((1200., 800.), 0.);
+    let a = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let b = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    let c = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+    let h = t.alloc(Node {
+        parent: None,
+        value: TreeNode::Split {
+            layout: Layout::SplitH,
+            children: vec![a, b],
+            percents: vec![0.5, 0.5],
+            meta: SplitMeta::default(),
+        },
+    });
+    let v = t.alloc(Node {
+        parent: Some(t.root),
+        value: TreeNode::Split {
+            layout: Layout::SplitV,
+            children: vec![h, c],
+            percents: vec![0.5, 0.5],
+            meta: SplitMeta::default(),
+        },
+    });
+    t.nodes.get_mut(&h).unwrap().parent = Some(v);
+    t.nodes.get_mut(&a).unwrap().parent = Some(h);
+    t.nodes.get_mut(&b).unwrap().parent = Some(h);
+    t.nodes.get_mut(&c).unwrap().parent = Some(v);
+    t.nodes.get_mut(&t.root).unwrap().value = TreeNode::Split {
+        layout: Layout::SplitH,
+        children: vec![v],
+        percents: vec![1.],
+        meta: SplitMeta::default(),
+    };
+    t.set_focus(c);
+    t.check_invariants();
+
+    assert!(t.move_direction(c, Direction::Up));
+
+    let TreeNode::Split { children, .. } = &t.nodes[&t.root].value else {
+        unreachable!()
+    };
+    assert_eq!(children, &[c, b, a]);
+    t.check_invariants();
+}
+
+// random seed 157 step 11 (sway-1.12-random): in H[a b c H[d e*]], `move
+// right` promotes e beside the inner H. e keeps its own fraction (0.5);
+// only the ancestor's is zeroed and takes the average of the others
+// (sway/commands/move.c:394-408; `apply_horiz_layout`, sway/tree/arrange.c).
+#[test]
+fn promotion_from_a_parallel_split_keeps_the_moved_fraction() {
+    let mut t = tree((1200., 800.), 0.);
+    for window in 1..=3 {
+        t.add_tile(tile(window, t.view_size()), InsertTarget::Focused);
+    }
+    let d = t.add_tile(tile(4, t.view_size()), InsertTarget::Focused);
+    t.split(d, Layout::SplitH);
+    let e = t.add_tile(tile(5, t.view_size()), InsertTarget::Focused);
+
+    assert!(t.move_direction(e, Direction::Right));
+
+    let TreeNode::Split {
+        children, percents, ..
+    } = &t.nodes[&t.root].value
+    else {
+        unreachable!()
+    };
+    assert_eq!(children.len(), 5);
+    assert_eq!(children.last(), Some(&e));
+    // a, b and c keep 0.25 and e keeps 0.5; the zeroed ancestor takes their
+    // average, 0.3125. Normalized: sway's 0.16 x 3, 0.2 and 0.32.
+    for (percent, expected) in percents.iter().zip([0.16, 0.16, 0.16, 0.2, 0.32]) {
+        assert!((percent - expected).abs() < 1e-9, "{percents:?}");
+    }
+    t.check_invariants();
+}
+
+// random seed 467 step 20 (sway-1.12-random): with a split container
+// focused, `move up` swaps it with its sibling and leaves the container
+// focused. Sway's directional move never changes focus
+// (`cmd_move_in_direction`, sway/commands/move.c:713-750).
+#[test]
+fn a_focused_container_stays_focused_after_a_directional_move() {
+    let mut t = tree((1200., 800.), 0.);
+    t.set_focused_layout(Layout::SplitV);
+    t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let b = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(b, Layout::SplitH);
+    t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+    assert!(t.focus_parent());
+    let container = t.focus().unwrap();
+    assert!(t.is_split(container));
+
+    assert!(t.move_direction(container, Direction::Up));
+
+    assert_eq!(t.focus(), Some(container));
+    t.check_invariants();
+}
+
+// random seed 368 steps 7 and 9 (sway-1.12-random): in V[H[a] b] with b
+// fullscreen, `layout tabbed` wraps the workspace children in a pending
+// tabbed container that sway reports as 0x0. The H inside keeps its
+// pre-layout box less the tab bar, and once the wrapper turns splitv the
+// split children omit percent, because sway omits it under an empty parent
+// box (sway/ipc-json.c:744-755).
+#[test]
+fn a_split_under_a_pending_fullscreen_wrapper_keeps_its_box() {
+    let mut t = tree((1200., 800.), 0.);
+    t.set_focused_layout(Layout::SplitV);
+    let a = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let b = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(a, Layout::SplitH);
+    t.set_focus(b);
+    let h = t.nodes[&a].parent.unwrap();
+    let before = t.compute_geometry().ipc_nodes[&h];
+    assert!(t.set_node_fullscreen(b, Some(FullscreenMode::Workspace)));
+
+    t.set_focused_layout(Layout::Tabbed);
+
+    let find = |node: &IpcNode<_>, id: NodeId| -> Option<(Rectangle<f64, Logical>, Option<f64>)> {
+        fn walk<W: Clone>(
+            node: &IpcNode<W>,
+            id: NodeId,
+        ) -> Option<(Rectangle<f64, Logical>, Option<f64>)> {
+            match node {
+                IpcNode::Split {
+                    id: own,
+                    rect,
+                    percent,
+                    children,
+                    ..
+                } => {
+                    if *own == id {
+                        return Some((*rect, *percent));
+                    }
+                    children.iter().find_map(|child| walk(child, id))
+                }
+                IpcNode::Leaf { .. } => None,
+            }
+        }
+        walk(node, id)
+    };
+    let (rect, _) = find(&t.ipc_tree(), h).unwrap();
+    assert_eq!(rect.loc.y, before.loc.y + t.titlebar_height, "{rect:?}");
+    assert_eq!(rect.size.h, before.size.h - t.titlebar_height, "{rect:?}");
+
+    // `focus parent; layout splitv` in the seed; the fullscreen view refuses
+    // `focus parent` here, so turn the wrapper directly.
+    let wrapper = t.nodes[&h].parent.unwrap();
+    t.set_layout(wrapper, Layout::SplitV);
+    let (rect, percent) = find(&t.ipc_tree(), h).unwrap();
+    assert_eq!(rect, before);
+    assert_eq!(percent, None);
     t.check_invariants();
 }

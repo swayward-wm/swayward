@@ -3,10 +3,7 @@ use swayward_ipc::command::Border;
 use swayward_ipc::legacy::SizeChange;
 use swayward_ipc::CommandOutcome;
 
-use super::{
-    failure, parse_boolean, tiling_target, CommandTarget, ResizeAmount, ResizeAxis, ResizeUnit,
-    Toggle,
-};
+use super::{failure, parse_boolean, CommandTarget, ResizeAmount, ResizeAxis, ResizeUnit, Toggle};
 use crate::swayward::State;
 
 fn target_window(
@@ -100,8 +97,11 @@ pub(super) fn opacity(
                 (mapped.id() == target).then(|| vec![mapped.window.clone()])
             })
         }
+        // Sway sets the container's alpha, which the scene applies to every
+        // view below it, a floating group included (`cmd_opacity`,
+        // sway/commands/opacity.c:15-44); set it on each window instead.
         CommandTarget::Container(workspace, node) => {
-            state.swayward.layout.tiling_node_windows(workspace, node)
+            state.swayward.layout.container_windows(workspace, node)
         }
     }
     .ok_or_else(|| failure("No matching node."))?;
@@ -246,13 +246,13 @@ pub(super) fn floating(
 pub(super) fn kill(state: &mut State, target: CommandTarget) -> Result<(), CommandOutcome> {
     let targets = match target {
         CommandTarget::Window(target) => vec![target.get()],
-        CommandTarget::Container(_, _) => {
-            let (workspace, node) =
-                tiling_target(state, target, "command requires a tiling target")?;
+        // Sway closes every view in the container, a floating group
+        // included (`cmd_kill`, sway/commands/kill.c:15-31).
+        CommandTarget::Container(workspace, node) => {
             let windows = state
                 .swayward
                 .layout
-                .tiling_node_windows(workspace, node)
+                .container_windows(workspace, node)
                 .ok_or_else(|| failure("No matching node."))?;
             state
                 .swayward
@@ -542,6 +542,18 @@ pub(super) fn title_format_focused(state: &mut State, format: &str) -> super::Ha
         ));
     };
     super::handled(title_format(state, target, format))
+}
+
+pub(super) fn inhibit_idle_focused(
+    state: &mut State,
+    mode: swayward_ipc::command::InhibitIdleMode,
+) -> super::HandlerResult {
+    let Some(target) = super::targeted::focused_target(state) else {
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can have idle inhibitors",
+        ));
+    };
+    super::handled(super::targeted::set_inhibit_idle(state, target, mode))
 }
 
 pub(super) fn shortcuts_inhibitor_focused(state: &mut State, enable: bool) -> super::HandlerResult {

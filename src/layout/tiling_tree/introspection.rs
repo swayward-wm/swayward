@@ -188,6 +188,24 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         self.fullscreen.is_some() && self.tree.fullscreen_layout_wrappers.contains(&id)
     }
 
+    fn under_tabbed_pending_wrapper(&self, id: NodeId) -> bool {
+        self.tree
+            .nodes
+            .get(&id)
+            .and_then(|node| node.parent)
+            .filter(|parent| self.is_pending_wrapper(*parent))
+            .and_then(|parent| self.tree.nodes.get(&parent))
+            .is_some_and(|parent| {
+                matches!(
+                    parent.value,
+                    TreeNode::Split {
+                        layout: Layout::Tabbed | Layout::Stacked,
+                        ..
+                    }
+                )
+            })
+    }
+
     fn node(&self, id: NodeId, percent: Option<f64>) -> Option<IpcNode<W::Id>> {
         let inside_pending_wrapper = self.in_pending_wrapper.contains(&id);
         Some(match &self.tree.nodes.get(&id)?.value {
@@ -222,6 +240,20 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             percent: pending_wrapper.then_some(0.).or(percent),
             rect: if pending_wrapper {
                 Rectangle::default()
+            } else if let Some(mut pre_layout) = self
+                .in_pending_wrapper
+                .contains(&id)
+                .then(|| tree.pre_layout_ipc_rects.get(&id).copied())
+                .flatten()
+            {
+                // A split moved into a pending fullscreen layout wrapper keeps
+                // its pre-layout box, less a tab bar when the wrapper is tabbed
+                // or stacked.
+                if self.under_tabbed_pending_wrapper(id) {
+                    pre_layout.loc.y += tree.titlebar_height;
+                    pre_layout.size.h = (pre_layout.size.h - tree.titlebar_height).max(0.);
+                }
+                pre_layout
             } else if let Some(slot) = tree.fullscreen_tile_slot_rect(id, self.geometries) {
                 slot
             } else {
@@ -291,10 +323,21 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         percents: &[f64],
     ) -> Vec<Option<f64>> {
         match layout {
-            Layout::Tabbed | Layout::Stacked if self.is_pending_wrapper(id) => {
-                vec![None; children.len()]
-            }
-            Layout::Tabbed | Layout::Stacked => vec![Some(1.); children.len()],
+            // A pending wrapper reports a 0x0 box, and sway omits percent
+            // when the parent box is empty (sway/ipc-json.c:744-755).
+            _ if self.is_pending_wrapper(id) => vec![None; children.len()],
+            // Every child fills the strip's content box, so it reports 1,
+            // except a fullscreen child, whose box is the output's.
+            Layout::Tabbed | Layout::Stacked => children
+                .iter()
+                .map(|child| {
+                    Some(if self.fullscreen == Some(*child) {
+                        self.fullscreen_child_percent(id, *child, 1.)
+                    } else {
+                        1.
+                    })
+                })
+                .collect(),
             Layout::SplitH | Layout::SplitV if self.fullscreen.is_some() => {
                 self.pending_split_percents(id, layout, children, percents)
             }
@@ -342,17 +385,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                 } else if !excluded.is_empty() && !is_fullscreen {
                     *stored_percent / visible_total
                 } else if is_fullscreen {
-                    let child_rect = tree
-                        .fullscreen_tile_slot_rect(*child, geometries)
-                        .or_else(|| geometries.ipc_nodes.get(child).copied())
-                        .unwrap_or_default();
-                    let parent_area = parent_rect.size.w.round() * parent_rect.size.h.round();
-                    let child_area = child_rect.size.w.round() * child_rect.size.h.round();
-                    if parent_area > 0. {
-                        child_area / parent_area
-                    } else {
-                        *stored_percent
-                    }
+                    self.fullscreen_child_percent(id, *child, *stored_percent)
                 } else if parent_extent > 0. {
                     allocated / parent_extent
                 } else {
@@ -360,6 +393,31 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                 })
             })
             .collect()
+    }
+
+    /// A fullscreen child's percent: its box's area over its parent's
+    /// pending box (sway/ipc-json.c:744-755), both as before the fullscreen
+    /// pass unless the child reports its tile slot.
+    fn fullscreen_child_percent(&self, parent: NodeId, child: NodeId, fallback: f64) -> f64 {
+        let tree = self.tree;
+        let geometries = self.geometries;
+        let parent_rect = tree
+            .pre_layout_ipc_rects
+            .get(&parent)
+            .or_else(|| geometries.tiled_ipc_nodes.get(&parent))
+            .copied()
+            .unwrap_or_default();
+        let child_rect = tree
+            .fullscreen_tile_slot_rect(child, geometries)
+            .or_else(|| geometries.ipc_nodes.get(&child).copied())
+            .unwrap_or_default();
+        let parent_area = parent_rect.size.w.round() * parent_rect.size.h.round();
+        let child_area = child_rect.size.w.round() * child_rect.size.h.round();
+        if parent_area > 0. {
+            child_area / parent_area
+        } else {
+            fallback
+        }
     }
 
     /// Split percents without fullscreen. Sway reports percent as
@@ -386,7 +444,10 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             .filter_map(|child| geometries.ipc_nodes.get(child).copied())
             .map(|rect| geometry::axis_extent(layout, rect))
             .sum::<f64>();
-        let allocated = child_shares(available, percents);
+        // Sway's container widths are integers, so its child_total_width is too
+        // (apply_horiz_layout, sway/tree/arrange.c:70-88). A floating group's fractional rect
+        // would otherwise round the first child's share the other way.
+        let allocated = child_shares(available.round(), percents);
         percents
             .iter()
             .zip(allocated)

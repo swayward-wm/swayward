@@ -23,6 +23,8 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         // tab_active also names nodes in its values: a container's shown child.
         self.tab_active.retain(|_, active| *active != id);
+        // So does last_entered_by: the leaf whose focus raised a container.
+        self.last_entered_by.retain(|_, leaf| *leaf != id);
         Some(node)
     }
 
@@ -61,6 +63,61 @@ impl<W: LayoutElement> TilingTree<W> {
             .get_mut(&child)
             .expect("invariant: the validated inserted child remains in the arena")
             .parent = Some(parent);
+    }
+
+    /// Gives each of `fresh` (children of `parent` whose fraction sway
+    /// zeroed) the average share of the other children, then normalizes, as
+    /// sway's next arrange does (`apply_horiz_layout`/`apply_vert_layout`,
+    /// sway/tree/arrange.c). With no other children they split evenly.
+    pub(super) fn share_as_fresh(&mut self, parent: NodeId, fresh: &[NodeId]) {
+        let Some(Node {
+            value: TreeNode::Split {
+                children, percents, ..
+            },
+            ..
+        }) = self.nodes.get_mut(&parent)
+        else {
+            return;
+        };
+        let is_fresh = |child: &NodeId| fresh.contains(child);
+        let (count, total) = children
+            .iter()
+            .zip(percents.iter())
+            .filter(|(child, _)| !is_fresh(child))
+            .fold((0usize, 0.), |(count, total), (_, percent)| {
+                (count + 1, total + percent)
+            });
+        let share = if count == 0 { 1. } else { total / count as f64 };
+        for (child, percent) in children.iter().zip(percents.iter_mut()) {
+            if is_fresh(child) {
+                *percent = share;
+            }
+        }
+        let sum: f64 = percents.iter().sum();
+        if sum > 0. {
+            for percent in percents.iter_mut() {
+                *percent /= sum;
+            }
+        }
+    }
+
+    pub(super) fn set_child_percent(&mut self, parent: NodeId, child: NodeId, percent: f64) {
+        let Some(Node {
+            value: TreeNode::Split {
+                children, percents, ..
+            },
+            ..
+        }) = self.nodes.get_mut(&parent)
+        else {
+            return;
+        };
+        if let Some(slot) = children
+            .iter()
+            .position(|candidate| *candidate == child)
+            .and_then(|index| percents.get_mut(index))
+        {
+            *slot = percent;
+        }
     }
 
     pub(super) fn insert_existing_child(

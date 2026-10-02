@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout::floating_tree::StackSlot;
 
 pub(super) struct WorkspaceNodeContext<'a> {
     pub(super) compositor_layout: &'a Layout<Mapped>,
@@ -241,7 +242,7 @@ fn floating_part(context: &WorkspaceNodeContext<'_>, state: &WorkspaceState) -> 
         .flatten();
     let mut floating_nodes = workspace
         .ipc_floating_trees()
-        .filter_map(|(_, tree, sticky)| {
+        .filter_map(|(root, tree, sticky)| {
             // `container_replace` hands a scratchpad view's membership to the
             // container that `container_split` wraps it in
             // (sway/sway/tree/container.c:1471-1564), so a group holding a
@@ -261,10 +262,14 @@ fn floating_part(context: &WorkspaceNodeContext<'_>, state: &WorkspaceState) -> 
             node.sticky = sticky;
             // A floating group's own tree keeps its internal focus while another layer is
             // active; sway reports a container focused only when it holds the seat focus.
-            if !state.focused || !workspace.floating_is_active() {
+            let holds_focus = state.focused
+                && workspace.active_window().is_some_and(|active| {
+                    workspace.floating_tree_root_for_window(&active.window) == Some(root)
+                });
+            if !state.focused || !workspace.floating_is_active() || !holds_focus {
                 clear_focused(&mut node);
             }
-            Some(node)
+            Some((StackSlot::Tree(root), node))
         })
         .chain(
             workspace
@@ -273,12 +278,23 @@ fn floating_part(context: &WorkspaceNodeContext<'_>, state: &WorkspaceState) -> 
                 .map(|(tile, layout)| {
                     let mut node = describe_floating_window(context, tile, &layout);
                     node.focused = active_window == Some(tile.window().id());
-                    node
+                    (StackSlot::Window(tile.window().window.clone()), node)
                 }),
         )
         .collect::<Vec<_>>();
-    floating_nodes.reverse();
-    floating_nodes
+    // Sway lists the workspace's floating containers bottom to top, a group
+    // and a single window in one list (`workspace->floating`,
+    // sway/ipc-json.c:532-540). A fullscreen tile that restores to floating
+    // is not in the floating stack yet; it is listed on top.
+    let stacking = workspace.floating().stacking();
+    let depth = |slot: &StackSlot<_>| {
+        stacking
+            .iter()
+            .position(|candidate| candidate == slot)
+            .map_or(0, |index| index + 1)
+    };
+    floating_nodes.sort_by_key(|(slot, _)| std::cmp::Reverse(depth(slot)));
+    floating_nodes.into_iter().map(|(_, node)| node).collect()
 }
 
 fn describe_floating_window(
@@ -363,14 +379,45 @@ fn order_focus(
         })
         .collect::<std::collections::HashMap<_, _>>();
     let children = nodes.iter().chain(floating_nodes).collect::<Vec<_>>();
+    // A node that was never focused joins the tail of sway's focus stack
+    // (`seat_node_from_node`, sway/input/seat.c:327-349). So a wrapper that
+    // was never focused sorts behind every focused node. A never-focused
+    // window beside it was created after the wrapper took every workspace
+    // child, so it joined the tail later and sorts behind the wrapper.
+    let timestamp_of = |id: &i64| {
+        children
+            .iter()
+            .find(|child| child.id == *id)
+            .and_then(|child| newest_focus_timestamp(child, &focus_timestamps))
+    };
+    // The tiled list already follows sway's focus stack, which raises a
+    // container whenever focus enters it (`seat_set_raw_focus`,
+    // sway/input/seat.c). A container keeps that place after the focused
+    // view leaves it, so a tiled entry ranks as recent as the last time
+    // focus entered it.
+    let tiled_ids = nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+    let last_entered = workspace
+        .tiling()
+        .last_entered_windows()
+        .filter_map(|(node, window)| {
+            let mapped = workspace
+                .windows()
+                .find(|mapped| &mapped.window == window)?;
+            Some((container_id(node), mapped.focus_timestamp()?))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let effective = tiled_ids
+        .iter()
+        .map(|id| (*id, timestamp_of(id).max(last_entered.get(id).copied())))
+        .collect::<std::collections::HashMap<_, _>>();
     focus.sort_by_key(|id| {
-        Reverse((
-            !stale_tiling.contains(id),
-            children
-                .iter()
-                .find(|child| child.id == *id)
-                .and_then(|child| newest_focus_timestamp(child, &focus_timestamps)),
-        ))
+        let timestamp = timestamp_of(id);
+        let rank = match (stale_tiling.contains(id), timestamp.is_some()) {
+            (false, true) => 2,
+            (true, _) => 1,
+            (false, false) => 0,
+        };
+        Reverse((rank, effective.get(id).copied().unwrap_or(timestamp)))
     });
 }
 
@@ -399,6 +446,11 @@ fn apply_workspace_visibility(
     for node in floating_nodes {
         let shown = !tiling_fullscreen && (!floating_fullscreen || contains_fullscreen(node));
         set_windows_visible(node, workspace_visible && shown);
+        // Inside the floating group that holds the fullscreen view, only that
+        // view is visible (`view_is_visible`, sway/tree/view.c:1187-1193).
+        if shown && floating_fullscreen && node.fullscreen_mode == 0 {
+            apply_fullscreen_state(&mut node.nodes, workspace_visible);
+        }
         if tiling_fullscreen {
             clear_focused(node);
         }

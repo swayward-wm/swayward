@@ -490,6 +490,13 @@ pub(super) fn move_target_to_workspace(
             let Some(window) = window else {
                 return failure("No matching node.");
             };
+            if let Err(error) = state.swayward.layout.refuse_sticky_move_on_same_output(
+                &window,
+                &workspace_target,
+                auto_back_and_forth,
+            ) {
+                return failure(error);
+            }
             state.swayward.layout.detach_floating_group_child(&window);
             state
                 .swayward
@@ -890,7 +897,10 @@ pub(super) fn direction_focused(
     {
         return Err(super::failure("Cannot move workspaces in a direction"));
     }
-    let fullscreen_floating = workspace.active_floating_is_fullscreen();
+    // A fullscreen floating group root is a fullscreen floating container
+    // too (`cmd_move_in_direction`, sway/commands/move.c:688-692).
+    let fullscreen_floating = workspace.active_floating_is_fullscreen()
+        || workspace.focused_floating_tree_root_is_fullscreen();
     if workspace.floating_is_active() || fullscreen_floating {
         if fullscreen_floating {
             return Err(failure("Cannot move fullscreen floating container"));
@@ -901,6 +911,24 @@ pub(super) fn direction_focused(
             .focused_leaf_is_only_child_of_floating_tree_root()
         {
             return Err(success());
+        }
+        // A floating group's child is not floating, so it moves inside the
+        // group like a tiled child; only the floating root moves by pixels
+        // (`container_is_floating`, sway/commands/move.c:326-330,
+        // 722-728).
+        if workspace.focused_floating_tree_child() {
+            let direction = match direction {
+                Direction::Left => crate::layout::tiling_tree::Direction::Left,
+                Direction::Right => crate::layout::tiling_tree::Direction::Right,
+                Direction::Up => crate::layout::tiling_tree::Direction::Up,
+                Direction::Down => crate::layout::tiling_tree::Direction::Down,
+            };
+            state
+                .swayward
+                .layout
+                .move_focused_floating_tree_child(direction);
+            state.swayward.queue_redraw_all();
+            return Ok(None);
         }
         let pixels = f64::from(pixels.unwrap_or(10));
         let (x, y) = match direction {

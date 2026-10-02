@@ -10,7 +10,7 @@ use swayward_ipc::{PositionChange, SizeChange, WindowLayout};
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
 use super::tiling_tree::{DetachedSubtree, Direction, NodeId, TilingTree, TilingTreeRenderElement};
-use super::titlebar::{self, Titlebar, TitlebarRenderer, TitlebarState};
+use super::titlebar::{self, Titlebar, TitlebarSlot, TitlebarState};
 use super::workspace::{InteractiveResize, ResolvedSize};
 use super::{
     ConfigureIntent, InteractiveResizeData, LayoutElement, Options, RemovedTile, SizeFrac,
@@ -89,28 +89,42 @@ pub(super) fn apply_position_change(
     }
 }
 
-/// Ordered floating roots. Step 1 stores one window in each root.
+/// The floating layer: single-window roots and nested container roots.
 #[derive(Debug)]
 pub struct FloatingLayout<W: LayoutElement> {
     /// Single-window root entries in top-to-bottom order.
     entries: Vec<FloatingEntry<W>>,
 
-    /// Nested container roots. Commands keep these internal until IPC serialization is complete.
+    /// Nested container roots, created by `floating enable` on a container.
     tree_entries: Vec<FloatingTreeEntry<W>>,
+
+    /// Source of [`FloatingEntry::stamp`] and [`FloatingTreeEntry::stamp`].
+    ///
+    /// Sway keeps one list of floating containers whichever kind they are
+    /// (`workspace->floating`): a new one is appended and a raised one moves
+    /// to the end (sway/tree/workspace.c:961-971, container.c:1625-1637). Each
+    /// root records when it last reached the top, and [`Self::stacking`]
+    /// merges the two vectors by it, so a single window and a group stack
+    /// against each other while each vector keeps its own order.
+    next_stamp: u64,
 
     /// Id of the active window.
     ///
     /// The active window is not necessarily the topmost window. Focus-follows-mouse should
     /// activate a window, but not bring it to the top, because that's very annoying.
     ///
-    /// This is always set to `Some()` when `tiles` isn't empty.
+    /// Removing the active window hands activation to another floating window, so this is
+    /// `Some()` while `entries` or `tree_entries` holds a window.
     active_window_id: Option<W::Id>,
 
     /// Ongoing interactive resize.
     interactive_resize: Option<InteractiveResize<W>>,
 
-    /// Windows in the closing animation.
-    closing_windows: Vec<ClosingWindow>,
+    /// Windows in the closing animation, each with the front-to-back index in `entries` it
+    /// closed at. Sway keeps a destroying view's saved buffer in its own scene tree, so the
+    /// closing window stays in its stack slot (`view_save_buffer`, sway/tree/view.c:1268-1287,
+    /// called from sway/desktop/transaction.c:843-846).
+    closing_windows: Vec<(usize, ClosingWindow)>,
 
     /// View size for this space.
     view_size: Size<f64, Logical>,
@@ -126,8 +140,6 @@ pub struct FloatingLayout<W: LayoutElement> {
 
     /// Configurable properties of the layout.
     options: Rc<Options>,
-
-    titlebars: TitlebarRenderer,
 }
 
 swayward_render_elements! {
@@ -139,16 +151,30 @@ swayward_render_elements! {
     }
 }
 
+/// A floating root, as listed by [`FloatingLayout::stacking`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum StackSlot<I> {
+    Window(I),
+    Tree(NodeId),
+}
+
 /// A single-window floating root.
 #[derive(Debug)]
 struct FloatingEntry<W: LayoutElement> {
     tile: Tile<W>,
     data: Data,
+    /// When this root last reached the top; see [`FloatingLayout::next_stamp`].
+    stamp: u64,
+    /// Lives with the entry, so raising a window keeps its titlebar buffer.
+    /// Boxed so the cache keeps one address as the entry moves in the stack.
+    titlebar: Box<TitlebarSlot>,
 }
 
 /// A nested container root resident in the floating layer.
 #[derive(Debug)]
 struct FloatingTreeEntry<W: LayoutElement> {
+    /// When this root last reached the top; see [`FloatingLayout::next_stamp`].
+    stamp: u64,
     tree: TilingTree<W>,
     root: NodeId,
     rect: Rectangle<f64, Logical>,
@@ -308,7 +334,6 @@ impl Data {
     pub fn set_logical_pos(&mut self, logical_pos: Point<f64, Logical>) {
         self.pos = Self::logical_to_size_frac_in_working_area(self.working_area, logical_pos);
 
-        // This will clamp the logical position to the current working area.
         self.recompute_logical_pos();
     }
 
@@ -400,6 +425,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
         Self {
             entries: Vec::new(),
             tree_entries: Vec::new(),
+            next_stamp: 0,
             active_window_id: None,
             interactive_resize: None,
             closing_windows: Vec::new(),
@@ -408,7 +434,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
             scale,
             clock,
             options,
-            titlebars: Default::default(),
         }
     }
 
@@ -458,7 +483,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
             entry.tree.advance_animations();
         }
 
-        self.closing_windows.retain_mut(|closing| {
+        self.closing_windows.retain_mut(|(_, closing)| {
             closing.advance_animations();
             closing.are_animations_ongoing()
         });
@@ -532,6 +557,16 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 .iter_mut()
                 .flat_map(|entry| entry.tree.tiles_mut()),
         )
+    }
+
+    /// Each single-window entry's window and the address of its titlebar
+    /// cache, in stacking order.
+    #[cfg(test)]
+    pub(super) fn titlebar_slots(&self) -> Vec<(W::Id, *const TitlebarSlot)> {
+        self.entries
+            .iter()
+            .map(|entry| (entry.tile.window().id().clone(), &raw const *entry.titlebar))
+            .collect()
     }
 
     pub fn tiles_with_offsets(&self) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>)> + '_ {
@@ -646,12 +681,30 @@ impl<W: LayoutElement> FloatingLayout<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, super::HitType)> {
-        for entry in self.tree_entries.iter().rev() {
-            if let Some(hit) = entry.tree.window_under(pos) {
-                return Some(hit);
-            }
-        }
-        for (tile, tile_pos) in self.tiles_with_render_positions() {
+        let positions = self.tiles_with_render_positions().collect::<Vec<_>>();
+        for slot in self.stacking() {
+            let (tile, tile_pos) = match slot {
+                StackSlot::Tree(root) => {
+                    let hit = self
+                        .tree_entries
+                        .iter()
+                        .find(|entry| entry.root == root)
+                        .and_then(|entry| entry.tree.window_under(pos));
+                    if hit.is_some() {
+                        return hit;
+                    }
+                    continue;
+                }
+                StackSlot::Window(window) => {
+                    let Some(&(tile, tile_pos)) = positions
+                        .iter()
+                        .find(|(tile, _)| tile.window().id() == &window)
+                    else {
+                        continue;
+                    };
+                    (tile, tile_pos)
+                }
+            };
             if self
                 .titlebar_rect(tile, tile_pos, tile.animated_tile_size().w)
                 .is_some_and(|rect| rect.contains(pos))
@@ -826,7 +879,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
         let Some(index) = self.idx_of(&active) else {
             return;
         };
-        let FloatingEntry { tile, data } = self.entries.remove(index);
+        let FloatingEntry { tile, data, .. } = self.remove_entry(index);
         let rect = Rectangle::new(data.logical_pos, data.size);
         let mut tree = TilingTree::new(
             self.view_size,
@@ -867,9 +920,11 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .any(|entry| entry.tree.contains(root)));
         self.active_window_id = tree.active_window().map(|window| window.id().clone());
         let sticky = tree.is_split_sticky(root);
+        let stamp = self.bump_stamp();
         self.tree_entries.insert(
             0,
             FloatingTreeEntry {
+                stamp,
                 tree,
                 root,
                 rect,
@@ -900,9 +955,11 @@ impl<W: LayoutElement> FloatingLayout<W> {
         );
         let root = removed.root;
         self.active_window_id = tree.active_window().map(|window| window.id().clone());
+        let stamp = self.bump_stamp();
         self.tree_entries.insert(
             0,
             FloatingTreeEntry {
+                stamp,
                 tree,
                 root,
                 rect,
@@ -943,6 +1000,61 @@ impl<W: LayoutElement> FloatingLayout<W> {
             working_area: self.working_area,
             sticky: entry.sticky,
         })
+    }
+
+    fn bump_stamp(&mut self) -> u64 {
+        self.next_stamp += 1;
+        self.next_stamp
+    }
+
+    /// Every floating root, top to bottom: both vectors merged by stamp, each
+    /// keeping its own order.
+    pub fn stacking(&self) -> Vec<StackSlot<W::Id>> {
+        let mut windows = self.entries.iter().peekable();
+        let mut trees = self.tree_entries.iter().peekable();
+        let mut stacking = Vec::with_capacity(self.entries.len() + self.tree_entries.len());
+        loop {
+            let tree_first = match (windows.peek(), trees.peek()) {
+                (None, None) => break,
+                (Some(_), None) => false,
+                (None, Some(_)) => true,
+                (Some(window), Some(tree)) => tree.stamp > window.stamp,
+            };
+            if tree_first {
+                if let Some(tree) = trees.next() {
+                    stacking.push(StackSlot::Tree(tree.root));
+                }
+            } else if let Some(window) = windows.next() {
+                stacking.push(StackSlot::Window(window.tile.window().id().clone()));
+            }
+        }
+        stacking
+    }
+
+    /// Floating roots bottom to top: `Some(root)` for a group, `None` for a
+    /// single window.
+    #[cfg(test)]
+    pub(super) fn stacking_order(&self) -> Vec<Option<NodeId>> {
+        self.stacking()
+            .into_iter()
+            .rev()
+            .map(|slot| match slot {
+                StackSlot::Tree(root) => Some(root),
+                StackSlot::Window(_) => None,
+            })
+            .collect()
+    }
+
+    /// Focuses the most recently focused view of group `root`.
+    pub fn focus_tree_view(&mut self, root: NodeId) {
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.root == root)
+        {
+            entry.tree.focus_inactive_leaf_of(root);
+            self.active_window_id = entry.tree.active_window().map(|window| window.id().clone());
+        }
     }
 
     pub fn tree_rect(&self, root: NodeId) -> Option<Rectangle<f64, Logical>> {
@@ -1076,10 +1188,44 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .is_some_and(|entry| entry.tree.set_window_border(id, style, width))
     }
 
+    /// Whether a new view should map into the active floating group: sway
+    /// maps it beside the seat's focus-inactive container when that is
+    /// inside a floating container but is not the floating root itself
+    /// (`view_map`, sway/tree/view.c:849-901).
+    pub fn maps_into_focused_group(&self) -> bool {
+        self.active_tree_entry().is_some_and(|entry| {
+            entry.tree.focus().is_some_and(|focus| {
+                focus != entry.root && entry.tree.contains_node(entry.root, focus)
+            })
+        })
+    }
+
+    /// Maps `tile` into the active floating group beside its focused child.
+    /// Check [`Self::maps_into_focused_group`] first.
+    pub fn add_tile_to_focused_group(&mut self, tile: Tile<W>) {
+        let id = tile.window().id().clone();
+        let Some(entry) = self.active_tree_entry_mut() else {
+            warn!("add_tile_to_focused_group: no active floating group");
+            return;
+        };
+        entry
+            .tree
+            .add_tile_with_activation(tile, super::tiling_tree::InsertTarget::Focused, true);
+        self.active_window_id = Some(id);
+    }
+
     pub fn focused_tree_child(&self) -> bool {
         self.active_tree_entry()
             .and_then(|entry| entry.tree.focus().map(|focus| focus != entry.root))
             .unwrap_or(false)
+    }
+
+    /// Whether the focused floating group root is itself fullscreen.
+    pub fn focused_tree_root_is_fullscreen(&self) -> bool {
+        self.active_tree_entry().is_some_and(|entry| {
+            entry.tree.focus() == Some(entry.root)
+                && entry.tree.fullscreen_node() == Some(entry.root)
+        })
     }
 
     pub fn focused_child_tree_mut(&mut self) -> Option<&mut TilingTree<W>> {
@@ -1113,6 +1259,23 @@ impl<W: LayoutElement> FloatingLayout<W> {
         })
     }
 
+    /// Every window under `node` in a floating group, or `None` when no
+    /// group holds `node`.
+    pub fn node_window_ids(&self, node: NodeId) -> Option<Vec<W::Id>> {
+        let entry = self
+            .tree_entries
+            .iter()
+            .find(|entry| entry.tree.contains(node))?;
+        Some(
+            entry
+                .tree
+                .windows()
+                .filter(|(leaf, _)| entry.tree.contains_node(node, *leaf))
+                .map(|(_, window)| window.id().clone())
+                .collect(),
+        )
+    }
+
     pub fn focus_parent(&mut self) -> bool {
         self.active_tree_entry_mut()
             .is_some_and(|entry| entry.tree.focus_parent())
@@ -1129,6 +1292,18 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 .map(|(_, window)| window.id().clone())
                 .collect()
         })
+    }
+
+    /// Whether `window`'s floating root, the window itself or the group it is
+    /// in, is sticky (`container_is_sticky_or_child`,
+    /// sway/tree/container.c:1648-1654).
+    pub fn window_root_is_sticky(&self, window: &W::Id) -> bool {
+        if let Some(entry) = self.tree_entry_with_window(window) {
+            return entry.sticky;
+        }
+        self.entries
+            .iter()
+            .any(|entry| entry.tile.window().id() == window && entry.tile.is_sticky)
     }
 
     pub fn tree_is_sticky(&self, root: NodeId) -> bool {
@@ -1332,6 +1507,32 @@ mod commands;
 mod interaction;
 mod rendering;
 
+/// One slot in the floating render order, front to back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatingStackElement {
+    /// Index into `closing_windows`.
+    Closing(usize),
+    /// Index into `entries`.
+    Live(usize),
+}
+
+/// Merges closing snapshots into the live stack. A snapshot recorded at index `i` renders just
+/// above the live entry now at `i`, which was below it when it closed.
+fn floating_stack_order(live_count: usize, closing_indices: &[usize]) -> Vec<FloatingStackElement> {
+    let mut closing: Vec<_> = closing_indices.iter().copied().enumerate().collect();
+    closing.sort_by_key(|(_, index)| *index);
+    let mut closing = closing.into_iter().peekable();
+    let mut order = Vec::with_capacity(live_count + closing_indices.len());
+    for live in 0..live_count {
+        while let Some((closing_idx, _)) = closing.next_if(|(_, index)| *index <= live) {
+            order.push(FloatingStackElement::Closing(closing_idx));
+        }
+        order.push(FloatingStackElement::Live(live));
+    }
+    order.extend(closing.map(|(closing_idx, _)| FloatingStackElement::Closing(closing_idx)));
+    order
+}
+
 fn compute_toplevel_bounds(
     border_config: swayward_config::Border,
     working_area_size: Size<f64, Logical>,
@@ -1352,5 +1553,27 @@ fn resolve_preset_size(preset: PresetSize, view_size: f64) -> ResolvedSize {
     match preset {
         PresetSize::Proportion(proportion) => ResolvedSize::Tile(view_size * proportion),
         PresetSize::Fixed(width) => ResolvedSize::Window(f64::from(width)),
+    }
+}
+
+#[cfg(test)]
+mod stack_order_tests {
+    use super::floating_stack_order;
+    use super::FloatingStackElement::*;
+
+    #[test]
+    fn closing_floating_window_keeps_its_stack_position() {
+        // A window closed from the middle of three stays between its neighbours.
+        assert_eq!(
+            floating_stack_order(2, &[1]),
+            vec![Live(0), Closing(0), Live(1)]
+        );
+        // Closed from the front, it stays in front; from the back, it stays behind.
+        assert_eq!(floating_stack_order(1, &[0]), vec![Closing(0), Live(0)]);
+        assert_eq!(floating_stack_order(1, &[1]), vec![Live(0), Closing(0)]);
+        assert_eq!(
+            floating_stack_order(1, &[1, 0]),
+            vec![Closing(1), Live(0), Closing(0)]
+        );
     }
 }

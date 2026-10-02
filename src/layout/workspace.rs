@@ -204,6 +204,8 @@ pub enum WorkspaceAddWindowTarget<'a, W: LayoutElement> {
     NewColumnAt(usize),
     /// Next to this existing window.
     NextTo(&'a W::Id),
+    /// Moved here from another workspace.
+    Move,
 }
 
 pub struct AddTileOptions {
@@ -773,7 +775,12 @@ impl<W: LayoutElement> Workspace<W> {
         tile.restore_to_floating = is_floating;
 
         match target {
-            WorkspaceAddWindowTarget::Auto => {
+            WorkspaceAddWindowTarget::Auto | WorkspaceAddWindowTarget::Move => {
+                let insert = if matches!(target, WorkspaceAddWindowTarget::Move) {
+                    InsertTarget::MoveDestination
+                } else {
+                    InsertTarget::Focused
+                };
                 // Don't steal focus from an active fullscreen window.
                 let activate = activate.map_smart(|| !self.is_active_pending_fullscreen());
 
@@ -786,8 +793,20 @@ impl<W: LayoutElement> Workspace<W> {
                         self.floating_is_active = FloatingActive::Yes;
                     }
                 } else {
-                    self.tiling
-                        .add_tile_with_activation(tile, InsertTarget::Focused, activate);
+                    // A new view whose focus-inactive container is inside a
+                    // floating group joins that group beside it; only a
+                    // focused floating root sends it to the tiling layer
+                    // (`view_map`, sway/tree/view.c:849-901).
+                    if activate
+                        && matches!(insert, InsertTarget::Focused)
+                        && self.floating_is_active.get()
+                        && tile.window().pending_sizing_mode().is_normal()
+                        && self.floating.maps_into_focused_group()
+                    {
+                        self.floating.add_tile_to_focused_group(tile);
+                        return;
+                    }
+                    self.tiling.add_tile_with_activation(tile, insert, activate);
 
                     if activate {
                         self.floating_is_active = FloatingActive::No;
@@ -936,6 +955,11 @@ impl<W: LayoutElement> Workspace<W> {
         transfer: bool,
     ) -> RemovedTile<W> {
         let mut from_floating = false;
+        let removed_focus = self.floating_is_active.get()
+            && self
+                .floating
+                .active_window()
+                .is_some_and(|window| window.id() == id);
         let removed = if self.floating.has_window(id) {
             from_floating = true;
             self.floating.remove_tile(id, transaction)
@@ -959,6 +983,16 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
+        // Removing the focused floating window hands focus to the workspace's
+        // focus-inactive node (seat_get_focus_inactive(ws), as in
+        // root_scratchpad_hide, sway/tree/root.c:211-229), which is a view
+        // whenever the workspace has one. A `focus parent` up to the workspace
+        // before the floating window was focused must not leave the tiling
+        // focus on the root.
+        if removed_focus && !self.floating_is_active.get() && self.tiling.root_is_focused() {
+            self.tiling.focus_child();
+            while self.tiling.focus_child() {}
+        }
 
         removed
     }
