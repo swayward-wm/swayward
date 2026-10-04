@@ -58,7 +58,7 @@ commit that moves a pin outside T4 is bounced.
 | Tier | When | Who runs what | Passes when |
 |---|---|---|---|
 | T0 | every commit | author: `./contrib/fast-gate` | exit 0 |
-| T1 | behavior change | author: T0, plus `contrib/targeted-oracle --run` and the cited rows | 0 new mismatches; cited rows match |
+| T1 | behavior change | author: T0, plus `contrib/targeted-oracle --baseline <last T2 sweep dir> --out-dir <scratch> --run` and the cited rows | 0 new mismatches; cited rows match |
 | T2 | a landed behavior batch, at most every 2 h | integrator: `contrib/oracle-sweep`, then `contrib/oracle-sweep-diff` against the baseline | 0 lost, 0 missing |
 | T3 | nightly | CI: 200k proptests and the live soak | no new failure |
 | T4 | release candidate, once per milestone | maintainer: full oracle regeneration | oracle `contrib/validate` green, `pending.toml` empty, two runs agree |
@@ -80,11 +80,16 @@ For T1, select the affected rows with `contrib/targeted-oracle --out-dir
 the dev container). It builds the release binary, points the local oracle
 cache's `pins.toml` at `HEAD` for the run and restores it afterwards (a
 scratch pin, never committed), and exits 1 only for rows that
-match in the pinned swayward snapshot and mismatch now; known mismatches are
-listed but pass. It fails closed for an unmapped production path. Run the rows
-a fix cites directly with oracle `contrib/sway-ipc-run`, with `--out` outside
-the repo. A sway-compatibility fix names its oracle row in the commit message
-(see Invariants).
+match in the baseline and mismatch now; known mismatches are listed but pass.
+Pass `--baseline <sweep-dir>`, the integrator's last T2 `contrib/oracle-sweep`
+output (the rolling baseline): without it the baseline is the pinned
+swayward snapshot, which is a milestone old. The baseline must be a finished
+sweep of the same oracle commit as `--oracle`, or the run exits 2. It fails
+closed for an unmapped production path. Run the rows a fix cites with
+`--scenarios a,b` (state, events and i3-derived names) and `--seeds 1,2`;
+these replace the path-based selection, so run them as a second invocation.
+A sway-compatibility fix names its oracle row in the commit message (see
+Invariants).
 
 The integrator owns T2 and takes the full sweep (random, i3-derived, state,
 events) off the critical path. It lands behavior commits in batches, sweeps the

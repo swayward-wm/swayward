@@ -2,11 +2,20 @@
 """Print or run focused oracle rows selected from changed production paths.
 
 With --run it builds the release binary, pins the oracle checkout to HEAD for
-the run, and compares every row with the oracle's committed swayward snapshot.
-It exits 1 only for rows that match in the snapshot and mismatch now.
+the run, and compares every row with the oracle's committed swayward snapshot,
+or with a contrib/oracle-sweep output directory given as --baseline (the
+rolling T2 baseline). It exits 1 only for rows that match in the baseline and
+mismatch now. A selected row the --baseline sweep lacks exits 2, naming it:
+an absent row is no evidence the mismatch is known. --allow-new-rows instead
+reports such a row as NEW when it mismatches now.
+
+--scenarios and --seeds replace the path-based selection: only the named rows
+run. A scenario name runs in every corpus that holds it (state, events,
+i3-derived).
 """
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -32,10 +41,34 @@ def changed_paths(base: str, paths: list[str]) -> list[str]:
     return [line for line in output.splitlines() if line]
 
 
-def commands(changed: list[str], oracle: Path, binary: Path, out_dir: Path) -> list[list[str]]:
+def empty_selection() -> dict[str, set]:
+    return {"state": set(), "events": set(), "i3_derived": set(), "random_seeds": set()}
+
+
+def named_rows(oracle: Path, scenarios: list[str], seeds: list[int]) -> dict[str, set]:
+    """Route explicitly named scenarios to their corpora; unknown names fail."""
+    corpora = scenario_corpora(oracle)
+    derived_path = oracle / "sway-ipc" / "i3-derived" / "scenarios.json"
+    if scenarios and (not corpora or not derived_path.exists()):
+        raise RuntimeError(f"no oracle scenarios under {oracle}; run ./contrib/fetch-oracle")
+    derived = {item["name"] for item in json.loads(derived_path.read_text())["scenarios"]} if scenarios else set()
+    selected = empty_selection()
+    for name in scenarios:
+        homes = [corpus for corpus in corpora.get(name, ()) if corpus in ("state", "events")]
+        if name in derived:
+            homes.append("i3_derived")
+        if not homes:
+            raise RuntimeError(f"unknown oracle scenario: {name}")
+        for corpus in homes:
+            selected[corpus].add(name)
+    selected["random_seeds"].update(seeds)
+    return selected
+
+
+def mapped_rows(changed: list[str], oracle: Path) -> dict[str, set]:
     with MAP.open("rb") as file:
         targets = tomllib.load(file)["target"]
-    selected = {"state": set(), "events": set(), "i3_derived": set(), "random_seeds": set()}
+    selected = empty_selection()
     corpora = scenario_corpora(oracle)
     mapped = set()
     for target in targets:
@@ -62,6 +95,10 @@ def commands(changed: list[str], oracle: Path, binary: Path, out_dir: Path) -> l
                 f"tests/oracle-targets.toml lists {corpus} scenarios outside the {corpus} corpus: "
                 + ", ".join(wrong)
             )
+    return selected
+
+
+def commands(selected: dict[str, set], oracle: Path, binary: Path, out_dir: Path) -> list[list[str]]:
     runner = oracle / "contrib" / "sway-ipc-run"
     common = ["--compositor", "swayward", "--binary", str(binary)]
     result = []
@@ -113,13 +150,53 @@ def verdicts(path: Path) -> dict[tuple, str]:
     }
 
 
-def compare(result: Path, baseline: Path) -> tuple[list, list, list]:
-    """New, known and fixed mismatches of one result against the baseline snapshot."""
-    now, before = verdicts(result), verdicts(baseline)
-    new = sorted(key for key, verdict in now.items() if verdict != "match" and before.get(key) == "match")
+def compare(
+    now: dict[tuple, str], before: dict[tuple, str], absent_is_new: bool = False
+) -> tuple[list, list, list]:
+    """New, known and fixed mismatches of one result against the baseline.
+
+    A row absent from the baseline is known unless absent_is_new, when a
+    mismatch there is NEW: nothing shows it ever mismatched before.
+    """
+    absent = "match" if absent_is_new else None
+    new = sorted(
+        key for key, verdict in now.items()
+        if verdict != "match" and before.get(key, absent) == "match"
+    )
     known = sorted(key for key, verdict in now.items() if verdict != "match" and key not in new)
     fixed = sorted(key for key, verdict in now.items() if verdict == "match" and before.get(key, "match") != "match")
     return new, known, fixed
+
+
+SWEEP_PREFIX = {"state": "state", "events": "events", "i3-derived": "i3d", "random": "random"}
+
+
+def sweep_verdicts(sweep: Path, corpus: str) -> dict[tuple, str]:
+    """Merged verdicts of one corpus across the shards of an oracle-sweep directory."""
+    prefix = SWEEP_PREFIX[corpus]
+    merged = {}
+    for path in sorted(sweep.glob("*.toml")):
+        if path.stem.split("-")[0] == prefix:
+            merged.update(verdicts(path))
+    if not merged:
+        raise RuntimeError(f"baseline {sweep} has no {prefix} results")
+    return merged
+
+
+def check_baseline(sweep: Path, oracle: Path) -> None:
+    """A rolling baseline is a finished sweep of the oracle commit in use."""
+    status_path = sweep / "status.json"
+    if not status_path.is_file():
+        raise RuntimeError(f"baseline has no {status_path}: the sweep did not finish")
+    status = json.loads(status_path.read_text())
+    if status.get("dead"):
+        raise RuntimeError(f"baseline {sweep} has dead shards: {status['dead']}")
+    head = subprocess.check_output(["git", "-C", oracle, "rev-parse", "HEAD"], text=True).strip()
+    if status.get("oracle") != head:
+        raise RuntimeError(
+            f"baseline {sweep} was swept on oracle {str(status.get('oracle'))[:7]}, "
+            f"{oracle} is at {head[:7]}; a baseline is valid for one oracle commit"
+        )
 
 
 def build_release() -> None:
@@ -131,7 +208,9 @@ def build_release() -> None:
     subprocess.run(["cargo", "build", "--release", "-p", "swayward"], cwd=ROOT, env=env, check=True)
 
 
-def run(selected: list[list[str]], oracle: Path) -> int:
+def run(
+    selected: list[list[str]], oracle: Path, sweep: Path | None = None, allow_new_rows: bool = False
+) -> int:
     pins = oracle / "pins.toml"
     original = pins.read_text()
     head = subprocess.check_output(["git", "-C", ROOT, "rev-parse", "HEAD"], text=True).strip()
@@ -140,6 +219,7 @@ def run(selected: list[list[str]], oracle: Path) -> int:
     # Only the top-level 40-hex pin; [snapshot] swayward stays the result name.
     pins.write_text(re.sub(r'^swayward = "[0-9a-f]{40}"$', f'swayward = "{head}"', original, flags=re.M))
     new_total = 0
+    absent_total = []
     try:
         for command in selected:
             print(shlex.join(command), flush=True)
@@ -151,15 +231,32 @@ def run(selected: list[list[str]], oracle: Path) -> int:
                 print(f"targeted-oracle: {command[1]} wrote no result", file=sys.stderr)
                 return 2
             corpus = out.stem
-            baseline = oracle / "sway-ipc" / "results" / f"{snapshot}{RESULT_SUFFIX[corpus]}.toml"
-            new, known, fixed = compare(out, baseline)
+            if sweep is None:
+                baseline = oracle / "sway-ipc" / "results" / f"{snapshot}{RESULT_SUFFIX[corpus]}.toml"
+                before, label = verdicts(baseline), baseline.name
+            else:
+                before, label = sweep_verdicts(sweep, corpus), str(sweep)
+            now = verdicts(out)
+            if sweep is not None:
+                absent = sorted(key for key in now if key not in before)
+                if absent and not allow_new_rows:
+                    absent_total += [f"{corpus} " + " ".join(map(str, key)) for key in absent]
+                    continue
+            new, known, fixed = compare(now, before, absent_is_new=sweep is not None)
             new_total += len(new)
-            print(f"{corpus}: {len(new)} new, {len(known)} known, {len(fixed)} fixed vs {baseline.name}")
+            print(f"{corpus}: {len(new)} new, {len(known)} known, {len(fixed)} fixed vs {label}")
             for label, keys in (("NEW", new), ("known", known), ("fixed", fixed)):
                 for key in keys:
                     print(f"  {label} {corpus} " + " ".join(map(str, key)))
     finally:
         pins.write_text(original)
+    if absent_total:
+        print(
+            f"targeted-oracle: selected rows absent from baseline {sweep} "
+            "(pass --allow-new-rows to report them as NEW): " + ", ".join(absent_total),
+            file=sys.stderr,
+        )
+        return 2
     return 1 if new_total else 0
 
 
@@ -171,12 +268,37 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/swayward")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--run", action="store_true")
+    parser.add_argument(
+        "--baseline", type=Path, metavar="SWEEP_DIR",
+        help="compare with this contrib/oracle-sweep output instead of the pinned snapshot",
+    )
+    parser.add_argument(
+        "--allow-new-rows", action="store_true",
+        help="with --baseline, compare rows absent from the sweep as if they matched there",
+    )
+    parser.add_argument(
+        "--scenarios", action="append", default=[], metavar="A,B",
+        help="run only these scenarios (state, events or i3-derived); repeatable",
+    )
+    parser.add_argument(
+        "--seeds", action="append", default=[], metavar="1,2",
+        help="run only these random seeds; repeatable",
+    )
     args = parser.parse_args()
     args.out_dir = args.out_dir.resolve()
+    scenarios = [name for item in args.scenarios for name in item.split(",") if name]
     try:
-        selected = commands(
-            changed_paths(args.base, args.paths), args.oracle, args.binary, args.out_dir
-        )
+        seeds = [int(seed) for item in args.seeds for seed in item.split(",") if seed]
+    except ValueError:
+        parser.error("--seeds takes comma-separated seed numbers")
+    if (scenarios or seeds) and args.paths:
+        parser.error("--scenarios/--seeds replace path selection; drop the paths")
+    try:
+        if scenarios or seeds:
+            rows = named_rows(args.oracle, scenarios, seeds)
+        else:
+            rows = mapped_rows(changed_paths(args.base, args.paths), args.oracle)
+        selected = commands(rows, args.oracle, args.binary, args.out_dir)
     except (OSError, subprocess.CalledProcessError, RuntimeError) as error:
         print(f"targeted-oracle: {error}", file=sys.stderr)
         return 2
@@ -189,9 +311,12 @@ def main() -> int:
             print(shlex.join(command))
         return 0
     try:
+        if args.baseline is not None:
+            args.baseline = args.baseline.resolve()
+            check_baseline(args.baseline, args.oracle)
         if args.binary == ROOT / "target/release/swayward":
             build_release()
-        return run(selected, args.oracle)
+        return run(selected, args.oracle, args.baseline, args.allow_new_rows)
     except (OSError, subprocess.CalledProcessError, RuntimeError) as error:
         print(f"targeted-oracle: {error}", file=sys.stderr)
         return 2
