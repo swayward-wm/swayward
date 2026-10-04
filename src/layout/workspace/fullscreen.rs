@@ -77,7 +77,9 @@ impl<W: LayoutElement> Workspace<W> {
             self.set_fullscreen(&window, mode.is_some());
             return true;
         }
-        let Some(id) = self.tiling.focus() else {
+        // With the workspace itself focused there is no container, and sway's
+        // `fullscreen` succeeds without doing anything (sway/commands/fullscreen.c:22-25).
+        let Some(id) = self.tiling.focus().filter(|id| !self.tiling.is_root(*id)) else {
             return false;
         };
         self.tiling.set_node_fullscreen(id, mode)

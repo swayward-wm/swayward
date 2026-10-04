@@ -490,6 +490,7 @@ impl<W: LayoutElement> TilingTree<W> {
             if let Some(node) = self.nodes.get_mut(&child) {
                 node.parent = Some(wrapper);
             }
+            self.commit_mapped_under_fullscreen(child);
         }
         if let Some(TreeNode::Split {
             children, percents, ..

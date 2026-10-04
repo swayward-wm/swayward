@@ -693,3 +693,168 @@ fn scripted_split_nesting_is_bounded() {
     );
     swayward.layout.verify_invariants();
 }
+
+fn map_app(f: &mut Fixture, client: super::client::ClientId, app_id: &str) {
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id(app_id.into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+}
+
+fn tree_json(f: &mut Fixture) -> serde_json::Value {
+    let swayward = f.swayward();
+    serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap()
+}
+
+/// A view mapped beside a fullscreen view is never committed, so sway
+/// reports calloc's `border none` and zero box until something attaches it
+/// to a container.
+fn assert_uncommitted(view: &serde_json::Value) {
+    assert_eq!(view["border"], "none", "{view}");
+    assert_eq!(view["current_border_width"], 0, "{view}");
+    assert_eq!(view["percent"], 0.0, "{view}");
+    assert_eq!(view["rect"]["width"], 0, "{view}");
+    assert_eq!(view["rect"]["height"], 0, "{view}");
+}
+
+/// Committed but never arranged: the configured border over a zero box below
+/// the titlebar, still with no content box.
+fn assert_committed_unarranged(view: &serde_json::Value, fullscreen: &serde_json::Value) {
+    assert_eq!(view["border"], "normal", "{view}");
+    assert_eq!(
+        view["current_border_width"], fullscreen["current_border_width"],
+        "{view}"
+    );
+    assert!(view["current_border_width"].as_i64().unwrap() > 0, "{view}");
+    let titlebar = view["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{view}");
+    assert_eq!(view["rect"]["width"], 0, "{view}");
+    assert_eq!(view["rect"]["height"], -titlebar, "{view}");
+    assert_eq!(view["window_rect"]["width"], 0, "{view}");
+    assert_eq!(view["window_rect"]["height"], 0, "{view}");
+}
+
+// random seed 29 step 9 (sway-1.12-random): `layout` under a
+// fullscreen view wraps the workspace children (`workspace_wrap_children`,
+// sway/tree/workspace.c:898-910), and `container_add_child` marks the hidden
+// view dirty (sway/tree/container.c:1436-1437). Its border is committed but
+// `arrange_workspace` lays out only the fullscreen view
+// (sway/tree/arrange.c:310-316), and the wrapper's empty box drops percent.
+#[test]
+fn layout_wrap_under_fullscreen_commits_the_hidden_views_border() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    map_app(&mut f, client, "hidden");
+    assert_uncommitted(find_json_node_with_app_id(&tree_json(&mut f), "hidden").unwrap());
+
+    // The workspace is splith, so a different layout makes the command act.
+    assert!(crate::command::execute(f.niri_state(), "layout splitv")[0].success);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let fullscreen = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_committed_unarranged(hidden, fullscreen);
+    assert_eq!(hidden["percent"], serde_json::Value::Null);
+}
+
+// random seed 47 step 6 (sway-1.12-random): with only a floating fullscreen
+// view on the workspace, a new view has no tiling sibling, so `view_map`
+// attaches it with `workspace_add_tiling` (sway/tree/view.c:849-901), which
+// marks it dirty (sway/tree/workspace.c:956-957).
+#[test]
+fn view_mapped_under_floating_fullscreen_keeps_its_border() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    map_app(&mut f, client, "hidden");
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let fullscreen = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_committed_unarranged(hidden, fullscreen);
+    assert_eq!(hidden["percent"], 0.0);
+    assert_eq!(hidden["visible"], false);
+}
+
+// random seed 29 step 7 (sway-1.12-random): beside a tiled fullscreen view
+// `view_map` uses `container_add_sibling`, which does not mark the new view
+// dirty (sway/tree/container.c:1410-1423), so it stays uncommitted.
+#[test]
+fn view_mapped_beside_tiled_fullscreen_stays_uncommitted() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    map_app(&mut f, client, "hidden");
+
+    assert_uncommitted(find_json_node_with_app_id(&tree_json(&mut f), "hidden").unwrap());
+}
+
+// random seed 355 step 10 (sway-1.12-random): with the workspace focused
+// there is no container, and sway's `fullscreen` succeeds without doing
+// anything (sway/commands/fullscreen.c:22-25), so a view mapped later tiles
+// normally.
+#[test]
+fn fullscreen_on_a_focused_workspace_does_nothing() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "first");
+    map_app(&mut f, client, "second");
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    map_app(&mut f, client, "third");
+
+    let tree = tree_json(&mut f);
+    for app_id in ["first", "second", "third"] {
+        let view = find_json_node_with_app_id(&tree, app_id).unwrap();
+        assert_eq!(view["fullscreen_mode"], 0, "{view}");
+        assert_eq!(view["border"], "normal", "{view}");
+        assert!(view["rect"]["width"].as_i64().unwrap() > 0, "{view}");
+    }
+}
+
+// random seed 436 step 14 (sway-1.12-random): floating the only child of a
+// fullscreen split reaps the split, and destroying the fullscreen container
+// ends fullscreen (`container_begin_destroy`, sway/tree/container.c:480-482).
+// The view that was mapped hidden under it is then arranged with its border.
+#[test]
+fn reaping_the_fullscreen_container_arranges_the_hidden_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "first");
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    map_app(&mut f, client, "hidden");
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
+    assert_uncommitted(find_json_node_with_app_id(&tree_json(&mut f), "hidden").unwrap());
+
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let first = find_json_node_with_app_id(&tree, "first").unwrap();
+    assert_eq!(hidden["border"], first["border"], "{hidden}");
+    assert_eq!(hidden["percent"], 0.5, "{hidden}");
+    assert!(hidden["rect"]["width"].as_i64().unwrap() > 0, "{hidden}");
+}

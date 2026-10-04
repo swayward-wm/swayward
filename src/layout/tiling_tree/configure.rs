@@ -56,6 +56,31 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// Sway commits a view mapped under fullscreen only once something marks
+    /// it dirty; until then it reports calloc's `border none`. Attaching it
+    /// with `workspace_add_tiling` or `container_add_child` marks it dirty
+    /// (sway/tree/workspace.c:956-957, sway/tree/container.c:1436-1437), but
+    /// the workspace still arranges only the fullscreen container
+    /// (sway/tree/arrange.c:310-316). So the view keeps its configured border
+    /// over its zero-sized box at the origin, as a moved container does.
+    pub(super) fn commit_mapped_under_fullscreen(&mut self, id: NodeId) {
+        if !self.mapped_under_fullscreen.remove(&id) {
+            return;
+        }
+        let titlebar = if self
+            .tile(id)
+            .is_some_and(Tile::has_configured_sway_titlebar)
+        {
+            self.titlebar_height
+        } else {
+            0.
+        };
+        self.moved_under_fullscreen.insert(
+            id,
+            Rectangle::new(Point::from((0., titlebar)), Size::from((0., 0.))),
+        );
+    }
+
     pub fn ipc_focus_follows_history(&self) -> bool {
         self.ipc_focus_follows_history
     }

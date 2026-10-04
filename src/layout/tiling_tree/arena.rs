@@ -18,8 +18,16 @@ impl<W: LayoutElement> TilingTree<W> {
 
     pub(super) fn remove_node(&mut self, id: NodeId) -> Option<Node<W>> {
         let node = self.nodes.remove(&id)?;
+        let was_fullscreen = self.fullscreen_node().is_some();
         for (_, table) in side_tables!(self, &mut) {
             table.forget(id);
+        }
+        // Destroying the fullscreen container ends fullscreen
+        // (`container_begin_destroy`, sway/tree/container.c:480-482), so the
+        // next arrange lays out the views that were hidden under it.
+        if was_fullscreen && self.fullscreen_node().is_none() {
+            self.mapped_under_fullscreen.clear();
+            self.moved_under_fullscreen.clear();
         }
         // tab_active also names nodes in its values: a container's shown child.
         self.tab_active.retain(|_, active| *active != id);

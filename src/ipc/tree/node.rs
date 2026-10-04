@@ -223,7 +223,9 @@ pub(crate) fn describe_tiling<'a, I>(
                 // view keeps its last content box.
                 let source = offset_rect(source, workspace_rect);
                 let titlebar = deco_rect.map_or(0, |rect| rect.size.h.round() as i32);
-                node.percent = Some(0.);
+                // A zero-sized box over its parent's: 0, unless the parent's own
+                // box is empty and sway omits the percent (sway/ipc-json.c:744-755).
+                node.percent = node.percent.map(|_| 0.);
                 node.rect = Rect {
                     x: source.x,
                     y: source.y,
@@ -236,11 +238,17 @@ pub(crate) fn describe_tiling<'a, I>(
                     width: 0,
                     height: titlebar,
                 };
-                node.window_rect = Rect {
-                    x: node.current_border_width,
-                    y: 0,
-                    width: (source.width - 2 * node.current_border_width).max(0),
-                    height: (source.height - node.current_border_width).max(0),
+                // A view mapped under fullscreen was never configured, so its
+                // content box is still calloc's zero box.
+                node.window_rect = if source.width == 0 && source.height == 0 {
+                    Rect::default()
+                } else {
+                    Rect {
+                        x: node.current_border_width,
+                        y: 0,
+                        width: (source.width - 2 * node.current_border_width).max(0),
+                        height: (source.height - node.current_border_width).max(0),
+                    }
                 };
             }
             Some(node)
