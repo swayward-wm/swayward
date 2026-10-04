@@ -18,6 +18,7 @@ fn reject_floating(state: &State) -> Result<(), CommandOutcome> {
         .active_workspace()
         .is_some_and(|workspace| {
             workspace.floating_is_active() && !workspace.focused_floating_tree_child()
+                || workspace.active_floating_is_fullscreen()
         })
     {
         Err(failure("Unable to change layout of floating windows"))

@@ -228,19 +228,27 @@ pub(super) fn floating(
             "Can't change floating on hidden scratchpad container",
         ));
     }
-    match mode {
-        Toggle::Enable => state
-            .swayward
-            .layout
-            .set_window_floating(Some(&window), true),
-        Toggle::Disable => state
-            .swayward
-            .layout
-            .set_window_floating(Some(&window), false),
-        Toggle::Toggle => state.swayward.layout.toggle_window_floating(Some(&window)),
-    }
+    set_window_floating(state, &window, *mode);
     state.swayward.queue_redraw_all();
     Ok(())
+}
+
+/// Sway's `floating` on one view. A fullscreen view keeps its fullscreen
+/// across the change (`container_set_floating`, sway/tree/container.c:941-1011).
+fn set_window_floating(state: &mut State, window: &smithay::desktop::Window, mode: Toggle) {
+    let floating = match mode {
+        Toggle::Enable => Some(true),
+        Toggle::Disable => Some(false),
+        Toggle::Toggle => None,
+    };
+    let layout = &mut state.swayward.layout;
+    if layout.set_fullscreen_window_floating(window, floating) {
+        return;
+    }
+    match floating {
+        Some(floating) => layout.set_window_floating(Some(window), floating),
+        None => layout.toggle_window_floating(Some(window)),
+    }
 }
 
 pub(super) fn kill(state: &mut State, target: CommandTarget) -> Result<(), CommandOutcome> {
@@ -627,17 +635,7 @@ pub(super) fn floating_focused(state: &mut State, mode: Toggle) -> super::Handle
             "Can't float an empty workspace",
         ));
     };
-    match mode {
-        Toggle::Enable => state
-            .swayward
-            .layout
-            .set_window_floating(Some(&window), true),
-        Toggle::Disable => state
-            .swayward
-            .layout
-            .set_window_floating(Some(&window), false),
-        Toggle::Toggle => state.swayward.layout.toggle_window_floating(Some(&window)),
-    }
+    set_window_floating(state, &window, mode);
     state.swayward.queue_redraw_all();
     Ok(None)
 }

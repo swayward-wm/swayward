@@ -82,7 +82,46 @@ impl<W: LayoutElement> Workspace<W> {
         let Some(id) = self.tiling.focus().filter(|id| !self.tiling.is_root(*id)) else {
             return false;
         };
+        // A fullscreen floating view leaves fullscreen back into the floating
+        // layer (`container_fullscreen_disable`, sway/tree/container.c).
+        if mode.is_none() && self.active_floating_is_fullscreen() {
+            if let Some(window) = self
+                .tiling
+                .active_tile()
+                .map(|tile| tile.window().id().clone())
+            {
+                self.set_fullscreen(&window, false);
+                return true;
+            }
+        }
         self.tiling.set_node_fullscreen(id, mode)
+    }
+
+    /// `floating enable|disable|toggle` on a fullscreen tiled or
+    /// fullscreen-floating view. Sway reattaches the container without
+    /// touching `fullscreen_mode`, and the new parent takes it back as the
+    /// workspace's fullscreen (`container_set_floating`,
+    /// sway/tree/container.c:941-1011; `container_handle_fullscreen_reparent`,
+    /// :1380-1391). A fullscreen floating view is a tiled tile that restores
+    /// to floating, so only that flag changes. `floating` is `None` to
+    /// toggle. Returns false when `window` is not such a view.
+    pub fn set_fullscreen_window_floating(
+        &mut self,
+        window: &W::Id,
+        floating: Option<bool>,
+    ) -> bool {
+        if !self.tiling.is_pending_fullscreen(window) {
+            return false;
+        }
+        let Some(tile) = self
+            .tiling
+            .tiles_mut()
+            .find(|tile| tile.window().id() == window)
+        else {
+            return false;
+        };
+        tile.restore_to_floating = floating.unwrap_or(!tile.restore_to_floating);
+        true
     }
 
     pub fn active_floating_is_fullscreen(&self) -> bool {

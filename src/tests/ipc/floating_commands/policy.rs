@@ -1182,3 +1182,109 @@ fn inhibit_idle_updates_get_tree_user_policy_and_effective_state() {
         true
     );
 }
+
+/// Random oracle seeds 180, 215, 294, 309, 383: `floating toggle` on a
+/// fullscreen view keeps it fullscreen. `container_set_floating` detaches
+/// and re-adds the container without touching `fullscreen_mode`, and
+/// `workspace_add_floating` reinstates it as the workspace's fullscreen
+/// (`container_handle_fullscreen_reparent`, sway/tree/container.c:941-975,
+/// 1380-1391; sway/tree/workspace.c:961-972). The tiled sibling stays hidden
+/// and keeps the half share it had before the fullscreen.
+#[test]
+fn floating_toggle_keeps_a_fullscreen_view_fullscreen() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fs-first", "fs-second"] {
+        windows::map_window(
+            &mut f,
+            client,
+            windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in ["fullscreen toggle", "floating toggle"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let second = find_json_node_with_app_id(&tree, "fs-second").unwrap();
+    assert_eq!(second["type"], "floating_con");
+    assert_eq!(second["fullscreen_mode"], 1);
+    let first = find_json_node_with_app_id(&tree, "fs-first").unwrap();
+    assert_eq!(first["visible"], false);
+    assert_eq!(first["percent"], 0.5);
+
+    // Toggling back tiles it again, still fullscreen.
+    let reply = crate::command::execute(f.niri_state(), "floating toggle");
+    assert!(reply[0].success, "{reply:?}");
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let second = find_json_node_with_app_id(&tree, "fs-second").unwrap();
+    assert_eq!(second["type"], "con");
+    assert_eq!(second["fullscreen_mode"], 1);
+}
+
+/// Random oracle seeds 180 and 294: a view floated while fullscreen is a
+/// floating container, so `layout` refuses it
+/// (`cmd_layout`, sway/commands/layout.c:129-132).
+#[test]
+fn layout_refuses_a_fullscreen_floating_view() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fs-first", "fs-second"] {
+        windows::map_window(
+            &mut f,
+            client,
+            windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in ["fullscreen toggle", "floating toggle", "focus right"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    let reply = crate::command::execute(f.niri_state(), "layout tabbed");
+    assert_eq!(
+        reply[0].error.as_deref(),
+        Some("Unable to change layout of floating windows")
+    );
+}
+
+/// Random oracle seed 309: `fullscreen toggle` on a view floated while
+/// fullscreen returns it to the floating layer, not to its old tiled slot
+/// (`container_fullscreen_disable`, sway/tree/container.c).
+#[test]
+fn unfullscreen_of_a_floated_fullscreen_view_stays_floating() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fs-first", "fs-second"] {
+        windows::map_window(
+            &mut f,
+            client,
+            windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in ["fullscreen toggle", "floating toggle", "fullscreen toggle"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let second = find_json_node_with_app_id(&tree, "fs-second").unwrap();
+    assert_eq!(second["type"], "floating_con");
+    assert_eq!(second["fullscreen_mode"], 0);
+    let first = find_json_node_with_app_id(&tree, "fs-first").unwrap();
+    assert_eq!(first["visible"], true);
+    assert_eq!(first["percent"], 1.0);
+}

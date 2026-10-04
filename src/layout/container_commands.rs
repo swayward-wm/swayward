@@ -293,6 +293,24 @@ impl<W: LayoutElement> Layout<W> {
             .is_some_and(|workspace| workspace.tiling_mut().set_title_format(node, format))
     }
 
+    /// Sway's `floating` command on a fullscreen view: the view changes
+    /// layer and stays fullscreen. Returns false when `window` is not
+    /// fullscreen, leaving the caller to float or tile it.
+    pub fn set_fullscreen_window_floating(
+        &mut self,
+        window: &W::Id,
+        floating: Option<bool>,
+    ) -> bool {
+        let Some(workspace) = self.workspaces_mut().find(|ws| ws.has_window(window)) else {
+            return false;
+        };
+        if !workspace.set_fullscreen_window_floating(window, floating) {
+            return false;
+        }
+        self.forget_scratchpad_window_if_tiled(window);
+        true
+    }
+
     pub fn set_container_floating(
         &mut self,
         workspace_id: WorkspaceId,
