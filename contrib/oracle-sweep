@@ -42,7 +42,9 @@ mkdir -p "$(dirname "$LOCK")"
 record=$(printf 'pid=%s\nswayward=%s\nstarted=%s' "$$" "$HEAD" "$(date -Iseconds)")
 exec 9>>"$LOCK"
 if ! flock -n 9; then
-    holder=$(cat "$LOCK")
+    # The holder writes its record right after flock; give it a moment.
+    holder=
+    for _ in $(seq 50); do holder=$(cat "$LOCK"); [ -n "$holder" ] && break; sleep 0.1; done
     echo "oracle-sweep: another sweep holds $LOCK: ${holder:-unknown holder}"
     hpid=$(sed -n 's/^pid=//p' "$LOCK")
     if [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; then
