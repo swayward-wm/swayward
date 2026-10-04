@@ -257,10 +257,26 @@ fn output_parses_chained_core_actions_and_power() {
         parse_output_command(&["*", "dpms", "toggle"]),
         Err("Cannot apply toggle to all outputs".into())
     );
-    assert_eq!(
-        parse_output_command(&["HDMI-A-1", "scale", "NaN"]),
-        Err("Invalid scale.".into())
-    );
+    // Sway stores whatever strtof reads; -1 is its unset sentinel and any
+    // other value that is not positive selects the default scale
+    // (`sway/sway/commands/output/scale.c`, `sway/sway/config/output.c`).
+    for value in ["NaN", "0", "-2"] {
+        assert!(matches!(
+            parse_output_command(&["HDMI-A-1", "scale", value]),
+            Ok(Command::Output { actions, .. })
+                if actions == [crate::OutputAction::Scale { scale: crate::ScaleToSet::Automatic }]
+        ));
+    }
+    assert!(matches!(
+        parse_output_command(&["*", "scale", "-1"]),
+        Ok(Command::Output { actions, .. }) if actions.is_empty()
+    ));
+    for value in ["inf", "1x"] {
+        assert_eq!(
+            parse_output_command(&["HDMI-A-1", "scale", value]),
+            Err("Invalid scale.".into())
+        );
+    }
     assert!(matches!(
         parse_output_command(&["HDMI-A-1", "mode", "1920x1080@60hz"]),
         Ok(Command::Output { .. })

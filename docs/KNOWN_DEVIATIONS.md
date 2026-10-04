@@ -290,6 +290,15 @@ The `opacity` command is implemented as mutable per-window state and multiplies
 window-rule opacity. Unlike the configured opacity, it remains effective in
 fullscreen, matching sway's scene-tree opacity.
 
+### Infinite output scale
+
+**Command gap.**
+
+`output <name> scale` accepts what sway's `strtof` accepts. `-1` leaves the scale
+unchanged and zero, negative, or NaN values select the automatic scale
+(`sway/config/output.c:180-182,526-533`). Swayward refuses `inf` with
+`Invalid scale.`, because sway passes an infinite scale to wlroots unchecked.
+
 ### Reload and transient output configuration
 
 **Deliberate.**

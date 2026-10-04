@@ -68,7 +68,16 @@ pub(super) fn parse_output_command(args: &[&str]) -> Result<Command, String> {
         };
         let (action, consumed) = parse(target, rest)?;
         action.validate()?;
-        actions.push(action);
+        // Sway stores `scale -1` as its "unset" sentinel, which
+        // merge_output_config skips (`sway/sway/config/output.c:180-182`), so
+        // the subcommand is accepted and changes nothing.
+        if action
+            != (crate::OutputAction::Scale {
+                scale: crate::ScaleToSet::Specific(-1.),
+            })
+        {
+            actions.push(action);
+        }
         args = rest
             .get(consumed..)
             .ok_or_else(|| format!("Invalid output subcommand: {name}."))?;
@@ -126,18 +135,26 @@ fn parse_output_scale(_: &str, rest: &[&str]) -> Result<(crate::OutputAction, us
     let Some(value) = rest.first() else {
         return Err("Missing scale argument.".into());
     };
+    // `sway/sway/commands/output/scale.c:13-17` stores any float strtof
+    // reads. -1 is the unset sentinel (dropped by parse_output_command), and
+    // any other value that is not positive, NaN included, selects the
+    // computed default scale (`sway/sway/config/output.c:526-533`). An
+    // infinite scale would reach wlr_output_state_set_scale unchecked, so
+    // swayward refuses it rather than apply it.
     let scale = value
-        .parse::<f64>()
+        .parse::<f32>()
         .map_err(|_| "Invalid scale.".to_owned())?;
-    if !scale.is_finite() || scale <= 0. {
+    if scale.is_infinite() {
         return Err("Invalid scale.".into());
     }
-    Ok((
-        crate::OutputAction::Scale {
-            scale: crate::ScaleToSet::Specific(scale),
-        },
-        1,
-    ))
+    let scale = if scale == -1. {
+        crate::ScaleToSet::Specific(-1.)
+    } else if scale > 0. {
+        crate::ScaleToSet::Specific(f64::from(scale))
+    } else {
+        crate::ScaleToSet::Automatic
+    };
+    Ok((crate::OutputAction::Scale { scale }, 1))
 }
 
 fn parse_output_transform(_: &str, rest: &[&str]) -> Result<(crate::OutputAction, usize), String> {
