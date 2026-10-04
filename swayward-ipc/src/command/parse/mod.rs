@@ -26,7 +26,7 @@ use workspace::*;
 
 /// Parse a command list with no variables defined.
 pub fn parse(input: &str) -> Vec<Result<ParsedCommand, CommandOutcome>> {
-    parse_with_variables(input, &[], true)
+    parse_with_variables(input, &[], FocusedNode::View)
 }
 
 /// Parse commands after applying sway's runtime variable substitution.
@@ -37,13 +37,14 @@ pub fn parse(input: &str) -> Vec<Result<ParsedCommand, CommandOutcome>> {
 /// the list is already split, a semicolon or comma inside a variable value
 /// remains data and cannot inject another command.
 ///
-/// `has_view` says whether a container is focused. A few sway handlers check
-/// for one before they look at their arguments, so without it their bad
-/// arguments get the handler's precondition error instead.
+/// `focused` says what sway's handler context would hold. A few sway
+/// handlers check for a container or a view before they look at their
+/// arguments, so without one their bad arguments get the handler's
+/// precondition error instead.
 pub fn parse_with_variables(
     input: &str,
     variables: &[(String, String)],
-    has_view: bool,
+    focused: FocusedNode,
 ) -> Vec<Result<ParsedCommand, CommandOutcome>> {
     let mut results = Vec::new();
     let mut variables = variables.to_vec();
@@ -113,7 +114,7 @@ pub fn parse_with_variables(
                 }));
             }
             Err(error) => {
-                results.push(Err(error.into_outcome(has_view)));
+                results.push(Err(error.into_outcome(focused)));
                 break;
             }
         }
@@ -280,9 +281,14 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
         // Handlers that check for a focused container before they read their
         // arguments: `sway/sway/commands/border.c:61-67`,
         // `sway/sway/commands/shortcuts_inhibitor.c:12-19`,
+        // `sway/sway/commands/inhibit_idle.c:13-17`,
         // `sway/sway/commands/opacity.c:11-18`,
-        // `sway/sway/commands/move.c:784-788` (move position) and
-        // `sway/sway/commands/resize.c:556-561`.
+        // `sway/sway/commands/move.c:784-788` (move position),
+        // `sway/sway/commands/resize.c:556-561`,
+        // `sway/sway/commands/allow_tearing.c:12-15` and
+        // `sway/sway/commands/max_render_time.c:23-27`. The last two check
+        // for a view after their argument checks, so swayward's own refusal
+        // only applies when a view is there to refuse.
         "border" if error.message_is(BORDER_SYNTAX) => {
             error.unless_view("Only views can have borders", Invalid)
         }
@@ -290,19 +296,28 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
             error.unless_view("Only views can have shortcuts inhibitors", Invalid)
         }
         "opacity" if error.message_is(OPACITY_FLOAT_INVALID) => {
-            error.unless_view("No current container", Failure)
+            error.unless_container("No current container", Failure)
+        }
+        "inhibit_idle" if error.message_is(INHIBIT_IDLE_USAGE) => {
+            error.unless_view("Only views can have idle inhibitors", Invalid)
+        }
+        "allow_tearing" if error.message_is(ALLOW_TEARING_REFUSAL) => {
+            error.unless_view("Tearing can only be allowed on views", Invalid)
+        }
+        "max_render_time" if error.message_is(MAX_RENDER_TIME_REFUSAL) => {
+            error.unless_view("Only views can have a max_render_time", Invalid)
         }
         "move"
             if error.message_is(&move_position_usage())
                 || error.message_is(INVALID_X_POSITION)
                 || error.message_is(INVALID_Y_POSITION) =>
         {
-            error.unless_view(
+            error.unless_container(
                 "Only floating containers can be moved to an absolute position",
                 Failure,
             )
         }
-        "resize" => error.unless_view("Cannot resize nothing", Invalid),
+        "resize" => error.unless_container("Cannot resize nothing", Invalid),
         // Handlers that report a bad value as CMD_FAILURE:
         // `sway/sway/commands/focus_follows_mouse.c:17-18`,
         // `sway/sway/commands/mouse_warping.c:16-17`,
@@ -324,6 +339,9 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
 }
 
 const SHORTCUTS_INHIBITOR_USAGE: &str = "Expected `shortcuts_inhibitor enable|disable`";
+const INHIBIT_IDLE_USAGE: &str = "Expected `inhibit_idle focus|fullscreen|open|none|visible`";
+const ALLOW_TEARING_REFUSAL: &str = "allow_tearing requires immediate presentation support";
+const MAX_RENDER_TIME_REFUSAL: &str = "max_render_time requires per-view render deadline support";
 
 fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<Command, String> {
     let argc = match lower {
@@ -378,7 +396,7 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
             ["open"] => Ok(Command::InhibitIdle(InhibitIdleMode::Open)),
             ["none"] => Ok(Command::InhibitIdle(InhibitIdleMode::None)),
             ["visible"] => Ok(Command::InhibitIdle(InhibitIdleMode::Visible)),
-            [_] => Err("Expected `inhibit_idle focus|fullscreen|open|none|visible`".into()),
+            [_] => Err(INHIBIT_IDLE_USAGE.into()),
             _ => Err(arity_error(
                 rest.len(),
                 "inhibit_idle",
@@ -392,11 +410,15 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
             parse_input_command(rest)
         }
         "output" => parse_output_command(rest),
-        "allow_tearing" => Err("allow_tearing requires immediate presentation support".into()),
-        "max_render_time" if rest.is_empty() => Err("Missing max render time argument.".into()),
-        "max_render_time" => {
-            Err("max_render_time requires per-view render deadline support".into())
-        }
+        "allow_tearing" => Err(ALLOW_TEARING_REFUSAL.into()),
+        // `sway/sway/commands/max_render_time.c:9-21`.
+        "max_render_time" => match rest.first() {
+            None => Err("Missing max render time argument.".into()),
+            Some(value) if *value == "off" || strtol_int(value).is_some_and(|time| time > 0) => {
+                Err(MAX_RENDER_TIME_REFUSAL.into())
+            }
+            Some(_) => Err("Invalid max render time.".into()),
+        },
         "shortcuts_inhibitor" => match rest {
             [value] if *value == "enable" => Ok(Command::ShortcutsInhibitor(true)),
             [value] if *value == "disable" => Ok(Command::ShortcutsInhibitor(false)),
@@ -457,6 +479,7 @@ fn check_arity(name: &str, count: usize) -> Result<(), String> {
         | "smart_gaps"
         | "title_format"
         | "titlebar_padding" => AtLeast(1),
+        "allow_tearing" => AtLeast(1),
         "assign" | "for_window" => AtLeast(2),
         "swap" => AtLeast(4),
         "focus_follows_mouse"

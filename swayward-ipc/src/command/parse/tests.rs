@@ -596,7 +596,7 @@ fn mixed_multibyte_command_text_never_panics() {
             input.push_str(PIECES[(state % PIECES.len() as u64) as usize]);
         }
         let _ = parse(&input);
-        let _ = parse_with_variables(&input, &variables, true);
+        let _ = parse_with_variables(&input, &variables, FocusedNode::View);
     }
 }
 
@@ -623,7 +623,7 @@ fn quoted_command_names_are_unknown_commands() {
             "{input}"
         );
         assert_eq!(
-            parse_with_variables(input, &[("$oracle".into(), "x".into())], true),
+            parse_with_variables(input, &[("$oracle".into(), "x".into())], FocusedNode::View),
             vec![Err(parse_error(format!(
                 "Unknown/invalid command '{name}'"
             )))],
@@ -686,7 +686,7 @@ fn exec_keeps_quotes_when_variables_are_defined() {
         ("exec_always   a  \"b  c\" $oracle", "a \"b  c\" value"),
         ("exec '$oracle -x'", "value -x"),
     ] {
-        let parsed = parse_with_variables(input, &variables, true);
+        let parsed = parse_with_variables(input, &variables, FocusedNode::View);
         let Some(Ok(ParsedCommand {
             command: Command::Exec { command, .. },
             ..

@@ -124,7 +124,7 @@ pub fn strtol(raw: &str) -> (i64, &str) {
 /// low 32 bits, as it does on sway's platforms, so 2147483648 is -2147483648.
 /// An empty argument has no digits and leaves `end` at its terminator, so it
 /// reads as 0, as in C.
-fn strtol_int(raw: &str) -> Option<i32> {
+pub(super) fn strtol_int(raw: &str) -> Option<i32> {
     let (value, rest) = strtol(raw);
     rest.is_empty().then_some(value as i32)
 }

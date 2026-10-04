@@ -280,7 +280,9 @@ on the target view and exposes it in `GET_TREE`
 (`sway/commands/allow_tearing.c:6-25` and
 `sway/commands/max_render_time.c:6-32`). Swayward's frame clock has no per-view
 tearing or render-deadline controls. Returning success would therefore report
-state that the compositor does not apply.
+state that the compositor does not apply. The refusal comes after sway's own
+checks: with no view focused, both commands give sway's precondition error,
+and `max_render_time` still rejects a missing or invalid value first.
 
 `inhibit_idle` is implemented with sway's focus, fullscreen, open, none, and
 visible user policies and composes with application idle-inhibitor protocol

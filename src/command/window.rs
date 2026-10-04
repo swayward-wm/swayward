@@ -1,5 +1,5 @@
 use swayward_config::Action;
-use swayward_ipc::command::Border;
+use swayward_ipc::command::{Border, FocusedNode};
 use swayward_ipc::legacy::SizeChange;
 use swayward_ipc::CommandOutcome;
 
@@ -537,7 +537,11 @@ pub(super) fn opacity_focused(
     value: f32,
     relative: bool,
 ) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
+    // `sway/sway/commands/opacity.c:15-18`: a focused workspace is no
+    // container.
+    let target = super::targeted::focused_target(state)
+        .filter(|_| super::targeted::focused_node(state) != FocusedNode::Nothing);
+    let Some(target) = target else {
         return Err(failure("No current container"));
     };
     super::handled(opacity(state, target, value, relative))
@@ -556,17 +560,27 @@ pub(super) fn inhibit_idle_focused(
     state: &mut State,
     mode: swayward_ipc::command::InhibitIdleMode,
 ) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
+    // `sway/sway/commands/inhibit_idle.c:13-17`.
+    if super::targeted::focused_node(state) != FocusedNode::View {
         return Err(swayward_ipc::command::parse_error(
             "Only views can have idle inhibitors",
         ));
+    }
+    let Some(target) = super::targeted::focused_target(state) else {
+        return Err(failure("No matching node."));
     };
     super::handled(super::targeted::set_inhibit_idle(state, target, mode))
 }
 
 pub(super) fn shortcuts_inhibitor_focused(state: &mut State, enable: bool) -> super::HandlerResult {
+    // `sway/sway/commands/shortcuts_inhibitor.c:14-18`.
+    if super::targeted::focused_node(state) != FocusedNode::View {
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can have shortcuts inhibitors",
+        ));
+    }
     let Some(target) = super::targeted::focused_target(state) else {
-        return Err(failure("Only views can have shortcuts inhibitors"));
+        return Err(failure("No matching node."));
     };
     super::handled(super::targeted::set_shortcuts_inhibitor(
         state, target, enable,

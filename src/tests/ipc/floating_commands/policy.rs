@@ -108,9 +108,23 @@ fn shortcuts_inhibitor_disable_sets_future_policy_and_deactivates_current() {
     assert_eq!(f.client(client).state.shortcut_inhibitor_events, [true]);
 }
 
+/// With a view focused, swayward refuses the per-view presentation commands
+/// it cannot apply, after sway's own argument checks
+/// (`sway/sway/commands/max_render_time.c:9-21`).
 #[test]
 fn runtime_presentation_command_refusals_are_explicit() {
     let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
     for (command, error) in [
         (
             "allow_tearing yes",
@@ -120,18 +134,112 @@ fn runtime_presentation_command_refusals_are_explicit() {
             "max_render_time 1",
             "max_render_time requires per-view render deadline support",
         ),
+        (
+            "max_render_time off",
+            "max_render_time requires per-view render deadline support",
+        ),
+        ("max_render_time 0", "Invalid max render time."),
+        ("max_render_time", "Missing max render time argument."),
+        (
+            "allow_tearing",
+            "Invalid allow_tearing command (expected at least 1 argument, got 0)",
+        ),
     ] {
         let outcome = crate::command::execute(f.niri_state(), command);
         assert!(!outcome[0].success, "{command}");
         assert_eq!(outcome[0].error.as_deref(), Some(error), "{command}");
         assert_eq!(outcome[0].parse_error, Some(true), "{command}");
     }
-    assert_eq!(
-        crate::command::execute(f.niri_state(), "max_render_time")[0]
-            .error
-            .as_deref(),
-        Some("Missing max render time argument.")
-    );
+}
+
+/// Oracle: differential_seed_1003, 1019, 1119, 1121, 1244, 1275 and 1579
+/// (diff-fam-no-view-error-precedence). These sway handlers check for a view,
+/// or for opacity a container, before they read their value, so with no view
+/// focused every well-formed value gets the precondition error, as CMD_INVALID
+/// except for opacity's CMD_FAILURE (`sway/sway/commands/allow_tearing.c:12-15`,
+/// `max_render_time.c:23-27`, `shortcuts_inhibitor.c:14-18`,
+/// `inhibit_idle.c:13-17`, `opacity.c:15-18`).
+#[test]
+fn view_commands_check_for_a_view_before_their_value() {
+    let cases = [
+        (
+            "allow_tearing no",
+            "Tearing can only be allowed on views",
+            true,
+        ),
+        (
+            "allow_tearing yes",
+            "Tearing can only be allowed on views",
+            true,
+        ),
+        (
+            "max_render_time 5",
+            "Only views can have a max_render_time",
+            true,
+        ),
+        (
+            "max_render_time off",
+            "Only views can have a max_render_time",
+            true,
+        ),
+        (
+            "shortcuts_inhibitor enable",
+            "Only views can have shortcuts inhibitors",
+            true,
+        ),
+        (
+            "shortcuts_inhibitor disable",
+            "Only views can have shortcuts inhibitors",
+            true,
+        ),
+        (
+            "inhibit_idle none",
+            "Only views can have idle inhibitors",
+            true,
+        ),
+        (
+            "inhibit_idle visible",
+            "Only views can have idle inhibitors",
+            true,
+        ),
+        (
+            "inhibit_idle bogus",
+            "Only views can have idle inhibitors",
+            true,
+        ),
+        ("opacity minus 0.2", "No current container", false),
+    ];
+    let check = |f: &mut Fixture, context: &str| {
+        for (command, error, parse_error) in cases {
+            assert_eq!(
+                crate::command::execute(f.niri_state(), command),
+                [swayward_ipc::CommandOutcome {
+                    success: false,
+                    error: Some(error.into()),
+                    parse_error: Some(parse_error),
+                }],
+                "{command} ({context})"
+            );
+        }
+    };
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    check(&mut f, "empty workspace");
+
+    // `focus parent` from a lone window focuses the workspace, which is no
+    // container in sway's handler context.
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    check(&mut f, "workspace focused");
 }
 
 #[test]

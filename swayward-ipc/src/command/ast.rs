@@ -465,6 +465,17 @@ pub enum GapOperation {
     Toggle,
 }
 
+/// What sway's `handler_context.container` holds for a command without
+/// criteria: nothing (a workspace or nothing is focused), a split container,
+/// or a container with a view (`sway/sway/commands.c:181-200`). Ordered, so a
+/// handler that needs a container accepts a view too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FocusedNode {
+    Nothing,
+    Container,
+    View,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedCommand {
     pub command: Command,
