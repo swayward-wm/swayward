@@ -446,3 +446,48 @@ workspace "7" { sway-output-assignment "headless-2"; }
         assert_eq!(holder["name"], "7", "{command}");
     }
 }
+
+#[test]
+fn a_split_holding_an_urgent_view_reports_urgent() {
+    // differential seeds 1455 1847 2026 2398 2895: sway reports a split urgent
+    // when a view below it is (`container_has_urgent_child`,
+    // sway/sway/ipc-json.c:728-730).
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "target");
+    assert!(crate::command::execute(f.niri_state(), "layout stacking")[0].success);
+    map_test_window(&mut f, client, "focused");
+    f.double_roundtrip(client);
+
+    let split_urgency = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap();
+        let mut found = vec![];
+        fn walk(node: &serde_json::Value, found: &mut Vec<bool>) {
+            if node["type"] == "con" && node["window"].is_null() && node["app_id"].is_null() {
+                found.push(node["urgent"].as_bool().unwrap());
+            }
+            for child in node["nodes"].as_array().into_iter().flatten() {
+                walk(child, found);
+            }
+        }
+        walk(&tree, &mut found);
+        found
+    };
+    assert_eq!(split_urgency(&mut f), [false]);
+
+    let outcome = crate::command::execute(f.niri_state(), "[app_id=target] urgent enable");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(split_urgency(&mut f), [true]);
+
+    let outcome = crate::command::execute(f.niri_state(), "[app_id=target] urgent disable");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(split_urgency(&mut f), [false]);
+}

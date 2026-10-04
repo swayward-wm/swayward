@@ -125,6 +125,9 @@ pub(crate) fn describe_tiling<'a, I>(
             node.fullscreen_mode = fullscreen_mode;
             node.sticky = sticky;
             node.marks = container_marks.get(&id).cloned().unwrap_or_default();
+            // A split reports whether any view below it is urgent
+            // (`container_has_urgent_child`, sway/sway/ipc-json.c:728-730).
+            node.urgent = node.nodes.iter().any(|child| child.urgent);
             Some(node)
         }
         IpcNode::Leaf {
