@@ -14,6 +14,7 @@ mod workspace;
 
 use arity::*;
 use bindings::*;
+pub use error::ParseFailure;
 use error::*;
 use move_resize::*;
 #[cfg(test)]
@@ -25,8 +26,19 @@ use settings::*;
 use workspace::*;
 
 /// Parse a command list with no variables defined.
+/// Parse failures are resolved as if a view were focused, and the list ends
+/// after the first CMD_INVALID, as sway's does.
 pub fn parse(input: &str) -> Vec<Result<ParsedCommand, CommandOutcome>> {
-    parse_with_variables(input, &[], FocusedNode::View)
+    let mut results = Vec::new();
+    for result in parse_with_variables(input, &[]) {
+        let result = result.map_err(|failure| failure.resolve(FocusedNode::View));
+        let invalid = matches!(&result, Err(outcome) if outcome.parse_error == Some(true));
+        results.push(result);
+        if invalid {
+            break;
+        }
+    }
+    results
 }
 
 /// Parse commands after applying sway's runtime variable substitution.
@@ -37,15 +49,16 @@ pub fn parse(input: &str) -> Vec<Result<ParsedCommand, CommandOutcome>> {
 /// the list is already split, a semicolon or comma inside a variable value
 /// remains data and cannot inject another command.
 ///
-/// `focused` says what sway's handler context would hold. A few sway
-/// handlers check for a container or a view before they look at their
-/// arguments, so without one their bad arguments get the handler's
-/// precondition error instead.
+/// A few sway handlers check for a container or a view before they look at
+/// their arguments, so without one their bad arguments get the handler's
+/// precondition error instead. A [`ParseFailure`] keeps both replies until
+/// the caller resolves it against the focus at the time the command runs.
+/// Every command is returned, including those after a failure: the caller
+/// stops the list at the first reply that resolves to CMD_INVALID.
 pub fn parse_with_variables(
     input: &str,
     variables: &[(String, String)],
-    focused: FocusedNode,
-) -> Vec<Result<ParsedCommand, CommandOutcome>> {
+) -> Vec<Result<ParsedCommand, ParseFailure>> {
     let mut results = Vec::new();
     let mut variables = variables.to_vec();
     let mut criteria = None;
@@ -70,7 +83,7 @@ pub fn parse_with_variables(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    results.push(Err(error));
+                    results.push(Err(error.into()));
                     break;
                 }
             }
@@ -113,10 +126,11 @@ pub fn parse_with_variables(
                     criteria_start,
                 }));
             }
-            Err(error) => {
-                results.push(Err(error.into_outcome(focused)));
-                break;
-            }
+            // Whether the list continues depends on the reply, which may
+            // depend on the focus earlier commands leave behind, so the
+            // caller decides once it has resolved it. Sway stops only on
+            // CMD_INVALID (`sway/sway/commands.c:295-299`).
+            Err(error) => results.push(Err(error.into_failure_reply())),
         }
         if matches!(delimiter, Some(';') | Some('\0')) {
             criteria = None;

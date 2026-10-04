@@ -57,15 +57,49 @@ impl ParseError {
         self
     }
 
-    pub(super) fn into_outcome(self, focused: FocusedNode) -> CommandOutcome {
-        let (message, kind) = match self.without_view {
-            Some((needed, message, kind)) if focused < needed => (message.to_owned(), kind),
-            _ => (self.message, self.kind),
-        };
-        CommandOutcome {
-            success: false,
-            error: Some(message),
-            parse_error: Some(kind == ErrorKind::Invalid),
+    pub(super) fn into_failure_reply(self) -> ParseFailure {
+        ParseFailure {
+            outcome: outcome(self.message, self.kind),
+            without: self
+                .without_view
+                .map(|(needed, message, kind)| (needed, outcome(message.to_owned(), kind))),
+        }
+    }
+}
+
+fn outcome(message: String, kind: ErrorKind) -> CommandOutcome {
+    CommandOutcome {
+        success: false,
+        error: Some(message),
+        parse_error: Some(kind == ErrorKind::Invalid),
+    }
+}
+
+/// A rejected command whose reply may depend on what is focused when it
+/// runs. Sway resolves the handler context per command, after earlier
+/// commands in the list have run (`sway/sway/commands.c:288-293`), so the
+/// choice is made at execution time, not at parse time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseFailure {
+    outcome: CommandOutcome,
+    without: Option<(FocusedNode, CommandOutcome)>,
+}
+
+impl ParseFailure {
+    /// The reply sway gives with `focused` in the handler context.
+    pub fn resolve(self, focused: FocusedNode) -> CommandOutcome {
+        match self.without {
+            Some((needed, outcome)) if focused < needed => outcome,
+            _ => self.outcome,
+        }
+    }
+}
+
+impl From<CommandOutcome> for ParseFailure {
+    fn from(outcome: CommandOutcome) -> Self {
+        Self {
+            outcome,
+            without: None,
         }
     }
 }

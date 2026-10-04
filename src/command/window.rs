@@ -627,8 +627,17 @@ pub(super) fn sticky_focused(state: &mut State, value: &str) -> super::HandlerRe
 }
 
 pub(super) fn border_focused(state: &mut State, border: &Border) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
-        return Err(failure("Only views can have borders"));
+    // `border` checks for a view before anything else, so a well-formed
+    // border command without one is refused as CMD_INVALID
+    // (`sway/sway/commands/border.c:61-67`). With criteria the command runs
+    // through the targeted path on each match instead, and no match is
+    // `No matching node.` (`sway/sway/commands.c:301-303`).
+    let target = super::targeted::focused_target(state)
+        .filter(|_| super::targeted::focused_node(state) == FocusedNode::View);
+    let Some(target) = target else {
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can have borders",
+        ));
     };
     super::handled(self::border(state, target, border))
 }

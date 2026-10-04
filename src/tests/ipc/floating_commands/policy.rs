@@ -242,6 +242,89 @@ fn view_commands_check_for_a_view_before_their_value() {
     check(&mut f, "workspace focused");
 }
 
+/// Oracle: state scenario chained-command-focus
+/// (diff-fam-chained-command-focus). Sway sets the handler context for each
+/// command of a list after the earlier ones have run
+/// (`sway/sway/commands.c:288-293`), so a view check sees the focus that
+/// `focus parent` or `focus child` left behind, in both directions.
+#[test]
+fn chained_commands_check_the_focus_left_by_earlier_commands() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let refusal = |error: &str, parse_error| swayward_ipc::CommandOutcome {
+        success: false,
+        error: Some(error.into()),
+        parse_error: Some(parse_error),
+    };
+    let ok = swayward_ipc::CommandOutcome {
+        success: true,
+        error: None,
+        parse_error: None,
+    };
+    for (command, second) in [
+        (
+            "focus parent; allow_tearing yes",
+            refusal("Tearing can only be allowed on views", true),
+        ),
+        (
+            "focus parent; opacity bogus",
+            refusal("No current container", false),
+        ),
+        (
+            "focus parent; border pixel 3",
+            refusal("Only views can have borders", true),
+        ),
+    ] {
+        let outcomes = crate::command::execute(f.niri_state(), command);
+        assert_eq!(outcomes, [ok.clone(), second], "{command}");
+        assert!(crate::command::execute(f.niri_state(), "focus child")[0].success);
+    }
+
+    // `opacity bogus` resolves to CMD_FAILURE without a container, which
+    // does not end the list (`sway/sway/commands.c:295-299`), so the
+    // following `focus child` still runs and gives the view back.
+    let outcomes =
+        crate::command::execute(f.niri_state(), "focus parent; opacity bogus; focus child");
+    assert_eq!(
+        outcomes,
+        [
+            ok.clone(),
+            refusal("No current container", false),
+            ok.clone()
+        ]
+    );
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "border pixel 3"),
+        std::slice::from_ref(&ok),
+        "focus child ran after the failure"
+    );
+
+    // The workspace is focused at the start; `focus child` gives the view
+    // back before the view check runs.
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    for (command, second) in [
+        ("focus child; border pixel 3", ok.clone()),
+        (
+            "focus child; opacity bogus",
+            refusal("opacity float invalid", true),
+        ),
+    ] {
+        let outcomes = crate::command::execute(f.niri_state(), command);
+        assert_eq!(outcomes, [ok.clone(), second], "{command}");
+        assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    }
+}
+
 #[test]
 fn create_output_adds_a_headless_output() {
     let (mut f, socket) = ipc_fixture();
