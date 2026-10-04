@@ -638,35 +638,12 @@ impl ForeignToplevelHandler for State {
         }
     }
 
-    fn set_maximized(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.swayward.layout.find_window_and_output(&wl_surface) {
-            let window = mapped.window.clone();
-            self.swayward.layout.set_maximized(&window, true);
-        }
-    }
+    // Sway connects only activate, fullscreen and close on the wlr
+    // foreign-toplevel handle (sway/sway/tree/view.c:881-893), so maximize
+    // requests are ignored, as minimize requests are in the protocol handler.
+    fn set_maximized(&mut self, _wl_surface: WlSurface) {}
 
-    fn unset_maximized(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.swayward.layout.find_window_and_output(&wl_surface) {
-            let window = mapped.window.clone();
-            self.swayward.layout.set_maximized(&window, false);
-        }
-    }
-
-    fn set_minimized(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.swayward.layout.find_window_and_output(&wl_surface) {
-            let window = mapped.window.clone();
-            self.swayward.layout.move_to_scratchpad(Some(&window));
-            self.swayward.queue_redraw_all();
-        }
-    }
-
-    fn unset_minimized(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.swayward.layout.find_window_and_output(&wl_surface) {
-            let window = mapped.window.clone();
-            self.swayward.layout.show_scratchpad(Some(&window));
-            self.swayward.queue_redraw_all();
-        }
-    }
+    fn unset_maximized(&mut self, _wl_surface: WlSurface) {}
 }
 
 impl ExtWorkspaceHandler for State {
