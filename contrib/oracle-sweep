@@ -39,6 +39,7 @@ HEAD=$(git -C "$SW" rev-parse HEAD)
 mkdir -p "$(dirname "$LOCK")"
 # The lock comes before the dirty checks: a running sweep dirties pins.toml.
 # Shards inherit fd 9, so the lock stays held while any of them still runs.
+record=$(printf 'pid=%s\nswayward=%s\nstarted=%s' "$$" "$HEAD" "$(date -Iseconds)")
 exec 9>>"$LOCK"
 if ! flock -n 9; then
     holder=$(cat "$LOCK")
@@ -51,7 +52,7 @@ if ! flock -n 9; then
 fi
 stale=$(sed -n 's/^pid=//p' "$LOCK")
 [ -z "$stale" ] || echo "oracle-sweep: reclaiming stale lock left by pid $stale: $(paste -sd' ' "$LOCK")"
-printf 'pid=%s\nswayward=%s\nstarted=%s\n' "$$" "$HEAD" "$(date -Iseconds)" >"$LOCK"
+printf '%s\n' "$record" >"$LOCK"
 # Release only the lock here: pins.toml is not ours to restore until the
 # dirty checks pass, since a dirty oracle may hold someone's edit.
 trap ': >"$LOCK"' EXIT
