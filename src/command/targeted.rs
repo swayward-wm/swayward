@@ -785,7 +785,21 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
         .map(|mapped| mapped.id())
         .collect::<Vec<_>>();
     let (hidden, rest): (Vec<_>, Vec<_>) = order.into_iter().partition(|id| hidden.contains(id));
-    for id in hidden.into_iter().chain(rest) {
+    // A scratchpad container counts as floating whatever it was before it
+    // was hidden, so `[tiling]` never matches it and `[floating]` does. The
+    // children of a hidden group have a parent and are tiling
+    // (`sway/sway/tree/container.c:1041-1050`).
+    let hidden_tiles = layout
+        .scratchpad_tiles()
+        .map(|(mapped, _)| mapped.id())
+        .collect::<Vec<_>>();
+    for id in hidden {
+        if let Some(mut snapshot) = snapshots.remove(&id) {
+            snapshot.floating = hidden_tiles.contains(&id);
+            candidates.push(Candidate::Window(snapshot));
+        }
+    }
+    for id in rest {
         if let Some(snapshot) = snapshots.remove(&id) {
             candidates.push(Candidate::Window(snapshot));
         }

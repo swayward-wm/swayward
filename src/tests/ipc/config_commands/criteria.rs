@@ -213,6 +213,47 @@ fn criteria_with_no_matches_returns_sway_failure() {
     );
 }
 
+// differential seeds 1277 1360 1403 1534 1539 1604 1673 1856 1987: with
+// criteria, `border` runs once per match, so no match is `No matching node.`
+// rather than the handler's no-view error (`sway/sway/commands.c:301-303`).
+#[test]
+fn border_with_unmatched_criteria_and_no_view_is_no_matching_node() {
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+
+    assert_eq!(
+        crate::command::execute(fixture.niri_state(), "[floating] border pixel 4"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("No matching node.".into()),
+            parse_error: Some(false),
+        }]
+    );
+}
+
+// differential seed 1963: a hidden scratchpad window is floating to criteria
+// (`container_is_floating`, `sway/sway/tree/container.c:1041-1050`).
+#[test]
+fn hidden_scratchpad_window_is_floating_to_criteria() {
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "hidden");
+    assert!(crate::command::execute(fixture.niri_state(), "move scratchpad")[0].success);
+
+    assert_eq!(
+        crate::command::execute(fixture.niri_state(), "[tiling] mark --add tiled"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("No matching node.".into()),
+            parse_error: Some(false),
+        }]
+    );
+    assert!(
+        crate::command::execute(fixture.niri_state(), "[floating] mark --add floated")[0].success
+    );
+}
+
 #[test]
 fn portable_security_context_criteria_match_exactly_the_intended_windows() {
     let mut fixture = Fixture::new();

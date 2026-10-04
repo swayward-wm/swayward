@@ -23,10 +23,13 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     let mut parsed = parse_with_variables(input, &state.swayward.sway_variables, focused);
     // `border` checks for a view before anything else, so a well-formed
     // border command with nothing focused is refused too
-    // (`sway/sway/commands/border.c:61-67`).
+    // (`sway/sway/commands/border.c:61-67`). With criteria the handler runs
+    // on each match instead, and no match is `No matching node.`
+    // (`sway/sway/commands.c:301-303`).
     if focused != swayward_ipc::command::FocusedNode::View {
         for parsed in &mut parsed {
-            if matches!(parsed, Ok(parsed) if matches!(parsed.command, Command::Border(_))) {
+            if matches!(parsed, Ok(parsed) if parsed.criteria.is_none() && matches!(parsed.command, Command::Border(_)))
+            {
                 *parsed = Err(swayward_ipc::command::parse_error(
                     "Only views can have borders",
                 ));
