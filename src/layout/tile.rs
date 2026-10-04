@@ -70,6 +70,9 @@ pub struct Tile<W: LayoutElement> {
     border: FocusRing,
     sway_border: Option<(BorderStyle, u16)>,
     sway_uses_csd: bool,
+    /// The style a CSD view returns to when it is tiled again
+    /// (`con->saved_border`, sway/commands/border.c:15-31).
+    sway_saved_border: Option<BorderStyle>,
     border_edges: ResizeEdge,
     border_visible: bool,
     titlebar_attached: bool,
@@ -249,6 +252,7 @@ impl<W: LayoutElement> Tile<W> {
             border: FocusRing::new(border_config.into()),
             sway_border: None,
             sway_uses_csd: false,
+            sway_saved_border: None,
             border_edges: ResizeEdge::all(),
             border_visible: true,
             titlebar_attached: false,
@@ -1880,6 +1884,9 @@ impl<W: LayoutElement> Tile<W> {
         }
         self.window
             .request_server_decoration(style != BorderStyle::Csd);
+        if style == BorderStyle::Csd && !self.sway_uses_csd {
+            self.sway_saved_border = Some(current_style);
+        }
         self.sway_uses_csd = style == BorderStyle::Csd;
         let style = if style == BorderStyle::Csd && !floating {
             current_style
@@ -1893,6 +1900,36 @@ impl<W: LayoutElement> Tile<W> {
         self.sway_border = Some((style, width));
         self.update_border_config();
         Ok(self.effective_border_width().unwrap_or(0.) - old_width)
+    }
+
+    /// Moves a CSD view's stored border between its tiled and floating
+    /// forms, as `container_set_floating` does: floating saves the border and
+    /// stores `csd`, tiling restores the saved one, and each tells the client
+    /// the matching decoration mode (sway/tree/container.c:955-964, 995-1003).
+    /// A view that is not using CSD is left alone.
+    pub fn set_sway_csd_floating(&mut self, floating: bool) {
+        if !self.sway_uses_csd {
+            return;
+        }
+        let Some((style, width)) = self.sway_border else {
+            return;
+        };
+        let style = if floating {
+            if style == BorderStyle::Csd {
+                return;
+            }
+            self.sway_saved_border = Some(style);
+            BorderStyle::Csd
+        } else {
+            if style != BorderStyle::Csd {
+                return;
+            }
+            self.sway_saved_border
+                .unwrap_or_else(|| self.default_sway_border().0)
+        };
+        self.window.request_server_decoration(!floating);
+        self.sway_border = Some((style, width));
+        self.update_border_config();
     }
 
     fn update_border_config(&mut self) {

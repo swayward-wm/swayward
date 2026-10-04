@@ -91,6 +91,7 @@ impl<W: LayoutElement> TilingTree<W> {
         self.interactive_resize = None;
         self.has_had_tile = true;
         tile.update_config(self.view_size, self.scale, self.options.clone());
+        tile.set_sway_csd_floating(false);
         let pending_mode = tile.window().pending_sizing_mode();
         let fullscreen = self.fullscreen_node();
         let previous_focus = self.focus;
@@ -311,6 +312,7 @@ impl<W: LayoutElement> TilingTree<W> {
     ) -> NodeId {
         self.interactive_resize = None;
         tile.update_config(self.view_size, self.scale, self.options.clone());
+        tile.set_sway_csd_floating(false);
         let old_geometries = self.compute_geometry();
         let id = self.alloc(Node {
             parent: Some(parent),

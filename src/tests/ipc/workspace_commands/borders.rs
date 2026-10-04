@@ -840,3 +840,67 @@ fn border_csd_fails_after_the_decoration_object_is_destroyed() {
         Some("This window doesn't support client side decorations")
     );
 }
+
+#[test]
+fn border_toggle_on_a_tiled_decorated_window_enters_csd_and_keeps_normal() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // foot has an xdg-decoration object, so sway's toggle cycles
+    // normal -> csd (sway/commands/border.c:45-50). A tiled view does not
+    // store B_CSD (border.c:25-27): GET_TREE still says "normal". The next
+    // toggle leaves CSD for none (border.c:34-37).
+    // Differential family diff-fam-border-toggle-cycle, seeds 1046 1070 1082
+    // 1108 1148 1179 1193 1194.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("toggled".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(Mode::ServerSide);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let border = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap();
+        find_json_node_with_app_id(&tree, "toggled").unwrap()["border"].clone()
+    };
+    assert_eq!(border(&mut f), "normal");
+
+    assert!(crate::command::execute(f.niri_state(), "border toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(border(&mut f), "normal");
+    assert_eq!(
+        f.client(client).window(&surface).decoration_modes.last(),
+        Some(&Mode::ClientSide)
+    );
+
+    // Floating a CSD view saves its border and stores csd; tiling it again
+    // restores the saved one (container_set_floating,
+    // sway/tree/container.c:955-964, 995-1003). Seed 1179.
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(border(&mut f), "csd");
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(border(&mut f), "normal");
+
+    assert!(crate::command::execute(f.niri_state(), "border toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(border(&mut f), "none");
+    assert_eq!(
+        f.client(client).window(&surface).decoration_modes.last(),
+        Some(&Mode::ServerSide)
+    );
+}

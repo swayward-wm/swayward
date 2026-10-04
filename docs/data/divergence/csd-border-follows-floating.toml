@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/tile.rs"]
+what = "a view using CSD stores `csd` while floating and gets its saved border back when it is tiled again, and the client is told the matching decoration mode."
+why = "Sway's `container_set_floating` saves `con->pending.border` and stores B_CSD when a CSD view floats, and restores the saved border when it tiles (sway/tree/container.c:955-964, 995-1003). Swayward kept the tiled style, so `border toggle` into CSD followed by `floating toggle` reported \"normal\" where sway reports \"csd\" (differential family diff-fam-border-toggle-cycle, seed 1179)."

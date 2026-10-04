@@ -417,6 +417,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 mapped_under_fullscreen,
             } => {
                 tile.update_config(self.view_size, self.scale, self.options.clone());
+                tile.set_sway_csd_floating(false);
                 let id = self.insert_with_id(
                     old_id,
                     Node {

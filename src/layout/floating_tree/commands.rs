@@ -3,6 +3,7 @@ use super::*;
 impl<W: LayoutElement> FloatingLayout<W> {
     pub(super) fn add_tile_at(&mut self, mut idx: usize, mut tile: Tile<W>, activate: bool) {
         tile.update_config(self.view_size, self.scale, self.options.clone());
+        tile.set_sway_csd_floating(true);
         tile.set_border_edges(ResizeEdge::all());
         tile.set_decorated_box(
             crate::layout::tile::DecoratedCorners::ALL,

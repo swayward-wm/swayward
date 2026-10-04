@@ -468,9 +468,15 @@ fn titleless_borders_keep_the_window_top_corners() {
         t.clock().clone(),
         Rc::new(Options::default()),
     );
+    tile.set_sway_border(BorderStyle::Pixel, None, true)
+        .unwrap();
     tile.set_sway_border(BorderStyle::Csd, None, true).unwrap();
     let id = t.add_tile(tile, InsertTarget::Focused);
 
+    // A floating CSD view stores `csd`; tiling it restores the saved border
+    // (container_set_floating, sway/tree/container.c:995-1003), here a
+    // titleless pixel border.
+    assert_eq!(t.tile(id).unwrap().sway_border().0, BorderStyle::Pixel);
     let geometry = t.compute_geometry();
     assert!(!geometry.titlebars.contains_key(&id));
     assert!(!geometry.titlebar_attached.contains(&id));
