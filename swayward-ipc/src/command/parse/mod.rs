@@ -176,6 +176,19 @@ fn parse_one_with_variables(
     input: &str,
     variables: &[(String, String)],
 ) -> Result<Command, ParseError> {
+    // Sway keeps the quotes on `exec` and `exec_always` arguments, expands
+    // each raw token and joins them with single spaces for `sh -c`
+    // (`sway/sway/commands.c:265-285`, `sway/sway/commands/exec_always.c:40-44`).
+    // Unquoting first would turn `sh -c 'sleep 300'` into `sh -c sleep 300`.
+    // The comparison is case-sensitive, as sway's `strcmp` is.
+    let raw = sway_split_args(input);
+    if let [name @ ("exec" | "exec_always"), args @ ..] = raw.as_slice() {
+        let joined = std::iter::once((*name).to_owned())
+            .chain(args.iter().map(|arg| expand_variables(arg, variables)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return parse_args(&words(&joined), &joined);
+    }
     let words = words(input);
     let skip = if words
         .first()

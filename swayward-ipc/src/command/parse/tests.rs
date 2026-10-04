@@ -669,3 +669,31 @@ fn every_listed_setting_has_a_parser() {
         }
     }
 }
+
+/// Oracle: random-v2 seeds 1018, 1144, 1188. With a variable defined, `exec`
+/// keeps its raw quoted arguments, which sway expands one by one and joins with
+/// spaces (`sway/sway/commands.c:265-285`,
+/// `sway/sway/commands/exec_always.c:40-44`).
+#[test]
+fn exec_keeps_quotes_when_variables_are_defined() {
+    let variables = [("$oracle".to_owned(), "value".to_owned())];
+    for (input, expected) in [
+        (
+            "exec foot --app-id=x sh -c 'sleep 300'",
+            "foot --app-id=x sh -c 'sleep 300'",
+        ),
+        ("exec sh -c 'echo $oracle'", "sh -c 'echo value'"),
+        ("exec_always   a  \"b  c\" $oracle", "a \"b  c\" value"),
+        ("exec '$oracle -x'", "value -x"),
+    ] {
+        let parsed = parse_with_variables(input, &variables, true);
+        let Some(Ok(ParsedCommand {
+            command: Command::Exec { command, .. },
+            ..
+        })) = parsed.first()
+        else {
+            panic!("{input}: {parsed:?}");
+        };
+        assert_eq!(command, expected, "{input}");
+    }
+}

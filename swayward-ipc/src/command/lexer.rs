@@ -115,17 +115,23 @@ pub(super) fn join_words(words: &[&str]) -> String {
 /// `[...]` block outside quotes is one token whatever it contains
 /// (`sway/common/stringop.c:92-142`).
 pub(super) fn sway_argc(input: &str) -> usize {
+    sway_split_args(input).len()
+}
+
+/// Sway's `split_args` tokens as raw slices of `input`: quote characters and
+/// backslashes stay in place, and a `[...]` block outside quotes is one token
+/// (`sway/common/stringop.c:92-142`).
+pub(super) fn sway_split_args(input: &str) -> Vec<&str> {
     const WHITESPACE: &[char] = &[' ', '\x0c', '\n', '\r', '\t', '\x0b'];
-    let mut argc = 0;
-    let mut in_token = false;
+    let mut tokens = Vec::new();
+    let mut start = None;
     let (mut in_string, mut in_char, mut in_brackets, mut escaped) = (false, false, false, false);
-    for ch in input.chars() {
-        if !in_token {
+    for (index, ch) in input.char_indices() {
+        if start.is_none() {
             if WHITESPACE.contains(&ch) {
                 continue;
             }
-            in_token = true;
-            argc += 1;
+            start = Some(index);
         }
         let quoted = in_string || in_char;
         if ch == '"' && !in_char && !escaped {
@@ -140,9 +146,14 @@ pub(super) fn sway_argc(input: &str) -> usize {
             escaped = !escaped;
             continue;
         } else if !quoted && !in_brackets && !escaped && WHITESPACE.contains(&ch) {
-            in_token = false;
+            if let Some(token) = start.take().and_then(|start| input.get(start..index)) {
+                tokens.push(token);
+            }
         }
         escaped = false;
     }
-    argc
+    if let Some(token) = start.and_then(|start| input.get(start..)) {
+        tokens.push(token);
+    }
+    tokens
 }
