@@ -21,12 +21,14 @@ before closing a worker's task. contrib/check-task-drift covers the other
 direction, worker commits that are not on main.
 
 A pre-release history squash removed every commit made before it. Pass the
-squash's sha map (`old new` per line) with --squash-map: a sha listed there
-counts as shipped when its new sha is on the target ref.
+squash's sha map (`old new` per line) with --squash-map and the pre-squash
+history with --pre-squash-ref: a sha is checked against the pre-squash
+history first (including its cherry-pick and subject matches), and counts
+as shipped when that history's tip maps to a commit on the target ref.
 
 Usage:
     contrib/check-closed-commits [--ref origin/main] [--since 2026-09-24] [-w swayward]
-                                 [--squash-map FILE]
+                                 [--squash-map FILE --pre-squash-ref REF]
 Exit 1 on any violation.
 """
 
@@ -77,10 +79,14 @@ def squashed(sha, mapping):
     return None
 
 
-def status(sha, ancestors, subjects, patch_ids, mapping):
+def status(sha, ancestors, subjects, patch_ids, mapping, pre=None):
     new = squashed(sha, mapping)
     if new is not None:
         return "ok" if new in ancestors else "lost"
+    if pre is not None:
+        verdict = status(sha, *pre, {})
+        if verdict != "lost":
+            return verdict
     full = git("rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}", check=False).strip()
     if not full:
         return "missing"
@@ -101,6 +107,7 @@ def main():
     ap.add_argument("--since", default="", help="ignore tasks closed before this date")
     ap.add_argument("-w", "--workstream", default="swayward")
     ap.add_argument("--squash-map", help="file of `old new` sha pairs from a history squash")
+    ap.add_argument("--pre-squash-ref", help="the archived pre-squash main, e.g. archive/pre-squash")
     args = ap.parse_args()
 
     workstream = args.workstream.replace("'", "''")
@@ -121,6 +128,12 @@ def main():
 
     ancestors, subjects, patch_ids = main_index(args.ref)
     mapping = load_squash_map(args.squash_map)
+    pre = None
+    if args.pre_squash_ref:
+        tip = git("rev-parse", args.pre_squash_ref).strip()
+        if squashed(tip, mapping) not in ancestors:
+            raise SystemExit(f"{args.pre_squash_ref} does not map to a commit on {args.ref}")
+        pre = main_index(args.pre_squash_ref)
     lost, missing = [], []
     for task, entry in sorted(tasks.items()):
         close = entry["close"]
@@ -129,7 +142,7 @@ def main():
         if args.since and close["created_at"] < args.since:
             continue
         for sha in dict.fromkeys(SHA.findall(close["content"])):
-            verdict = status(sha, ancestors, subjects, patch_ids, mapping)
+            verdict = status(sha, ancestors, subjects, patch_ids, mapping, pre)
             if verdict == "lost":
                 lost.append((task, sha))
             elif verdict == "missing":
