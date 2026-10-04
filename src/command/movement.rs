@@ -1000,14 +1000,20 @@ pub(super) fn to_workspace_focused(
 }
 
 pub(super) fn to_mark_focused(state: &mut State, mark: &str) -> super::HandlerResult {
+    // Sway rejects an empty focused workspace before it resolves the mark
+    // (sway/commands/move.c:430-434).
     let Some(source) = super::targeted::focused_target(state) else {
-        return Err(success());
+        return Err(failure("Can't move an empty workspace"));
     };
     super::handled_outcome(move_target_to_mark(state, source, mark))
 }
 
 pub(super) fn to_output_focused(state: &mut State, target: &OutputTarget) -> super::HandlerResult {
-    let focused_target = super::targeted::focused_target(state);
+    // Sway rejects an empty focused workspace before it resolves the output
+    // (sway/commands/move.c:430-434).
+    let Some(focused_target) = super::targeted::focused_target(state) else {
+        return Err(failure("Can't move an empty workspace"));
+    };
     let focused = state
         .swayward
         .layout
@@ -1018,7 +1024,7 @@ pub(super) fn to_output_focused(state: &mut State, target: &OutputTarget) -> sup
         .and_then(|(window, _)| state.swayward.layout.window_center(window));
     let reference_output = focused.as_ref().map(|(_, output)| output);
     let output = output_target(state, target, reference_output, reference).map_err(failure)?;
-    if let Some(CommandTarget::Container(workspace, node)) = focused_target {
+    if let CommandTarget::Container(workspace, node) = focused_target {
         super::handled_outcome(move_tiling_subtree_to_output(
             state, workspace, node, &output,
         ))?;

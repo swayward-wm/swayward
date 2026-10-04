@@ -549,6 +549,9 @@ fn move_output_accepts_direction_name_and_workspace_forms() {
             .output_name(),
         &outputs[1]
     );
+    // Sway refocuses the emptied source workspace (sway/commands/move.c:598-607), where
+    // a container move fails "Can't move an empty workspace"; follow the window first.
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
     assert!(
         crate::command::execute(
             f.niri_state(),
