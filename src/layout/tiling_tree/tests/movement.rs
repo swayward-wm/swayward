@@ -829,3 +829,40 @@ fn a_split_under_a_pending_fullscreen_wrapper_keeps_its_box() {
     assert_eq!(percent, None);
     t.check_invariants();
 }
+
+// random seed 201 step 9 (sway-1.12-random): in H[a H[b]] with the H[b]
+// split fullscreen and focused, `layout tabbed` wraps the workspace children
+// in a pending tabbed container (sway/commands/layout.c:178-183). The
+// fullscreen split keeps its full output box; only its non-fullscreen
+// siblings lose the tab bar.
+#[test]
+fn a_fullscreen_split_under_a_pending_tabbed_wrapper_keeps_its_box() {
+    let mut t = tree((1200., 800.), 0.);
+    let _a = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let b = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(b, Layout::SplitH);
+    let h = t.nodes[&b].parent.unwrap();
+    t.set_focus(h);
+    assert!(t.set_node_fullscreen(h, Some(FullscreenMode::Workspace)));
+    let before = t.compute_geometry().ipc_nodes[&h];
+
+    t.set_focused_layout(Layout::Tabbed);
+
+    let wrapper = t.nodes[&h].parent.unwrap();
+    assert_ne!(wrapper, t.root);
+    fn rect_of<W: Clone>(node: &IpcNode<W>, id: NodeId) -> Option<Rectangle<f64, Logical>> {
+        match node {
+            IpcNode::Split {
+                id: own,
+                rect,
+                children,
+                ..
+            } => (*own == id)
+                .then_some(*rect)
+                .or_else(|| children.iter().find_map(|child| rect_of(child, id))),
+            IpcNode::Leaf { .. } => None,
+        }
+    }
+    assert_eq!(rect_of(&t.ipc_tree(), h), Some(before));
+    t.check_invariants();
+}

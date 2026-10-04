@@ -248,8 +248,8 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             {
                 // A split moved into a pending fullscreen layout wrapper keeps
                 // its pre-layout box, less a tab bar when the wrapper is tabbed
-                // or stacked.
-                if self.under_tabbed_pending_wrapper(id) {
+                // or stacked. The fullscreen container itself keeps its box.
+                if self.fullscreen != Some(id) && self.under_tabbed_pending_wrapper(id) {
                     pre_layout.loc.y += tree.titlebar_height;
                     pre_layout.size.h = (pre_layout.size.h - tree.titlebar_height).max(0.);
                 }

@@ -154,21 +154,29 @@ impl<W: LayoutElement> TilingTree<W> {
             self.has_had_tile = true;
             self.empty_representation_layout = None;
         }
-        let focus = self.focus;
         let (target, remapped) = self.focused_layout_target();
         let Some(target) = target else {
             self.set_layout(self.root, layout);
             return remapped;
         };
+        self.apply_focused_target_layout(target, layout);
+        remapped
+    }
+
+    /// Applies a `layout` command's new layout to the target that
+    /// [`Self::focused_layout_target`] chose. When the target is the workspace
+    /// and a container is focused, sway keeps the workspace layout and wraps
+    /// its children in a new container instead (sway/commands/layout.c:178-183).
+    fn apply_focused_target_layout(&mut self, target: NodeId, layout: Layout) {
+        let root_layout = self.split_layout(self.root);
         if target == self.root
-            && focus.is_some_and(|focus| {
-                self.tile(focus).is_some()
-                    || matches!(root_layout, Layout::Tabbed | Layout::Stacked)
+            && self.focus.is_some_and(|focus| {
+                focus != self.root || matches!(root_layout, Some(Layout::Tabbed | Layout::Stacked))
             })
-            && layout != root_layout
+            && Some(layout) != root_layout
         {
             if !self.can_wrap_root_children() {
-                return remapped;
+                return;
             }
             let pre_layout_ipc_rects = self
                 .fullscreen_node()
@@ -183,7 +191,13 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             self.set_layout_for_command(target, layout);
         }
-        remapped
+    }
+
+    fn split_layout(&self, id: NodeId) -> Option<Layout> {
+        match self.nodes.get(&id).map(|node| &node.value) {
+            Some(TreeNode::Split { layout, .. }) => Some(*layout),
+            Some(TreeNode::Leaf { .. }) | None => None,
+        }
     }
 
     pub fn split_focused(&mut self, layout: Layout) {
@@ -246,8 +260,10 @@ impl<W: LayoutElement> TilingTree<W> {
 
     pub fn toggle_focused_layout(&mut self, toggle: &LayoutToggle) -> Vec<(NodeId, NodeId)> {
         let (target, remapped) = self.focused_layout_target();
-        if let Some(target) = target {
-            self.toggle_node_layout(target, toggle);
+        if let Some((target, layout)) =
+            target.and_then(|target| Some((target, self.toggled_layout(target, toggle)?)))
+        {
+            self.apply_focused_target_layout(target, layout);
         }
         remapped
     }
@@ -260,10 +276,16 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn toggle_node_layout(&mut self, target: NodeId, toggle: &LayoutToggle) -> bool {
-        let current = match self.nodes.get(&target).map(|node| &node.value) {
-            Some(TreeNode::Split { layout, .. }) => *layout,
-            Some(TreeNode::Leaf { .. }) | None => return false,
+        let Some(layout) = self.toggled_layout(target, toggle) else {
+            return false;
         };
+        self.set_layout_for_command(target, layout);
+        true
+    }
+
+    /// The layout `layout toggle` picks for `target`, or `None` when it is not a split.
+    fn toggled_layout(&self, target: NodeId, toggle: &LayoutToggle) -> Option<Layout> {
+        let current = self.split_layout(target)?;
         let tree_layout = |layout| match layout {
             swayward_ipc::command::Layout::SplitH => Some(Layout::SplitH),
             swayward_ipc::command::Layout::SplitV => Some(Layout::SplitV),
@@ -273,8 +295,7 @@ impl<W: LayoutElement> TilingTree<W> {
         };
         let next = match toggle {
             LayoutToggle::Default | LayoutToggle::Split => {
-                self.toggle_layout_split(target);
-                return true;
+                return Some(self.split_toggled_layout(target))
             }
             LayoutToggle::All => match current {
                 Layout::SplitH => Layout::SplitV,
@@ -298,22 +319,13 @@ impl<W: LayoutElement> TilingTree<W> {
                             .find(|candidate| matches!(candidate, LayoutToggleEntry::Layout(_)))
                     });
                 match next {
-                    Some(LayoutToggleEntry::Split) => {
-                        self.toggle_layout_split(target);
-                        return true;
-                    }
-                    Some(LayoutToggleEntry::Layout(layout)) => {
-                        let Some(layout) = tree_layout(*layout) else {
-                            return false;
-                        };
-                        layout
-                    }
-                    None => return false,
+                    Some(LayoutToggleEntry::Split) => self.split_toggled_layout(target),
+                    Some(LayoutToggleEntry::Layout(layout)) => tree_layout(*layout)?,
+                    None => return None,
                 }
             }
         };
-        self.set_layout_for_command(target, next);
-        true
+        Some(next)
     }
 
     pub(super) fn previous_layout(&self, id: NodeId) -> Option<Layout> {
@@ -323,10 +335,9 @@ impl<W: LayoutElement> TilingTree<W> {
     pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
         let (target, remapped) = self.focused_layout_target();
         let target = target?;
-        self.previous_layout(target).is_some().then(|| {
-            self.restore_node_layout(target);
-            remapped
-        })
+        let layout = self.previous_layout(target)?;
+        self.apply_focused_target_layout(target, layout);
+        Some(remapped)
     }
 
     pub fn restore_target_layout(&mut self, id: NodeId) -> bool {
@@ -347,13 +358,14 @@ impl<W: LayoutElement> TilingTree<W> {
     pub fn toggle_focused_layout_split(&mut self) -> Vec<(NodeId, NodeId)> {
         let (target, remapped) = self.focused_layout_target();
         if let Some(target) = target {
-            self.toggle_layout_split(target);
+            let layout = self.split_toggled_layout(target);
+            self.apply_focused_target_layout(target, layout);
         }
         remapped
     }
 
-    fn toggle_layout_split(&mut self, target: NodeId) {
-        let layout = match self.nodes.get(&target).map(|node| &node.value) {
+    fn split_toggled_layout(&self, target: NodeId) -> Layout {
+        match self.nodes.get(&target).map(|node| &node.value) {
             Some(TreeNode::Split {
                 layout: Layout::SplitH,
                 ..
@@ -363,8 +375,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 ..
             }) => Layout::SplitH,
             _ => self.previous_layout(target).unwrap_or(Layout::SplitH),
-        };
-        self.set_layout_for_command(target, layout);
+        }
     }
 
     pub fn toggle_focused_split(&mut self) {
