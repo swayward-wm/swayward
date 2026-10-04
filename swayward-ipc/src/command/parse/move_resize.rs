@@ -5,6 +5,7 @@ pub(super) const BORDER_SYNTAX: &str =
 pub(super) const OPACITY_FLOAT_INVALID: &str = "opacity float invalid";
 pub(super) const INVALID_X_POSITION: &str = "Invalid x position specified";
 pub(super) const INVALID_Y_POSITION: &str = "Invalid y position specified";
+pub(super) const INVALID_DISTANCE: &str = "Invalid distance specified";
 pub(super) const SPLIT_INVALID: &str =
     "Invalid split command (expected either horizontal or vertical).";
 
@@ -416,9 +417,7 @@ pub(super) fn parse_move_distance(value: &str) -> Result<i32, String> {
     while bytes.get(split).is_some_and(u8::is_ascii_digit) {
         split += 1;
     }
-    let (digits, suffix) = value
-        .split_at_checked(split)
-        .ok_or("Invalid distance specified")?;
+    let (digits, suffix) = value.split_at_checked(split).ok_or(INVALID_DISTANCE)?;
     let amount = if split == 0 {
         0
     } else {
@@ -427,7 +426,7 @@ pub(super) fn parse_move_distance(value: &str) -> Result<i32, String> {
     if suffix.is_empty() || suffix.eq_ignore_ascii_case("px") {
         Ok(amount)
     } else {
-        Err("Invalid distance specified".into())
+        Err(INVALID_DISTANCE.into())
     }
 }
 

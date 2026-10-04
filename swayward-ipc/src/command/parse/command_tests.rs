@@ -347,6 +347,15 @@ fn no_focus_reports_sways_criteria_error() {
 }
 
 #[test]
+fn move_distance_is_a_command_failure() {
+    // Oracle: command-fuzz family-move-extra. Sway's move_in_direction
+    // reports a bad distance as CMD_FAILURE (`sway/sway/commands/move.c:674-680`).
+    let outcome = parse("move left oracle_extra").remove(0).unwrap_err();
+    assert_eq!(outcome.error.as_deref(), Some("Invalid distance specified"));
+    assert_eq!(outcome.parse_error, Some(false));
+}
+
+#[test]
 fn invalid_setting_values_parse_like_sway() {
     // Sway stores atoi("-1") and then aborts in wlr_scene_rect_set_size when
     // the next window maps, so a negative width has no sway behaviour to

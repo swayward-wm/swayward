@@ -293,6 +293,7 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
         // Handlers that report a bad value as CMD_FAILURE:
         // `sway/sway/commands/focus_follows_mouse.c:17-18`,
         // `sway/sway/commands/mouse_warping.c:16-17`,
+        // `sway/sway/commands/move.c:674-680`,
         // `sway/sway/commands/split.c:80-81` and
         // `sway/sway/commands/titlebar_border_thickness.c:17`,
         // `sway/sway/commands/titlebar_padding.c:17,26`.
@@ -300,6 +301,7 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
             error.into_failure()
         }
         "mouse_warping" if error.message_is(MOUSE_WARPING_USAGE) => error.into_failure(),
+        "move" if error.message_is(INVALID_DISTANCE) => error.into_failure(),
         "split" if error.message_is(SPLIT_INVALID) => error.into_failure(),
         "titlebar_border_thickness" | "titlebar_padding" if error.message_is(INVALID_SIZE) => {
             error.into_failure()
