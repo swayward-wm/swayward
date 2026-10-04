@@ -132,6 +132,16 @@ fn strtol(raw: &str) -> (i64, &str) {
     )
 }
 
+/// C's `(int)strtol(raw, &end, 10)` with `*end == '\0'` required, as sway's
+/// integer settings read their arguments. The long to int conversion keeps the
+/// low 32 bits, as it does on sway's platforms, so 2147483648 is -2147483648.
+/// An empty argument has no digits and leaves `end` at its terminator, so it
+/// reads as 0, as in C.
+fn strtol_int(raw: &str) -> Option<i32> {
+    let (value, rest) = strtol(raw);
+    rest.is_empty().then_some(value as i32)
+}
+
 /// C's `atoi`: strtol's leading integer, and 0 when there are no digits.
 /// Out-of-range values saturate at the `int` range, where C's behaviour is
 /// undefined.
@@ -334,11 +344,13 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             _ => Err("Expected 'smart_borders on|no_gaps|off'".into()),
         },
         "smart_gaps" => match rest {
-            [value] => {
-                let value = value.to_ascii_lowercase();
-                let mapped = match value.as_str() {
+            // `sway/sway/commands/smart_gaps.c:9-23`: at least one argument,
+            // later ones ignored. inverse_outer is matched with strcmp, every
+            // other value goes through parse_boolean.
+            [value, ..] => {
+                let mapped = match *value {
                     "inverse_outer" => SmartGapsArg::InverseOuter,
-                    "toggle" => SmartGapsArg::Toggle,
+                    other if other.eq_ignore_ascii_case("toggle") => SmartGapsArg::Toggle,
                     other if parse_boolean(other, true) => SmartGapsArg::On,
                     _ => SmartGapsArg::Off,
                 };
@@ -353,7 +365,8 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             None => Err("Expected 'show_marks yes|no'".into()),
         },
         "title_align" => match rest {
-            [value] if matches!(*value, "left" | "center" | "right") => Ok(
+            // `sway/sway/commands/title_align.c:12-28` reads argv[0] only.
+            [value, ..] if matches!(*value, "left" | "center" | "right") => Ok(
                 Command::SetLayoutOption(LayoutOption::TitleAlignment((*value).into())),
             ),
             _ => Err("Expected 'title_align left|center|right'".into()),
@@ -365,11 +378,12 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             _ => Err("Expected 'tiling_drag enable|disable|toggle'".into()),
         },
         "tiling_drag_threshold" => match rest {
-            [value] => value
-                .parse()
-                .map(LayoutOption::TilingDragThreshold)
-                .map(Command::SetLayoutOption)
-                .map_err(|_| "Invalid threshold specified".into()),
+            // `sway/sway/commands/tiling_drag_threshold.c:12-16` reads an int
+            // with strtol, so 2147483648 wraps negative and is rejected.
+            [value] => strtol_int(value)
+                .and_then(|value| u32::try_from(value).ok())
+                .map(|value| Command::SetLayoutOption(LayoutOption::TilingDragThreshold(value)))
+                .ok_or_else(|| "Invalid threshold specified".into()),
             _ => Err("Expected 'tiling_drag_threshold <threshold>'".into()),
         },
         "force_display_urgency_hint" => {
@@ -573,20 +587,19 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             ))
         }
         "titlebar_padding" => {
-            // One value sets both axes; two set horizontal then vertical.
-            // Negatives are rejected, matching sway's `Invalid size specified`
+            // One value sets both axes; two set horizontal then vertical, and
+            // later arguments are ignored. Each is an int read with strtol;
+            // negatives are rejected, matching sway's `Invalid size specified`
             // (`sway/sway/commands/titlebar_padding.c:8-38`).
             const INVALID: &str = INVALID_SIZE;
+            let size = |value: &str| strtol_int(value).ok_or_else(|| INVALID.to_owned());
             let (horizontal, vertical) = match rest {
                 [h] => {
-                    let h: i32 = h.parse().map_err(|_| INVALID.to_owned())?;
+                    let h = size(h)?;
                     (h, h)
                 }
-                [h, v] => (
-                    h.parse().map_err(|_| INVALID.to_owned())?,
-                    v.parse().map_err(|_| INVALID.to_owned())?,
-                ),
-                _ => return Err("Expected 'titlebar_padding <horizontal> [<vertical>]'".into()),
+                [h, v, ..] => (size(h)?, size(v)?),
+                [] => return Err("Expected 'titlebar_padding <horizontal> [<vertical>]'".into()),
             };
             if horizontal < 0 || vertical < 0 {
                 return Err(INVALID.into());
@@ -600,11 +613,12 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             // `sway/sway/commands/floating_minmax_size.c` wants exactly three
             // words, with a literal `x` between two integers, and rejects a
             // trailing suffix because it uses strtol and checks the remainder.
+            // The long is cast to int, so 2147483648 is stored as INT_MIN.
             let usage = format!("Expected '{name} <width> x <height>'");
             let [width, "x", height] = rest else {
                 return Err(usage);
             };
-            let (Ok(width), Ok(height)) = (width.parse::<i32>(), height.parse::<i32>()) else {
+            let (Some(width), Some(height)) = (strtol_int(width), strtol_int(height)) else {
                 return Err(usage);
             };
             Ok(Command::SetLayoutOption(
