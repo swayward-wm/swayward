@@ -123,3 +123,19 @@ fn invalid_arguments_follow_sways_handler_error_kind() {
     );
     assert_eq!(outcome.parse_error, Some(false));
 }
+
+/// Oracle: command-fuzz family-mode-invalid, family-mode-unicode and
+/// family-mode-quote. An unknown mode is CMD_INVALID
+/// (`sway/sway/commands/mode.c:68-71`), so it also stops the list.
+#[test]
+fn unknown_mode_is_a_parse_error_like_sway() {
+    let mut fixture = crate::tests::fixture::Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+    let outcome = execute(fixture.niri_state(), "mode oracle_invalid; nop");
+    assert_eq!(
+        outcome,
+        vec![swayward_ipc::command::parse_error(
+            "Unknown mode `oracle_invalid'"
+        )]
+    );
+}

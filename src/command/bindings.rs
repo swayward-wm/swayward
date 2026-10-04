@@ -379,7 +379,10 @@ pub(super) fn mode(
                 .find(|mode| mode.name == name)
                 .map(|mode| mode.pango_markup);
             let Some(pango_markup) = pango_markup else {
-                return Err(super::failure(format!("Unknown mode `{name}'")));
+                // CMD_INVALID (`sway/sway/commands/mode.c:68-71`).
+                return Err(swayward_ipc::command::parse_error(format!(
+                    "Unknown mode `{name}'"
+                )));
             };
             pango_markup
         };
