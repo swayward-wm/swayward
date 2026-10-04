@@ -496,6 +496,39 @@ fn tiled_axis_resize_without_parallel_siblings_reports_failure() {
     }
 }
 
+/// Oracle: random seeds 169, 332, 346. A view mapped beside a fullscreen view
+/// is never arranged, so its box stays zero-sized and sway refuses to take
+/// any width from it (sway/commands/resize.c:113-120).
+#[test]
+fn tiled_resize_beside_a_view_mapped_under_fullscreen_reports_failure() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    for index in 0..2 {
+        if index == 1 {
+            assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+        }
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "resize grow width 10 px");
+    assert_eq!(
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize any further".into()),
+            parse_error: Some(true),
+        }]
+    );
+}
+
 #[test]
 fn tiled_axis_resize_with_workspace_focus_reports_no_target() {
     let mut f = Fixture::new();

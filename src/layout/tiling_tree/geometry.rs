@@ -809,8 +809,8 @@ fn subtract_horizontal(
 }
 
 /// Sway's smallest sane container width and height (include/sway/tree/node.h:8-9).
-const MIN_SANE_W: f64 = 100.;
-const MIN_SANE_H: f64 = 60.;
+pub(super) const MIN_SANE_W: f64 = 100.;
+pub(super) const MIN_SANE_H: f64 = 60.;
 
 /// The inner gap between a split's children, shrunk so that every child keeps at least
 /// `minimum_child_extent`, and floored to whole pixels (`apply_horiz_layout` and
