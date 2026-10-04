@@ -661,6 +661,48 @@ fn closing_the_focused_window_emits_close_before_restored_focus() {
     assert_eq!(focus["container"]["app_id"], "first");
 }
 
+/// Oracle: events/command_coverage (`$events[12]`). Sway registers the user
+/// idle inhibitor on the view's unmap signal, which fires before
+/// `container_begin_destroy` emits `close` (`sway/desktop/idle_inhibit_v1.c:71`;
+/// `sway/tree/view.c:973`; `sway/tree/container.c:477`), so the close event
+/// reports no user inhibitor.
+#[test]
+fn close_event_reports_the_user_idle_inhibitor_as_destroyed() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    windows::map_window(
+        &mut fixture,
+        client,
+        windows::WindowSpec {
+            app_id: Some("inhibited"),
+            title: Some("inhibited"),
+            ..Default::default()
+        },
+    );
+    let mut window = None;
+    fixture.swayward().layout.with_windows_mut(|mapped, _| {
+        mapped.set_inhibit_idle_mode(swayward_ipc::command::InhibitIdleMode::Focus);
+        window = Some(mapped.window.clone());
+    });
+    let mapped = window.unwrap();
+    fixture.niri_state().ipc_refresh_layout();
+    let mut subscriber = subscribe_to_window_events(&mut fixture, &socket);
+
+    fixture
+        .swayward()
+        .layout
+        .remove_window(&mapped, crate::utils::transaction::Transaction::new());
+    fixture.niri_state().update_keyboard_focus();
+    fixture.niri_state().ipc_refresh_layout();
+
+    let (_, close) = read_ipc_reply(&mut fixture, &mut subscriber);
+    let close: Value = serde_json::from_str(&close).unwrap();
+    assert_eq!(close["change"], "close");
+    assert_eq!(close["container"]["idle_inhibitors"]["user"], "none");
+    assert_eq!(close["container"]["inhibit_idle"], false);
+}
+
 /// Oracle: events/for_window_during_scratchpad. A `mark` whose runtime
 /// `for_window` rule matches re-enters the command executor in the middle of
 /// the list. The outer transaction must still order `move scratchpad` as sway

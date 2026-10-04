@@ -267,6 +267,14 @@ impl State {
                     .cloned()
                 {
                     container["foreign_toplevel_identifier"] = serde_json::Value::Null;
+                    // Sway's user idle inhibitor listens on the view's unmap
+                    // signal, which fires before close is emitted
+                    // (`sway/sway/desktop/idle_inhibit_v1.c:71`;
+                    // `sway/sway/tree/view.c:973`), so close reports none.
+                    container["idle_inhibitors"]["user"] = "none".into();
+                    if container["idle_inhibitors"]["application"] == "none" {
+                        container["inhibit_idle"] = false.into();
+                    }
                     events.push(Event::SwayWindowChanged {
                         change: "close".into(),
                         container,
