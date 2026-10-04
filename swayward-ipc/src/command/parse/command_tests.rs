@@ -559,6 +559,21 @@ fn parses_layout_and_window_command_families() {
             Some("Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'")
         );
     assert_eq!(command("layout default"), Command::LayoutDefault);
+    // Sway matches argv[0] and ignores the rest unless it is `toggle`
+    // (`sway/sway/commands/layout.c:107-123`). Oracle: command-fuzz
+    // family-layout-extra.
+    assert_eq!(
+        command("layout tabbed oracle_extra"),
+        Command::Layout(Layout::Tabbed)
+    );
+    assert_eq!(command("layout default extra"), Command::LayoutDefault);
+    for input in ["layout toggle stacked", "layout toggle garbage junk"] {
+        assert_eq!(
+            parse(input)[0].as_ref().unwrap_err().error.as_deref(),
+            Some(LAYOUT_USAGE),
+            "{input}"
+        );
+    }
     assert_eq!(
         command("layout toggle split"),
         Command::LayoutToggle(LayoutToggle::Split)

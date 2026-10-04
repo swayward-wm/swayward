@@ -215,7 +215,9 @@ pub(super) fn parse_layout(args: &[&str]) -> Result<Command, String> {
         "stacking" => Some(Layout::Stacked),
         _ => None,
     };
-    if let [layout] = args {
+    // `sway/sway/commands/layout.c:107-123` matches argv[0] first and ignores
+    // any later arguments unless it is `toggle`.
+    if let [layout, ..] = args {
         if let Some(layout) = direct(layout) {
             return Ok(Command::Layout(layout));
         }
@@ -233,7 +235,9 @@ pub(super) fn parse_layout(args: &[&str]) -> Result<Command, String> {
         [] => LayoutToggle::Default,
         ["split"] => LayoutToggle::Split,
         ["all"] => LayoutToggle::All,
-        [_] => return Err("Expected 'layout toggle [split|all]' or a list of layouts".into()),
+        // Any other single word, or a list with no layout in it, is L_NONE
+        // and gets the full usage (layout.c:200-202).
+        [_] => return Err(LAYOUT_USAGE.into()),
         entries => {
             let cycle = entries
                 .iter()
@@ -246,7 +250,7 @@ pub(super) fn parse_layout(args: &[&str]) -> Result<Command, String> {
                 })
                 .collect::<Vec<_>>();
             if cycle.is_empty() {
-                return Err("Expected a valid layout in the toggle list".into());
+                return Err(LAYOUT_USAGE.into());
             }
             LayoutToggle::Cycle(cycle)
         }
