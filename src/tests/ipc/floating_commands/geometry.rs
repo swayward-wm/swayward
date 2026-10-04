@@ -700,3 +700,94 @@ fn floating_stacking_and_focus_match_sway_before_and_after_raise() {
         serde_json::from_str(&sway_fixture!("three_floating_after_raise.tree.json")).unwrap();
     assert_eq!(floating_order(&describe(&mut f)), floating_order(&after));
 }
+
+/// Oracle rows sway-1.12-random seeds 39, 127, 290 and 307: `floating toggle` on a tiled
+/// view floats it at its natural size with the content box centered on the workspace
+/// (`container_floating_resize_and_center`, sway/tree/container.c:850-894), clears the
+/// tiled edges (sway/tree/container.c:955-956), and a split keeps that box.
+#[test]
+fn floating_toggle_centers_the_natural_size_and_split_keeps_it() {
+    // The oracle's swayward harness config (sway-ipc-run `SwaywardAdapter`).
+    let mut config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let surface = f.client(client).create_window().surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    let initial = f.client(client).window(&surface).format_recent_configures();
+    assert!(
+        initial.starts_with("size: 0 × 0,") && initial.ends_with("states: []"),
+        "the initial configure carries no size and no tiled edges: {initial}"
+    );
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size(696, 491);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let _ = f.client(client).window(&surface).recent_configures();
+
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+    let configure = f.client(client).window(&surface).format_recent_configures();
+    let last = configure.lines().last().unwrap_or_default();
+    assert!(
+        last.starts_with("size: 696 × 491,") && last.ends_with("states: [Activated]"),
+        "floating restores the natural size without tiled edges: {configure}"
+    );
+    let window = f.client(client).window(&surface);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let tree = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap()
+    };
+    // The content box (696x491) is centered on the 1280x720 workspace: x 292, y 114.5,
+    // which sway reports truncated. The container adds the 2 px border on three sides and
+    // the titlebar on top.
+    let floating = tree(&mut f);
+    let floating = find_json_node(&floating, "floating_con", false).unwrap();
+    let titlebar = floating["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{floating}");
+    let content_top = 114 - titlebar;
+    let expected = serde_json::json!({
+        "x": 290, "y": content_top, "width": 700, "height": 493 + titlebar,
+    });
+    assert_eq!(floating["rect"], expected, "{floating}");
+    assert_eq!(
+        floating["geometry"],
+        serde_json::json!({"x": 0, "y": 0, "width": 696, "height": 491}),
+        "{floating}"
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
+    f.double_roundtrip(client);
+    let split = tree(&mut f);
+    let split = find_json_node(&split, "floating_con", false).unwrap();
+    assert_eq!(split["layout"], "splith", "{split}");
+    assert_eq!(split["rect"], expected, "{split}");
+    let child = &split["nodes"][0];
+    assert_eq!(
+        child["rect"],
+        serde_json::json!({"x": 290, "y": content_top + titlebar, "width": 700, "height": 493}),
+        "{child}"
+    );
+}

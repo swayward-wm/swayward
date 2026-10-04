@@ -109,6 +109,9 @@ pub struct Mapped {
     /// Whether this window is floating.
     is_floating: bool,
 
+    /// Whether this window is a floating root, configured without tiled edges.
+    is_untiled: bool,
+
     /// Client geometry captured when the window first mapped.
     natural_size: Size<i32, Logical>,
 

@@ -1527,8 +1527,11 @@ impl<W: LayoutElement> Workspace<W> {
             }
 
             // Come up with a default floating position close to the tile position.
+            // A view floated at its natural size is centered by the floating layout,
+            // as sway does (`container_floating_resize_and_center`,
+            // sway/tree/container.c:850-894).
             let stored_or_default = self.floating.stored_or_default_tile_pos(&tile);
-            if stored_or_default.is_none() {
+            if stored_or_default.is_none() && tile.floating_window_size.is_none() {
                 let offset = Point::from((50., 50.));
                 let pos = if self.tiling.is_empty() {
                     let size = tile.tile_size().to_point();

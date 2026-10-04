@@ -4,7 +4,7 @@ description: "want maximized: A\nconfig:\nwindow-rule {\n}"
 expression: snapshot
 ---
 initial configure:
-size: 1280 × 720, bounds: 1280 × 720, states: []
+size: 0 × 0, bounds: 1280 × 720, states: []
 
 post-map configures:
 size: 1280 × 720, bounds: 1280 × 720, states: [Maximized]

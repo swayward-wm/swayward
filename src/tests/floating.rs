@@ -29,6 +29,13 @@ fn set_up_with_config(config: Config) -> (Fixture, ClientId, WlSurface) {
     window.ack_last_and_commit();
     f.double_roundtrip(id);
 
+    // The initial configure carries no size, so the tiled slot arrives after mapping. Ack
+    // it like a real client, keeping the 100×100 buffer.
+    let window = f.client(id).window(&surface);
+    window.ack_last_and_commit();
+    f.double_roundtrip(id);
+    let _ = f.client(id).window(&surface).recent_configures();
+
     (f, id, surface)
 }
 
@@ -81,12 +88,6 @@ fn unfocus_preserves_current_size() {
 #[test]
 fn resize_to_different_size() {
     let (mut f, id, surface) = set_up();
-    let _ = f.client(id).window(&surface).recent_configures();
-
-    // Commit in response to the Activated state change configure.
-    f.client(id).window(&surface).ack_last_and_commit();
-    f.double_roundtrip(id);
-
     f.swayward().layout.toggle_window_floating(None);
     f.swayward()
         .layout
@@ -958,12 +959,6 @@ window-rule {
 "##;
     let config = Config::parse_mem(config).unwrap();
     let (mut f, id, surface) = set_up_with_config(config);
-
-    // Commit to the Activated state configure.
-    f.client(id).window(&surface).ack_last_and_commit();
-    f.double_roundtrip(id);
-
-    let _ = f.client(id).window(&surface).recent_configures();
 
     // Make it floating.
     f.swayward().layout.toggle_window_floating(None);

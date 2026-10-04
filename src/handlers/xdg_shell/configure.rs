@@ -222,8 +222,15 @@ impl State {
             );
         }
 
-        // Set the tiled state for the initial configure.
-        update_tiled_state(toplevel, config.prefer_no_csd, rules.tiled_state);
+        // Sway's initial configure carries no tiled edges; it sets them when the view maps
+        // tiled (`handle_commit`, sway/desktop/xdg_shell.c:297-306; `view_map`,
+        // sway/tree/view.c:912-917). A client that snaps its size to a grid while untiled
+        // therefore picks its natural size untiled. A window rule still forces the state.
+        update_tiled_state(
+            toplevel,
+            config.prefer_no_csd,
+            rules.tiled_state.or(Some(false)),
+        );
 
         // Set the configured settings.
         *state = InitialConfigureState::Configured {

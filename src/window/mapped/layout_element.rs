@@ -411,6 +411,10 @@ impl LayoutElement for Mapped {
         self.need_to_recompute_rules |= changed;
     }
 
+    fn set_untiled(&mut self, untiled: bool) {
+        self.is_untiled = untiled;
+    }
+
     fn has_xdg_decoration(&self) -> bool {
         self.has_xdg_decoration
     }

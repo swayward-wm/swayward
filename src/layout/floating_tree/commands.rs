@@ -62,6 +62,8 @@ impl<W: LayoutElement> FloatingLayout<W> {
 
         let pos = if tile.floating_pos.is_some() {
             self.stored_or_default_tile_pos(&tile).unwrap()
+        } else if size.w > 1 && size.h > 1 {
+            self.centered_content_tile_pos(&tile, size.to_f64())
         } else {
             let tile_size = size.to_f64() + tile.tile_size() - tile.window_size();
             center_preferring_top_left_in_area(self.working_area, tile_size)
@@ -85,6 +87,31 @@ impl<W: LayoutElement> FloatingLayout<W> {
         );
 
         self.bring_up_descendants_of(idx);
+    }
+
+    /// Sway centers a floating view's content box, not its decorated container, on the
+    /// workspace, or on the output when the content is larger than the workspace
+    /// (`container_floating_resize_and_center`, sway/tree/container.c:878-893).
+    fn centered_content_tile_pos(
+        &self,
+        tile: &Tile<W>,
+        content: Size<f64, Logical>,
+    ) -> Point<f64, Logical> {
+        let area = if content.w > self.working_area.size.w || content.h > self.working_area.size.h {
+            Rectangle::from_size(self.view_size)
+        } else {
+            self.working_area
+        };
+        // Sway keeps the half pixel and truncates it when it reports the box
+        // (`container_get_box` into an int `wlr_box`, sway/ipc-json.c:241-247); flooring
+        // gives the same integers.
+        let mut content_loc = area.loc + (area.size.to_point() - content.to_point()).downscale(2.);
+        content_loc.x = content_loc.x.floor();
+        content_loc.y = content_loc.y.floor();
+        // Floating tiles draw all four borders, so left equals bottom.
+        let side = tile.tile_width_for_window_width(0.) / 2.;
+        let top = tile.tile_height_for_window_height(0.) - side;
+        content_loc - Point::from((side, top))
     }
 
     pub fn add_tile_above(&mut self, above: &W::Id, mut tile: Tile<W>, activate: bool) {

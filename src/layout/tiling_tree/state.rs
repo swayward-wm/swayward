@@ -292,22 +292,25 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// Return a new tiled view's initial size.
     ///
-    /// Sway configures a new tiled view to its future allocation, the slot it will occupy once
-    /// arranged (`view_autoconfigure`, sway/tree/view.c:349-465), so the first configure is
-    /// already the final size. A height preset from a window rule still applies.
+    /// Sway's initial configure carries no size (`handle_commit` schedules a bare configure,
+    /// sway/desktop/xdg_shell.c:297-306), so the client maps at a size of its own choosing.
+    /// That size is the view's natural size (`handle_map`, xdg_shell.c:481-482), which
+    /// floating it later restores (`floating_natural_resize`, sway/tree/container.c:833-847).
+    /// The view gets its tiled slot once it is mapped. A height preset from a window rule
+    /// still applies.
     pub fn new_window_size(
         &self,
         height: Option<PresetSize>,
         rules: &ResolvedWindowRules,
     ) -> Size<i32, Logical> {
-        let bounds = self.new_window_toplevel_bounds(rules);
         let height = match height {
             Some(PresetSize::Fixed(value)) => value.max(1),
             Some(PresetSize::Proportion(value)) => {
+                let bounds = self.new_window_toplevel_bounds(rules);
                 (f64::from(bounds.h) * value).floor().max(1.) as i32
             }
-            None => bounds.h,
+            None => 0,
         };
-        Size::from((bounds.w, height))
+        Size::from((0, height))
     }
 }

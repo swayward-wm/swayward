@@ -8,5 +8,5 @@ size: 1280 × 720, bounds: 1280 × 720, states: [Fullscreen]
 
 post-map configures:
 size: 1280 × 720, bounds: 1280 × 720, states: [Fullscreen]
-size: 1280 × 720, bounds: 1280 × 720, states: []
+size: 0 × 0, bounds: 1280 × 720, states: []
 size: 1280 × 720, bounds: 1280 × 720, states: [Activated]

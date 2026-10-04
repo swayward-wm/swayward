@@ -28,6 +28,7 @@ impl Mapped {
             is_focused: false,
             is_active_in_column: true,
             is_floating: false,
+            is_untiled: false,
             natural_size,
             has_xdg_decoration,
             is_window_cast_target: false,
@@ -416,8 +417,11 @@ impl Mapped {
         self.window.send_frame(output, time, throttle, should_send);
     }
 
+    /// Sway clears the tiled edges of a floating view and sets them on a tiled one
+    /// (`container_set_floating`, sway/tree/container.c:955-956, 998-999).
     pub fn update_tiled_state(&self, prefer_no_csd: bool) {
-        update_tiled_state(self.toplevel(), prefer_no_csd, self.rules.tiled_state);
+        let force_tiled = self.rules.tiled_state.or(self.is_untiled.then_some(false));
+        update_tiled_state(self.toplevel(), prefer_no_csd, force_tiled);
     }
 
     pub fn is_windowed_fullscreen(&self) -> bool {

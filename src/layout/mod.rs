@@ -268,6 +268,12 @@ pub trait LayoutElement {
     fn set_activated(&mut self, active: bool);
     fn set_active_in_column(&mut self, active: bool);
     fn set_floating(&mut self, floating: bool);
+    /// Whether the window is a floating root, which sway configures without tiled edges
+    /// (`container_set_floating` and `container_split`, sway/tree/container.c:955-956,
+    /// 1535-1536).
+    fn set_untiled(&mut self, untiled: bool) {
+        let _ = untiled;
+    }
     fn has_xdg_decoration(&self) -> bool {
         false
     }
@@ -5553,6 +5559,7 @@ impl<W: LayoutElement> Layout<W> {
 
             win.set_active_in_column(true);
             win.set_floating(move_.is_floating);
+            win.set_untiled(move_.is_floating);
             win.set_activated(true);
 
             win.set_interactive_resize(None);

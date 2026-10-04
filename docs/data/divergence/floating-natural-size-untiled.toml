@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/handlers/xdg_shell/configure.rs", "src/layout/floating_tree/commands.rs", "src/layout/floating_tree/interaction.rs", "src/layout/mod.rs", "src/layout/tiling_tree/rendering.rs", "src/layout/workspace.rs", "src/window/mapped/layout_element.rs", "src/window/mapped/mod.rs", "src/window/mapped/state.rs"]
+what = "send the initial configure with no size and no tiled edges, clear the tiled edges on floating roots, float a view at its natural size every time, and center its content box rather than the decorated tile."
+why = "Sway's initial configure is bare (sway/desktop/xdg_shell.c:297-306), so a client picks its natural size untiled; `container_set_floating` clears the tiled edges and `container_floating_resize_and_center` restores the natural size and centers the content (sway/tree/container.c:850-894, 955-968). Swayward sent the tiled slot and the tiled edges up front, so foot mapped at a grid-snapped full size and floated at 1280x745 at the origin."
