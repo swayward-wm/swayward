@@ -1,6 +1,7 @@
 //! Sway workspace switching, creation, renaming and move-to-workspace commands.
 
 use super::*;
+use crate::command::NO_PREVIOUS_WORKSPACE;
 
 impl<W: LayoutElement> Layout<W> {
     pub(super) fn move_activation(focus: bool) -> ActivateWindow {
@@ -190,7 +191,7 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 let Some(previous_name) = monitor.previous_workspace_name().map(str::to_owned)
                 else {
-                    return Err("There is no previous workspace".into());
+                    return Err(NO_PREVIOUS_WORKSPACE.into());
                 };
                 return self.activate_sway_workspace(WorkspaceTarget::Name(previous_name));
             }

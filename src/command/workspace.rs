@@ -28,10 +28,20 @@ pub(super) fn activate(
         state.swayward.layout.activate_sway_workspace(target)
     };
     if let Err(error) = result {
-        return Err(failure(error));
+        return Err(activation_failure(error));
     }
     state.swayward.queue_redraw_all();
     Ok(None)
+}
+
+/// Maps an activation error to sway's result kind: the missing-history
+/// refusal is `CMD_INVALID`, every other refusal `CMD_FAILURE`.
+pub(super) fn activation_failure(error: String) -> super::CommandOutcome {
+    if error == super::NO_PREVIOUS_WORKSPACE {
+        swayward_ipc::command::parse_error(error)
+    } else {
+        failure(error)
+    }
 }
 
 pub(super) fn assign(

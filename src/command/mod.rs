@@ -82,6 +82,10 @@ pub(crate) fn create_output(
     }
 }
 
+/// Sway answers `workspace back_and_forth` without history with `CMD_INVALID`
+/// (`sway/commands/workspace.c:216-218`), serialized as `parse_error: true`.
+pub(crate) const NO_PREVIOUS_WORKSPACE: &str = "There is no previous workspace";
+
 pub(super) fn success() -> CommandOutcome {
     CommandOutcome {
         success: true,
