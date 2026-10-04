@@ -1,19 +1,25 @@
 #!/bin/bash
 # Full oracle sweep (random, i3-derived, state, events) of one swayward commit.
 #
-# Usage: contrib/oracle-sweep <oracle-worktree> <out-dir> [swayward-checkout]
+# Usage: contrib/oracle-sweep [--reuse] <oracle-worktree> <out-dir> [swayward-checkout]
 #
 # Run inside the dev container. The checkout (default: this repo) must be
 # clean with target/release/swayward built from HEAD. The oracle worktree's
 # swayward pin is set to HEAD for the run and restored afterwards. Runs six
-# shards in parallel; a shard that dies (no result, or a socket failure in its
-# log) is retried once, because under load a dead shard otherwise shows up as
-# hundreds of false losses. Compare two sweeps with contrib/oracle-sweep-diff.
+# shards in parallel; a shard that dies (exit status above 1, no result, or a
+# socket failure or traceback in its log) is retried once, because under load
+# a dead shard otherwise shows up as hundreds of false losses. sway-ipc-run
+# exits 1 when it finishes with mismatches, so 1 alone is not a death.
+# Compare two sweeps with contrib/oracle-sweep-diff.
 # The last step writes <out-dir>/status.json (swayward and oracle sha, wall
 # minutes, dead shards); oracle-sweep-diff --ledger appends a row only when it
-# exists and lists no dead shard.
+# exists and lists no dead shard. A previous sweep's results in <out-dir>
+# would pass for this one's, so the sweep refuses an <out-dir> holding *.toml
+# or status.json; --reuse deletes them (and the old logs) first.
 set -u
-[ $# -ge 2 ] || { sed -n '2,15p' "$0"; exit 2; }
+REUSE=0
+if [ "${1:-}" = --reuse ]; then REUSE=1; shift; fi
+[ $# -ge 2 ] || { sed -n '2,18p' "$0"; exit 2; }
 OR=$(realpath "$1")
 OUT=$(realpath -m "$2")
 SW=$(realpath "${3:-$(dirname "$0")/..}")
@@ -25,14 +31,20 @@ DSHARDS=${DSHARDS:-2}
 [ -x "$BIN" ] || { echo "oracle-sweep: missing $BIN"; exit 2; }
 [ -z "$(git -C "$SW" status --porcelain)" ] || { echo "oracle-sweep: dirty $SW"; exit 2; }
 [ -z "$(git -C "$OR" status --porcelain)" ] || { echo "oracle-sweep: dirty $OR"; exit 2; }
+if compgen -G "$OUT/*.toml" >/dev/null || [ -e "$OUT/status.json" ]; then
+    if [ "$REUSE" = 0 ]; then
+        echo "oracle-sweep: $OUT holds a previous sweep; pick a fresh dir or pass --reuse"
+        exit 2
+    fi
+    rm -f "$OUT"/*.toml "$OUT/status.json" "$OUT"/logs/*.log
+fi
 HEAD=$(git -C "$SW" rev-parse HEAD)
 ORSHA=$(git -C "$OR" rev-parse HEAD)
 sed -i "s/^swayward = \"[0-9a-f]\{40\}\"$/swayward = \"$HEAD\"/" "$OR/pins.toml"
 trap 'git -C "$OR" checkout -q -- pins.toml' EXIT
 mkdir -p "$OUT/logs"
-rm -f "$OUT/status.json"
 
-declare -A CMD
+declare -A CMD RC
 common="--compositor swayward --binary $BIN"
 seeds=$(python3 -c "import json; print(' '.join(str(s['seed']) for s in json.load(open('$OR/sway-ipc/random/sequences.json'))['sequences']))")
 names=$(python3 -c "import json; print(' '.join(s['name'] for s in json.load(open('$OR/sway-ipc/i3-derived/scenarios.json'))['scenarios']))")
@@ -48,15 +60,20 @@ CMD[state]="$RUN scenarios $common --corpus state --out $OUT/state.toml"
 CMD[events]="$RUN scenarios $common --corpus events --out $OUT/events.toml"
 
 run_shards() {
+    declare -A pid
     for s in "$@"; do
         # shellcheck disable=SC2086 # CMD values are word lists by design
         (cd "$OR" && ${CMD[$s]} >"$OUT/logs/$s.log" 2>&1) &
+        pid[$s]=$!
     done
-    wait
+    for s in "$@"; do
+        wait "${pid[$s]}"
+        RC[$s]=$?
+    done
 }
 dead_shards() {
     for s in "${!CMD[@]}"; do
-        if [ ! -s "$OUT/$s.toml" ] || grep -qE "Connection refused|timed out|Traceback" "$OUT/logs/$s.log"; then
+        if [ "${RC[$s]:-2}" -gt 1 ] || [ ! -s "$OUT/$s.toml" ] || grep -qE "Connection refused|timed out|Traceback" "$OUT/logs/$s.log"; then
             echo "$s"
         fi
     done
