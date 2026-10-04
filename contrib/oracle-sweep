@@ -16,10 +16,15 @@
 # exists and lists no dead shard. A previous sweep's results in <out-dir>
 # would pass for this one's, so the sweep refuses an <out-dir> holding *.toml
 # or status.json; --reuse deletes them (and the old logs) first.
+# One sweep runs per host at a time: the sweep holds an flock on
+# $ORACLE_SWEEP_LOCK (default ~/hacking/swayward-wm/scratch/oracle-sweep.lock)
+# and records its pid, swayward sha and start time there. A second sweep
+# exits 2 naming the holder; a record left by a sweep that died without
+# clearing it (no flock held) is reclaimed with a message.
 set -u
 REUSE=0
 if [ "${1:-}" = --reuse ]; then REUSE=1; shift; fi
-[ $# -ge 2 ] || { sed -n '2,18p' "$0"; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,23p' "$0"; exit 2; }
 OR=$(realpath "$1")
 OUT=$(realpath -m "$2")
 SW=$(realpath "${3:-$(dirname "$0")/..}")
@@ -27,10 +32,32 @@ BIN=$SW/target/release/swayward
 RUN=$OR/contrib/sway-ipc-run
 RSHARDS=${RSHARDS:-2}
 DSHARDS=${DSHARDS:-2}
+LOCK=${ORACLE_SWEEP_LOCK:-$HOME/hacking/swayward-wm/scratch/oracle-sweep.lock}
 
 [ -x "$BIN" ] || { echo "oracle-sweep: missing $BIN"; exit 2; }
+HEAD=$(git -C "$SW" rev-parse HEAD)
+mkdir -p "$(dirname "$LOCK")"
+# The lock comes before the dirty checks: a running sweep dirties pins.toml.
+# Shards inherit fd 9, so the lock stays held while any of them still runs.
+exec 9>>"$LOCK"
+if ! flock -n 9; then
+    holder=$(cat "$LOCK")
+    echo "oracle-sweep: another sweep holds $LOCK: ${holder:-unknown holder}"
+    hpid=$(sed -n 's/^pid=//p' "$LOCK")
+    if [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; then
+        echo "oracle-sweep: pid $hpid is gone but its shards still run"
+    fi
+    exit 2
+fi
+stale=$(sed -n 's/^pid=//p' "$LOCK")
+[ -z "$stale" ] || echo "oracle-sweep: reclaiming stale lock left by pid $stale: $(paste -sd' ' "$LOCK")"
+printf 'pid=%s\nswayward=%s\nstarted=%s\n' "$$" "$HEAD" "$(date -Iseconds)" >"$LOCK"
+# Release only the lock here: pins.toml is not ours to restore until the
+# dirty checks pass, since a dirty oracle may hold someone's edit.
+trap ': >"$LOCK"' EXIT
 [ -z "$(git -C "$SW" status --porcelain)" ] || { echo "oracle-sweep: dirty $SW"; exit 2; }
 [ -z "$(git -C "$OR" status --porcelain)" ] || { echo "oracle-sweep: dirty $OR"; exit 2; }
+trap 'git -C "$OR" checkout -q -- pins.toml; : >"$LOCK"' EXIT
 if compgen -G "$OUT/*.toml" >/dev/null || [ -e "$OUT/status.json" ]; then
     if [ "$REUSE" = 0 ]; then
         echo "oracle-sweep: $OUT holds a previous sweep; pick a fresh dir or pass --reuse"
@@ -38,10 +65,8 @@ if compgen -G "$OUT/*.toml" >/dev/null || [ -e "$OUT/status.json" ]; then
     fi
     rm -f "$OUT"/*.toml "$OUT/status.json" "$OUT"/logs/*.log
 fi
-HEAD=$(git -C "$SW" rev-parse HEAD)
 ORSHA=$(git -C "$OR" rev-parse HEAD)
 sed -i "s/^swayward = \"[0-9a-f]\{40\}\"$/swayward = \"$HEAD\"/" "$OR/pins.toml"
-trap 'git -C "$OR" checkout -q -- pins.toml' EXIT
 mkdir -p "$OUT/logs"
 
 declare -A CMD RC
@@ -83,7 +108,7 @@ start=$(date +%s)
 run_shards "${!CMD[@]}"
 retry=$(dead_shards)
 if [ -n "$retry" ]; then
-    echo "oracle-sweep: retrying dead shards:" $retry
+    echo "oracle-sweep: retrying dead shards: ${retry//$'\n'/ }"
     for s in $retry; do
         mv "$OUT/logs/$s.log" "$OUT/logs/$s.dead.log"
         rm -f "$OUT/$s.toml"
@@ -107,4 +132,4 @@ wall=$((($(date +%s) - start) / 60))
 echo "wall $wall min"
 printf '{"swayward": "%s", "oracle": "%s", "wall_min": %d, "dead": "%s"}\n' \
     "$HEAD" "$ORSHA" "$wall" "${dead//$'\n'/ }" >"$OUT/status.json"
-[ -z "$dead" ] || { echo "oracle-sweep: DEAD SHARDS after retry:" $dead; exit 1; }
+[ -z "$dead" ] || { echo "oracle-sweep: DEAD SHARDS after retry: ${dead//$'\n'/ }"; exit 1; }

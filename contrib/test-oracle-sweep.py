@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -15,9 +16,14 @@ SCRATCH = ROOT.parent / "scratch"
 
 # FAKE_MODE: ok writes a matching row and exits 0; mismatch writes a
 # mismatching row and exits 1, as sway-ipc-run does; die writes nothing and
-# exits 1 with no recognised message; crash writes a row but exits 3.
+# exits 1 with no recognised message; crash writes a row but exits 3; hold
+# waits for $FAKE_RELEASE to exist, then behaves as ok.
 RUNNER = """#!/bin/sh
 out=; while [ $# -gt 0 ]; do [ "$1" = --out ] && out=$2; shift; done
+if [ "$FAKE_MODE" = hold ]; then
+    while [ ! -e "$FAKE_RELEASE" ]; do sleep 0.05; done
+    FAKE_MODE=ok
+fi
 case $FAKE_MODE in
 ok) printf '[[result]]\\nscenario = "x"\\nrequest = "tree"\\nverdict = "match"\\n' >"$out" ;;
 mismatch) printf '[[result]]\\nscenario = "x"\\nrequest = "tree"\\nverdict = "mismatch"\\n' >"$out"
@@ -69,14 +75,18 @@ class OracleSweepTest(unittest.TestCase):
         binary.chmod(0o755)
         self.out = tmp / "sweep"
         self.ledger = tmp / "progress.tsv"
+        # A private lock, so the tests neither block on nor disturb a real sweep.
+        self.lock = tmp / "oracle-sweep.lock"
+        self.env = {**os.environ, "ORACLE_SWEEP_LOCK": str(self.lock),
+                    "FAKE_RELEASE": str(tmp / "release")}
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def sweep(self, mode, *flags):
+    def sweep(self, mode, *flags, out=None):
         return subprocess.run(
-            [SWEEP, *flags, self.oracle, self.out, self.checkout], text=True,
-            capture_output=True, check=False, env={**os.environ, "FAKE_MODE": mode})
+            [SWEEP, *flags, self.oracle, out or self.out, self.checkout], text=True,
+            capture_output=True, check=False, env={**self.env, "FAKE_MODE": mode})
 
     def ledger_lines(self):
         subprocess.run([DIFF, "--ledger", self.ledger, self.out, self.out],
@@ -124,6 +134,36 @@ class OracleSweepTest(unittest.TestCase):
         self.assertIn("retrying dead shards", result.stdout)
         self.assertEqual(len(self.dead()), 6)
         self.assertEqual(self.ledger_lines(), [])
+
+    def test_a_second_concurrent_sweep_exits_2_naming_the_holder(self):
+        first = subprocess.Popen(
+            [SWEEP, self.oracle, self.out, self.checkout], text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env={**self.env, "FAKE_MODE": "hold"})
+        try:
+            deadline = time.monotonic() + 30
+            while f"pid={first.pid}" not in (self.lock.read_text()
+                                              if self.lock.exists() else ""):
+                self.assertLess(time.monotonic(), deadline, "first sweep never locked")
+                time.sleep(0.05)
+            second = self.sweep("ok", out=self.out.parent / "sweep2")
+            self.assertEqual(second.returncode, 2, second.stdout + second.stderr)
+            self.assertIn(f"pid={first.pid}", second.stdout)
+            self.assertIn(f"swayward={git('rev-parse', 'HEAD')}", second.stdout)
+            self.assertIn("started=", second.stdout)
+            self.assertFalse((self.out.parent / "sweep2").exists())
+        finally:
+            Path(self.env["FAKE_RELEASE"]).touch()
+            stdout, _ = first.communicate(timeout=60)
+        self.assertEqual(first.returncode, 0, stdout)
+        self.assertEqual(self.lock.read_text(), "")
+        self.assertEqual(self.sweep("ok", out=self.out.parent / "sweep3").returncode, 0)
+
+    def test_a_dead_holders_lock_is_reclaimed(self):
+        self.lock.write_text("pid=999999999\nswayward=abc\nstarted=then\n")
+        result = self.sweep("ok")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("reclaiming stale lock left by pid 999999999", result.stdout)
 
 
 if __name__ == "__main__":
