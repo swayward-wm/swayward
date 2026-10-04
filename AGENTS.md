@@ -50,34 +50,55 @@ bases.
 
 ### What each kind of commit needs
 
-The fast gate is the whole gate for most commits. The full oracle sweep
-(random, i3-derived, state, events) takes 25 to 110 minutes and saturates the
-machine, so it runs off the critical path.
+**Rule zero: never pin intermediate commits.** The oracle's `pins.toml`
+swayward sha and swayward's `tests/oracle.toml` change once per milestone, at
+the release candidate (T4). Every other commit leaves both pins alone; a
+commit that moves a pin outside T4 is bounced.
 
-| Commit | Before handover | After landing |
-|---|---|---|
-| Refactor, test, docs, tooling | `./contrib/fast-gate` | nothing |
-| Behavior change | `./contrib/fast-gate`, plus the oracle rows it can affect | integrator sweep on the batch tip |
+| Tier | When | Who runs what | Passes when |
+|---|---|---|---|
+| T0 | every commit | author: `./contrib/fast-gate` | exit 0 |
+| T1 | behavior change | author: T0, plus `contrib/targeted-oracle --run` and the cited rows | 0 new mismatches; cited rows match |
+| T2 | a landed behavior batch, at most every 2 h | integrator: `contrib/oracle-sweep`, then `contrib/oracle-sweep-diff` against the baseline | 0 lost, 0 missing |
+| T3 | nightly | CI: 200k proptests and the live soak | no new failure |
+| T4 | release candidate, once per milestone | maintainer: full oracle regeneration | oracle `contrib/validate` green, `pending.toml` empty, two runs agree |
 
-Select the affected rows with `contrib/targeted-oracle --out-dir <scratch>`.
-Review the printed commands, then commit and add `--run` (inside the dev
-container). It builds the release binary, pins the oracle cache to `HEAD` for
-the run, and exits 1 only for rows that match in the pinned swayward snapshot
-and mismatch now; known mismatches are listed but pass. It fails closed for an
-unmapped production path. A sway-compatibility fix still
-names its oracle row in the commit message (see Invariants).
+T4 runs in this order, so the pinned commit survives on main:
 
-The integrator owns the full sweep. It lands behavior commits in batches, runs
-the sweep once on the pushed tip, and on a regression replays only the lost
-rows against each commit in the batch, then reverts or bounces the culprit.
+1. Squash swayward, if wanted. Squash before the freeze, never after.
+2. Freeze the RC sha on main.
+3. Pin the RC in the oracle and regenerate every result.
+4. Squash the oracle.
+5. Repin `tests/oracle.toml` once, then tag swayward HEAD.
+
+History is final at the beta1 tag: from then on main is never rewritten and
+the oracle pins only tagged or on-main commits.
+`docs/internal/launch-checklist.md` is the runbook.
+
+For T1, select the affected rows with `contrib/targeted-oracle --out-dir
+<scratch>`. Review the printed commands, then commit and add `--run` (inside
+the dev container). It builds the release binary, points the local oracle
+cache's `pins.toml` at `HEAD` for the run and restores it afterwards (a
+scratch pin, never committed), and exits 1 only for rows that
+match in the pinned swayward snapshot and mismatch now; known mismatches are
+listed but pass. It fails closed for an unmapped production path. Run the rows
+a fix cites directly with oracle `contrib/sway-ipc-run`, with `--out` outside
+the repo. A sway-compatibility fix names its oracle row in the commit message
+(see Invariants).
+
+The integrator owns T2 and takes the full sweep (random, i3-derived, state,
+events) off the critical path. It lands behavior commits in batches, sweeps the
+pushed tip, and on a regression replays only the lost rows against each commit
+in the batch, then reverts or bounces the culprit.
 `contrib/oracle-sweep <oracle-worktree> <out-dir>` runs the sweep in six
 shards (about 10 minutes) and retries a dead shard once;
 `contrib/oracle-sweep-diff <before> <after>` lists lost, gained and missing
 rows and exits 1 on any loss. Keep the last main sweep under
-`~/hacking/swayward-wm/scratch/` as the baseline.
-Refactor batches are checked for zero per-row change. Nightly CI owns
-exhaustive coverage: 200k proptests and the live soak. Workers run the full
-corpus only when the integrator asks for it.
+`~/hacking/swayward-wm/scratch/` as the baseline. When the oracle commit
+changes, first sweep unchanged main on the new oracle commit and make that the
+baseline; a baseline is valid for one oracle commit. Refactor batches are
+checked for zero per-row change. Workers run the full corpus only when the
+integrator asks for it.
 
 Done means pushed, or committed where the orchestrator cherry-picks. A close
 note that names a commit must name one that exists on the remote.

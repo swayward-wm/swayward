@@ -23,13 +23,56 @@ Before the final measurement, confirm that the standalone oracle has the i3, swa
 
 Gate: every `extract-compliance-harness` blocker except `oracle-final-squash` is closed.
 
-## 2. Freeze the swayward source commit
+## 2. Resolve the beta version contract
+
+**Owner: maintainer**
+
+Complete `launch-beta-version-contract` before editing release metadata. The current decisions conflict: the public version is `beta1`, while the release workflow requires a numeric Semantic Version such as `26.9.0-beta.1`, and Cargo/package metadata still says `26.4.0`.
+
+Record one exact value for each item:
+
+- the signed Git tag;
+- `swayward --version` and `GET_VERSION.human_readable`;
+- the Cargo workspace version;
+- Debian, RPM, and Arch package versions;
+- the release workflow input;
+- whether `swayward-ipc` is published for beta1.
+
+Gate: `contrib/check-release-consistency`, its test, the release runbook, and version tests all encode the same decision. Export the decided version as `VERSION`.
+
+## 3. Land the version bump
+
+**Owner: release worker, reviewed by maintainer**
+
+The bump changes `src`, `swayward-ipc`, and `swayward-config`, so it lands before the freeze in step 4 and the measured commit reports the beta version.
+
+Follow `docs/wiki/Development:-Releasing-swayward.md`. Update the version source, `Cargo.toml`, `Cargo.lock`, workspace dependency pins, `contrib/PKGBUILD`, and public examples. In an Arch container, regenerate rather than hand-edit `.SRCINFO`:
+
+```sh
+cd "$SWAYWARD/contrib"
+makepkg --printsrcinfo > .SRCINFO
+```
+
+Run:
+
+```sh
+cd "$SWAYWARD"
+./contrib/check-release-consistency "swayward-v$VERSION"
+./contrib/test-release-consistency
+```
+
+Gate: version metadata agrees, `.SRCINFO` is generated, and `./contrib/fast-gate` passes. Commit the bump and land it on `main` as the last source commit.
+
+## 4. Freeze the swayward source commit
 
 **Owner: maintainer and integrator**
 
+Never pin an intermediate commit. The commit recorded here is the only swayward commit the oracle pins for beta1, so it must survive every later history change.
+
 1. Drain the integration queue.
-2. Confirm that no launch-blocking fix remains open.
-3. Record the commit that the oracle will measure:
+2. Confirm that no launch-blocking fix remains open and that the step 3 version bump is the last source commit on `main`.
+3. Squash before freeze, never after. If the maintainer wants a shorter history, squash swayward `main` now, back up the pre-squash history as a bundle under `$SCRATCH`, and push with `--force-with-lease`. A squash after this step orphans the pinned commit and invalidates every result that names it.
+4. Record the commit that the oracle will measure:
 
    ```sh
    git -C "$SWAYWARD" fetch origin
@@ -38,9 +81,18 @@ Gate: every `extract-compliance-harness` blocker except `oracle-final-squash` is
    printf '%s\n' "$SWAYWARD_SHA" | tee "$SCRATCH/swayward-snapshot-sha"
    ```
 
-Gate: the working tree is clean, the queue is empty, and the integrator confirms `$SWAYWARD_SHA` as the snapshot commit. If another behavior change lands, return to this step and discard any unpublished measurement of the old commit.
+5. Confirm that the commit is on `main` and reachable from a fresh clone:
 
-## 3. Repin and regenerate the oracle
+   ```sh
+   git clone --quiet https://github.com/swayward-wm/swayward "$SCRATCH/fresh-clone"
+   git -C "$SCRATCH/fresh-clone" cat-file -e "$SWAYWARD_SHA^{commit}"
+   git -C "$SWAYWARD" merge-base --is-ancestor "$SWAYWARD_SHA" origin/main
+   rm -rf "$SCRATCH/fresh-clone"
+   ```
+
+Gate: the squash, if any, is pushed; the working tree is clean; the queue is empty; and the integrator confirms `$SWAYWARD_SHA` as the snapshot commit. From here until the tag, `main` changes only in `tests/oracle.toml`, generated docs, and release metadata that does not touch `src`, `swayward-ipc`, or `swayward-config`. Check with `git diff --quiet "$SWAYWARD_SHA" HEAD -- src swayward-ipc swayward-config`. If another behavior change lands, return to this step and discard any unpublished measurement of the old commit.
+
+## 5. Repin and regenerate the oracle
 
 **Owner: oracle snapshot worker**
 
@@ -92,7 +144,7 @@ git status --short
 
 Commit the complete repin. Push only its oracle branch. Do not force-push that branch after results exist because result metadata records `oracle_commit`.
 
-## 4. Finish and squash the oracle
+## 6. Finish and squash the oracle
 
 **Owner: maintainer**
 
@@ -138,7 +190,7 @@ test "$(git rev-list --count origin/main)" -eq 1
 
 Record the new oracle root SHA as `ORACLE_SHA`. Close `oracle-final-squash`, then close `extract-compliance-harness` with the final SHA and reproducibility evidence.
 
-## 5. Pin swayward to the final oracle root
+## 7. Pin swayward to the final oracle root
 
 **Owner: swayward integrator**
 
@@ -158,45 +210,24 @@ git diff --check
 
 Gate: the summary names `$ORACLE_SHA`, all public links use the final snapshot name, and coverage reports zero violations. Commit this as one swayward commit. Do not push from a worker worktree; the integrator cherry-picks it.
 
-## 6. Resolve the beta version contract
-
-**Owner: maintainer**
-
-Complete `launch-beta-version-contract` before editing release metadata. The current decisions conflict: the public version is `beta1`, while the release workflow requires a numeric Semantic Version such as `26.9.0-beta.1`, and Cargo/package metadata still says `26.4.0`.
-
-Record one exact value for each item:
-
-- the signed Git tag;
-- `swayward --version` and `GET_VERSION.human_readable`;
-- the Cargo workspace version;
-- Debian, RPM, and Arch package versions;
-- the release workflow input;
-- whether `swayward-ipc` is published for beta1.
-
-Gate: `contrib/check-release-consistency`, its test, the release runbook, and version tests all encode the same decision.
-
-## 7. Prepare the release commit
+## 8. Prepare the release metadata commit
 
 **Owner: release worker, reviewed by maintainer**
 
-Follow `docs/wiki/Development:-Releasing-swayward.md`. Update the version source, `Cargo.toml`, `Cargo.lock`, workspace dependency pins, `contrib/PKGBUILD`, and public examples. In an Arch container, regenerate rather than hand-edit `.SRCINFO`:
+The version bump already landed in step 3. This commit only adds release metadata that depends on the final oracle pin from step 7. If any edit below would change `src`, `swayward-ipc`, or `swayward-config`, return to step 4.
 
-```sh
-cd "$SWAYWARD/contrib"
-makepkg --printsrcinfo > .SRCINFO
-```
-
-Run:
+Write `docs/RELEASE-NOTES-beta1.md` so it names `$ORACLE_SHA`, the final swayward snapshot name, and the current user-visible changes. Then confirm that the bump from step 3 still holds:
 
 ```sh
 cd "$SWAYWARD"
 ./contrib/check-release-consistency "swayward-v$VERSION"
 ./contrib/test-release-consistency
+git diff --quiet "$SWAYWARD_SHA" HEAD -- src swayward-ipc swayward-config
 ```
 
-Gate: release metadata agrees, `.SRCINFO` is generated, and `docs/RELEASE-NOTES-beta1.md` names the final oracle pin and current user-visible changes. Commit the release metadata. Do not amend it after the final audit.
+Gate: release metadata agrees and the release notes name the final oracle pin. Commit the release metadata. Do not amend it after the final audit.
 
-## 8. Run the final launch gate
+## 9. Run the final launch gate
 
 **Owner: integrator; maintainer reviews the evidence**
 
@@ -231,17 +262,19 @@ Apply the six oracle launch rules and record evidence on `launch-six-rules-gate`
 
 Gate: every command passes at the exact release commit, all six rules hold, and the working tree is clean.
 
-## 9. Create the beta tag and draft release
+## 10. Create the beta tag and draft release
 
 **Owner: maintainer**
 
-Confirm that the audited commit is still `origin/main`:
+Tag HEAD after the step 7 repin and the step 8 release metadata, not `$SWAYWARD_SHA`. HEAD differs from the measured commit only in `tests/oracle.toml`, generated docs, and release metadata, so the tagged tree has the final pin and the same source the oracle measured. Confirm that the audited commit is still `origin/main`:
 
 ```sh
 cd "$SWAYWARD"
 git fetch origin
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 git status --short                    # must print nothing
+git diff --quiet "$SWAYWARD_SHA" HEAD -- src swayward-ipc swayward-config
+git diff --stat "$SWAYWARD_SHA" HEAD  # pin, generated docs, release metadata only
 ./contrib/check-release-consistency "swayward-v$VERSION"
 ```
 
@@ -251,6 +284,18 @@ Create and push the signed tag:
 git tag -s "swayward-v$VERSION" -m "swayward $VERSION"
 git push origin "swayward-v$VERSION"
 ```
+
+History is final at the tag. Turn on branch protection for swayward `main` and oracle `main` so that neither accepts a force-push or deletion, and confirm it:
+
+```sh
+for repo in swayward-wm/swayward swayward-wm/sway-ipc-oracle; do
+  printf '%s' '{"required_status_checks":null,"enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null,"allow_force_pushes":false,"allow_deletions":false}' \
+    | gh api -X PUT "repos/$repo/branches/main/protection" --input -
+  gh api "repos/$repo/branches/main/protection" --jq '.allow_force_pushes.enabled'  # false
+done
+```
+
+From here on, the oracle pins only tagged or `main` commits, and neither `main` is squashed or rebased again.
 
 Dispatch **Prepare release** on that tag and use the version without the `swayward-v` prefix:
 
@@ -263,7 +308,7 @@ gh run list --workflow release.yml --limit 1
 
 Gate: the validation, Ubuntu, Debian, Fedora, Arch, and clean-install jobs pass. Download the artifacts, verify checksums, review generated notes, and add the bounded beta limitations from `docs/RELEASE-NOTES-beta1.md`. Publish the draft only after maintainer review.
 
-## 10. Send courtesy notes and wait
+## 11. Send courtesy notes and wait
 
 **Owner: maintainer**
 
@@ -271,7 +316,7 @@ After the final oracle commit is public, send the reviewed notes from `oracle-co
 
 Gate: wait at least one week before the public announcement. Fix and credit any confirmed citation, fixture, or harness error before continuing.
 
-## 11. Announce the oracle and invite beta reports
+## 12. Announce the oracle and invite beta reports
 
 **Owner: maintainer**
 
@@ -281,7 +326,7 @@ Use `docs/TONE.md` for every published sentence. Keep claims dry, publish all ou
 
 Gate: the maintainer approves the final post, the courtesy interval has elapsed, the release artifacts remain available, and the issue-reporting path is clear.
 
-## 12. Defer COPR and AUR
+## 13. Defer COPR and AUR
 
 COPR and AUR are not beta1 blockers. GitHub release artifacts are the beta distribution channel.
 
