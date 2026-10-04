@@ -110,3 +110,39 @@ pub(super) fn unquote(value: &str) -> &str {
 pub(super) fn join_words(words: &[&str]) -> String {
     unquote(&words.join(" ")).to_owned()
 }
+
+/// How many tokens sway's `split_args` makes of `input`. Unlike [`words`], a
+/// `[...]` block outside quotes is one token whatever it contains
+/// (`sway/common/stringop.c:92-142`).
+pub(super) fn sway_argc(input: &str) -> usize {
+    const WHITESPACE: &[char] = &[' ', '\x0c', '\n', '\r', '\t', '\x0b'];
+    let mut argc = 0;
+    let mut in_token = false;
+    let (mut in_string, mut in_char, mut in_brackets, mut escaped) = (false, false, false, false);
+    for ch in input.chars() {
+        if !in_token {
+            if WHITESPACE.contains(&ch) {
+                continue;
+            }
+            in_token = true;
+            argc += 1;
+        }
+        let quoted = in_string || in_char;
+        if ch == '"' && !in_char && !escaped {
+            in_string = !in_string;
+        } else if ch == '\'' && !in_string && !escaped {
+            in_char = !in_char;
+        } else if ch == '[' && !quoted && !in_brackets && !escaped {
+            in_brackets = true;
+        } else if ch == ']' && !quoted && in_brackets && !escaped {
+            in_brackets = false;
+        } else if ch == '\\' {
+            escaped = !escaped;
+            continue;
+        } else if !quoted && !in_brackets && !escaped && WHITESPACE.contains(&ch) {
+            in_token = false;
+        }
+        escaped = false;
+    }
+    argc
+}

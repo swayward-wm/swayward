@@ -311,7 +311,16 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
 const SHORTCUTS_INHIBITOR_USAGE: &str = "Expected `shortcuts_inhibitor enable|disable`";
 
 fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<Command, String> {
-    check_arity(lower, rest.len())?;
+    let argc = match lower {
+        // These consume their raw tail. Count it as sway's split_args does:
+        // criteria stay one token even when they hold spaces, and `""` is a
+        // token (`sway/common/stringop.c:92-142`).
+        "assign" | "for_window" | "no_focus" | "exec" | "exec_always" => {
+            sway_argc(input).saturating_sub(1)
+        }
+        _ => rest.len(),
+    };
+    check_arity(lower, argc)?;
     match lower {
         "focus" => parse_focus(rest),
         "move" => parse_move(rest),
@@ -333,13 +342,7 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
             _ => Err(arity_error(rest.len(), "urgent", Expected::EqualTo(1))),
         },
         "border" => parse_border(rest).map(Command::Border),
-        "title_format" => {
-            if rest.is_empty() {
-                Err("Expected 'title_format <format>'".into())
-            } else {
-                Ok(Command::TitleFormat(join_words(rest)))
-            }
-        }
+        "title_format" => Ok(Command::TitleFormat(join_words(rest))),
         "sticky" => one(rest, "sticky <enable|disable|toggle>")
             .map(|value| Command::Sticky(value.to_owned())),
         "swap" => parse_swap(rest),
@@ -428,17 +431,33 @@ fn check_arity(name: &str, count: usize) -> Result<(), String> {
         | "new_float"
         | "font"
         | "mode"
-        | "title_align" => AtLeast(1),
-        "for_window" => AtLeast(2),
+        | "title_align"
+        | "exec"
+        | "exec_always"
+        | "force_display_urgency_hint"
+        | "hide_edge_borders"
+        | "move"
+        | "no_focus"
+        | "show_marks"
+        | "smart_gaps"
+        | "title_format"
+        | "titlebar_padding" => AtLeast(1),
+        "assign" | "for_window" => AtLeast(2),
         "swap" => AtLeast(4),
         "focus_follows_mouse"
         | "focus_on_window_activation"
         | "focus_wrapping"
         | "force_focus_wrapping"
+        | "mouse_warping"
         | "popup_during_fullscreen"
+        | "scratchpad"
+        | "shortcuts_inhibitor"
+        | "smart_borders"
+        | "split"
         | "sticky"
         | "tiling_drag"
-        | "tiling_drag_threshold" => EqualTo(1),
+        | "tiling_drag_threshold"
+        | "workspace_auto_back_and_forth" => EqualTo(1),
         "floating_minimum_size" | "floating_maximum_size" => EqualTo(3),
         "reload" | "splith" | "splitv" | "splitt" => EqualTo(0),
         _ => return Ok(()),

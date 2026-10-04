@@ -81,11 +81,9 @@ fn parses_shortcuts_inhibitor_view_policy_only() {
         Command::ShortcutsInhibitor(false)
     );
     for input in [
-        "shortcuts_inhibitor",
         "shortcuts_inhibitor toggle",
         "shortcuts_inhibitor activate",
         "shortcuts_inhibitor deactivate",
-        "shortcuts_inhibitor enable extra",
     ] {
         assert_eq!(
             parse(input)[0].as_ref().unwrap_err().error.as_deref(),
@@ -209,6 +207,133 @@ fn command_arity_failures_match_sway() {
     assert!(parse("focus left extra")[0].is_ok());
     assert!(parse("force_display_urgency_hint 500 ms extra")[0].is_ok());
     assert!(parse("hide_edge_borders none extra")[0].is_ok());
+    assert!(parse("exec \"\"")[0].is_ok());
+}
+
+/// Oracle: command-fuzz family-*-missing and family-*-extra rows for each
+/// handler whose first statement is sway's checkarg.
+#[test]
+fn leading_checkarg_failures_match_sway() {
+    for (input, expected) in [
+        (
+            "assign",
+            "Invalid assign command (expected at least 2 arguments, got 0)",
+        ),
+        (
+            "assign oracle_invalid",
+            "Invalid assign command (expected at least 2 arguments, got 1)",
+        ),
+        (
+            "assign \"unterminated",
+            "Invalid assign command (expected at least 2 arguments, got 1)",
+        ),
+        (
+            "assign [app_id=\"unterminated] workspace 2",
+            "Invalid assign command (expected at least 2 arguments, got 1)",
+        ),
+        (
+            "assign [app_id=\"a b\"]",
+            "Invalid assign command (expected at least 2 arguments, got 1)",
+        ),
+        (
+            "exec",
+            "Invalid exec command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "exec_always",
+            "Invalid exec_always command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "exec --no-startup-id",
+            "Invalid --no-startup-id command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "force_display_urgency_hint",
+            "Invalid force_display_urgency_hint command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "hide_edge_borders",
+            "Invalid hide_edge_borders command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "mouse_warping",
+            "Invalid mouse_warping command (expected 1 argument, got 0)",
+        ),
+        (
+            "mouse_warping output oracle_extra",
+            "Invalid mouse_warping command (expected 1 argument, got 2)",
+        ),
+        (
+            "move",
+            "Invalid move command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "no_focus",
+            "Invalid no_focus command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "scratchpad",
+            "Invalid scratchpad command (expected 1 argument, got 0)",
+        ),
+        (
+            "scratchpad show oracle_extra",
+            "Invalid scratchpad command (expected 1 argument, got 2)",
+        ),
+        (
+            "shortcuts_inhibitor",
+            "Invalid shortcuts_inhibitor command (expected 1 argument, got 0)",
+        ),
+        (
+            "shortcuts_inhibitor enable oracle_extra",
+            "Invalid shortcuts_inhibitor command (expected 1 argument, got 2)",
+        ),
+        (
+            "show_marks",
+            "Invalid show_marks command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "smart_borders",
+            "Invalid smart_borders command (expected 1 argument, got 0)",
+        ),
+        (
+            "smart_borders on oracle_extra",
+            "Invalid smart_borders command (expected 1 argument, got 2)",
+        ),
+        (
+            "smart_gaps",
+            "Invalid smart_gaps command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "split",
+            "Invalid split command (expected 1 argument, got 0)",
+        ),
+        (
+            "split h oracle_extra",
+            "Invalid split command (expected 1 argument, got 2)",
+        ),
+        (
+            "title_format",
+            "Invalid title_format command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "titlebar_padding",
+            "Invalid titlebar_padding command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "workspace_auto_back_and_forth",
+            "Invalid workspace_auto_back_and_forth command (expected 1 argument, got 0)",
+        ),
+        (
+            "workspace_auto_back_and_forth yes oracle_extra",
+            "Invalid workspace_auto_back_and_forth command (expected 1 argument, got 2)",
+        ),
+    ] {
+        let outcome = parse(input).remove(0).unwrap_err();
+        assert_eq!(outcome.error.as_deref(), Some(expected), "{input}");
+        assert_eq!(outcome.parse_error, Some(true), "{input}");
+    }
+    // The criteria stay one token, and the target makes two.
+    assert!(parse("assign [app_id=\"a b\"] 2")[0].is_ok());
 }
 
 #[test]

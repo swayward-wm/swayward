@@ -36,7 +36,9 @@ pub(super) fn parse_exec(input: &str, name: &str) -> Result<Command, String> {
         }
     }
     if command.is_empty() {
-        return Err(format!("Expected '{name} <command>'"));
+        // Sway checks again after the flag, naming the flag as the command
+        // (`sway/sway/commands/exec_always.c:31-38`).
+        return Err(arity_error(0, NO_STARTUP_ID, Expected::AtLeast(1)));
     }
     let command = if words(command).len() == 1 && command.starts_with(['\'', '"']) {
         strip_sway_quotes(command)
