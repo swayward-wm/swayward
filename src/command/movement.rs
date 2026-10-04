@@ -876,7 +876,11 @@ pub(super) fn move_target_to_mark(
 
 pub(super) fn swap_focused(state: &mut State, target: SwapTarget) -> super::HandlerResult {
     let Some(source) = super::targeted::focused_target(state) else {
-        return Err(failure("Can only swap with containers and views"));
+        // Sway looks the target up before it checks for a focused container
+        // (`sway/sway/commands/swap.c:54-74`).
+        return Err(swap_destination(state, &target)
+            .err()
+            .unwrap_or_else(|| failure("Can only swap with containers and views")));
     };
     super::handled_outcome(swap_target(state, source, &target))
 }

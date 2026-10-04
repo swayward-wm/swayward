@@ -139,3 +139,19 @@ fn unknown_mode_is_a_parse_error_like_sway() {
         )]
     );
 }
+
+/// Oracle: command-fuzz family-swap-extra. Sway resolves the swap target
+/// before it checks for a focused container (`sway/sway/commands/swap.c:54-74`).
+#[test]
+fn swap_without_focus_reports_the_missing_target_first() {
+    let mut fixture = crate::tests::fixture::Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+    let outcome = &execute(
+        fixture.niri_state(),
+        "swap container with mark probe oracle_extra",
+    )[0];
+    assert_eq!(
+        outcome,
+        &failure("Failed to find mark 'probe oracle_extra'")
+    );
+}
