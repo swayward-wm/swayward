@@ -18,6 +18,7 @@ use move_resize::*;
 use move_resize::{FOCUS_USAGE, LAYOUT_USAGE, MOVE_USAGE};
 use output::*;
 use rules::*;
+pub use settings::strtol;
 use settings::*;
 use workspace::*;
 

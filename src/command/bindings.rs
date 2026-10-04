@@ -169,40 +169,60 @@ pub(super) fn mutate_key_binding(
 }
 
 /// Parse a bindsym or bindcode combo into a config key. A bindcode combo's
-/// last component becomes `code:<n>`; sway accepts codes 8 to 255.
+/// last component becomes a keycode the way sway's identify_key reads it:
+/// strtol truncated to xkb_keycode_t, refusing only XKB_KEYCODE_INVALID
+/// (`sway/sway/commands/bind.c:153-176`). So `2147483648` is a legal code
+/// that no key sends, and a word with no digits is code 0.
 fn normalise_key(
     key: &str,
     keycode: bool,
     has_command: bool,
 ) -> Result<swayward_config::Key, BindingMutationError> {
     let keycombo = key;
-    let key = if keycode {
-        let (modifiers, code) = key
-            .rsplit_once('+')
-            .map_or(("", key), |(mods, code)| (mods, code));
-        let code: u32 = match code.parse() {
-            Ok(code) if (8..=255).contains(&code) => code,
-            _ if !has_command => {
-                return Err(BindingMutationError::Command(format!(
-                    "Could not find binding `{keycombo}` for the given flags"
-                )));
-            }
-            _ => {
-                return Err(BindingMutationError::Command(format!(
-                    "Invalid keycode '{code}'"
-                )))
-            }
-        };
-        if modifiers.is_empty() {
-            format!("code:{code}")
+    if !keycode {
+        return key.parse::<swayward_config::Key>().map_err(|_| {
+            BindingMutationError::Parse(format!("Unknown key or button '{keycombo}'"))
+        });
+    }
+    let (modifiers, code) = key
+        .rsplit_once('+')
+        .map_or(("", key), |(mods, code)| (mods, code));
+    let raw = swayward_ipc::command::strtol(code).0 as u32;
+    if raw == u32::MAX {
+        return Err(BindingMutationError::Parse(format!(
+            "Invalid keycode or button code '{code}'"
+        )));
+    }
+    // A first key that names an evdev BTN_* code becomes a mouse binding in
+    // sway (bind.c:154-163, get_mouse_bindcode in sway/sway/input/cursor.c).
+    // swayward has no runtime mouse bindings, so it refuses rather than bind
+    // the code as a key.
+    if is_evdev_button(raw) {
+        return Err(BindingMutationError::Command(if has_command {
+            "runtime mouse bindings require exact pointer-region semantics".into()
         } else {
-            format!("{modifiers}+code:{code}")
-        }
+            format!("Could not find binding `{keycombo}` for the given flags")
+        }));
+    }
+    // Parse the modifiers through the config syntax with a placeholder code,
+    // then substitute the real one, which the KDL syntax limits to 8..=255.
+    let placeholder = if modifiers.is_empty() {
+        "code:8".to_owned()
     } else {
-        key.to_owned()
+        format!("{modifiers}+code:8")
     };
-    key.parse::<swayward_config::Key>()
-        .map_err(|_| BindingMutationError::Parse(format!("Unknown key or button '{keycombo}'")))
+    let mut key = placeholder
+        .parse::<swayward_config::Key>()
+        .map_err(|_| BindingMutationError::Parse(format!("Unknown key or button '{keycombo}'")))?;
+    key.trigger = swayward_config::Trigger::Keycode(raw);
+    Ok(key)
+}
+
+/// Whether libevdev names `code` as an EV_KEY BTN_* event: the BTN_MISC to
+/// BTN_GEAR_UP, BTN_DPAD and BTN_TRIGGER_HAPPY blocks of
+/// linux/input-event-codes.h.
+fn is_evdev_button(code: u32) -> bool {
+    matches!(code, 0x100..=0x151 | 0x220..=0x227 | 0x2c0..=0x2e7)
 }
 
 /// The binding list of `mode`, where "default" is the top-level list.

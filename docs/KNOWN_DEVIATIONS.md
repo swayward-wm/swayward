@@ -290,6 +290,18 @@ The `opacity` command is implemented as mutable per-window state and multiplies
 window-rule opacity. Unlike the configured opacity, it remains effective in
 fullscreen, matching sway's scene-tree opacity.
 
+### Runtime mouse bindcodes
+
+**Command gap.**
+
+Swayward reads `bindcode` and `unbindcode` codes the way sway does: `strtol`
+truncated to an XKB keycode, refusing only `-1`
+(`sway/commands/bind.c:153-176`). A first key that names an evdev `BTN_*`
+code, such as `bindcode 272`, is a mouse binding in sway
+(`get_mouse_bindcode`, `sway/input/cursor.c:1228-1247`). Swayward refuses it
+because runtime bindings have no pointer-region model, rather than bind the code
+as a key that no keyboard sends.
+
 ### Infinite output scale
 
 **Command gap.**

@@ -53,6 +53,39 @@ fn runtime_bindsym_fires_unbinds_and_is_discarded_by_reload() {
     );
 }
 
+/// Sway reads a bindcode with strtol truncated to xkb_keycode_t and refuses
+/// only XKB_KEYCODE_INVALID (`sway/sway/commands/bind.c:153-176`). Oracle:
+/// command-fuzz family-bindcode-overflow, family-bindcode-negative,
+/// family-unbindcode-negative and family-unbindcode-overflow.
+#[test]
+fn bindcode_reads_codes_the_way_sways_identify_key_does() {
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1280, 720));
+
+    let outcome = &crate::command::execute(fixture.niri_state(), "bindcode 2147483648 nop")[0];
+    assert!(outcome.success, "{outcome:?}");
+    assert!(crate::command::execute(fixture.niri_state(), "unbindcode 2147483648")[0].success);
+    let outcome = &crate::command::execute(fixture.niri_state(), "unbindcode 2147483648")[0];
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("Could not find binding `2147483648` for the given flags")
+    );
+    assert_eq!(outcome.parse_error, Some(false));
+
+    for command in ["bindcode -1 nop", "unbindcode -1"] {
+        let outcome = &crate::command::execute(fixture.niri_state(), command)[0];
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("Invalid keycode or button code '-1'"),
+            "{command}"
+        );
+        assert_eq!(outcome.parse_error, Some(true), "{command}");
+    }
+    // BTN_LEFT is a mouse bindcode in sway; swayward has no runtime mouse
+    // bindings, so it refuses rather than bind it as a key.
+    assert!(!crate::command::execute(fixture.niri_state(), "bindcode 272 nop")[0].success);
+}
+
 #[test]
 fn runtime_bindcode_fires_and_unbindcode_stops_it() {
     let mut fixture = Fixture::new();

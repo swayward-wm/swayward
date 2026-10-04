@@ -108,7 +108,7 @@ pub(super) fn parse_gaps_kind(kind: &str) -> Option<(bool, [bool; 4])> {
 /// strtol does. Returns the value and the unparsed rest; with no digits the
 /// value is 0 and the rest is the whole input, as strtol leaves `end` at the
 /// start.
-fn strtol(raw: &str) -> (i64, &str) {
+pub fn strtol(raw: &str) -> (i64, &str) {
     let trimmed = raw.trim_start_matches(|c: char| c.is_ascii_whitespace());
     let (negative, unsigned) = match (trimmed.strip_prefix('-'), trimmed.strip_prefix('+')) {
         (Some(digits), _) => (true, digits),
