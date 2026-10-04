@@ -1,16 +1,32 @@
 #!/usr/bin/env python3
 """Per-row verdict diff between two contrib/oracle-sweep output directories.
 
-Usage: contrib/oracle-sweep-diff <before-dir> <after-dir>
+Usage: contrib/oracle-sweep-diff [--ledger <file>] <before-dir> <after-dir>
 
 Prints rows lost (match -> mismatch), gained, and present in only one sweep.
 Exits 1 when any row is lost or missing, so a refactor batch with zero
 per-row change exits 0.
+
+With --ledger, also prints the SWEEP note for the integrator log and appends
+one TSV row for <after-dir> to <file>, keyed by tree hash and oracle sha. The
+row is skipped when <after-dir>/status.json is absent (the sweep did not
+finish) or lists a dead shard, because a dead shard is not a measurement;
+the script then exits 2.
 """
 
+import datetime
+import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CORPORA = ("random", "i3d", "state", "events")
+LEDGER_COLUMNS = (
+    "date", "swayward_sha", "tree", "oracle_sha", "sweep_dir",
+    *CORPORA, "lost", "gained", "wall_min", "note",
+)
 
 
 def rows(directory: Path) -> dict[tuple[str, str, str], str]:
@@ -36,17 +52,82 @@ def diff(before: dict, after: dict) -> dict[str, list]:
     }
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
+def counts(after: dict) -> dict[str, str]:
+    out = {}
+    for corpus in CORPORA:
+        verdicts = [v for (c, _, _), v in after.items() if c == corpus]
+        out[corpus] = f"{verdicts.count('match')}/{len(verdicts)}"
+    return out
+
+
+def sweep_note(entry: dict) -> str:
+    return (
+        f"SWEEP tree={entry['tree']} sha={entry['swayward_sha']} oracle={entry['oracle_sha']}"
+        + "".join(f" {c} {entry[c]}" for c in CORPORA)
+        + f" lost {entry['lost']} gained {entry['gained']} wall {entry['wall_min']}"
+    )
+
+
+def ledger_entry(after_dir: Path, after: dict, result: dict) -> tuple[dict | None, str]:
+    """The ledger row for a finished sweep, or None and the reason to skip it."""
+    status_path = after_dir / "status.json"
+    if not status_path.is_file():
+        return None, f"no {status_path}: the sweep did not finish"
+    status = json.loads(status_path.read_text())
+    if status.get("dead"):
+        return None, f"dead shards: {status['dead']}"
+    tree = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", status["swayward"] + "^{tree}"],
+        text=True, capture_output=True, check=False,
+    ).stdout.strip()
+    if not tree:
+        return None, f"swayward {status['swayward']} is not in {ROOT}"
+    return {
+        "date": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M"),
+        "swayward_sha": status["swayward"][:8],
+        "tree": tree[:8],
+        "oracle_sha": status["oracle"][:7],
+        "sweep_dir": str(after_dir.resolve()),
+        **counts(after),
+        "lost": str(len(result["lost"])),
+        "gained": str(len(result["gained"])),
+        "wall_min": str(status["wall_min"]),
+        "note": "",
+    }, ""
+
+
+def append_ledger(ledger: Path, entry: dict) -> None:
+    new = not ledger.is_file() or ledger.stat().st_size == 0
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a") as out:
+        if new:
+            out.write("\t".join(LEDGER_COLUMNS) + "\n")
+        out.write("\t".join(entry[c] for c in LEDGER_COLUMNS) + "\n")
+
+
+def main(argv: list[str]) -> int:
+    ledger = None
+    if argv[:1] == ["--ledger"] and len(argv) >= 2:
+        ledger, argv = Path(argv[1]), argv[2:]
+    if len(argv) != 2:
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    result = diff(rows(Path(sys.argv[1])), rows(Path(sys.argv[2])))
+    before_dir, after_dir = Path(argv[0]), Path(argv[1])
+    after = rows(after_dir)
+    result = diff(rows(before_dir), after)
     for name, keys in result.items():
         print(f"{name}: {len(keys)}")
         for key in keys:
             print("  " + " ".join(part for part in key if part))
+    if ledger is not None:
+        entry, reason = ledger_entry(after_dir, after, result)
+        if entry is None:
+            print(f"ledger: no row appended ({reason})", file=sys.stderr)
+            return 2
+        append_ledger(ledger, entry)
+        print(sweep_note(entry))
     return 1 if result["lost"] or result["missing"] else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

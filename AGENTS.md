@@ -100,6 +100,25 @@ baseline; a baseline is valid for one oracle commit. Refactor batches are
 checked for zero per-row change. Workers run the full corpus only when the
 integrator asks for it.
 
+Every T2 sweep ends in one SWEEP note in the integrator log, the primary
+record of progress between pins:
+
+```sh
+contrib/oracle-sweep-diff --ledger ~/hacking/swayward-wm/scratch/progress.tsv <baseline> <sweep>
+```
+
+It appends one row to the ledger and prints the note to paste verbatim:
+
+```
+SWEEP tree=<8> sha=<8> oracle=<7> random a/b i3d a/b state a/b events a/b lost n gained n wall m
+```
+
+Counts are match/total. The tree hash survives a squash; the oracle sha says
+which corpus the denominators come from. A sweep that died or left a dead
+shard appends nothing and prints no note (exit 2): it is not a measurement, so
+rerun it. The TSV is a cache: the beta1 plan's `data/seed_ledger.py` rebuilds
+it from the notes. Neither is published; public figures come only from T4.
+
 Done means pushed, or committed where the orchestrator cherry-picks. A close
 note that names a commit must name one that exists on the remote.
 

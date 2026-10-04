@@ -9,8 +9,11 @@
 # shards in parallel; a shard that dies (no result, or a socket failure in its
 # log) is retried once, because under load a dead shard otherwise shows up as
 # hundreds of false losses. Compare two sweeps with contrib/oracle-sweep-diff.
+# The last step writes <out-dir>/status.json (swayward and oracle sha, wall
+# minutes, dead shards); oracle-sweep-diff --ledger appends a row only when it
+# exists and lists no dead shard.
 set -u
-[ $# -ge 2 ] || { sed -n '2,12p' "$0"; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,15p' "$0"; exit 2; }
 OR=$(realpath "$1")
 OUT=$(realpath -m "$2")
 SW=$(realpath "${3:-$(dirname "$0")/..}")
@@ -23,9 +26,11 @@ DSHARDS=${DSHARDS:-2}
 [ -z "$(git -C "$SW" status --porcelain)" ] || { echo "oracle-sweep: dirty $SW"; exit 2; }
 [ -z "$(git -C "$OR" status --porcelain)" ] || { echo "oracle-sweep: dirty $OR"; exit 2; }
 HEAD=$(git -C "$SW" rev-parse HEAD)
+ORSHA=$(git -C "$OR" rev-parse HEAD)
 sed -i "s/^swayward = \"[0-9a-f]\{40\}\"$/swayward = \"$HEAD\"/" "$OR/pins.toml"
 trap 'git -C "$OR" checkout -q -- pins.toml' EXIT
 mkdir -p "$OUT/logs"
+rm -f "$OUT/status.json"
 
 declare -A CMD
 common="--compositor swayward --binary $BIN"
@@ -81,5 +86,8 @@ for path in sorted(pathlib.Path(sys.argv[1]).glob("*.toml")):
 for corpus, counts in sorted(totals.items()):
     print(f"{corpus}: {counts['match']}/{sum(counts.values())} match")
 EOF
-echo "wall $((($(date +%s) - start) / 60)) min"
+wall=$((($(date +%s) - start) / 60))
+echo "wall $wall min"
+printf '{"swayward": "%s", "oracle": "%s", "wall_min": %d, "dead": "%s"}\n' \
+    "$HEAD" "$ORSHA" "$wall" "${dead//$'\n'/ }" >"$OUT/status.json"
 [ -z "$dead" ] || { echo "oracle-sweep: DEAD SHARDS after retry:" $dead; exit 1; }
