@@ -161,15 +161,19 @@ pub(super) fn parse_assign(input: &str, name: &str) -> Result<Command, String> {
 }
 
 pub(super) fn parse_no_focus(input: &str, name: &str) -> Result<Command, String> {
-    const USAGE: &str = "Expected 'no_focus <criteria>'";
     let rest = raw_tail(input, name)?;
     if !rest.starts_with('[') {
         return Err("No criteria".into());
     }
     // `sway/sway/commands/no_focus.c:8-20` hands argv[0] to criteria_parse
     // and ignores later arguments, which stops at the closing bracket.
-    let (criteria, _) = parse_rule_criteria(input, name, USAGE)?;
-    Ok(Command::NoFocus { criteria })
+    let Some((criteria, _)) = split_criteria(rest) else {
+        return Err(unclosed_criteria_error(rest));
+    };
+    crate::criteria::Criteria::parse(criteria, None)?;
+    Ok(Command::NoFocus {
+        criteria: criteria.to_owned(),
+    })
 }
 
 pub(super) fn parse_for_window(input: &str, name: &str) -> Result<Command, String> {

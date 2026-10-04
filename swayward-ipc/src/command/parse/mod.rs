@@ -138,16 +138,16 @@ fn take_criteria(text: &str) -> Result<Option<(String, &str)>, CommandOutcome> {
             }
             Ok(Some((raw.to_owned(), tail.trim_start())))
         }
-        None => {
-            // Sway's criteria parser reports a more specific token or quote
-            // error before noticing a missing closing bracket.
-            let completed = format!("{text}]");
-            let error = crate::criteria::Criteria::parse(&completed, None)
-                .err()
-                .unwrap_or_else(|| "No closing brace found in criteria".into());
-            Err(parse_error(error))
-        }
+        None => Err(parse_error(unclosed_criteria_error(text))),
     }
+}
+
+/// Sway's error for criteria with no closing bracket. Its parser reports a
+/// more specific token or quote error before it notices the bracket.
+fn unclosed_criteria_error(text: &str) -> String {
+    crate::criteria::Criteria::parse(&format!("{text}]"), None)
+        .err()
+        .unwrap_or_else(|| "No closing brace found in criteria".into())
 }
 
 /// Record an unscoped `set`, bare or inside `mode`, for later commands in the

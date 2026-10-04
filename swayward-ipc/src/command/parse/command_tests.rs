@@ -337,6 +337,16 @@ fn leading_checkarg_failures_match_sway() {
 }
 
 #[test]
+fn no_focus_reports_sways_criteria_error() {
+    // Oracle: command-fuzz family-no_focus-criteria-quote.
+    let outcome = parse("no_focus [app_id=\"unterminated]")
+        .remove(0)
+        .unwrap_err();
+    assert_eq!(outcome.error.as_deref(), Some("Quote mismatch in criteria"));
+    assert_eq!(outcome.parse_error, Some(true));
+}
+
+#[test]
 fn invalid_setting_values_parse_like_sway() {
     // Sway stores atoi("-1") and then aborts in wlr_scene_rect_set_size when
     // the next window maps, so a negative width has no sway behaviour to
