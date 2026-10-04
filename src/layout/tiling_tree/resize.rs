@@ -3,12 +3,51 @@ use super::*;
 impl<W: LayoutElement> TilingTree<W> {
     pub fn resize_adjacent(&mut self, first: NodeId, second: NodeId, delta: f64) -> bool {
         let old = self.compute_geometry();
+        if !self.adjacent_fits_min_sane(&old.ipc_nodes, first, second, delta) {
+            return false;
+        }
         let changed = self.resize_adjacent_inner(first, second, delta);
         if changed {
             self.interactive_resize = None;
             self.animate_geometry_changes(old, None);
         }
         changed
+    }
+
+    /// Sway refuses a command resize that would take either neighbour below
+    /// its sane minimum (`container_resize_tiled`, sway/commands/resize.c:113-120).
+    fn adjacent_fits_min_sane(
+        &self,
+        ipc_nodes: &HashMap<NodeId, Rectangle<f64, Logical>>,
+        first: NodeId,
+        second: NodeId,
+        delta: f64,
+    ) -> bool {
+        let Some(parent) = self.nodes.get(&first).and_then(|node| node.parent) else {
+            return false;
+        };
+        let Some(Node {
+            value: TreeNode::Split {
+                layout, children, ..
+            },
+            ..
+        }) = self.nodes.get(&parent)
+        else {
+            return false;
+        };
+        let Some(available) = children
+            .iter()
+            .map(|child| ipc_nodes.get(child).map(|rect| axis_extent(*layout, rect)))
+            .sum::<Option<f64>>()
+        else {
+            return false;
+        };
+        let change = delta * available;
+        fits_min_sane(
+            ipc_nodes,
+            *layout,
+            [(first, change), (second, -change.ceil())],
+        )
     }
 
     fn resize_adjacent_inner(&mut self, first: NodeId, second: NodeId, delta: f64) -> bool {
@@ -450,7 +489,16 @@ impl<W: LayoutElement> TilingTree<W> {
                         ((parent_extent * value / 100.).trunc() - current) / available
                     }
                 };
-                let changed = self.resize_across_siblings(parent_id, branch, delta);
+                // Only `resize grow|shrink` is held to the sane minimum.
+                // Sway's `resize set` skips such a change too but still
+                // replies success (resize_set_tiled,
+                // sway/commands/resize.c:285-339); swayward's `resize set`
+                // keeps its earlier behaviour and applies it.
+                let adjust = matches!(
+                    change,
+                    SizeChange::AdjustFixed(_) | SizeChange::AdjustProportion(_)
+                );
+                let changed = self.resize_across_siblings(parent_id, branch, delta, adjust);
                 return changed && branch == id;
             }
             branch = parent_id;
@@ -460,17 +508,27 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     /// Grows or shrinks `target` by taking the change evenly from all its siblings, refusing
-    /// if any would drop below sway's sane minimum (`container_resize_tiled`,
-    /// sway/commands/resize.c:66-175).
-    fn resize_across_siblings(&mut self, parent: NodeId, target: NodeId, delta: f64) -> bool {
+    /// if any share would drop to zero or, with `check_min_sane`, any box below sway's sane
+    /// minimum (`container_resize_tiled`, sway/commands/resize.c:66-175).
+    fn resize_across_siblings(
+        &mut self,
+        parent: NodeId,
+        target: NodeId,
+        delta: f64,
+        check_min_sane: bool,
+    ) -> bool {
         if !delta.is_finite() {
             return false;
         }
         let old = self.compute_geometry();
         let Some(Node {
-            value: TreeNode::Split {
-                children, percents, ..
-            },
+            value:
+                TreeNode::Split {
+                    layout,
+                    children,
+                    percents,
+                    ..
+                },
             ..
         }) = self.nodes.get_mut(&parent)
         else {
@@ -493,6 +551,27 @@ impl<W: LayoutElement> TilingTree<W> {
                 .enumerate()
                 .any(|(index, percent)| index != target_index && percent - compensation <= 0.)
         {
+            return false;
+        }
+        let Some(available) = children
+            .iter()
+            .map(|child| {
+                old.ipc_nodes
+                    .get(child)
+                    .map(|rect| axis_extent(*layout, rect))
+            })
+            .sum::<Option<f64>>()
+        else {
+            return false;
+        };
+        let changes = children.iter().enumerate().map(|(index, child)| {
+            if index == target_index {
+                (*child, delta * available)
+            } else {
+                (*child, -(compensation * available).ceil())
+            }
+        });
+        if check_min_sane && !fits_min_sane(&old.ipc_nodes, *layout, changes) {
             return false;
         }
         for (index, percent) in percents.iter_mut().enumerate() {
@@ -609,4 +688,34 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         None
     }
+}
+
+fn axis_extent(layout: Layout, rect: &Rectangle<f64, Logical>) -> f64 {
+    if layout == Layout::SplitV {
+        rect.size.h
+    } else {
+        rect.size.w
+    }
+}
+
+/// Whether every container keeps sway's sane minimum after its change in px.
+/// Sway compares the boxes it last arranged, so a view mapped or moved under a
+/// fullscreen container still has a zero box and refuses any resize that takes
+/// from it (`container_resize_tiled`, sway/commands/resize.c:113-120, 141-148;
+/// `arrange_workspace`, sway/tree/arrange.c:310-316).
+fn fits_min_sane(
+    ipc_nodes: &HashMap<NodeId, Rectangle<f64, Logical>>,
+    layout: Layout,
+    changes: impl IntoIterator<Item = (NodeId, f64)>,
+) -> bool {
+    let minimum = if layout == Layout::SplitV {
+        geometry::MIN_SANE_H
+    } else {
+        geometry::MIN_SANE_W
+    };
+    changes.into_iter().all(|(id, change)| {
+        ipc_nodes
+            .get(&id)
+            .is_some_and(|rect| axis_extent(layout, rect) + change >= minimum)
+    })
 }

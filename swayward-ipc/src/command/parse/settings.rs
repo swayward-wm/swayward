@@ -1,18 +1,8 @@
 use super::*;
 
 pub(super) fn parse_client_colors(name: &str, args: &[&str]) -> Result<Command, String> {
-    if args.len() < 3 {
-        return Err(format!(
-            "Invalid {name} command (expected at least 3 arguments, got {})",
-            args.len()
-        ));
-    }
-    if args.len() > 5 {
-        return Err(format!(
-            "Invalid {name} command (expected at most 5 arguments, got {})",
-            args.len()
-        ));
-    }
+    checkarg(args.len(), name, Expected::AtLeast(3))?;
+    checkarg(args.len(), name, Expected::AtMost(5))?;
 
     let default_indicator = match name {
         "client.focused" | "client.focused_tab_title" => "#2e9ef4ff",
@@ -22,10 +12,7 @@ pub(super) fn parse_client_colors(name: &str, args: &[&str]) -> Result<Command, 
         _ => return Err(format!("Unknown/invalid command '{name}'")),
     };
     let [border, background, text, rest @ ..] = args else {
-        return Err(format!(
-            "Invalid {name} command (expected at least 3 arguments, got {})",
-            args.len()
-        ));
+        return Err(arity_error(args.len(), name, Expected::AtLeast(3)));
     };
     let properties = [
         ("border", *border),
@@ -108,7 +95,7 @@ pub(super) fn parse_gaps_kind(kind: &str) -> Option<(bool, [bool; 4])> {
 /// strtol does. Returns the value and the unparsed rest; with no digits the
 /// value is 0 and the rest is the whole input, as strtol leaves `end` at the
 /// start.
-fn strtol(raw: &str) -> (i64, &str) {
+pub fn strtol(raw: &str) -> (i64, &str) {
     let trimmed = raw.trim_start_matches(|c: char| c.is_ascii_whitespace());
     let (negative, unsigned) = match (trimmed.strip_prefix('-'), trimmed.strip_prefix('+')) {
         (Some(digits), _) => (true, digits),
@@ -130,6 +117,16 @@ fn strtol(raw: &str) -> (i64, &str) {
         value.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
         rest,
     )
+}
+
+/// C's `(int)strtol(raw, &end, 10)` with `*end == '\0'` required, as sway's
+/// integer settings read their arguments. The long to int conversion keeps the
+/// low 32 bits, as it does on sway's platforms, so 2147483648 is -2147483648.
+/// An empty argument has no digits and leaves `end` at its terminator, so it
+/// reads as 0, as in C.
+pub(super) fn strtol_int(raw: &str) -> Option<i32> {
+    let (value, rest) = strtol(raw);
+    rest.is_empty().then_some(value as i32)
 }
 
 /// C's `atoi`: strtol's leading integer, and 0 when there are no digits.
@@ -195,10 +192,7 @@ pub(super) fn parse_gaps(args: &[&str]) -> Result<Command, String> {
                 amount,
             })
         }
-        args if args.len() < 2 => Err(format!(
-            "Invalid gaps command (expected at least 2 arguments, got {})",
-            args.len()
-        )),
+        args if args.len() < 2 => Err(arity_error(args.len(), "gaps", Expected::AtLeast(2))),
         _ => Err(format!(
             "Expected {GAPS_EXPECTED_RUNTIME} or {GAPS_EXPECTED_DEFAULTS}"
         )),
@@ -334,11 +328,13 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             _ => Err("Expected 'smart_borders on|no_gaps|off'".into()),
         },
         "smart_gaps" => match rest {
-            [value] => {
-                let value = value.to_ascii_lowercase();
-                let mapped = match value.as_str() {
+            // `sway/sway/commands/smart_gaps.c:9-23`: at least one argument,
+            // later ones ignored. inverse_outer is matched with strcmp, every
+            // other value goes through parse_boolean.
+            [value, ..] => {
+                let mapped = match *value {
                     "inverse_outer" => SmartGapsArg::InverseOuter,
-                    "toggle" => SmartGapsArg::Toggle,
+                    other if other.eq_ignore_ascii_case("toggle") => SmartGapsArg::Toggle,
                     other if parse_boolean(other, true) => SmartGapsArg::On,
                     _ => SmartGapsArg::Off,
                 };
@@ -353,7 +349,8 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             None => Err("Expected 'show_marks yes|no'".into()),
         },
         "title_align" => match rest {
-            [value] if matches!(*value, "left" | "center" | "right") => Ok(
+            // `sway/sway/commands/title_align.c:12-28` reads argv[0] only.
+            [value, ..] if matches!(*value, "left" | "center" | "right") => Ok(
                 Command::SetLayoutOption(LayoutOption::TitleAlignment((*value).into())),
             ),
             _ => Err("Expected 'title_align left|center|right'".into()),
@@ -365,11 +362,12 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             _ => Err("Expected 'tiling_drag enable|disable|toggle'".into()),
         },
         "tiling_drag_threshold" => match rest {
-            [value] => value
-                .parse()
-                .map(LayoutOption::TilingDragThreshold)
-                .map(Command::SetLayoutOption)
-                .map_err(|_| "Invalid threshold specified".into()),
+            // `sway/sway/commands/tiling_drag_threshold.c:12-16` reads an int
+            // with strtol, so 2147483648 wraps negative and is rejected.
+            [value] => strtol_int(value)
+                .and_then(|value| u32::try_from(value).ok())
+                .map(|value| Command::SetLayoutOption(LayoutOption::TilingDragThreshold(value)))
+                .ok_or_else(|| "Invalid threshold specified".into()),
             _ => Err("Expected 'tiling_drag_threshold <threshold>'".into()),
         },
         "force_display_urgency_hint" => {
@@ -480,10 +478,7 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             // because the check is EXPECTED_AT_LEAST.
             const USAGE: &str = "Usage: floating_modifier <mod> [inverse|normal]";
             let Some((modifier, mode)) = rest.split_first() else {
-                return Err(
-                    "Invalid floating_modifier command (expected at least 1 argument, got 0)"
-                        .into(),
-                );
+                return Err(arity_error(0, "floating_modifier", Expected::AtLeast(1)));
             };
             if modifier.eq_ignore_ascii_case("none") {
                 return Ok(Command::SetLayoutOption(LayoutOption::FloatingModifier {
@@ -562,9 +557,10 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
         "titlebar_border_thickness" => {
             const INVALID: &str = INVALID_SIZE;
             let [value] = rest else {
-                return Err(format!(
-                    "Invalid titlebar_border_thickness command (expected 1 argument, got {})",
-                    rest.len()
+                return Err(arity_error(
+                    rest.len(),
+                    "titlebar_border_thickness",
+                    Expected::EqualTo(1),
                 ));
             };
             let value = value.parse().map_err(|_| INVALID.to_owned())?;
@@ -573,20 +569,19 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             ))
         }
         "titlebar_padding" => {
-            // One value sets both axes; two set horizontal then vertical.
-            // Negatives are rejected, matching sway's `Invalid size specified`
+            // One value sets both axes; two set horizontal then vertical, and
+            // later arguments are ignored. Each is an int read with strtol;
+            // negatives are rejected, matching sway's `Invalid size specified`
             // (`sway/sway/commands/titlebar_padding.c:8-38`).
             const INVALID: &str = INVALID_SIZE;
+            let size = |value: &str| strtol_int(value).ok_or_else(|| INVALID.to_owned());
             let (horizontal, vertical) = match rest {
                 [h] => {
-                    let h: i32 = h.parse().map_err(|_| INVALID.to_owned())?;
+                    let h = size(h)?;
                     (h, h)
                 }
-                [h, v] => (
-                    h.parse().map_err(|_| INVALID.to_owned())?,
-                    v.parse().map_err(|_| INVALID.to_owned())?,
-                ),
-                _ => return Err("Expected 'titlebar_padding <horizontal> [<vertical>]'".into()),
+                [h, v, ..] => (size(h)?, size(v)?),
+                [] => return Err("Expected 'titlebar_padding <horizontal> [<vertical>]'".into()),
             };
             if horizontal < 0 || vertical < 0 {
                 return Err(INVALID.into());
@@ -600,11 +595,12 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             // `sway/sway/commands/floating_minmax_size.c` wants exactly three
             // words, with a literal `x` between two integers, and rejects a
             // trailing suffix because it uses strtol and checks the remainder.
+            // The long is cast to int, so 2147483648 is stored as INT_MIN.
             let usage = format!("Expected '{name} <width> x <height>'");
             let [width, "x", height] = rest else {
                 return Err(usage);
             };
-            let (Ok(width), Ok(height)) = (width.parse::<i32>(), height.parse::<i32>()) else {
+            let (Some(width), Some(height)) = (strtol_int(width), strtol_int(height)) else {
                 return Err(usage);
             };
             Ok(Command::SetLayoutOption(

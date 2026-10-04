@@ -122,13 +122,12 @@ fn close_sends_xdg_close() {
     assert!(!f.client(client).window(&first).close_requested);
 }
 
-/// Known divergence: sway wires only `activate`, `fullscreen` and `close` on
-/// the wlr foreign-toplevel handle (sway/sway/tree/view.c:881-893), so
-/// `set_maximized` is a no-op there. swayward inherits niri's maximize
-/// mapping. This pins the current behaviour until that is decided; it is not
-/// evidence of sway compatibility.
+/// Sway wires only `activate`, `fullscreen` and `close` on the wlr
+/// foreign-toplevel handle (sway/sway/tree/view.c:881-893), so
+/// `set_maximized` and `unset_maximized` change nothing, even when the
+/// window is already maximized.
 #[test]
-fn maximize_request_maximizes_unlike_sway() {
+fn maximize_request_is_noop_like_sway() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
@@ -138,21 +137,40 @@ fn maximize_request_maximizes_unlike_sway() {
         windows::WindowSpec::titled_size("window", 200, 100),
     );
     let handle = f.client(client).foreign_toplevel("window").handle.clone();
+    let configures = f.client(client).window(&surface).configures_received.len();
 
     handle.set_maximized();
     f.double_roundtrip(client);
+    assert_eq!(
+        f.client(client).window(&surface).configures_received.len(),
+        configures
+    );
+    assert!(!last_states(&mut f, client, &surface).contains(&xdg_toplevel::State::Maximized));
+
+    // Maximize by another route so that unset_maximized has something it
+    // could undo.
+    let window = window_id(&mut f, &surface);
+    f.swayward().layout.set_maximized(&window, true);
+    f.double_roundtrip(client);
     assert!(last_states(&mut f, client, &surface).contains(&xdg_toplevel::State::Maximized));
+    let configures = f.client(client).window(&surface).configures_received.len();
+
     handle.unset_maximized();
     f.double_roundtrip(client);
-    assert!(!last_states(&mut f, client, &surface).contains(&xdg_toplevel::State::Maximized));
+    assert_eq!(
+        f.client(client).window(&surface).configures_received.len(),
+        configures
+    );
+    assert!(last_states(&mut f, client, &surface).contains(&xdg_toplevel::State::Maximized));
 }
 
-/// Known divergence: sway has no foreign-toplevel minimize handler
-/// (sway/sway/tree/view.c:881-893), so `set_minimized` is a no-op there.
-/// swayward hides the window in the scratchpad. This pins the current
-/// behaviour until that is decided; it is not evidence of sway compatibility.
+/// Sway has no foreign-toplevel minimize handler
+/// (sway/sway/tree/view.c:881-893), so `set_minimized` leaves the view
+/// tiled and focused, and `unset_minimized` leaves a scratchpad-hidden
+/// view hidden. Oracle row: sway-ipc state scenario
+/// `foreign_toplevel_set_minimized`.
 #[test]
-fn minimize_request_hides_in_scratchpad_unlike_sway() {
+fn minimize_request_is_noop_like_sway() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
@@ -163,20 +181,31 @@ fn minimize_request_hides_in_scratchpad_unlike_sway() {
     );
     let window = window_id(&mut f, &surface);
     let handle = f.client(client).foreign_toplevel("window").handle.clone();
+    let configures = f.client(client).window(&surface).configures_received.len();
 
     handle.set_minimized();
     f.double_roundtrip(client);
-    assert!(f.swayward().layout.is_scratchpad_hidden(&window));
-    handle.unset_minimized();
-    f.double_roundtrip(client);
     assert!(!f.swayward().layout.is_scratchpad_hidden(&window));
     assert_eq!(f.swayward().layout.focus().unwrap().window, window);
+    assert_eq!(
+        f.client(client).window(&surface).configures_received.len(),
+        configures
+    );
+
+    // Hide the window by another route so that unset_minimized has something
+    // it could undo.
+    f.swayward().layout.move_to_scratchpad(Some(&window));
+    f.double_roundtrip(client);
+    assert!(f.swayward().layout.is_scratchpad_hidden(&window));
+
+    handle.unset_minimized();
+    f.double_roundtrip(client);
+    assert!(f.swayward().layout.is_scratchpad_hidden(&window));
 }
 
 /// Sway's activate handler shows a scratchpad-hidden view before focusing it
 /// (sway/sway/tree/view.c:741-743). The window is hidden with the
-/// `scratchpad` layout operation rather than a minimize request, so this
-/// holds whatever happens to the minimize mapping.
+/// `scratchpad` layout operation, because a minimize request is a no-op.
 #[test]
 fn activate_shows_a_scratchpad_hidden_window() {
     let mut f = Fixture::new();

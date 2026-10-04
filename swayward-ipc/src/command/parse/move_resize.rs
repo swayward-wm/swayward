@@ -5,13 +5,14 @@ pub(super) const BORDER_SYNTAX: &str =
 pub(super) const OPACITY_FLOAT_INVALID: &str = "opacity float invalid";
 pub(super) const INVALID_X_POSITION: &str = "Invalid x position specified";
 pub(super) const INVALID_Y_POSITION: &str = "Invalid y position specified";
+pub(super) const INVALID_DISTANCE: &str = "Invalid distance specified";
 pub(super) const SPLIT_INVALID: &str =
     "Invalid split command (expected either horizontal or vertical).";
 
 pub(super) fn parse_border(args: &[&str]) -> Result<Border, String> {
     const SYNTAX: &str = BORDER_SYNTAX;
     let Some(style) = args.first() else {
-        return Err("Invalid border command (expected at least 1 argument, got 0)".into());
+        return Err(arity_error(0, "border", Expected::AtLeast(1)));
     };
     let (style, mut width) = match style.to_ascii_lowercase().as_str() {
         "normal" => (BorderStyle::Normal, None),
@@ -215,7 +216,9 @@ pub(super) fn parse_layout(args: &[&str]) -> Result<Command, String> {
         "stacking" => Some(Layout::Stacked),
         _ => None,
     };
-    if let [layout] = args {
+    // `sway/sway/commands/layout.c:107-123` matches argv[0] first and ignores
+    // any later arguments unless it is `toggle`.
+    if let [layout, ..] = args {
         if let Some(layout) = direct(layout) {
             return Ok(Command::Layout(layout));
         }
@@ -224,7 +227,7 @@ pub(super) fn parse_layout(args: &[&str]) -> Result<Command, String> {
         }
     }
     let [toggle, rest @ ..] = args else {
-        return Err("Invalid layout command (expected at least 1 argument, got 0)".into());
+        return Err(arity_error(0, "layout", Expected::AtLeast(1)));
     };
     if !toggle.eq_ignore_ascii_case("toggle") {
         return Err(LAYOUT_USAGE.into());
@@ -233,7 +236,9 @@ pub(super) fn parse_layout(args: &[&str]) -> Result<Command, String> {
         [] => LayoutToggle::Default,
         ["split"] => LayoutToggle::Split,
         ["all"] => LayoutToggle::All,
-        [_] => return Err("Expected 'layout toggle [split|all]' or a list of layouts".into()),
+        // Any other single word, or a list with no layout in it, is L_NONE
+        // and gets the full usage (layout.c:200-202).
+        [_] => return Err(LAYOUT_USAGE.into()),
         entries => {
             let cycle = entries
                 .iter()
@@ -246,7 +251,7 @@ pub(super) fn parse_layout(args: &[&str]) -> Result<Command, String> {
                 })
                 .collect::<Vec<_>>();
             if cycle.is_empty() {
-                return Err("Expected a valid layout in the toggle list".into());
+                return Err(LAYOUT_USAGE.into());
             }
             LayoutToggle::Cycle(cycle)
         }
@@ -269,12 +274,7 @@ pub(super) fn parse_split(args: &[&str]) -> Result<Command, String> {
 pub(super) fn parse_opacity(args: &[&str]) -> Result<Command, String> {
     let value = args
         .get(if args.len() == 1 { 0 } else { 1 })
-        .ok_or_else(|| {
-            format!(
-                "Invalid opacity command (expected at least 1 argument, got {})",
-                args.len()
-            )
-        })?
+        .ok_or_else(|| arity_error(args.len(), "opacity", Expected::AtLeast(1)))?
         .parse::<f32>()
         .map_err(|_| OPACITY_FLOAT_INVALID.to_owned())?;
 
@@ -417,9 +417,7 @@ pub(super) fn parse_move_distance(value: &str) -> Result<i32, String> {
     while bytes.get(split).is_some_and(u8::is_ascii_digit) {
         split += 1;
     }
-    let (digits, suffix) = value
-        .split_at_checked(split)
-        .ok_or("Invalid distance specified")?;
+    let (digits, suffix) = value.split_at_checked(split).ok_or(INVALID_DISTANCE)?;
     let amount = if split == 0 {
         0
     } else {
@@ -428,7 +426,7 @@ pub(super) fn parse_move_distance(value: &str) -> Result<i32, String> {
     if suffix.is_empty() || suffix.eq_ignore_ascii_case("px") {
         Ok(amount)
     } else {
-        Err("Invalid distance specified".into())
+        Err(INVALID_DISTANCE.into())
     }
 }
 

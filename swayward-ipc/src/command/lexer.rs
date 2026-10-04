@@ -110,3 +110,50 @@ pub(super) fn unquote(value: &str) -> &str {
 pub(super) fn join_words(words: &[&str]) -> String {
     unquote(&words.join(" ")).to_owned()
 }
+
+/// How many tokens sway's `split_args` makes of `input`. Unlike [`words`], a
+/// `[...]` block outside quotes is one token whatever it contains
+/// (`sway/common/stringop.c:92-142`).
+pub(super) fn sway_argc(input: &str) -> usize {
+    sway_split_args(input).len()
+}
+
+/// Sway's `split_args` tokens as raw slices of `input`: quote characters and
+/// backslashes stay in place, and a `[...]` block outside quotes is one token
+/// (`sway/common/stringop.c:92-142`).
+pub(super) fn sway_split_args(input: &str) -> Vec<&str> {
+    const WHITESPACE: &[char] = &[' ', '\x0c', '\n', '\r', '\t', '\x0b'];
+    let mut tokens = Vec::new();
+    let mut start = None;
+    let (mut in_string, mut in_char, mut in_brackets, mut escaped) = (false, false, false, false);
+    for (index, ch) in input.char_indices() {
+        if start.is_none() {
+            if WHITESPACE.contains(&ch) {
+                continue;
+            }
+            start = Some(index);
+        }
+        let quoted = in_string || in_char;
+        if ch == '"' && !in_char && !escaped {
+            in_string = !in_string;
+        } else if ch == '\'' && !in_string && !escaped {
+            in_char = !in_char;
+        } else if ch == '[' && !quoted && !in_brackets && !escaped {
+            in_brackets = true;
+        } else if ch == ']' && !quoted && in_brackets && !escaped {
+            in_brackets = false;
+        } else if ch == '\\' {
+            escaped = !escaped;
+            continue;
+        } else if !quoted && !in_brackets && !escaped && WHITESPACE.contains(&ch) {
+            if let Some(token) = start.take().and_then(|start| input.get(start..index)) {
+                tokens.push(token);
+            }
+        }
+        escaped = false;
+    }
+    if let Some(token) = start.and_then(|start| input.get(start..)) {
+        tokens.push(token);
+    }
+    tokens
+}

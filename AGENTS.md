@@ -14,6 +14,18 @@ distrobox enter swayward-dev -- bash -lc 'cd <repo> && cargo test --all'
 
 Setup: [`docs/BUILDING.md`](docs/BUILDING.md).
 
+On the operator's machine the three `swayward-wm` repos live side by side:
+
+| Path | Repo |
+|---|---|
+| `~/hacking/swayward-wm/swayward` | `swayward-wm/swayward`, this repo |
+| `~/hacking/swayward-wm/oracle` | `swayward-wm/sway-ipc-oracle` |
+| `~/hacking/swayward-wm/org` | `swayward-wm/.github`, the org profile and logo |
+
+Worktrees, scratch output and extra target directories go beside them under
+`~/hacking/swayward-wm/`, never inside a repo. See "Scratch space lives on
+disk" for where.
+
 Format with **nightly**: `cargo +nightly fmt --all`. `rustfmt.toml` uses four
 nightly-only options and the CI fmt job runs nightly, so stable rustfmt reports
 clean while leaving nightly diffs in place.
@@ -38,26 +50,79 @@ bases.
 
 ### What each kind of commit needs
 
-The fast gate is the whole gate for most commits. The full oracle sweep
-(random, i3-derived, state, events) takes 25 to 110 minutes and saturates the
-machine, so it runs off the critical path.
+**Rule zero: never pin intermediate commits.** The oracle's `pins.toml`
+swayward sha and swayward's `tests/oracle.toml` change once per milestone, at
+the release candidate (T4). Every other commit leaves both pins alone; a
+commit that moves a pin outside T4 is bounced.
 
-| Commit | Before handover | After landing |
-|---|---|---|
-| Refactor, test, docs, tooling | `./contrib/fast-gate` | nothing |
-| Behavior change | `./contrib/fast-gate`, plus the oracle rows it can affect | integrator sweep on the batch tip |
+| Tier | When | Who runs what | Passes when |
+|---|---|---|---|
+| T0 | every commit | author: `./contrib/fast-gate` | exit 0 |
+| T1 | behavior change | author: T0, plus `contrib/targeted-oracle --baseline <last T2 sweep dir> --out-dir <scratch> --run` and the cited rows | 0 new mismatches; cited rows match |
+| T2 | a landed behavior batch, at most every 2 h | integrator: `contrib/oracle-sweep`, then `contrib/oracle-sweep-diff` against the baseline | 0 lost, 0 missing |
+| T3 | nightly | CI: 200k proptests and the live soak | no new failure |
+| T4 | release candidate, once per milestone | maintainer: full oracle regeneration | oracle `contrib/validate` green, `pending.toml` empty, two runs agree |
 
-Select the affected rows with `contrib/targeted-oracle --out-dir <scratch>`.
-Review the printed commands, then add `--run`. It uses a release binary and
-fails closed for an unmapped production path. A sway-compatibility fix still
-names its oracle row in the commit message (see Invariants).
+T4 runs in this order, so the pinned commit survives on main:
 
-The integrator owns the full sweep. It lands behavior commits in batches, runs
-the sweep once on the pushed tip, and on a regression replays only the lost
-rows against each commit in the batch, then reverts or bounces the culprit.
-Refactor batches are checked for zero per-row change. Nightly CI owns
-exhaustive coverage: 200k proptests and the live soak. Workers run the full
-corpus only when the integrator asks for it.
+1. Squash swayward, if wanted. Squash before the freeze, never after.
+2. Freeze the RC sha on main.
+3. Pin the RC in the oracle and regenerate every result.
+4. Squash the oracle.
+5. Repin `tests/oracle.toml` once, then tag swayward HEAD.
+
+History is final at the beta1 tag: from then on main is never rewritten and
+the oracle pins only tagged or on-main commits.
+`docs/internal/launch-checklist.md` is the runbook.
+
+For T1, select the affected rows with `contrib/targeted-oracle --out-dir
+<scratch>`. Review the printed commands, then commit and add `--run` (inside
+the dev container). It builds the release binary, points the local oracle
+cache's `pins.toml` at `HEAD` for the run and restores it afterwards (a
+scratch pin, never committed), and exits 1 only for rows that
+match in the baseline and mismatch now; known mismatches are listed but pass.
+Pass `--baseline <sweep-dir>`, the integrator's last T2 `contrib/oracle-sweep`
+output (the rolling baseline): without it the baseline is the pinned
+swayward snapshot, which is a milestone old. The baseline must be a finished
+sweep of the same oracle commit as `--oracle`, or the run exits 2. It fails
+closed for an unmapped production path. Run the rows a fix cites with
+`--scenarios a,b` (state, events and i3-derived names) and `--seeds 1,2`;
+these replace the path-based selection, so run them as a second invocation.
+A sway-compatibility fix names its oracle row in the commit message (see
+Invariants).
+
+The integrator owns T2 and takes the full sweep (random, i3-derived, state,
+events) off the critical path. It lands behavior commits in batches, sweeps the
+pushed tip, and on a regression replays only the lost rows against each commit
+in the batch, then reverts or bounces the culprit.
+`contrib/oracle-sweep <oracle-worktree> <out-dir>` runs the sweep in six
+shards (about 10 minutes) and retries a dead shard once;
+`contrib/oracle-sweep-diff <before> <after>` lists lost, gained and missing
+rows and exits 1 on any loss. Keep the last main sweep under
+`~/hacking/swayward-wm/scratch/` as the baseline. When the oracle commit
+changes, first sweep unchanged main on the new oracle commit and make that the
+baseline; a baseline is valid for one oracle commit. Refactor batches are
+checked for zero per-row change. Workers run the full corpus only when the
+integrator asks for it.
+
+Every T2 sweep ends in one SWEEP note in the integrator log, the primary
+record of progress between pins:
+
+```sh
+contrib/oracle-sweep-diff --ledger ~/hacking/swayward-wm/scratch/progress.tsv <baseline> <sweep>
+```
+
+It appends one row to the ledger and prints the note to paste verbatim:
+
+```
+SWEEP tree=<8> sha=<8> oracle=<7> random a/b i3d a/b state a/b events a/b lost n gained n wall m
+```
+
+Counts are match/total. The tree hash survives a squash; the oracle sha says
+which corpus the denominators come from. A sweep that died or left a dead
+shard appends nothing and prints no note (exit 2): it is not a measurement, so
+rerun it. The TSV is a cache: the beta1 plan's `data/seed_ledger.py` rebuilds
+it from the notes. Neither is published; public figures come only from T4.
 
 Done means pushed, or committed where the orchestrator cherry-picks. A close
 note that names a commit must name one that exists on the remote.
@@ -66,7 +131,8 @@ note that names a commit must name one that exists on the remote.
 
 `/tmp` is a RAM-backed tmpfs: whatever accumulates there is memory, and then
 swap on the operator's session. Put extra `CARGO_TARGET_DIR`s, clones, logs
-and measurement output under `~/hacking/<name>` and delete them when done.
+and measurement output under `~/hacking/swayward-wm/scratch/<name>` and delete
+them when done.
 A stray 5.5 GB target directory and 16,000 leaked test socket directories
 once took `/tmp` to 5.8 GB. Tests clean up what they create, including
 directories that still hold a socket (`remove_dir_all`).
@@ -146,7 +212,7 @@ prefer read-only queries.
 upstream's CI as though it were ours. Set the default once per clone:
 
 ```sh
-gh repo set-default martintrojer/swayward
+gh repo set-default swayward-wm/swayward
 ```
 
 This writes `remote.origin.gh-resolved = base` into `.git/config`, which is
@@ -226,7 +292,7 @@ or supposedly infallible data.
 
 ## Tests
 
-The unchanged i3 tests live in `martintrojer/sway-ipc-oracle` at the commit in
+The unchanged i3 tests live in `swayward-wm/sway-ipc-oracle` at the commit in
 `tests/oracle.toml`. Never edit those files: they are the external oracle, and a
 test you can edit to pass is not evidence. Run `./contrib/fetch-oracle` before
 the in-process harness. Where i3 and sway differ, record a skip with a citation
@@ -238,11 +304,11 @@ Measure swayward against the oracle from a clean worktree of it, passing
 `--out` outside the repo: the runners' default output path is a tracked
 results file, and a measurement taken from a worker's half-edited clone gave
 misleading numbers. The operator's own oracle checkout is
-`~/hacking/sway-ipc-oracle`; leave it alone and add a worktree beside it:
-`git -C ~/hacking/sway-ipc-oracle worktree add
-~/hacking/sway-ipc-oracle.worktrees/<name> -b <branch> origin/main`. Thirteen
-separate clones accumulated before this rule, and agents edited the operator's
-checkout because it was the obvious local copy.
+`~/hacking/swayward-wm/oracle`; leave it alone and add a worktree beside it:
+`git -C ~/hacking/swayward-wm/oracle worktree add
+~/hacking/swayward-wm/oracle.worktrees/<name> -b <branch> origin/main`.
+Thirteen separate clones accumulated before this rule, and agents edited the
+operator's checkout because it was the obvious local copy.
 
 `tests/i3/coverage.toml` is the source of truth for what the in-process harness measures.
 Use `./contrib/coverage-report` for the current census; its `--json` output is

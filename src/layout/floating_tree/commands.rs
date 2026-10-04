@@ -62,15 +62,56 @@ impl<W: LayoutElement> FloatingLayout<W> {
 
         let pos = if tile.floating_pos.is_some() {
             self.stored_or_default_tile_pos(&tile).unwrap()
+        } else if size.w > 1 && size.h > 1 {
+            self.centered_content_tile_pos(&tile, size.to_f64())
         } else {
             let tile_size = size.to_f64() + tile.tile_size() - tile.window_size();
             center_preferring_top_left_in_area(self.working_area, tile_size)
         };
 
         let data = Data::new(self.view_size, self.working_area, &tile, pos);
-        self.entries.insert(idx, FloatingEntry { tile, data });
+        // A new root goes on top; one kept below its parent shares the parent's
+        // place relative to groups.
+        let stamp = match idx.checked_sub(1).and_then(|above| self.entries.get(above)) {
+            Some(above) => above.stamp,
+            None => self.bump_stamp(),
+        };
+        self.insert_entry(
+            idx,
+            FloatingEntry {
+                tile,
+                data,
+                stamp,
+                titlebar: Box::default(),
+            },
+        );
 
         self.bring_up_descendants_of(idx);
+    }
+
+    /// Sway centers a floating view's content box, not its decorated container, on the
+    /// workspace, or on the output when the content is larger than the workspace
+    /// (`container_floating_resize_and_center`, sway/tree/container.c:878-893).
+    fn centered_content_tile_pos(
+        &self,
+        tile: &Tile<W>,
+        content: Size<f64, Logical>,
+    ) -> Point<f64, Logical> {
+        let area = if content.w > self.working_area.size.w || content.h > self.working_area.size.h {
+            Rectangle::from_size(self.view_size)
+        } else {
+            self.working_area
+        };
+        // Sway keeps the half pixel and truncates it when it reports the box
+        // (`container_get_box` into an int `wlr_box`, sway/ipc-json.c:241-247); flooring
+        // gives the same integers.
+        let mut content_loc = area.loc + (area.size.to_point() - content.to_point()).downscale(2.);
+        content_loc.x = content_loc.x.floor();
+        content_loc.y = content_loc.y.floor();
+        // Floating tiles draw all four borders, so left equals bottom.
+        let side = tile.tile_width_for_window_width(0.) / 2.;
+        let top = tile.tile_height_for_window_height(0.) - side;
+        content_loc - Point::from((side, top))
     }
 
     pub fn add_tile_above(&mut self, above: &W::Id, mut tile: Tile<W>, activate: bool) {
@@ -150,7 +191,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
     }
 
     fn remove_tile_by_idx(&mut self, idx: usize) -> RemovedTile<W> {
-        let FloatingEntry { mut tile, data } = self.entries.remove(idx);
+        let FloatingEntry { mut tile, data, .. } = self.remove_entry(idx);
 
         if Some(tile.window().id()) == self.active_window_id.as_ref() {
             self.active_window_id = self.fallback_active_window();
@@ -183,6 +224,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
             return;
         }
 
+        let Some(idx) = self.idx_of(id) else {
+            return;
+        };
         let Some((tile, tile_pos)) = self
             .tiles_with_render_positions_mut(false)
             .find(|(tile, _)| tile.window().id() == id)
@@ -196,7 +240,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
 
         let tile_size = tile.tile_size();
 
-        self.start_close_animation_for_tile(renderer, snapshot, tile_size, tile_pos, blocker);
+        self.start_close_animation_at(renderer, snapshot, tile_size, tile_pos, blocker, idx);
     }
 
     pub fn activate_window_without_raising(&mut self, id: &W::Id) -> bool {
@@ -223,6 +267,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
         };
         let mut entry = self.tree_entries.remove(idx);
         entry.tree.activate_window(id);
+        entry.stamp = self.bump_stamp();
         self.tree_entries.insert(0, entry);
         self.active_window_id = Some(id.clone());
         true
@@ -231,10 +276,35 @@ impl<W: LayoutElement> FloatingLayout<W> {
     fn raise_window(&mut self, from_idx: usize, to_idx: usize) {
         assert!(to_idx <= from_idx);
 
-        let entry = self.entries.remove(from_idx);
-        self.entries.insert(to_idx, entry);
+        let mut entry = self.remove_entry(from_idx);
+        entry.stamp = match to_idx
+            .checked_sub(1)
+            .and_then(|above| self.entries.get(above))
+        {
+            Some(above) => above.stamp,
+            None => self.bump_stamp(),
+        };
+        self.insert_entry(to_idx, entry);
     }
 
+    /// Inserts a live entry, keeping closing snapshots in their stack slots.
+    pub(super) fn insert_entry(&mut self, idx: usize, entry: FloatingEntry<W>) {
+        for (index, _) in &mut self.closing_windows {
+            *index += usize::from(*index >= idx);
+        }
+        self.entries.insert(idx, entry);
+    }
+
+    /// Removes a live entry, keeping closing snapshots in their stack slots.
+    pub(super) fn remove_entry(&mut self, idx: usize) -> FloatingEntry<W> {
+        for (index, _) in &mut self.closing_windows {
+            *index -= usize::from(*index > idx);
+        }
+        self.entries.remove(idx)
+    }
+
+    /// Starts a close animation for a tile that was not in this layout's stack, such as one
+    /// being dragged; it renders in front.
     pub fn start_close_animation_for_tile(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -242,6 +312,18 @@ impl<W: LayoutElement> FloatingLayout<W> {
         tile_size: Size<f64, Logical>,
         tile_pos: Point<f64, Logical>,
         blocker: TransactionBlocker,
+    ) {
+        self.start_close_animation_at(renderer, snapshot, tile_size, tile_pos, blocker, 0);
+    }
+
+    fn start_close_animation_at(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        snapshot: TileRenderSnapshot,
+        tile_size: Size<f64, Logical>,
+        tile_pos: Point<f64, Logical>,
+        blocker: TransactionBlocker,
+        stack_index: usize,
     ) {
         let anim = Animation::new(
             self.clock.clone(),
@@ -263,7 +345,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
         );
         match res {
             Ok(closing) => {
-                self.closing_windows.push(closing);
+                self.closing_windows.push((stack_index, closing));
             }
             Err(err) => {
                 warn!("error creating a closing window animation: {err:?}");

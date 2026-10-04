@@ -14,6 +14,14 @@ fn set_up() -> (Fixture, ClientId, WlSurface) {
     fixture.add_output(2, (1280, 720));
     let client = fixture.add_client();
     let surface = windows::map_window(&mut fixture, client, windows::WindowSpec::sized(100, 100));
+    // The initial configure carries no size; ack the tiled slot that follows the map,
+    // keeping the 100×100 buffer.
+    fixture
+        .client(client)
+        .window(&surface)
+        .ack_last_and_commit();
+    fixture.double_roundtrip(client);
+    let _ = fixture.client(client).window(&surface).recent_configures();
     (fixture, client, surface)
 }
 

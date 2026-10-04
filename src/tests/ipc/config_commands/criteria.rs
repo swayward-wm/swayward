@@ -96,6 +96,23 @@ fn empty_workspace_move_and_floating_commands_match_sway_errors() {
             false,
             "Can't move an empty workspace",
         ),
+        // Sway rejects the empty workspace before resolving the destination
+        // (sway/commands/move.c:430-434), so an unknown output or mark is never looked up.
+        (
+            "move container to output right",
+            false,
+            "Can't move an empty workspace",
+        ),
+        (
+            "move container to output HEADLESS-9",
+            false,
+            "Can't move an empty workspace",
+        ),
+        (
+            "move container to mark oracle",
+            false,
+            "Can't move an empty workspace",
+        ),
     ] {
         assert_eq!(
             crate::command::execute(fixture.niri_state(), command),

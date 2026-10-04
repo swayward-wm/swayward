@@ -281,9 +281,10 @@ fn title_format_updates_a_split_container_representation() {
     let split = find_json_node_with_mark(&tree, "formatted-split").unwrap();
     assert_eq!(split["name"], Value::Null);
     let workspace_node = tree["nodes"][1]["nodes"][0].as_object().unwrap();
+    // `layout` on a workspace child wraps the children (sway/commands/layout.c:178-183).
     assert_eq!(
         workspace_node["representation"],
-        "T[app-one V[app-three app-two]]"
+        "H[T[app-one V[app-three app-two]]]"
     );
     let workspace = fixture.swayward().layout.active_workspace().unwrap();
     assert!(workspace

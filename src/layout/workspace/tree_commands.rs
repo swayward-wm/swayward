@@ -130,6 +130,10 @@ impl<W: LayoutElement> Workspace<W> {
         root
     }
 
+    pub fn focus_floating_tree_view(&mut self, root: NodeId) {
+        self.floating.focus_tree_view(root);
+    }
+
     pub fn remove_active_tiling_tile(&mut self) -> Option<Tile<W>> {
         if self.floating_is_active.get() {
             return None;
@@ -220,6 +224,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn focused_floating_tree_child(&self) -> bool {
         self.floating_is_active.get() && self.floating.focused_tree_child()
+    }
+
+    pub fn focused_floating_tree_root_is_fullscreen(&self) -> bool {
+        self.floating_is_active.get() && self.floating.focused_tree_root_is_fullscreen()
     }
 
     pub fn is_workspace_focused(&self) -> bool {
@@ -356,6 +364,12 @@ impl<W: LayoutElement> Workspace<W> {
         } else {
             self.tiling.focus_direction_without_wrap(Direction::Up)
         }
+    }
+
+    pub fn move_focused_floating_tree_child(&mut self, direction: Direction) -> bool {
+        self.floating
+            .move_focused_tree_child(direction)
+            .unwrap_or(false)
     }
 
     pub fn move_window_in_direction(

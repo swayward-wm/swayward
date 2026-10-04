@@ -6,6 +6,7 @@
 //! The parser knows which handler it is standing in for, so it records that
 //! here instead of leaving dispatch to recognise the message text.
 
+use super::FocusedNode;
 use crate::CommandOutcome;
 
 /// The reply kind of a sway handler result: CMD_INVALID or CMD_FAILURE.
@@ -20,9 +21,9 @@ pub(super) enum ErrorKind {
 pub(super) struct ParseError {
     message: String,
     kind: ErrorKind,
-    /// What sway's handler answers instead when there is no focused
-    /// container, for handlers that check focus before their arguments.
-    without_view: Option<(&'static str, ErrorKind)>,
+    /// What sway's handler answers instead when the focused node is less
+    /// than it needs, for handlers that check focus before their arguments.
+    without_view: Option<(FocusedNode, &'static str, ErrorKind)>,
 }
 
 impl ParseError {
@@ -42,16 +43,23 @@ impl ParseError {
         self.message == message
     }
 
-    /// Answer `message` of `kind` instead when nothing is focused, because
-    /// sway's handler checks for a container before it parses arguments.
+    /// Answer `message` of `kind` instead when no view is focused, because
+    /// sway's handler checks `container->view` before it parses arguments.
     pub(super) fn unless_view(mut self, message: &'static str, kind: ErrorKind) -> Self {
-        self.without_view = Some((message, kind));
+        self.without_view = Some((FocusedNode::View, message, kind));
         self
     }
 
-    pub(super) fn into_outcome(self, has_view: bool) -> CommandOutcome {
+    /// Answer `message` of `kind` instead when no container is focused,
+    /// because sway's handler checks for one before it parses arguments.
+    pub(super) fn unless_container(mut self, message: &'static str, kind: ErrorKind) -> Self {
+        self.without_view = Some((FocusedNode::Container, message, kind));
+        self
+    }
+
+    pub(super) fn into_outcome(self, focused: FocusedNode) -> CommandOutcome {
         let (message, kind) = match self.without_view {
-            Some((message, kind)) if !has_view => (message.to_owned(), kind),
+            Some((needed, message, kind)) if focused < needed => (message.to_owned(), kind),
             _ => (self.message, self.kind),
         };
         CommandOutcome {

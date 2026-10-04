@@ -4,7 +4,7 @@ internal changes inherited from the niri fork. See
 
 Start here. If a row sounds relevant to your setup, its details include the
 exact behaviour, the reason for it, and the sway source citations. [Testing and
-conformance](https://github.com/martintrojer/swayward/wiki/Testing-and-Conformance#intentional-differences-from-sway)
+conformance](https://github.com/swayward-wm/swayward/wiki/Testing-and-Conformance#intentional-differences-from-sway)
 explains how the tests encode these differences.
 
 | Deviation | What you will notice | Details |
@@ -275,17 +275,43 @@ are deliberate safety deviations.
 
 **Command gap.**
 
-Swayward refuses `inhibit_idle`, `allow_tearing`, and `max_render_time`. Sway
-stores each value on the target view and exposes them in `GET_TREE`
-(`sway/commands/inhibit_idle.c:8-50`, `sway/commands/allow_tearing.c:6-25`, and
-`sway/commands/max_render_time.c:6-32`). Swayward has no equivalent mutable
-per-view state: idle inhibition comes from client protocol objects, and its
-frame clock has no per-view tearing or render-deadline controls. Returning
-success would therefore report state that the compositor does not apply.
+Swayward refuses `allow_tearing` and `max_render_time`. Sway stores each value
+on the target view and exposes it in `GET_TREE`
+(`sway/commands/allow_tearing.c:6-25` and
+`sway/commands/max_render_time.c:6-32`). Swayward's frame clock has no per-view
+tearing or render-deadline controls. Returning success would therefore report
+state that the compositor does not apply. The refusal comes after sway's own
+checks: with no view focused, both commands give sway's precondition error,
+and `max_render_time` still rejects a missing or invalid value first.
+
+`inhibit_idle` is implemented with sway's focus, fullscreen, open, none, and
+visible user policies and composes with application idle-inhibitor protocol
+objects.
 
 The `opacity` command is implemented as mutable per-window state and multiplies
 window-rule opacity. Unlike the configured opacity, it remains effective in
 fullscreen, matching sway's scene-tree opacity.
+
+### Runtime mouse bindcodes
+
+**Command gap.**
+
+Swayward reads `bindcode` and `unbindcode` codes the way sway does: `strtol`
+truncated to an XKB keycode, refusing only `-1`
+(`sway/commands/bind.c:153-176`). A first key that names an evdev `BTN_*`
+code, such as `bindcode 272`, is a mouse binding in sway
+(`get_mouse_bindcode`, `sway/input/cursor.c:1228-1247`). Swayward refuses it
+because runtime bindings have no pointer-region model, rather than bind the code
+as a key that no keyboard sends.
+
+### Infinite output scale
+
+**Command gap.**
+
+`output <name> scale` accepts what sway's `strtof` accepts. `-1` leaves the scale
+unchanged and zero, negative, or NaN values select the automatic scale
+(`sway/config/output.c:180-182,526-533`). Swayward refuses `inf` with
+`Invalid scale.`, because sway passes an infinite scale to wlroots unchecked.
 
 ### Reload and transient output configuration
 

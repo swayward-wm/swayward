@@ -198,7 +198,11 @@ fn runtime_map_rules_reject_x11_only_criteria() {
 fn runtime_map_rules_reject_missing_or_invalid_arguments() {
     assert!(parse_one("assign [app_id=term]").is_err());
     assert!(parse_one("assign [app_id=term] number named").is_err());
-    assert!(parse_one("no_focus [app_id=term] trailing").is_err());
+    // Sway's no_focus reads argv[0] only (`sway/sway/commands/no_focus.c`).
+    assert!(matches!(
+        parse_one("no_focus [app_id=term] trailing"),
+        Ok(Command::NoFocus { criteria }) if criteria == "[app_id=term]"
+    ));
 }
 
 #[test]
@@ -253,10 +257,26 @@ fn output_parses_chained_core_actions_and_power() {
         parse_output_command(&["*", "dpms", "toggle"]),
         Err("Cannot apply toggle to all outputs".into())
     );
-    assert_eq!(
-        parse_output_command(&["HDMI-A-1", "scale", "NaN"]),
-        Err("Invalid scale.".into())
-    );
+    // Sway stores whatever strtof reads; -1 is its unset sentinel and any
+    // other value that is not positive selects the default scale
+    // (`sway/sway/commands/output/scale.c`, `sway/sway/config/output.c`).
+    for value in ["NaN", "0", "-2"] {
+        assert!(matches!(
+            parse_output_command(&["HDMI-A-1", "scale", value]),
+            Ok(Command::Output { actions, .. })
+                if actions == [crate::OutputAction::Scale { scale: crate::ScaleToSet::Automatic }]
+        ));
+    }
+    assert!(matches!(
+        parse_output_command(&["*", "scale", "-1"]),
+        Ok(Command::Output { actions, .. }) if actions.is_empty()
+    ));
+    for value in ["inf", "1x"] {
+        assert_eq!(
+            parse_output_command(&["HDMI-A-1", "scale", value]),
+            Err("Invalid scale.".into())
+        );
+    }
     assert!(matches!(
         parse_output_command(&["HDMI-A-1", "mode", "1920x1080@60hz"]),
         Ok(Command::Output { .. })
@@ -576,7 +596,7 @@ fn mixed_multibyte_command_text_never_panics() {
             input.push_str(PIECES[(state % PIECES.len() as u64) as usize]);
         }
         let _ = parse(&input);
-        let _ = parse_with_variables(&input, &variables, true);
+        let _ = parse_with_variables(&input, &variables, FocusedNode::View);
     }
 }
 
@@ -603,7 +623,7 @@ fn quoted_command_names_are_unknown_commands() {
             "{input}"
         );
         assert_eq!(
-            parse_with_variables(input, &[("$oracle".into(), "x".into())], true),
+            parse_with_variables(input, &[("$oracle".into(), "x".into())], FocusedNode::View),
             vec![Err(parse_error(format!(
                 "Unknown/invalid command '{name}'"
             )))],
@@ -647,5 +667,33 @@ fn every_listed_setting_has_a_parser() {
                 );
             }
         }
+    }
+}
+
+/// Oracle: random-v2 seeds 1018, 1144, 1188. With a variable defined, `exec`
+/// keeps its raw quoted arguments, which sway expands one by one and joins with
+/// spaces (`sway/sway/commands.c:265-285`,
+/// `sway/sway/commands/exec_always.c:40-44`).
+#[test]
+fn exec_keeps_quotes_when_variables_are_defined() {
+    let variables = [("$oracle".to_owned(), "value".to_owned())];
+    for (input, expected) in [
+        (
+            "exec foot --app-id=x sh -c 'sleep 300'",
+            "foot --app-id=x sh -c 'sleep 300'",
+        ),
+        ("exec sh -c 'echo $oracle'", "sh -c 'echo value'"),
+        ("exec_always   a  \"b  c\" $oracle", "a \"b  c\" value"),
+        ("exec '$oracle -x'", "value -x"),
+    ] {
+        let parsed = parse_with_variables(input, &variables, FocusedNode::View);
+        let Some(Ok(ParsedCommand {
+            command: Command::Exec { command, .. },
+            ..
+        })) = parsed.first()
+        else {
+            panic!("{input}: {parsed:?}");
+        };
+        assert_eq!(command, expected, "{input}");
     }
 }

@@ -126,13 +126,28 @@ fn parent_and_child_focus_walk_the_tree_and_layout_the_selected_parent() {
             ..
         } if *id == nested && children.iter().all(|child| matches!(child, IpcNode::Leaf { focused: false, .. }))
     ));
+    // The selected parent is the workspace, so sway keeps the workspace layout
+    // and wraps its children in a tabbed container (sway/commands/layout.c:178-183).
     t.set_focused_layout(Layout::Tabbed);
+    let TreeNode::Split {
+        layout: Layout::SplitH,
+        children: root_children,
+        ..
+    } = &t.nodes[&t.root].value
+    else {
+        panic!("the workspace must keep its split layout");
+    };
+    let [wrapper] = root_children.as_slice() else {
+        panic!("the workspace children must be wrapped");
+    };
+    let wrapper = *wrapper;
     assert!(matches!(
-        t.nodes[&t.root].value,
+        &t.nodes[&wrapper].value,
         TreeNode::Split {
             layout: Layout::Tabbed,
+            children,
             ..
-        }
+        } if children == &[first, nested]
     ));
     assert!(matches!(
         t.nodes[&nested].value,
@@ -141,9 +156,14 @@ fn parent_and_child_focus_walk_the_tree_and_layout_the_selected_parent() {
             ..
         }
     ));
+    assert_eq!(t.focus(), Some(nested));
+    assert!(t.focus_parent());
+    assert_eq!(t.focus(), Some(wrapper));
     assert!(t.focus_parent());
     assert_eq!(t.focus(), Some(t.root));
     assert!(!t.focus_parent());
+    assert!(t.focus_child());
+    assert_eq!(t.focus(), Some(wrapper));
     assert!(t.focus_child());
     assert_eq!(t.focus(), Some(nested));
     assert!(t.focus_child());
@@ -185,6 +205,37 @@ fn split_parent_preserves_stacked_child_focus_axis() {
     assert!(t.focus_down());
     assert_eq!(t.focus(), Some(first));
     assert!(t.focus_up());
+    assert_eq!(t.focus(), Some(second));
+    t.check_invariants();
+}
+
+#[test]
+fn layout_toggle_with_a_workspace_parent_wraps_the_children() {
+    // `layout toggle split` on a view under the workspace keeps the workspace
+    // layout and wraps its children (sway/commands/layout.c:178-183).
+    let mut t = tree((1200., 800.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let second = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.toggle_focused_layout(&swayward_ipc::command::LayoutToggle::Split);
+    let TreeNode::Split {
+        layout: Layout::SplitH,
+        children,
+        ..
+    } = &t.nodes[&t.root].value
+    else {
+        panic!("the workspace must keep its split layout");
+    };
+    let [wrapper] = children.as_slice() else {
+        panic!("the workspace children must be wrapped");
+    };
+    assert!(matches!(
+        &t.nodes[wrapper].value,
+        TreeNode::Split {
+            layout: Layout::SplitV,
+            children,
+            ..
+        } if children == &[first, second]
+    ));
     assert_eq!(t.focus(), Some(second));
     t.check_invariants();
 }

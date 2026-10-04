@@ -1,6 +1,11 @@
 #[test]
 fn get_tree_reports_sway_default_floating_rules() {
-    let (mut f, socket) = ipc_fixture();
+    // The oracle's swayward config: sway's shipped normal 2 defaults.
+    let config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    let (mut f, socket) = ipc_fixture_with_config(config);
     f.add_output(1, (1280, 720));
     let client = f.add_client();
 
@@ -33,6 +38,17 @@ fn get_tree_reports_sway_default_floating_rules() {
             },
             "GET_TREE floating state for {name}"
         );
+        // Sway gives a default-floating view `default_floating_border` and a
+        // tiled one `default_border`, both normal 2 (sway/tree/view.c:909-916,
+        // sway/config.c:301-306). A view that never asked for client-side
+        // decorations keeps it once its transaction commits; oracle rows
+        // default_floating_fixed_{width,both} and
+        // default_tiling_fixed_height_zero_width.
+        assert_eq!(node["border"], "normal", "GET_TREE border for {name}");
+        assert_eq!(
+            node["current_border_width"], 2,
+            "GET_TREE border width for {name}"
+        );
     }
 
     let parent = f.client(client).create_window();
@@ -59,10 +75,12 @@ fn get_tree_reports_sway_default_floating_rules() {
 
     let mut stream = UnixStream::connect(socket).unwrap();
     let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
-    assert_eq!(
-        find_json_node_with_app_id(&tree, "dialog").unwrap()["floating"],
-        "user_on"
-    );
+    let dialog = find_json_node_with_app_id(&tree, "dialog").unwrap();
+    assert_eq!(dialog["floating"], "user_on");
+    // Oracle row default_floating_parent: the parented dialog floats with
+    // sway's default floating border, not calloc's `none`.
+    assert_eq!(dialog["border"], "normal");
+    assert_eq!(dialog["current_border_width"], 2);
 }
 
 fn one_window_schema_fixture() -> (Fixture, std::path::PathBuf, super::client::ClientId) {

@@ -1,0 +1,138 @@
+#!/bin/bash
+# Full oracle sweep (random, i3-derived, state, events) of one swayward commit.
+#
+# Usage: contrib/oracle-sweep [--reuse] <oracle-worktree> <out-dir> [swayward-checkout]
+#
+# Run inside the dev container. The checkout (default: this repo) must be
+# clean with target/release/swayward built from HEAD. The oracle worktree's
+# swayward pin is set to HEAD for the run and restored afterwards. Runs six
+# shards in parallel; a shard that dies (exit status above 1, no result, or a
+# socket failure or traceback in its log) is retried once, because under load
+# a dead shard otherwise shows up as hundreds of false losses. sway-ipc-run
+# exits 1 when it finishes with mismatches, so 1 alone is not a death.
+# Compare two sweeps with contrib/oracle-sweep-diff.
+# The last step writes <out-dir>/status.json (swayward and oracle sha, wall
+# minutes, dead shards); oracle-sweep-diff --ledger appends a row only when it
+# exists and lists no dead shard. A previous sweep's results in <out-dir>
+# would pass for this one's, so the sweep refuses an <out-dir> holding *.toml
+# or status.json; --reuse deletes them (and the old logs) first.
+# One sweep runs per host at a time: the sweep holds an flock on
+# $ORACLE_SWEEP_LOCK (default ~/hacking/swayward-wm/scratch/oracle-sweep.lock)
+# and records its pid, swayward sha and start time there. A second sweep
+# exits 2 naming the holder; a record left by a sweep that died without
+# clearing it (no flock held) is reclaimed with a message.
+set -u
+REUSE=0
+if [ "${1:-}" = --reuse ]; then REUSE=1; shift; fi
+[ $# -ge 2 ] || { sed -n '2,23p' "$0"; exit 2; }
+OR=$(realpath "$1")
+OUT=$(realpath -m "$2")
+SW=$(realpath "${3:-$(dirname "$0")/..}")
+BIN=$SW/target/release/swayward
+RUN=$OR/contrib/sway-ipc-run
+RSHARDS=${RSHARDS:-2}
+DSHARDS=${DSHARDS:-2}
+LOCK=${ORACLE_SWEEP_LOCK:-$HOME/hacking/swayward-wm/scratch/oracle-sweep.lock}
+
+[ -x "$BIN" ] || { echo "oracle-sweep: missing $BIN"; exit 2; }
+HEAD=$(git -C "$SW" rev-parse HEAD)
+mkdir -p "$(dirname "$LOCK")"
+# The lock comes before the dirty checks: a running sweep dirties pins.toml.
+# Shards inherit fd 9, so the lock stays held while any of them still runs.
+record=$(printf 'pid=%s\nswayward=%s\nstarted=%s' "$$" "$HEAD" "$(date -Iseconds)")
+exec 9>>"$LOCK"
+if ! flock -n 9; then
+    # The holder writes its record right after flock; give it a moment.
+    holder=
+    for _ in $(seq 50); do holder=$(cat "$LOCK"); [ -n "$holder" ] && break; sleep 0.1; done
+    echo "oracle-sweep: another sweep holds $LOCK: ${holder:-unknown holder}"
+    hpid=$(sed -n 's/^pid=//p' "$LOCK")
+    if [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; then
+        echo "oracle-sweep: pid $hpid is gone but its shards still run"
+    fi
+    exit 2
+fi
+stale=$(sed -n 's/^pid=//p' "$LOCK")
+[ -z "$stale" ] || echo "oracle-sweep: reclaiming stale lock left by pid $stale: $(paste -sd' ' "$LOCK")"
+printf '%s\n' "$record" >"$LOCK"
+# Release only the lock here: pins.toml is not ours to restore until the
+# dirty checks pass, since a dirty oracle may hold someone's edit.
+trap ': >"$LOCK"' EXIT
+[ -z "$(git -C "$SW" status --porcelain)" ] || { echo "oracle-sweep: dirty $SW"; exit 2; }
+[ -z "$(git -C "$OR" status --porcelain)" ] || { echo "oracle-sweep: dirty $OR"; exit 2; }
+trap 'git -C "$OR" checkout -q -- pins.toml; : >"$LOCK"' EXIT
+if compgen -G "$OUT/*.toml" >/dev/null || [ -e "$OUT/status.json" ]; then
+    if [ "$REUSE" = 0 ]; then
+        echo "oracle-sweep: $OUT holds a previous sweep; pick a fresh dir or pass --reuse"
+        exit 2
+    fi
+    rm -f "$OUT"/*.toml "$OUT/status.json" "$OUT"/logs/*.log
+fi
+ORSHA=$(git -C "$OR" rev-parse HEAD)
+sed -i "s/^swayward = \"[0-9a-f]\{40\}\"$/swayward = \"$HEAD\"/" "$OR/pins.toml"
+mkdir -p "$OUT/logs"
+
+declare -A CMD RC
+common="--compositor swayward --binary $BIN"
+seeds=$(python3 -c "import json; print(' '.join(str(s['seed']) for s in json.load(open('$OR/sway-ipc/random/sequences.json'))['sequences']))")
+names=$(python3 -c "import json; print(' '.join(s['name'] for s in json.load(open('$OR/sway-ipc/i3-derived/scenarios.json'))['scenarios']))")
+for k in $(seq 0 $((RSHARDS - 1))); do
+    list=$(tr ' ' '\n' <<<"$seeds" | awk -v k="$k" -v n="$RSHARDS" 'NR % n == k' | paste -sd,)
+    CMD[random-$k]="$RUN random $common --seeds $list --out $OUT/random-$k.toml"
+done
+for k in $(seq 0 $((DSHARDS - 1))); do
+    args=$(tr ' ' '\n' <<<"$names" | awk -v k="$k" -v n="$DSHARDS" 'NR % n == k { printf " --scenario %s", $0 }')
+    CMD[i3d-$k]="$RUN i3-derived $common$args --out $OUT/i3d-$k.toml"
+done
+CMD[state]="$RUN scenarios $common --corpus state --out $OUT/state.toml"
+CMD[events]="$RUN scenarios $common --corpus events --out $OUT/events.toml"
+
+run_shards() {
+    declare -A pid
+    for s in "$@"; do
+        # shellcheck disable=SC2086 # CMD values are word lists by design
+        (cd "$OR" && ${CMD[$s]} >"$OUT/logs/$s.log" 2>&1) &
+        pid[$s]=$!
+    done
+    for s in "$@"; do
+        wait "${pid[$s]}"
+        RC[$s]=$?
+    done
+}
+dead_shards() {
+    for s in "${!CMD[@]}"; do
+        if [ "${RC[$s]:-2}" -gt 1 ] || [ ! -s "$OUT/$s.toml" ] || grep -qE "Connection refused|timed out|Traceback" "$OUT/logs/$s.log"; then
+            echo "$s"
+        fi
+    done
+}
+
+start=$(date +%s)
+run_shards "${!CMD[@]}"
+retry=$(dead_shards)
+if [ -n "$retry" ]; then
+    echo "oracle-sweep: retrying dead shards: ${retry//$'\n'/ }"
+    for s in $retry; do
+        mv "$OUT/logs/$s.log" "$OUT/logs/$s.dead.log"
+        rm -f "$OUT/$s.toml"
+    done
+    # shellcheck disable=SC2086
+    run_shards $retry
+fi
+dead=$(dead_shards)
+
+echo "swayward $HEAD"
+python3 - "$OUT" <<'EOF'
+import collections, pathlib, sys, tomllib
+totals = collections.defaultdict(collections.Counter)
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.toml")):
+    for row in tomllib.loads(path.read_text()).get("result", []):
+        totals[path.stem.split("-")[0]][row["verdict"]] += 1
+for corpus, counts in sorted(totals.items()):
+    print(f"{corpus}: {counts['match']}/{sum(counts.values())} match")
+EOF
+wall=$((($(date +%s) - start) / 60))
+echo "wall $wall min"
+printf '{"swayward": "%s", "oracle": "%s", "wall_min": %d, "dead": "%s"}\n' \
+    "$HEAD" "$ORSHA" "$wall" "${dead//$'\n'/ }" >"$OUT/status.json"
+[ -z "$dead" ] || { echo "oracle-sweep: DEAD SHARDS after retry: ${dead//$'\n'/ }"; exit 1; }

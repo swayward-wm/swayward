@@ -141,6 +141,35 @@ fn runtime_set_variable_changes_a_subsequent_command() {
     );
 }
 
+/// Oracle: random-v2 seeds 1018, 1144, 1188. Once any variable exists, sway
+/// still passes `exec` its raw quoted arguments: only argv[1..] of other
+/// commands lose their quotes (`sway/sway/commands.c:265-285`). Swayward
+/// unquoted them, so `sh -c 'sleep 300'` became `sh -c sleep 300` and the
+/// exec'd client never mapped.
+#[test]
+fn runtime_set_variable_keeps_exec_quoting() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let scratch = ScratchDir::new("set-exec-quoting");
+    let output = scratch.join("done");
+
+    assert!(crate::command::execute(f.niri_state(), "set $oracle value")[0].success);
+    // With the quotes stripped, `sh -c` runs `touch` with no operand and the
+    // path becomes the shell's $0, so no file appears. The trailing
+    // `$oracle` still expands, as sway expands every exec argument.
+    let command = format!("exec sh -c 'touch {}' $oracle", output.display());
+    assert!(crate::command::execute(f.niri_state(), &command)[0].success);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !output.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exec lost its quoting after a runtime set"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Sway's symbol table is global, not per-connection, so a variable set on one
 /// IPC connection is visible on the next command from any source.
 #[test]

@@ -839,8 +839,11 @@ fn floating_toggle_after_moving_scratchpad_window_between_workspaces_does_not_pa
         ("move scratchpad", true),
         ("scratchpad show", true),
         ("move container to workspace 2", true),
-        ("floating toggle", false),
-        ("move container to workspace 2", false),
+        // `scratchpad show` focuses the group's most recently focused view
+        // (sway/tree/root.c:185-186), so the moved view leaves its sibling
+        // focused: pinned sway answers success to both of these.
+        ("floating toggle", true),
+        ("move container to workspace 2", true),
         ("workspace 2", true),
         ("floating toggle", true),
     ] {
@@ -966,4 +969,291 @@ fn moving_a_window_under_fullscreen_keeps_its_border() {
         .find(|workspace| workspace["name"] == "2")
         .unwrap();
     assert_eq!(workspace["focus"][0], fullscreen["id"]);
+}
+
+// random seed 253 step 13 (sway-1.12-random): the destination workspace's
+// focus-inactive container is a tabbed split, so sway adds the moved window
+// as its child (`container_move_to_container`,
+// sway/commands/move.c:241-262), not beside it at workspace level.
+#[test]
+fn moving_a_window_onto_a_focused_split_joins_that_split() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let map = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    map(&mut f, "first");
+    map(&mut f, "second");
+    for command in ["layout tabbed", "focus parent", "workspace other"] {
+        let outcome = query_ipc_with_payload(&mut f, &mut stream, MessageType::RunCommand, command);
+        assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
+    }
+    map(&mut f, "third");
+    let outcome = query_ipc_with_payload(
+        &mut f,
+        &mut stream,
+        MessageType::RunCommand,
+        "move container to workspace 1",
+    );
+    assert_eq!(outcome[0]["success"], true, "{outcome}");
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let target = workspaces
+        .iter()
+        .find(|workspace| workspace["name"] == "1")
+        .unwrap();
+    assert_eq!(
+        target["representation"], "H[T[first second third]]",
+        "{target}"
+    );
+}
+
+// random seed 368 step 5 (sway-1.12-random): `move down` from H[a b*] wraps
+// the workspace into V[H[a] b]. The new H wrapper was never focused, so it
+// joins the tail of sway's focus stack (`seat_node_from_node`,
+// sway/input/seat.c:327-349) and the workspace reports b first, the
+// floating window next, and the wrapper last.
+#[test]
+fn a_reorienting_move_lists_the_new_wrapper_last_in_focus() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let map = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    map(&mut f, "floater");
+    let outcome = query_ipc_with_payload(
+        &mut f,
+        &mut stream,
+        MessageType::RunCommand,
+        "floating toggle",
+    );
+    assert_eq!(outcome[0]["success"], true, "{outcome}");
+    map(&mut f, "a");
+    map(&mut f, "b");
+    let outcome = query_ipc_with_payload(&mut f, &mut stream, MessageType::RunCommand, "move down");
+    assert_eq!(outcome[0]["success"], true, "{outcome}");
+
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let wrapper = workspace["nodes"][0]["id"].clone();
+    let b = workspace["nodes"][1]["id"].clone();
+    let floater = workspace["floating_nodes"][0]["id"].clone();
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([b, floater, wrapper]),
+        "{workspace}"
+    );
+}
+
+// random seed 197 step 12 (sway-1.12-random): a tabbed container in the
+// top half of a V workspace measures its child's percent against its own
+// box (`ipc_json_describe_container`, sway/ipc-json.c:744-754). The tab bar
+// takes one titlebar from the top of that box, so the split below it
+// reports (360 - titlebar) / 360 (0.925 with sway's 27px titlebar), not the
+// workspace-relative (720 - titlebar) / 720 (0.9625).
+#[test]
+fn a_tabbed_childs_percent_uses_the_tabbed_containers_own_box() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let map = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    map(&mut f, "a");
+    for command in ["splitv", "layout tabbed"] {
+        let outcome = query_ipc_with_payload(&mut f, &mut stream, MessageType::RunCommand, command);
+        assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
+    }
+    map(&mut f, "b");
+    for command in ["splitv", "focus parent", "focus parent", "splith"] {
+        let outcome = query_ipc_with_payload(&mut f, &mut stream, MessageType::RunCommand, command);
+        assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
+    }
+    map(&mut f, "c");
+    let outcome = query_ipc_with_payload(&mut f, &mut stream, MessageType::RunCommand, "move down");
+    assert_eq!(outcome[0]["success"], true, "{outcome}");
+
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let representation = workspace["representation"].as_str().unwrap();
+    let tabbed = &workspace["nodes"][0]["nodes"][0];
+    assert_eq!(tabbed["layout"], "tabbed", "{representation}");
+    let split = tabbed["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["layout"] == "splitv")
+        .unwrap_or_else(|| panic!("{representation}"));
+    // The split's rect starts below the tab bar and its own titlebar, as in
+    // sway's capture (y = 2 * 27); only the tab bar comes out of the percent.
+    let titlebar =
+        (split["rect"]["y"].as_f64().unwrap() - tabbed["rect"]["y"].as_f64().unwrap()) / 2.;
+    assert!(titlebar > 0., "{representation}");
+    let box_height = tabbed["rect"]["height"].as_f64().unwrap();
+    let percent = split["percent"].as_f64().unwrap();
+    assert!(
+        (percent - (box_height - titlebar) / box_height).abs() < 1e-9,
+        "{percent} in {representation}"
+    );
+}
+
+// random seed 183 step 17 (sway-1.12-random): in H[1 H[2 H[3*]]], 3 floats
+// and leaves H[1 H[2]]; 5 maps beside 2 and `move right` takes it out of
+// the split. The split keeps the place focus gave it when it entered 5
+// (`seat_set_raw_focus`, sway/input/seat.c), so the workspace focus list is
+// [5, split, 3, 1], not [5, 3, split, 1] ranked by 2's older focus.
+#[test]
+fn a_container_keeps_its_focus_place_after_the_focused_view_leaves() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let map = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, stream: &mut UnixStream, command: &str| {
+        let outcome = query_ipc_with_payload(f, stream, MessageType::RunCommand, command);
+        assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
+    };
+    map(&mut f, "1");
+    map(&mut f, "2");
+    run(&mut f, &mut stream, "splith");
+    map(&mut f, "3");
+    run(&mut f, &mut stream, "splith");
+    run(&mut f, &mut stream, "floating toggle");
+    map(&mut f, "5");
+    run(&mut f, &mut stream, "move right");
+
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let name = |id: &serde_json::Value| {
+        workspace["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(workspace["floating_nodes"].as_array().unwrap())
+            .find(|node| node["id"] == *id)
+            .map(|node| node["app_id"].as_str().unwrap_or("split").to_owned())
+            .unwrap()
+    };
+    let order: Vec<_> = workspace["focus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(name)
+        .collect();
+    assert_eq!(
+        order,
+        ["5", "split", "3", "1"],
+        "{}",
+        workspace["representation"]
+    );
+}
+
+// random seed 15 step 15 (sway-1.12-random): window 1 moves to workspace
+// 2, then `focus parent` up to workspace 1 and `move container to workspace
+// 2` moves the whole workspace. Its children were focused after window 1,
+// so the moved wrapper ranks first on workspace 2 even though window 1 sits
+// after it in tree order, which once pulled the wrapper behind window 1.
+#[test]
+fn a_moved_workspace_ranks_by_its_own_focus_not_tree_order() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let map = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, stream: &mut UnixStream, command: &str| {
+        let outcome = query_ipc_with_payload(f, stream, MessageType::RunCommand, command);
+        assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
+    };
+    // The seed's commands, minus a no-op `sticky toggle` on a tiled window.
+    map(&mut f, "1");
+    run(&mut f, &mut stream, "splith");
+    run(&mut f, &mut stream, "splitv");
+    map(&mut f, "2");
+    run(&mut f, &mut stream, "splith");
+    map(&mut f, "3");
+    for command in [
+        "layout tabbed",
+        "focus child",
+        "focus parent",
+        "focus child",
+        "focus up",
+        "move container to workspace 2",
+        "focus parent",
+        "move container to workspace 2",
+    ] {
+        query_ipc_with_payload(&mut f, &mut stream, MessageType::RunCommand, command);
+    }
+
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let target = tree["nodes"][1]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["name"] == "2")
+        .unwrap();
+    let kind = |id: &serde_json::Value| {
+        target["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == *id)
+            .map(|node| node["app_id"].as_str().unwrap_or("wrapper").to_owned())
+            .unwrap()
+    };
+    let order: Vec<_> = target["focus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(kind)
+        .collect();
+    assert_eq!(order, ["wrapper", "1"], "{}", target["representation"]);
 }

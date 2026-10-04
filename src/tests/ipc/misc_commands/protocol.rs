@@ -370,6 +370,19 @@ fn floating_sizes_accept_i32_values_and_reject_malformed_values() {
             false,
             (i32::MAX, i32::MIN),
         ),
+        // Sway casts strtol's long to int (`sway/sway/commands/floating_minmax_size.c`),
+        // keeping the low 32 bits. Oracle: command-fuzz
+        // family-floating_minimum_size-overflow and family-floating_maximum_size-overflow.
+        (
+            "floating_minimum_size 2147483648 x 50",
+            true,
+            (i32::MIN, 50),
+        ),
+        (
+            "floating_maximum_size 10 x -2147483649",
+            false,
+            (10, i32::MAX),
+        ),
     ] {
         let outcome = crate::command::execute(f.niri_state(), command);
         assert!(outcome[0].success, "{command}: {outcome:?}");
@@ -388,10 +401,6 @@ fn floating_sizes_accept_i32_values_and_reject_malformed_values() {
             "Expected 'floating_minimum_size <width> x <height>'",
         ),
         (
-            "floating_minimum_size 2147483648 x 20",
-            "Expected 'floating_minimum_size <width> x <height>'",
-        ),
-        (
             "floating_minimum_size 10 by 20",
             "Expected 'floating_minimum_size <width> x <height>'",
         ),
@@ -401,10 +410,6 @@ fn floating_sizes_accept_i32_values_and_reject_malformed_values() {
         ),
         (
             "floating_maximum_size wide x 20",
-            "Expected 'floating_maximum_size <width> x <height>'",
-        ),
-        (
-            "floating_maximum_size 10 x -2147483649",
             "Expected 'floating_maximum_size <width> x <height>'",
         ),
         (

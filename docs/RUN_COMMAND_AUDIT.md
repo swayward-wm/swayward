@@ -6,7 +6,7 @@ makes reachable over IPC. It does not audit the other IPC request rows in
 
 This audit uses sway 1.12 commit
 `88869399f421d9180dd8b6ed0b5a1f4a3585d252`, recorded in
-[`tests/sway/compatibility.toml`](https://github.com/martintrojer/swayward/blob/main/tests/sway/compatibility.toml)
+[`tests/sway/compatibility.toml`](https://github.com/swayward-wm/swayward/blob/main/tests/sway/compatibility.toml)
 and matching `sway-ipc/fixtures/schema-version.json` in the pinned oracle. Sway selects
 `command_handlers[]` while the configuration is active, then falls back to the
 shared `handlers[]` table (`sway/sway/commands.c:44-129,162-173`). The tables
@@ -27,8 +27,8 @@ comparison of every accepted command family with sway 1.12:
 - A refused command returns a structured failure. Refusal is safer than an
   accepted command that silently ignores unsupported syntax or state.
 
-The parser accepts 69 of sway's 82 unique runtime command names and rejects 13.
-Of the accepted names, 28 implement the full audited command family and 41 are
+The parser accepts 70 of sway's 82 unique runtime command names and rejects 12.
+Of the accepted names, 29 implement the full audited command family and 41 are
 partial. An accepted probe establishes one implemented form, not complete
 command-family parity.
 
@@ -56,7 +56,7 @@ document:
 ```
 
 The script reads
-[`tests/sway/compatibility.toml`](https://github.com/martintrojer/swayward/blob/main/tests/sway/compatibility.toml),
+[`tests/sway/compatibility.toml`](https://github.com/swayward-wm/swayward/blob/main/tests/sway/compatibility.toml),
 runs every recorded invocation through the parser, and checks the request and
 event tables in [`SWAY_COMPATIBILITY.md`](SWAY_COMPATIBILITY.md). The TOML is
 the per-command data source for sway source locations, probes, parser results,

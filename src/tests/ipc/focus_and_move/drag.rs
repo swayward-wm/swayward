@@ -83,12 +83,12 @@ fn focus_returns_under_stationary_pointer(
         f.roundtrip(client);
         let window = f.client(client).window(&surface);
         window.attach_new_buffer();
-        // Commit the size the compositor asked for, so the surface has a
-        // real hit-testable region.
-        let size = window.configures_received.last().unwrap().1.size;
-        window.set_size(size.0 as u16, size.1 as u16);
+        window.set_size(100, 100);
         window.ack_last_and_commit();
         f.double_roundtrip(client);
+        // Commit the size the compositor asked for, so the surface has a
+        // real hit-testable region.
+        commit_configured_size(&mut f, client, &surface);
         let focus = f.swayward().layout.focus().unwrap();
         ids.push((focus.id(), focus.window.clone()));
     }
@@ -167,10 +167,10 @@ fn pointer_moves_on_same_output_focus(mode: swayward_config::input::MouseWarping
         f.roundtrip(client);
         let window = f.client(client).window(&surface);
         window.attach_new_buffer();
-        let size = window.configures_received.last().unwrap().1.size;
-        window.set_size(size.0 as u16, size.1 as u16);
+        window.set_size(100, 100);
         window.ack_last_and_commit();
         f.double_roundtrip(client);
+        commit_configured_size(&mut f, client, &surface);
     }
 
     // Put the pointer somewhere on the focused output that is not the centre
@@ -312,10 +312,10 @@ fn tiled_drag_fixture() -> Fixture {
     f.roundtrip(client);
     let window = f.client(client).window(&surface);
     window.attach_new_buffer();
-    let size = window.configures_received.last().unwrap().1.size;
-    window.set_size(size.0 as u16, size.1 as u16);
+    window.set_size(100, 100);
     window.ack_last_and_commit();
     f.double_roundtrip(client);
+    commit_configured_size(&mut f, client, &surface);
     pointer_motion_absolute(&mut f, 640., 400.);
     f
 }
@@ -402,10 +402,10 @@ fn floating_modifier_none_disables_the_drag() {
     f.roundtrip(client);
     let window = f.client(client).window(&surface);
     window.attach_new_buffer();
-    let size = window.configures_received.last().unwrap().1.size;
-    window.set_size(size.0 as u16, size.1 as u16);
+    window.set_size(100, 100);
     window.ack_last_and_commit();
     f.double_roundtrip(client);
+    commit_configured_size(&mut f, client, &surface);
 
     pointer_motion_absolute(&mut f, 640., 400.);
     // Super is held, but `none` means no modifier can arm the drag.
@@ -443,10 +443,10 @@ fn mouse_warping_output_warps_when_focus_crosses_outputs() {
     f.roundtrip(client);
     let window = f.client(client).window(&surface);
     window.attach_new_buffer();
-    let size = window.configures_received.last().unwrap().1.size;
-    window.set_size(size.0 as u16, size.1 as u16);
+    window.set_size(100, 100);
     window.ack_last_and_commit();
     f.double_roundtrip(client);
+    commit_configured_size(&mut f, client, &surface);
 
     let start = smithay::utils::Point::<f64, smithay::utils::Logical>::from((5., 5.));
     f.niri_state().move_cursor(start);
@@ -576,4 +576,18 @@ fn resize_rejects_hidden_scratchpad_window_without_panicking() {
         outcome[0].error.as_deref(),
         Some("Cannot resize a hidden scratchpad container")
     );
+}
+
+/// The initial configure carries no size, so a client maps at its own size and then
+/// commits the tiled slot the compositor configures after mapping.
+fn commit_configured_size(
+    f: &mut Fixture,
+    client: super::client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+) {
+    let window = f.client(client).window(surface);
+    let size = window.configures_received.last().unwrap().1.size;
+    window.set_size(size.0 as u16, size.1 as u16);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
 }

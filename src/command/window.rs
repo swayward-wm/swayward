@@ -1,12 +1,9 @@
 use swayward_config::Action;
-use swayward_ipc::command::Border;
+use swayward_ipc::command::{Border, FocusedNode};
 use swayward_ipc::legacy::SizeChange;
 use swayward_ipc::CommandOutcome;
 
-use super::{
-    failure, parse_boolean, tiling_target, CommandTarget, ResizeAmount, ResizeAxis, ResizeUnit,
-    Toggle,
-};
+use super::{failure, parse_boolean, CommandTarget, ResizeAmount, ResizeAxis, ResizeUnit, Toggle};
 use crate::swayward::State;
 
 fn target_window(
@@ -100,8 +97,11 @@ pub(super) fn opacity(
                 (mapped.id() == target).then(|| vec![mapped.window.clone()])
             })
         }
+        // Sway sets the container's alpha, which the scene applies to every
+        // view below it, a floating group included (`cmd_opacity`,
+        // sway/commands/opacity.c:15-44); set it on each window instead.
         CommandTarget::Container(workspace, node) => {
-            state.swayward.layout.tiling_node_windows(workspace, node)
+            state.swayward.layout.container_windows(workspace, node)
         }
     }
     .ok_or_else(|| failure("No matching node."))?;
@@ -228,31 +228,39 @@ pub(super) fn floating(
             "Can't change floating on hidden scratchpad container",
         ));
     }
-    match mode {
-        Toggle::Enable => state
-            .swayward
-            .layout
-            .set_window_floating(Some(&window), true),
-        Toggle::Disable => state
-            .swayward
-            .layout
-            .set_window_floating(Some(&window), false),
-        Toggle::Toggle => state.swayward.layout.toggle_window_floating(Some(&window)),
-    }
+    set_window_floating(state, &window, *mode);
     state.swayward.queue_redraw_all();
     Ok(())
+}
+
+/// Sway's `floating` on one view. A fullscreen view keeps its fullscreen
+/// across the change (`container_set_floating`, sway/tree/container.c:941-1011).
+fn set_window_floating(state: &mut State, window: &smithay::desktop::Window, mode: Toggle) {
+    let floating = match mode {
+        Toggle::Enable => Some(true),
+        Toggle::Disable => Some(false),
+        Toggle::Toggle => None,
+    };
+    let layout = &mut state.swayward.layout;
+    if layout.set_fullscreen_window_floating(window, floating) {
+        return;
+    }
+    match floating {
+        Some(floating) => layout.set_window_floating(Some(window), floating),
+        None => layout.toggle_window_floating(Some(window)),
+    }
 }
 
 pub(super) fn kill(state: &mut State, target: CommandTarget) -> Result<(), CommandOutcome> {
     let targets = match target {
         CommandTarget::Window(target) => vec![target.get()],
-        CommandTarget::Container(_, _) => {
-            let (workspace, node) =
-                tiling_target(state, target, "command requires a tiling target")?;
+        // Sway closes every view in the container, a floating group
+        // included (`cmd_kill`, sway/commands/kill.c:15-31).
+        CommandTarget::Container(workspace, node) => {
             let windows = state
                 .swayward
                 .layout
-                .tiling_node_windows(workspace, node)
+                .container_windows(workspace, node)
                 .ok_or_else(|| failure("No matching node."))?;
             state
                 .swayward
@@ -529,7 +537,11 @@ pub(super) fn opacity_focused(
     value: f32,
     relative: bool,
 ) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
+    // `sway/sway/commands/opacity.c:15-18`: a focused workspace is no
+    // container.
+    let target = super::targeted::focused_target(state)
+        .filter(|_| super::targeted::focused_node(state) != FocusedNode::Nothing);
+    let Some(target) = target else {
         return Err(failure("No current container"));
     };
     super::handled(opacity(state, target, value, relative))
@@ -544,9 +556,31 @@ pub(super) fn title_format_focused(state: &mut State, format: &str) -> super::Ha
     super::handled(title_format(state, target, format))
 }
 
-pub(super) fn shortcuts_inhibitor_focused(state: &mut State, enable: bool) -> super::HandlerResult {
+pub(super) fn inhibit_idle_focused(
+    state: &mut State,
+    mode: swayward_ipc::command::InhibitIdleMode,
+) -> super::HandlerResult {
+    // `sway/sway/commands/inhibit_idle.c:13-17`.
+    if super::targeted::focused_node(state) != FocusedNode::View {
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can have idle inhibitors",
+        ));
+    }
     let Some(target) = super::targeted::focused_target(state) else {
-        return Err(failure("Only views can have shortcuts inhibitors"));
+        return Err(failure("No matching node."));
+    };
+    super::handled(super::targeted::set_inhibit_idle(state, target, mode))
+}
+
+pub(super) fn shortcuts_inhibitor_focused(state: &mut State, enable: bool) -> super::HandlerResult {
+    // `sway/sway/commands/shortcuts_inhibitor.c:14-18`.
+    if super::targeted::focused_node(state) != FocusedNode::View {
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can have shortcuts inhibitors",
+        ));
+    }
+    let Some(target) = super::targeted::focused_target(state) else {
+        return Err(failure("No matching node."));
     };
     super::handled(super::targeted::set_shortcuts_inhibitor(
         state, target, enable,
@@ -615,17 +649,7 @@ pub(super) fn floating_focused(state: &mut State, mode: Toggle) -> super::Handle
             "Can't float an empty workspace",
         ));
     };
-    match mode {
-        Toggle::Enable => state
-            .swayward
-            .layout
-            .set_window_floating(Some(&window), true),
-        Toggle::Disable => state
-            .swayward
-            .layout
-            .set_window_floating(Some(&window), false),
-        Toggle::Toggle => state.swayward.layout.toggle_window_floating(Some(&window)),
-    }
+    set_window_floating(state, &window, mode);
     state.swayward.queue_redraw_all();
     Ok(None)
 }

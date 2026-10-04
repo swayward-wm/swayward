@@ -100,6 +100,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
 
             win.set_active_in_column(true);
             win.set_floating(true);
+            win.set_untiled(true);
 
             let mut is_active = is_active && Some(win.id()) == active.as_ref();
             if self.options.deactivate_unfocused_windows {

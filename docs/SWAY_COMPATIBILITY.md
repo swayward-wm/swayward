@@ -12,10 +12,10 @@ this page.
 ## Start with the measurements
 
 swayward has a very extensive suite of tests. [Testing and
-conformance](https://github.com/martintrojer/swayward/wiki/Testing-and-Conformance)
+conformance](https://github.com/swayward-wm/swayward/wiki/Testing-and-Conformance)
 has the current numbers, including the unchanged i3 suite and the sway IPC
 scenarios measured by the independent
-[`sway-ipc-oracle`](https://github.com/martintrojer/sway-ipc-oracle). The
+[`sway-ipc-oracle`](https://github.com/swayward-wm/sway-ipc-oracle). The
 [IPC oracle coverage](IPC_ORACLE_COVERAGE.md) page explains where the faster
 in-process tests are still blind. These are measurements, not a compatibility
 percentage. One passing assertion does not vouch for the command beside it.
@@ -34,7 +34,7 @@ KDL as sway config text. Sway uses the same kind of refusal for `IPC_SYNC`
 (`sway/sway/ipc-server.c:919-925`).
 
 The raw request and event inventory lives in
-[`tests/sway/compatibility.toml`](https://github.com/martintrojer/swayward/blob/main/tests/sway/compatibility.toml).
+[`tests/sway/compatibility.toml`](https://github.com/swayward-wm/swayward/blob/main/tests/sway/compatibility.toml).
 `contrib/command-census --check` checks the inventory against the parser and the
 figures quoted here. Markdown is not generated from the TOML.
 
@@ -69,9 +69,10 @@ The partial requests are:
 
 - `RUN_COMMAND` covers most, not all, of sway's runtime command language. The
   next section gives the practical boundary.
-- `SUBSCRIBE` accepts 8 of sway's 10 event families. It refuses
-  `barconfig_update` and `bar_state_update` because swayward has no managed
-  `bar {}` and therefore no corresponding event to send. See
+- `SUBSCRIBE` accepts 8 of sway's 10 event families as live streams. It also
+  accepts `barconfig_update` and `bar_state_update`, but never emits them
+  because swayward manages no `bar {}`. Accepting them lets swaybar subscribe
+  to workspace and mode events in the same request. See
   [Bars](KNOWN_DEVIATIONS.md#bars).
 - `GET_OUTPUTS` returns sway 1.12's complete field set and live geometry,
   identity, mode, scale, transform, subpixel layout, current workspace, and
@@ -104,8 +105,8 @@ runtime commands go through `swayward-ipc`. Most command gaps come from that
 seam: the setting exists in KDL, but there is no safe live mutation path for
 it yet.
 
-The parser accepts 69 of sway 1.12's 82 unique runtime command names. Of those,
-28 command families are complete and 41 are partial. An accepted name means at
+The parser accepts 70 of sway 1.12's 82 unique runtime command names. Of those,
+29 command families are complete and 41 are partial. An accepted name means at
 least one real form works; it does not mean every option, target, or unit works.
 
 The commonly used forms include:
@@ -124,7 +125,7 @@ Parse failures also include `"parse_error": true`. The parser never turns an
 unknown form into a successful no-op.
 
 For the full list, use the hand-maintained data in
-[`tests/sway/compatibility.toml`](https://github.com/martintrojer/swayward/blob/main/tests/sway/compatibility.toml).
+[`tests/sway/compatibility.toml`](https://github.com/swayward-wm/swayward/blob/main/tests/sway/compatibility.toml).
 Each command row includes a realistic probe, its sway source, parser result,
 execution classification, state path, and rough cost. The
 [`RUN_COMMAND` audit](RUN_COMMAND_AUDIT.md) explains the categories and shows
@@ -144,11 +145,11 @@ adaptive-sync, bit depth, modeline, and power have runtime paths. An `*` target
 applies to connected outputs; unlike sway, it is not retained as wildcard
 configuration for outputs connected later. Other output subcommands fail.
 
-Commands that promise state swayward cannot represent also fail. For example,
-`inhibit_idle` needs sway's user-inhibitor policy modes
-(`sway/commands/inhibit_idle.c:8-50`, `sway/tree/view.c:281-303`), and
+Commands that promise state swayward cannot represent still fail. For example,
 `allow_tearing` needs asynchronous page flips
 (`sway/commands/allow_tearing.c:6-25`, `sway/desktop/output.c:254-269`).
+`inhibit_idle` is implemented with sway's per-view focus, fullscreen, open,
+none, and visible user policies (`sway/commands/inhibit_idle.c:8-50`).
 `max_render_time` needs per-output and per-view render budgets, which
 swayward's frame clock does not have (`sway/commands/max_render_time.c:6-32`,
 `sway/desktop/output.c:150-185`, `src/frame_clock.rs`).
@@ -162,7 +163,7 @@ and the other user-visible differences.
 
 ## Events
 
-Subscriptions cover 8 of sway's 10 event families:
+Subscriptions accept all 10 of sway's event family names:
 
 - workspace, window, mode, and binding events;
 - initial and requested tick events;
@@ -171,9 +172,9 @@ Subscriptions cover 8 of sway's 10 event families:
 
 The event payloads use sway's names and object shapes. The oracle contains the
 captured schemas; focused headless tests exercise live ordering and selected
-values. `barconfig_update` and `bar_state_update` are refused at subscription
-time because swayward does not manage a bar. A refused subscription is clearer
-than one that stays silent forever.
+values. `barconfig_update` and `bar_state_update` are accepted but never emitted
+because swayward does not manage a bar. This keeps swaybar's combined
+subscription from rejecting the workspace and mode families too.
 
 ## Clients exercised so far
 

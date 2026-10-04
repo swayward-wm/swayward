@@ -435,6 +435,7 @@ impl<W: LayoutElement> TilingTree<W> {
             let focused = Some(*id) == focus;
             window.set_active_in_column(focused);
             window.set_floating(floating);
+            window.set_untiled(false);
             window.set_activated(
                 is_active && (!self.options.deactivate_unfocused_windows || focused && is_focused),
             );

@@ -5,6 +5,13 @@ impl<W: LayoutElement> TilingTree<W> {
         self.focus
     }
 
+    /// Each container paired with the window whose focus last entered it.
+    pub fn last_entered_windows(&self) -> impl Iterator<Item = (NodeId, &W::Id)> + '_ {
+        self.last_entered_by
+            .iter()
+            .filter_map(|(node, leaf)| Some((*node, self.tile(*leaf)?.window().id())))
+    }
+
     pub fn focus_rank_for_window(&self, window: &W::Id) -> Option<usize> {
         let node = self.node_for_window(window)?;
         self.focus_history
@@ -188,6 +195,14 @@ impl<W: LayoutElement> TilingTree<W> {
         };
         self.set_focus_id(Some(parent));
         true
+    }
+
+    /// Moves focus from `id` down to its most recently focused leaf, as sway's
+    /// `seat_set_focus(seat_get_focus_inactive(node))` focuses a view.
+    pub fn focus_inactive_leaf_of(&mut self, id: NodeId) {
+        if let Some(leaf) = self.focused_leaf_in(id) {
+            self.set_focus_id(Some(leaf));
+        }
     }
 
     pub fn focus_child(&mut self) -> bool {
@@ -597,6 +612,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 .retain(|candidate| *candidate != id && !ancestors.contains(candidate));
             for ancestor in ancestors {
                 self.focus_history.insert(0, ancestor);
+                if self.tile(id).is_some() {
+                    self.last_entered_by.insert(ancestor, id);
+                }
             }
             self.focus_history.insert(0, id);
             let mut stale = std::mem::take(&mut self.ipc_stale_nodes);

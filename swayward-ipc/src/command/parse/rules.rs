@@ -36,7 +36,9 @@ pub(super) fn parse_exec(input: &str, name: &str) -> Result<Command, String> {
         }
     }
     if command.is_empty() {
-        return Err(format!("Expected '{name} <command>'"));
+        // Sway checks again after the flag, naming the flag as the command
+        // (`sway/sway/commands/exec_always.c:31-38`).
+        return Err(arity_error(0, NO_STARTUP_ID, Expected::AtLeast(1)));
     }
     let command = if words(command).len() == 1 && command.starts_with(['\'', '"']) {
         strip_sway_quotes(command)
@@ -85,7 +87,7 @@ pub(super) fn parse_mark(args: &[&str]) -> Result<Command, String> {
         index += 1;
     }
     if args.is_empty() {
-        return Err("Invalid mark command (expected at least 1 argument, got 0)".into());
+        return Err(arity_error(0, "mark", Expected::AtLeast(1)));
     }
     if index == args.len() {
         return Err("Expected '[--add|--replace] [--toggle] <identifier>'".into());
@@ -159,16 +161,19 @@ pub(super) fn parse_assign(input: &str, name: &str) -> Result<Command, String> {
 }
 
 pub(super) fn parse_no_focus(input: &str, name: &str) -> Result<Command, String> {
-    const USAGE: &str = "Expected 'no_focus <criteria>'";
     let rest = raw_tail(input, name)?;
     if !rest.starts_with('[') {
         return Err("No criteria".into());
     }
-    let (criteria, trailing) = parse_rule_criteria(input, name, USAGE)?;
-    if !trailing.is_empty() {
-        return Err(USAGE.into());
-    }
-    Ok(Command::NoFocus { criteria })
+    // `sway/sway/commands/no_focus.c:8-20` hands argv[0] to criteria_parse
+    // and ignores later arguments, which stops at the closing bracket.
+    let Some((criteria, _)) = split_criteria(rest) else {
+        return Err(unclosed_criteria_error(rest));
+    };
+    crate::criteria::Criteria::parse(criteria, None)?;
+    Ok(Command::NoFocus {
+        criteria: criteria.to_owned(),
+    })
 }
 
 pub(super) fn parse_for_window(input: &str, name: &str) -> Result<Command, String> {

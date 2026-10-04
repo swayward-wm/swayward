@@ -130,6 +130,20 @@ impl<W: LayoutElement> TilingTree<W> {
         self.place_new_leaf_in_focus_order(id, activate, focus_blocked, previous_focus);
         if mapped_under_fullscreen && !pending_mode.is_fullscreen() {
             self.mapped_under_fullscreen.insert(id);
+            // With no tiling container to map beside, sway attaches the view
+            // with `workspace_add_tiling` (sway/tree/view.c:849-901), which
+            // commits it. Only a floating fullscreen view leaves that so.
+            let floating_fullscreen = fullscreen
+                .and_then(|fullscreen| self.tile(fullscreen))
+                .is_some_and(|tile| tile.restore_to_floating);
+            let no_tiling_sibling = self.root_children().is_some_and(|children| {
+                children
+                    .iter()
+                    .all(|child| *child == id || Some(*child) == fullscreen)
+            });
+            if floating_fullscreen && no_tiling_sibling {
+                self.commit_mapped_under_fullscreen(id);
+            }
         }
         if pending_mode.is_maximized() {
             self.pending_modes.insert(
@@ -193,6 +207,12 @@ impl<W: LayoutElement> TilingTree<W> {
         let target = match target {
             InsertTarget::Focused => self.focus,
             InsertTarget::Node(id) => Some(id),
+            InsertTarget::MoveDestination => {
+                if let Some(focus) = self.focus.filter(|focus| self.is_split(*focus)) {
+                    return (focus, None);
+                }
+                self.focus
+            }
         };
         let parent = target
             .and_then(|id| self.nodes.get(&id)?.parent)

@@ -3,6 +3,7 @@ use super::lexer::*;
 use super::variables::*;
 use crate::CommandOutcome;
 
+mod arity;
 mod bindings;
 mod error;
 mod move_resize;
@@ -11,6 +12,7 @@ mod rules;
 mod settings;
 mod workspace;
 
+use arity::*;
 use bindings::*;
 use error::*;
 use move_resize::*;
@@ -18,12 +20,13 @@ use move_resize::*;
 use move_resize::{FOCUS_USAGE, LAYOUT_USAGE, MOVE_USAGE};
 use output::*;
 use rules::*;
+pub use settings::strtol;
 use settings::*;
 use workspace::*;
 
 /// Parse a command list with no variables defined.
 pub fn parse(input: &str) -> Vec<Result<ParsedCommand, CommandOutcome>> {
-    parse_with_variables(input, &[], true)
+    parse_with_variables(input, &[], FocusedNode::View)
 }
 
 /// Parse commands after applying sway's runtime variable substitution.
@@ -34,13 +37,14 @@ pub fn parse(input: &str) -> Vec<Result<ParsedCommand, CommandOutcome>> {
 /// the list is already split, a semicolon or comma inside a variable value
 /// remains data and cannot inject another command.
 ///
-/// `has_view` says whether a container is focused. A few sway handlers check
-/// for one before they look at their arguments, so without it their bad
-/// arguments get the handler's precondition error instead.
+/// `focused` says what sway's handler context would hold. A few sway
+/// handlers check for a container or a view before they look at their
+/// arguments, so without one their bad arguments get the handler's
+/// precondition error instead.
 pub fn parse_with_variables(
     input: &str,
     variables: &[(String, String)],
-    has_view: bool,
+    focused: FocusedNode,
 ) -> Vec<Result<ParsedCommand, CommandOutcome>> {
     let mut results = Vec::new();
     let mut variables = variables.to_vec();
@@ -110,7 +114,7 @@ pub fn parse_with_variables(
                 }));
             }
             Err(error) => {
-                results.push(Err(error.into_outcome(has_view)));
+                results.push(Err(error.into_outcome(focused)));
                 break;
             }
         }
@@ -135,16 +139,16 @@ fn take_criteria(text: &str) -> Result<Option<(String, &str)>, CommandOutcome> {
             }
             Ok(Some((raw.to_owned(), tail.trim_start())))
         }
-        None => {
-            // Sway's criteria parser reports a more specific token or quote
-            // error before noticing a missing closing bracket.
-            let completed = format!("{text}]");
-            let error = crate::criteria::Criteria::parse(&completed, None)
-                .err()
-                .unwrap_or_else(|| "No closing brace found in criteria".into());
-            Err(parse_error(error))
-        }
+        None => Err(parse_error(unclosed_criteria_error(text))),
     }
+}
+
+/// Sway's error for criteria with no closing bracket. Its parser reports a
+/// more specific token or quote error before it notices the bracket.
+fn unclosed_criteria_error(text: &str) -> String {
+    crate::criteria::Criteria::parse(&format!("{text}]"), None)
+        .err()
+        .unwrap_or_else(|| "No closing brace found in criteria".into())
 }
 
 /// Record an unscoped `set`, bare or inside `mode`, for later commands in the
@@ -173,6 +177,19 @@ fn parse_one_with_variables(
     input: &str,
     variables: &[(String, String)],
 ) -> Result<Command, ParseError> {
+    // Sway keeps the quotes on `exec` and `exec_always` arguments, expands
+    // each raw token and joins them with single spaces for `sh -c`
+    // (`sway/sway/commands.c:265-285`, `sway/sway/commands/exec_always.c:40-44`).
+    // Unquoting first would turn `sh -c 'sleep 300'` into `sh -c sleep 300`.
+    // The comparison is case-sensitive, as sway's `strcmp` is.
+    let raw = sway_split_args(input);
+    if let [name @ ("exec" | "exec_always"), args @ ..] = raw.as_slice() {
+        let joined = std::iter::once((*name).to_owned())
+            .chain(args.iter().map(|arg| expand_variables(arg, variables)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return parse_args(&words(&joined), &joined);
+    }
     let words = words(input);
     let skip = if words
         .first()
@@ -264,9 +281,14 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
         // Handlers that check for a focused container before they read their
         // arguments: `sway/sway/commands/border.c:61-67`,
         // `sway/sway/commands/shortcuts_inhibitor.c:12-19`,
+        // `sway/sway/commands/inhibit_idle.c:13-17`,
         // `sway/sway/commands/opacity.c:11-18`,
-        // `sway/sway/commands/move.c:784-788` (move position) and
-        // `sway/sway/commands/resize.c:556-561`.
+        // `sway/sway/commands/move.c:784-788` (move position),
+        // `sway/sway/commands/resize.c:556-561`,
+        // `sway/sway/commands/allow_tearing.c:12-15` and
+        // `sway/sway/commands/max_render_time.c:23-27`. The last two check
+        // for a view after their argument checks, so swayward's own refusal
+        // only applies when a view is there to refuse.
         "border" if error.message_is(BORDER_SYNTAX) => {
             error.unless_view("Only views can have borders", Invalid)
         }
@@ -274,22 +296,32 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
             error.unless_view("Only views can have shortcuts inhibitors", Invalid)
         }
         "opacity" if error.message_is(OPACITY_FLOAT_INVALID) => {
-            error.unless_view("No current container", Failure)
+            error.unless_container("No current container", Failure)
+        }
+        "inhibit_idle" if error.message_is(INHIBIT_IDLE_USAGE) => {
+            error.unless_view("Only views can have idle inhibitors", Invalid)
+        }
+        "allow_tearing" if error.message_is(ALLOW_TEARING_REFUSAL) => {
+            error.unless_view("Tearing can only be allowed on views", Invalid)
+        }
+        "max_render_time" if error.message_is(MAX_RENDER_TIME_REFUSAL) => {
+            error.unless_view("Only views can have a max_render_time", Invalid)
         }
         "move"
             if error.message_is(&move_position_usage())
                 || error.message_is(INVALID_X_POSITION)
                 || error.message_is(INVALID_Y_POSITION) =>
         {
-            error.unless_view(
+            error.unless_container(
                 "Only floating containers can be moved to an absolute position",
                 Failure,
             )
         }
-        "resize" => error.unless_view("Cannot resize nothing", Invalid),
+        "resize" => error.unless_container("Cannot resize nothing", Invalid),
         // Handlers that report a bad value as CMD_FAILURE:
         // `sway/sway/commands/focus_follows_mouse.c:17-18`,
         // `sway/sway/commands/mouse_warping.c:16-17`,
+        // `sway/sway/commands/move.c:674-680`,
         // `sway/sway/commands/split.c:80-81` and
         // `sway/sway/commands/titlebar_border_thickness.c:17`,
         // `sway/sway/commands/titlebar_padding.c:17,26`.
@@ -297,6 +329,7 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
             error.into_failure()
         }
         "mouse_warping" if error.message_is(MOUSE_WARPING_USAGE) => error.into_failure(),
+        "move" if error.message_is(INVALID_DISTANCE) => error.into_failure(),
         "split" if error.message_is(SPLIT_INVALID) => error.into_failure(),
         "titlebar_border_thickness" | "titlebar_padding" if error.message_is(INVALID_SIZE) => {
             error.into_failure()
@@ -306,9 +339,21 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
 }
 
 const SHORTCUTS_INHIBITOR_USAGE: &str = "Expected `shortcuts_inhibitor enable|disable`";
+const INHIBIT_IDLE_USAGE: &str = "Expected `inhibit_idle focus|fullscreen|open|none|visible`";
+const ALLOW_TEARING_REFUSAL: &str = "allow_tearing requires immediate presentation support";
+const MAX_RENDER_TIME_REFUSAL: &str = "max_render_time requires per-view render deadline support";
 
 fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<Command, String> {
-    check_arity(lower, rest.len())?;
+    let argc = match lower {
+        // These consume their raw tail. Count it as sway's split_args does:
+        // criteria stay one token even when they hold spaces, and `""` is a
+        // token (`sway/common/stringop.c:92-142`).
+        "assign" | "for_window" | "no_focus" | "exec" | "exec_always" => {
+            sway_argc(input).saturating_sub(1)
+        }
+        _ => rest.len(),
+    };
+    check_arity(lower, argc)?;
     match lower {
         "focus" => parse_focus(rest),
         "move" => parse_move(rest),
@@ -320,29 +365,17 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
         "fullscreen" => parse_fullscreen(rest),
         "floating" => match rest {
             [value] => Ok(Command::Floating(parse_boolean_toggle(value))),
-            _ => Err(format!(
-                "Invalid floating command (expected 1 argument, got {})",
-                rest.len()
-            )),
+            _ => Err(arity_error(rest.len(), "floating", Expected::EqualTo(1))),
         },
         "urgent" => match rest {
             [value] if matches!(*value, "allow" | "deny") => {
                 Err("urgent allow|deny requires client urgency-request policy support".into())
             }
             [value] => Ok(Command::Urgent((*value).to_owned())),
-            _ => Err(format!(
-                "Invalid urgent command (expected 1 argument, got {})",
-                rest.len()
-            )),
+            _ => Err(arity_error(rest.len(), "urgent", Expected::EqualTo(1))),
         },
         "border" => parse_border(rest).map(Command::Border),
-        "title_format" => {
-            if rest.is_empty() {
-                Err("Expected 'title_format <format>'".into())
-            } else {
-                Ok(Command::TitleFormat(join_words(rest)))
-            }
-        }
+        "title_format" => Ok(Command::TitleFormat(join_words(rest))),
         "sticky" => one(rest, "sticky <enable|disable|toggle>")
             .map(|value| Command::Sticky(value.to_owned())),
         "swap" => parse_swap(rest),
@@ -355,36 +388,37 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
         "kill" => Ok(Command::Kill),
         "resize" => parse_resize(rest),
         "reload" => no_args(rest, "reload").map(|()| Command::Reload),
-        "exit" => {
-            if rest.is_empty() {
-                Ok(Command::Exit)
-            } else {
-                Err(format!(
-                    "Invalid exit command (expected 0 arguments, got {})",
-                    rest.len()
-                ))
-            }
-        }
+        "exit" => checkarg(rest.len(), "exit", Expected::EqualTo(0)).map(|()| Command::Exit),
         "opacity" => parse_opacity(rest),
-        "inhibit_idle" => Err("inhibit_idle requires user inhibitor policy support".into()),
+        "inhibit_idle" => match rest {
+            ["focus"] => Ok(Command::InhibitIdle(InhibitIdleMode::Focus)),
+            ["fullscreen"] => Ok(Command::InhibitIdle(InhibitIdleMode::Fullscreen)),
+            ["open"] => Ok(Command::InhibitIdle(InhibitIdleMode::Open)),
+            ["none"] => Ok(Command::InhibitIdle(InhibitIdleMode::None)),
+            ["visible"] => Ok(Command::InhibitIdle(InhibitIdleMode::Visible)),
+            [_] => Err(INHIBIT_IDLE_USAGE.into()),
+            _ => Err(arity_error(
+                rest.len(),
+                "inhibit_idle",
+                Expected::EqualTo(1),
+            )),
+        },
         // Sway's developer-only create_output handler deliberately ignores argv.
         "create_output" => Ok(Command::CreateOutput),
         "input" => {
-            if rest.len() < 2 {
-                Err(format!(
-                    "Invalid input command (expected at least 2 arguments, got {})",
-                    rest.len()
-                ))
-            } else {
-                parse_input_command(rest)
-            }
+            checkarg(rest.len(), "input", Expected::AtLeast(2))?;
+            parse_input_command(rest)
         }
         "output" => parse_output_command(rest),
-        "allow_tearing" => Err("allow_tearing requires immediate presentation support".into()),
-        "max_render_time" if rest.is_empty() => Err("Missing max render time argument.".into()),
-        "max_render_time" => {
-            Err("max_render_time requires per-view render deadline support".into())
-        }
+        "allow_tearing" => Err(ALLOW_TEARING_REFUSAL.into()),
+        // `sway/sway/commands/max_render_time.c:9-21`.
+        "max_render_time" => match rest.first() {
+            None => Err("Missing max render time argument.".into()),
+            Some(value) if *value == "off" || strtol_int(value).is_some_and(|time| time > 0) => {
+                Err(MAX_RENDER_TIME_REFUSAL.into())
+            }
+            Some(_) => Err("Invalid max render time.".into()),
+        },
         "shortcuts_inhibitor" => match rest {
             [value] if *value == "enable" => Ok(Command::ShortcutsInhibitor(true)),
             [value] if *value == "disable" => Ok(Command::ShortcutsInhibitor(false)),
@@ -417,7 +451,11 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
     }
 }
 
+/// The `checkarg` sway's handler for `name` runs before it reads argv.
+/// Handlers that check later, or only on some paths, call [`checkarg`]
+/// themselves.
 fn check_arity(name: &str, count: usize) -> Result<(), String> {
+    use Expected::{AtLeast, EqualTo};
     let display_name = match name {
         "new_window" => "default_border",
         "new_float" => "default_floating_border",
@@ -430,31 +468,39 @@ fn check_arity(name: &str, count: usize) -> Result<(), String> {
         | "new_float"
         | "font"
         | "mode"
-        | "title_align" => Some(("at least ", 1, false)),
-        "for_window" => Some(("at least ", 2, false)),
-        "swap" => Some(("at least ", 4, false)),
+        | "title_align"
+        | "exec"
+        | "exec_always"
+        | "force_display_urgency_hint"
+        | "hide_edge_borders"
+        | "move"
+        | "no_focus"
+        | "show_marks"
+        | "smart_gaps"
+        | "title_format"
+        | "titlebar_padding" => AtLeast(1),
+        "allow_tearing" => AtLeast(1),
+        "assign" | "for_window" => AtLeast(2),
+        "swap" => AtLeast(4),
         "focus_follows_mouse"
         | "focus_on_window_activation"
         | "focus_wrapping"
         | "force_focus_wrapping"
+        | "mouse_warping"
         | "popup_during_fullscreen"
+        | "scratchpad"
+        | "shortcuts_inhibitor"
+        | "smart_borders"
+        | "split"
         | "sticky"
         | "tiling_drag"
-        | "tiling_drag_threshold" => Some(("", 1, true)),
-        "floating_minimum_size" | "floating_maximum_size" => Some(("", 3, true)),
-        "reload" | "splith" | "splitv" | "splitt" => Some(("", 0, true)),
-        _ => None,
+        | "tiling_drag_threshold"
+        | "workspace_auto_back_and_forth" => EqualTo(1),
+        "floating_minimum_size" | "floating_maximum_size" => EqualTo(3),
+        "reload" | "splith" | "splitv" | "splitt" => EqualTo(0),
+        _ => return Ok(()),
     };
-    let Some((qualifier, expected, exact)) = expected else {
-        return Ok(());
-    };
-    if (exact && count != expected) || (!exact && count < expected) {
-        return Err(format!(
-            "Invalid {display_name} command (expected {qualifier}{expected} argument{}, got {count})",
-            if expected == 1 { "" } else { "s" }
-        ));
-    }
-    Ok(())
+    checkarg(count, display_name, expected)
 }
 
 fn no_args(args: &[&str], syntax: &str) -> Result<(), String> {

@@ -81,11 +81,9 @@ fn parses_shortcuts_inhibitor_view_policy_only() {
         Command::ShortcutsInhibitor(false)
     );
     for input in [
-        "shortcuts_inhibitor",
         "shortcuts_inhibitor toggle",
         "shortcuts_inhibitor activate",
         "shortcuts_inhibitor deactivate",
-        "shortcuts_inhibitor enable extra",
     ] {
         assert_eq!(
             parse(input)[0].as_ref().unwrap_err().error.as_deref(),
@@ -209,6 +207,152 @@ fn command_arity_failures_match_sway() {
     assert!(parse("focus left extra")[0].is_ok());
     assert!(parse("force_display_urgency_hint 500 ms extra")[0].is_ok());
     assert!(parse("hide_edge_borders none extra")[0].is_ok());
+    assert!(parse("exec \"\"")[0].is_ok());
+}
+
+/// Oracle: command-fuzz family-*-missing and family-*-extra rows for each
+/// handler whose first statement is sway's checkarg.
+#[test]
+fn leading_checkarg_failures_match_sway() {
+    for (input, expected) in [
+        (
+            "assign",
+            "Invalid assign command (expected at least 2 arguments, got 0)",
+        ),
+        (
+            "assign oracle_invalid",
+            "Invalid assign command (expected at least 2 arguments, got 1)",
+        ),
+        (
+            "assign \"unterminated",
+            "Invalid assign command (expected at least 2 arguments, got 1)",
+        ),
+        (
+            "assign [app_id=\"unterminated] workspace 2",
+            "Invalid assign command (expected at least 2 arguments, got 1)",
+        ),
+        (
+            "assign [app_id=\"a b\"]",
+            "Invalid assign command (expected at least 2 arguments, got 1)",
+        ),
+        (
+            "exec",
+            "Invalid exec command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "exec_always",
+            "Invalid exec_always command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "exec --no-startup-id",
+            "Invalid --no-startup-id command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "force_display_urgency_hint",
+            "Invalid force_display_urgency_hint command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "hide_edge_borders",
+            "Invalid hide_edge_borders command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "mouse_warping",
+            "Invalid mouse_warping command (expected 1 argument, got 0)",
+        ),
+        (
+            "mouse_warping output oracle_extra",
+            "Invalid mouse_warping command (expected 1 argument, got 2)",
+        ),
+        (
+            "move",
+            "Invalid move command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "no_focus",
+            "Invalid no_focus command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "scratchpad",
+            "Invalid scratchpad command (expected 1 argument, got 0)",
+        ),
+        (
+            "scratchpad show oracle_extra",
+            "Invalid scratchpad command (expected 1 argument, got 2)",
+        ),
+        (
+            "shortcuts_inhibitor",
+            "Invalid shortcuts_inhibitor command (expected 1 argument, got 0)",
+        ),
+        (
+            "shortcuts_inhibitor enable oracle_extra",
+            "Invalid shortcuts_inhibitor command (expected 1 argument, got 2)",
+        ),
+        (
+            "show_marks",
+            "Invalid show_marks command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "smart_borders",
+            "Invalid smart_borders command (expected 1 argument, got 0)",
+        ),
+        (
+            "smart_borders on oracle_extra",
+            "Invalid smart_borders command (expected 1 argument, got 2)",
+        ),
+        (
+            "smart_gaps",
+            "Invalid smart_gaps command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "split",
+            "Invalid split command (expected 1 argument, got 0)",
+        ),
+        (
+            "split h oracle_extra",
+            "Invalid split command (expected 1 argument, got 2)",
+        ),
+        (
+            "title_format",
+            "Invalid title_format command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "titlebar_padding",
+            "Invalid titlebar_padding command (expected at least 1 argument, got 0)",
+        ),
+        (
+            "workspace_auto_back_and_forth",
+            "Invalid workspace_auto_back_and_forth command (expected 1 argument, got 0)",
+        ),
+        (
+            "workspace_auto_back_and_forth yes oracle_extra",
+            "Invalid workspace_auto_back_and_forth command (expected 1 argument, got 2)",
+        ),
+    ] {
+        let outcome = parse(input).remove(0).unwrap_err();
+        assert_eq!(outcome.error.as_deref(), Some(expected), "{input}");
+        assert_eq!(outcome.parse_error, Some(true), "{input}");
+    }
+    // The criteria stay one token, and the target makes two.
+    assert!(parse("assign [app_id=\"a b\"] 2")[0].is_ok());
+}
+
+#[test]
+fn no_focus_reports_sways_criteria_error() {
+    // Oracle: command-fuzz family-no_focus-criteria-quote.
+    let outcome = parse("no_focus [app_id=\"unterminated]")
+        .remove(0)
+        .unwrap_err();
+    assert_eq!(outcome.error.as_deref(), Some("Quote mismatch in criteria"));
+    assert_eq!(outcome.parse_error, Some(true));
+}
+
+#[test]
+fn move_distance_is_a_command_failure() {
+    // Oracle: command-fuzz family-move-extra. Sway's move_in_direction
+    // reports a bad distance as CMD_FAILURE (`sway/sway/commands/move.c:674-680`).
+    let outcome = parse("move left oracle_extra").remove(0).unwrap_err();
+    assert_eq!(outcome.error.as_deref(), Some("Invalid distance specified"));
+    assert_eq!(outcome.parse_error, Some(false));
 }
 
 #[test]
@@ -287,14 +431,26 @@ fn parses_opacity_modes_and_sway_errors() {
 }
 
 #[test]
-fn unsupported_runtime_state_commands_fail_loud() {
+fn inhibit_idle_parses_sway_modes_and_errors() {
+    for (value, mode) in [
+        ("focus", InhibitIdleMode::Focus),
+        ("fullscreen", InhibitIdleMode::Fullscreen),
+        ("open", InhibitIdleMode::Open),
+        ("none", InhibitIdleMode::None),
+        ("visible", InhibitIdleMode::Visible),
+    ] {
+        assert_eq!(
+            command(&format!("inhibit_idle {value}")),
+            Command::InhibitIdle(mode)
+        );
+    }
     assert_eq!(
-        parse("inhibit_idle visible")[0]
+        parse("inhibit_idle always")[0]
             .as_ref()
             .unwrap_err()
             .error
             .as_deref(),
-        Some("inhibit_idle requires user inhibitor policy support")
+        Some("Expected `inhibit_idle focus|fullscreen|open|none|visible`")
     );
 }
 
@@ -547,6 +703,21 @@ fn parses_layout_and_window_command_families() {
             Some("Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'")
         );
     assert_eq!(command("layout default"), Command::LayoutDefault);
+    // Sway matches argv[0] and ignores the rest unless it is `toggle`
+    // (`sway/sway/commands/layout.c:107-123`). Oracle: command-fuzz
+    // family-layout-extra.
+    assert_eq!(
+        command("layout tabbed oracle_extra"),
+        Command::Layout(Layout::Tabbed)
+    );
+    assert_eq!(command("layout default extra"), Command::LayoutDefault);
+    for input in ["layout toggle stacked", "layout toggle garbage junk"] {
+        assert_eq!(
+            parse(input)[0].as_ref().unwrap_err().error.as_deref(),
+            Some(LAYOUT_USAGE),
+            "{input}"
+        );
+    }
     assert_eq!(
         command("layout toggle split"),
         Command::LayoutToggle(LayoutToggle::Split)

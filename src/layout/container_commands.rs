@@ -293,6 +293,24 @@ impl<W: LayoutElement> Layout<W> {
             .is_some_and(|workspace| workspace.tiling_mut().set_title_format(node, format))
     }
 
+    /// Sway's `floating` command on a fullscreen view: the view changes
+    /// layer and stays fullscreen. Returns false when `window` is not
+    /// fullscreen, leaving the caller to float or tile it.
+    pub fn set_fullscreen_window_floating(
+        &mut self,
+        window: &W::Id,
+        floating: Option<bool>,
+    ) -> bool {
+        let Some(workspace) = self.workspaces_mut().find(|ws| ws.has_window(window)) else {
+            return false;
+        };
+        if !workspace.set_fullscreen_window_floating(window, floating) {
+            return false;
+        }
+        self.forget_scratchpad_window_if_tiled(window);
+        true
+    }
+
     pub fn set_container_floating(
         &mut self,
         workspace_id: WorkspaceId,
@@ -324,6 +342,15 @@ impl<W: LayoutElement> Layout<W> {
         node: NodeId,
     ) -> Option<Vec<W::Id>> {
         self.workspace(workspace_id)?.tiling_node_windows(node)
+    }
+
+    /// Every window under a container, tiled or in a floating group, as
+    /// `container_for_each_child` walks it (sway/tree/container.c).
+    pub fn container_windows(&self, workspace_id: WorkspaceId, node: NodeId) -> Option<Vec<W::Id>> {
+        let workspace = self.workspace(workspace_id)?;
+        workspace
+            .tiling_node_windows(node)
+            .or_else(|| workspace.floating().node_window_ids(node))
     }
 
     pub fn toggle_focused_layout(

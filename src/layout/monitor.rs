@@ -17,7 +17,9 @@ use super::workspace::{
     compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
     WorkspaceRenderElement,
 };
-use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
+use super::{
+    compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options, WorkspaceActivation,
+};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::RenderLayer;
@@ -109,13 +111,8 @@ pub struct DndScrollGesture {
     /// For example, if there's a workspace switch during a DnD scroll.
     animation: Option<Animation>,
     tracker: SwipeTracker,
-    /// Whether the gesture is controlled by the touchpad.
-    /// Whether the gesture is clamped to +-1 workspace around the center.
-    is_clamped: bool,
-
-    // If this gesture is for drag-and-drop scrolling, this is the last event's unadjusted
-    // timestamp.
-    dnd_last_event_time: Option<Duration>,
+    /// The last event's unadjusted timestamp.
+    dnd_last_event_time: Duration,
     // Time when the drag-and-drop scroll delta became non-zero, used for debouncing.
     //
     // If `None` then the scroll delta is currently zero.
@@ -178,6 +175,8 @@ pub enum MonitorAddWindowTarget<'a, W: LayoutElement> {
     },
     /// Next to this existing window.
     NextTo(&'a W::Id),
+    /// Moved onto this workspace from another one.
+    Move(WorkspaceId),
 }
 
 impl<'a, W: LayoutElement> Copy for MonitorAddWindowTarget<'a, W> {}
@@ -242,16 +241,6 @@ impl WorkspaceSwitch {
 }
 
 impl DndScrollGesture {
-    fn min_max(&self, workspace_count: usize) -> (f64, f64) {
-        if self.is_clamped {
-            let min = self.center_idx.saturating_sub(1) as f64;
-            let max = (self.center_idx + 1).min(workspace_count - 1) as f64;
-            (min, max)
-        } else {
-            (0., (workspace_count - 1) as f64)
-        }
-    }
-
     fn animate_from(&mut self, from: f64, clock: Clock, config: swayward_config::Animation) {
         let current = self.animation.as_ref().map_or(0., Animation::value);
         self.animation = Some(Animation::new(clock, from + current, 0., 0., config));
@@ -348,8 +337,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         // A monitor always needs one workspace to be active on, but only one:
-        // sway creates further workspaces on demand, and niri's always-empty
-        // trailing placeholder is an affordance of its scrolling strip.
+        // sway creates further workspaces on demand.
         if workspaces.is_empty() {
             let mut ws = Workspace::new(output.clone(), clock.clone(), options.clone());
             // Sway creates each output's initial workspace before applying the
@@ -647,7 +635,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         match &mut self.workspace_switch {
             // During a DnD scroll, we want to visually animate even if idx matches the active idx.
-            Some(WorkspaceSwitch::DndScroll(gesture)) if gesture.dnd_last_event_time.is_some() => {
+            Some(WorkspaceSwitch::DndScroll(gesture)) => {
                 gesture.center_idx = idx;
 
                 // Adjust start_idx to make current_idx point at idx.
@@ -693,6 +681,10 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 (idx, target)
             }
+            MonitorAddWindowTarget::Move(id) => {
+                let idx = self.idx_of_ws(id).unwrap();
+                (idx, WorkspaceAddWindowTarget::Move)
+            }
             MonitorAddWindowTarget::NextTo(win_id) => {
                 let idx = self
                     .workspaces
@@ -715,7 +707,13 @@ impl<W: LayoutElement> Monitor<W> {
         // monitor. So we can use any workspace, not necessarily the exact target workspace.
         let tile = self.workspaces[0].make_tile(window);
 
-        self.add_tile(tile, target, activate, true, is_floating);
+        self.add_tile(
+            tile,
+            target,
+            activate,
+            WorkspaceActivation::Allow,
+            is_floating,
+        );
     }
 
     pub fn add_tiling_tile(&mut self, workspace_idx: usize, tile: Tile<W>, activate: bool) {
@@ -740,7 +738,7 @@ impl<W: LayoutElement> Monitor<W> {
         activate: ActivateWindow,
         // Kept separate from window activation until mu task layout-activate-window-api gives the
         // API an explicit workspace-activation policy.
-        allow_to_activate_workspace: bool,
+        workspace_activation: WorkspaceActivation,
         is_floating: bool,
     ) {
         let (workspace_idx, target) = self.resolve_add_window_target(target);
@@ -761,7 +759,7 @@ impl<W: LayoutElement> Monitor<W> {
             workspace.original_output = OutputId::new(&self.output);
         }
 
-        if allow_to_activate_workspace && activate.map_smart(|| false) {
+        if workspace_activation.allowed() && activate.map_smart(|| false) {
             self.activate_workspace(workspace_idx);
         }
     }
@@ -775,7 +773,7 @@ impl<W: LayoutElement> Monitor<W> {
         activate: bool,
         // Kept separate from window activation until mu task layout-activate-window-api gives the
         // API an explicit workspace-activation policy.
-        allow_to_activate_workspace: bool,
+        workspace_activation: WorkspaceActivation,
     ) {
         let workspace = &mut self.workspaces[workspace_idx];
 
@@ -785,7 +783,7 @@ impl<W: LayoutElement> Monitor<W> {
             workspace.original_output = OutputId::new(&self.output);
         }
 
-        if allow_to_activate_workspace && activate {
+        if workspace_activation.allowed() && activate {
             self.activate_workspace(workspace_idx);
         }
     }
@@ -1135,16 +1133,13 @@ impl<W: LayoutElement> Monitor<W> {
 
         self.add_tile(
             removed.tile,
-            MonitorAddWindowTarget::Workspace {
-                id: new_id,
-                column_idx: None,
-            },
+            MonitorAddWindowTarget::Move(new_id),
             if activate {
                 ActivateWindow::Yes
             } else {
                 ActivateWindow::No
             },
-            true,
+            WorkspaceActivation::Allow,
             removed.is_floating,
         );
         if let (Some(fullscreen), Some(fullscreen_window)) = (fullscreen, fullscreen_window) {
@@ -1242,7 +1237,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn switch_workspace_up(&mut self) {
         let new_idx = match &self.workspace_switch {
             // During a DnD scroll, select the prev apparent workspace.
-            Some(WorkspaceSwitch::DndScroll(gesture)) if gesture.dnd_last_event_time.is_some() => {
+            Some(WorkspaceSwitch::DndScroll(gesture)) => {
                 let current = gesture.current_idx;
                 let new = current.ceil() - 1.;
                 new.clamp(0., (self.workspaces.len() - 1) as f64) as usize
@@ -1256,7 +1251,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn switch_workspace_down(&mut self) {
         let new_idx = match &self.workspace_switch {
             // During a DnD scroll, select the next apparent workspace.
-            Some(WorkspaceSwitch::DndScroll(gesture)) if gesture.dnd_last_event_time.is_some() => {
+            Some(WorkspaceSwitch::DndScroll(gesture)) => {
                 let current = gesture.current_idx;
                 let new = current.floor() + 1.;
                 new.clamp(0., (self.workspaces.len() - 1) as f64) as usize
@@ -1387,16 +1382,14 @@ impl<W: LayoutElement> Monitor<W> {
                 //
                 // This happens after any dnd_scroll_gesture_scroll() calls (in
                 // Layout::advance_animations()), so it doesn't mess up the time delta there.
-                if let Some(last_time) = &mut gesture.dnd_last_event_time {
-                    let now = self.clock.now_unadjusted();
-                    if *last_time != now {
-                        *last_time = now;
+                let now = self.clock.now_unadjusted();
+                if gesture.dnd_last_event_time != now {
+                    gesture.dnd_last_event_time = now;
 
-                        // If last_time was already == now, then dnd_scroll_gesture_scroll() must've
-                        // updated the gesture already. Therefore, when this code runs, the pointer
-                        // must be outside the DnD scrolling zone.
-                        gesture.dnd_nonzero_start_time = None;
-                    }
+                    // If last_time was already == now, then dnd_scroll_gesture_scroll() must've
+                    // updated the gesture already. Therefore, when this code runs, the pointer
+                    // must be outside the DnD scrolling zone.
+                    gesture.dnd_nonzero_start_time = None;
                 }
 
                 if let Some(anim) = &mut gesture.animation {
@@ -2006,11 +1999,7 @@ mod workspace_moves;
 
 impl<W: LayoutElement> Monitor<W> {
     pub fn dnd_scroll_gesture_begin(&mut self) {
-        if let Some(WorkspaceSwitch::DndScroll(DndScrollGesture {
-            dnd_last_event_time: Some(_),
-            ..
-        })) = &self.workspace_switch
-        {
+        if let Some(WorkspaceSwitch::DndScroll(_)) = &self.workspace_switch {
             // Already active.
             return;
         }
@@ -2029,8 +2018,7 @@ impl<W: LayoutElement> Monitor<W> {
             current_idx,
             animation: None,
             tracker: SwipeTracker::new(),
-            is_clamped: false,
-            dnd_last_event_time: Some(self.clock.now_unadjusted()),
+            dnd_last_event_time: self.clock.now_unadjusted(),
             dnd_nonzero_start_time: None,
         };
         self.workspace_switch = Some(WorkspaceSwitch::DndScroll(gesture));
@@ -2043,10 +2031,7 @@ impl<W: LayoutElement> Monitor<W> {
             return false;
         };
 
-        let Some(last_time) = gesture.dnd_last_event_time else {
-            // Not a DnD scroll.
-            return false;
-        };
+        let last_time = gesture.dnd_last_event_time;
 
         let config = &self.options.gestures.dnd_edge_workspace_switch;
         let trigger_height = config.trigger_height;
@@ -2084,7 +2069,7 @@ impl<W: LayoutElement> Monitor<W> {
         let delta = delta * speed;
 
         let now = self.clock.now_unadjusted();
-        gesture.dnd_last_event_time = Some(now);
+        gesture.dnd_last_event_time = now;
 
         if delta == 0. {
             // We're outside the scrolling zone.
@@ -2111,8 +2096,7 @@ impl<W: LayoutElement> Monitor<W> {
         let pos = gesture.tracker.pos() / total_height;
         let unclamped = gesture.start_idx + pos;
 
-        let (min, max) = gesture.min_max(self.workspaces.len());
-        let clamped = unclamped.clamp(min, max);
+        let clamped = unclamped.clamp(0., (self.workspaces.len() - 1) as f64);
 
         // Make sure that DnD scrolling too much outside the min/max does not "build up".
         gesture.start_idx += clamped - unclamped;
@@ -2122,17 +2106,6 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn dnd_scroll_gesture_end(&mut self) {
-        if !matches!(
-            self.workspace_switch,
-            Some(WorkspaceSwitch::DndScroll(DndScrollGesture {
-                dnd_last_event_time: Some(_),
-                ..
-            }))
-        ) {
-            // Not a DnD scroll.
-            return;
-        };
-
         let Some(WorkspaceSwitch::DndScroll(gesture)) = &mut self.workspace_switch else {
             return;
         };

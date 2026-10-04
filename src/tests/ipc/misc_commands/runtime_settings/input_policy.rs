@@ -36,6 +36,37 @@ fn input_policy_settings_apply_at_runtime_like_sway() {
     assert!(f.swayward().config.borrow().input.tiling_drag);
     assert!(crate::command::execute(f.niri_state(), "tiling_drag_threshold 17")[0].success);
     assert_eq!(f.swayward().config.borrow().input.tiling_drag_threshold, 17);
+    // Sway reads the threshold as an int, so 2147483648 wraps negative and
+    // is refused (`sway/sway/commands/tiling_drag_threshold.c:12-16`).
+    // Oracle: command-fuzz family-tiling_drag_threshold-overflow.
+    let outcome = &crate::command::execute(f.niri_state(), "tiling_drag_threshold 2147483648")[0];
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("Invalid threshold specified")
+    );
+    assert_eq!(outcome.parse_error, Some(true));
+    assert_eq!(f.swayward().config.borrow().input.tiling_drag_threshold, 17);
+
+    // These handlers read their leading arguments and ignore the rest.
+    // Oracle: command-fuzz family-title_align-extra, family-smart_gaps-extra
+    // and family-titlebar_padding-extra.
+    assert!(crate::command::execute(f.niri_state(), "title_align center oracle_extra")[0].success);
+    assert_eq!(
+        layout(&mut f).titlebar.alignment,
+        swayward_config::TitleAlignment::Center
+    );
+    assert!(crate::command::execute(f.niri_state(), "smart_gaps on oracle_extra")[0].success);
+    assert_eq!(layout(&mut f).smart_gaps, swayward_config::SmartGaps::On);
+    assert!(
+        crate::command::execute(f.niri_state(), "titlebar_padding 4 3 oracle_extra")[0].success
+    );
+    assert_eq!(
+        (
+            layout(&mut f).titlebar.horizontal_padding,
+            layout(&mut f).titlebar.vertical_padding
+        ),
+        (4., 3.)
+    );
     assert!(crate::command::execute(f.niri_state(), "force_display_urgency_hint 700ms")[0].success);
     assert_eq!(f.swayward().config.borrow().urgent_timeout_ms.0, 700);
     // Oracle: state/settings_urgency_hint_parse

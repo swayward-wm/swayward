@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" width="64" height="64">
+  <title>swayward</title>
+  <desc>Icon-size swayward mark: the circuit tree simplified, with heavier strokes, for 16 to 64 px.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c0d3a"/>
+      <stop offset="1" stop-color="#07030f"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff2bd6" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#7a2bff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="trunk" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#ff2bd6"/>
+      <stop offset="1" stop-color="#00f0ff"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1fffb0"/>
+      <stop offset="1" stop-color="#00b8ff"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff2bd6"/>
+      <stop offset="1" stop-color="#4a0d66"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="800" height="800" rx="168" fill="url(#bg)"/>
+  <circle cx="400" cy="380" r="330" fill="url(#halo)"/>
+
+  <!-- island -->
+  <g transform="translate(400 580)">
+    <polygon points="-250,0 0,74 0,130 -250,56" fill="url(#side)"/>
+    <polygon points="250,0 0,74 0,130 250,56" fill="url(#side)" opacity="0.7"/>
+    <polygon points="0,-74 250,0 0,74 -250,0" fill="url(#top)"/>
+  </g>
+
+  <!-- trunk and three branches, heavy enough to survive 16 px -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+    <path d="M390,560 L390,470 L460,400 L460,320 L420,280 L420,200" stroke="url(#trunk)" stroke-width="44"/>
+    <path d="M460,370 L570,260 L570,200" stroke="#00f0ff" stroke-width="30"/>
+    <path d="M420,300 L310,190 L310,150" stroke="#00f0ff" stroke-width="30"/>
+  </g>
+
+  <!-- three container leaves -->
+  <g fill="#0b0618" stroke-width="18" stroke-linejoin="round" filter="url(#glow)">
+    <rect x="510" y="110" width="120" height="86" rx="10" stroke="#00f0ff"/>
+    <rect x="250" y="60" width="120" height="86" rx="10" stroke="#00f0ff"/>
+    <rect x="360" y="120" width="120" height="86" rx="10" stroke="#ff2bd6"/>
+  </g>
+</svg>

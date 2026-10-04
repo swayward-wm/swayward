@@ -32,6 +32,7 @@ struct AssignContext<'a, W: LayoutElement> {
     titlebar_height: f64,
     fullscreen: &'a HashSet<NodeId>,
     mapped_under_fullscreen: &'a HashSet<NodeId>,
+    stale_fullscreen_rects: &'a HashMap<NodeId, Rectangle<f64, Logical>>,
     workspace_area: Rectangle<f64, Logical>,
     gaps_to_edge: bool,
     hide_edge_borders: HideEdgeBorders,
@@ -64,6 +65,9 @@ pub(crate) struct GeometryInput<'a, W: LayoutElement> {
     pub titlebar_height: f64,
     pub fullscreen: &'a HashSet<NodeId>,
     pub mapped_under_fullscreen: &'a HashSet<NodeId>,
+    /// Boxes that override the tiled pass: former fullscreen containers sway
+    /// no longer arranges (see `TilingTree::stale_fullscreen_rects`).
+    pub stale_fullscreen_rects: &'a HashMap<NodeId, Rectangle<f64, Logical>>,
     pub hide_edge_borders: HideEdgeBorders,
     pub smart_borders: SmartBorders,
     pub visible_leaves: &'a HashSet<NodeId>,
@@ -79,6 +83,7 @@ pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry
         titlebar_height: input.titlebar_height,
         fullscreen: &HashSet::new(),
         mapped_under_fullscreen: input.mapped_under_fullscreen,
+        stale_fullscreen_rects: input.stale_fullscreen_rects,
         workspace_area,
         gaps_to_edge: input.gaps_to_edge,
         hide_edge_borders: input.hide_edge_borders,
@@ -306,7 +311,6 @@ fn assign_leaf<W: LayoutElement>(
     // arrange_container() likewise derives the content and each border from the container
     // dimensions (sway/desktop/transaction.c:392-472).
     result.leaf_boxes.insert(id, rect);
-    let decorated_by_parent = decorated_by_parent && fullscreen.is_empty();
     if decorated_by_parent {
         result.titlebar_attached.insert(id);
         result.titlebar_owned_by_parent.insert(id);
@@ -625,12 +629,9 @@ fn assign_strip<W: LayoutElement>(
 ) {
     let nodes = context.nodes;
     let titlebar_height = context.titlebar_height;
-    let fullscreen = context.fullscreen;
 
     let count = children.len();
-    let total_height = if !fullscreen.is_empty() {
-        0.
-    } else if layout == Layout::Stacked {
+    let total_height = if layout == Layout::Stacked {
         titlebar_height * count as f64
     } else {
         titlebar_height
@@ -742,7 +743,7 @@ fn emit_strip_titlebar<W: LayoutElement>(
                 })
                 .unwrap_or_default(),
             state: TitlebarState::Unfocused,
-            visible: context.fullscreen.is_empty(),
+            visible: true,
         },
     );
 }
@@ -755,6 +756,14 @@ fn assign<W: LayoutElement>(
     let Some(node) = context.nodes.get(&assignment.id) else {
         return;
     };
+    let mut assignment = assignment;
+    if let Some(stale) = context
+        .stale_fullscreen_rects
+        .get(&assignment.id)
+        .filter(|_| context.fullscreen.is_empty())
+    {
+        assignment.rect = *stale;
+    }
     result.ipc_nodes.insert(assignment.id, assignment.rect);
     match &node.value {
         TreeNode::Leaf { tile } => assign_leaf(context, tile, assignment, result),
@@ -813,8 +822,8 @@ fn subtract_horizontal(
 }
 
 /// Sway's smallest sane container width and height (include/sway/tree/node.h:8-9).
-const MIN_SANE_W: f64 = 100.;
-const MIN_SANE_H: f64 = 60.;
+pub(super) const MIN_SANE_W: f64 = 100.;
+pub(super) const MIN_SANE_H: f64 = 60.;
 
 /// The inner gap between a split's children, shrunk so that every child keeps at least
 /// `minimum_child_extent`, and floored to whole pixels (`apply_horiz_layout` and

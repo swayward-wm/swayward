@@ -4,7 +4,7 @@ description: "config:\nwindow-rule {\n    open-fullscreen false\n    border { on
 expression: snapshot
 ---
 initial configure:
-size: 1272 × 712, bounds: 1272 × 712, states: []
+size: 0 × 0, bounds: 1272 × 712, states: []
 
 post-map configures:
 size: 1272 × 694, bounds: 1272 × 712, states: [Activated]

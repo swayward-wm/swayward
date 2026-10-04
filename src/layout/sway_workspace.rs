@@ -1,6 +1,7 @@
 //! Sway workspace switching, creation, renaming and move-to-workspace commands.
 
 use super::*;
+use crate::command::NO_PREVIOUS_WORKSPACE;
 
 impl<W: LayoutElement> Layout<W> {
     pub(super) fn move_activation(focus: bool) -> ActivateWindow {
@@ -190,7 +191,7 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 let Some(previous_name) = monitor.previous_workspace_name().map(str::to_owned)
                 else {
-                    return Err("There is no previous workspace".into());
+                    return Err(NO_PREVIOUS_WORKSPACE.into());
                 };
                 return self.activate_sway_workspace(WorkspaceTarget::Name(previous_name));
             }
@@ -660,6 +661,51 @@ impl<W: LayoutElement> Layout<W> {
             }) {
                 workspace.activate_window(&window);
             }
+        }
+        Ok(())
+    }
+
+    /// A sticky floating container, or a child of one, is already on every
+    /// workspace of its output, so sway refuses to move it to a workspace
+    /// there, the current one included (sway/commands/move.c:498-511,
+    /// 542-546). `target` is resolved as `move ... to workspace` would.
+    pub fn refuse_sticky_move_on_same_output(
+        &self,
+        window: &W::Id,
+        target: &crate::command::WorkspaceTarget,
+        auto_back_and_forth: bool,
+    ) -> Result<(), String> {
+        let Some((source_monitor, _, source)) = self
+            .workspaces()
+            .find(|(_, _, workspace)| workspace.has_window(window))
+        else {
+            return Ok(());
+        };
+        let target =
+            &self.resolve_move_workspace_target(source.id(), target.clone(), auto_back_and_forth);
+        if !source.floating().window_root_is_sticky(window) {
+            return Ok(());
+        }
+        let Some(source_output) = source_monitor.map(|monitor| monitor.output().clone()) else {
+            return Ok(());
+        };
+        let destination_output = match self.find_sway_workspace_position(target) {
+            Some((output, _)) => output,
+            None => match target {
+                crate::command::WorkspaceTarget::Name(name)
+                | crate::command::WorkspaceTarget::Number(name) => self
+                    .initial_monitor_for_workspace(name)
+                    .and_then(|index| self.monitors().nth(index))
+                    .map(|monitor| monitor.output().clone()),
+                _ => return Ok(()),
+            },
+        };
+        // The check asks only whether the destination is on the old output,
+        // so the current workspace is refused too (sway/commands/move.c:542).
+        if destination_output.as_ref() == Some(&source_output) {
+            return Err(
+                "Can't move sticky container to another workspace on the same output".into(),
+            );
         }
         Ok(())
     }

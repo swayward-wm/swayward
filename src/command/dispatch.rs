@@ -19,12 +19,12 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     // single choke point for both IPC commands and key bindings, matching
     // sway, where a binding re-enters execute_command at press time
     // (`sway/sway/commands/bind.c:635`).
-    let has_view = state.swayward.layout.focus().is_some();
-    let mut parsed = parse_with_variables(input, &state.swayward.sway_variables, has_view);
+    let focused = super::targeted::focused_node(state);
+    let mut parsed = parse_with_variables(input, &state.swayward.sway_variables, focused);
     // `border` checks for a view before anything else, so a well-formed
     // border command with nothing focused is refused too
     // (`sway/sway/commands/border.c:61-67`).
-    if !has_view {
+    if focused != swayward_ipc::command::FocusedNode::View {
         for parsed in &mut parsed {
             if matches!(parsed, Ok(parsed) if matches!(parsed.command, Command::Border(_))) {
                 *parsed = Err(swayward_ipc::command::parse_error(
@@ -140,6 +140,7 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
         Command::OpacityRelative(value) => window::opacity_focused(state, value, true),
         Command::TitleFormat(format) => window::title_format_focused(state, &format),
         Command::ShortcutsInhibitor(enable) => window::shortcuts_inhibitor_focused(state, enable),
+        Command::InhibitIdle(mode) => window::inhibit_idle_focused(state, mode),
         Command::Sticky(value) => window::sticky_focused(state, &value),
         Command::Border(border) => window::border_focused(state, &border),
         Command::Floating(mode) => window::floating_focused(state, mode),

@@ -490,6 +490,13 @@ pub(super) fn move_target_to_workspace(
             let Some(window) = window else {
                 return failure("No matching node.");
             };
+            if let Err(error) = state.swayward.layout.refuse_sticky_move_on_same_output(
+                &window,
+                &workspace_target,
+                auto_back_and_forth,
+            ) {
+                return failure(error);
+            }
             state.swayward.layout.detach_floating_group_child(&window);
             state
                 .swayward
@@ -869,7 +876,11 @@ pub(super) fn move_target_to_mark(
 
 pub(super) fn swap_focused(state: &mut State, target: SwapTarget) -> super::HandlerResult {
     let Some(source) = super::targeted::focused_target(state) else {
-        return Err(failure("Can only swap with containers and views"));
+        // Sway looks the target up before it checks for a focused container
+        // (`sway/sway/commands/swap.c:54-74`).
+        return Err(swap_destination(state, &target)
+            .err()
+            .unwrap_or_else(|| failure("Can only swap with containers and views")));
     };
     super::handled_outcome(swap_target(state, source, &target))
 }
@@ -890,7 +901,10 @@ pub(super) fn direction_focused(
     {
         return Err(super::failure("Cannot move workspaces in a direction"));
     }
-    let fullscreen_floating = workspace.active_floating_is_fullscreen();
+    // A fullscreen floating group root is a fullscreen floating container
+    // too (`cmd_move_in_direction`, sway/commands/move.c:688-692).
+    let fullscreen_floating = workspace.active_floating_is_fullscreen()
+        || workspace.focused_floating_tree_root_is_fullscreen();
     if workspace.floating_is_active() || fullscreen_floating {
         if fullscreen_floating {
             return Err(failure("Cannot move fullscreen floating container"));
@@ -901,6 +915,24 @@ pub(super) fn direction_focused(
             .focused_leaf_is_only_child_of_floating_tree_root()
         {
             return Err(success());
+        }
+        // A floating group's child is not floating, so it moves inside the
+        // group like a tiled child; only the floating root moves by pixels
+        // (`container_is_floating`, sway/commands/move.c:326-330,
+        // 722-728).
+        if workspace.focused_floating_tree_child() {
+            let direction = match direction {
+                Direction::Left => crate::layout::tiling_tree::Direction::Left,
+                Direction::Right => crate::layout::tiling_tree::Direction::Right,
+                Direction::Up => crate::layout::tiling_tree::Direction::Up,
+                Direction::Down => crate::layout::tiling_tree::Direction::Down,
+            };
+            state
+                .swayward
+                .layout
+                .move_focused_floating_tree_child(direction);
+            state.swayward.queue_redraw_all();
+            return Ok(None);
         }
         let pixels = f64::from(pixels.unwrap_or(10));
         let (x, y) = match direction {
@@ -968,14 +1000,20 @@ pub(super) fn to_workspace_focused(
 }
 
 pub(super) fn to_mark_focused(state: &mut State, mark: &str) -> super::HandlerResult {
+    // Sway rejects an empty focused workspace before it resolves the mark
+    // (sway/commands/move.c:430-434).
     let Some(source) = super::targeted::focused_target(state) else {
-        return Err(success());
+        return Err(failure("Can't move an empty workspace"));
     };
     super::handled_outcome(move_target_to_mark(state, source, mark))
 }
 
 pub(super) fn to_output_focused(state: &mut State, target: &OutputTarget) -> super::HandlerResult {
-    let focused_target = super::targeted::focused_target(state);
+    // Sway rejects an empty focused workspace before it resolves the output
+    // (sway/commands/move.c:430-434).
+    let Some(focused_target) = super::targeted::focused_target(state) else {
+        return Err(failure("Can't move an empty workspace"));
+    };
     let focused = state
         .swayward
         .layout
@@ -986,7 +1024,7 @@ pub(super) fn to_output_focused(state: &mut State, target: &OutputTarget) -> sup
         .and_then(|(window, _)| state.swayward.layout.window_center(window));
     let reference_output = focused.as_ref().map(|(_, output)| output);
     let output = output_target(state, target, reference_output, reference).map_err(failure)?;
-    if let Some(CommandTarget::Container(workspace, node)) = focused_target {
+    if let CommandTarget::Container(workspace, node) = focused_target {
         super::handled_outcome(move_tiling_subtree_to_output(
             state, workspace, node, &output,
         ))?;

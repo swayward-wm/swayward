@@ -1,25 +1,14 @@
 #[test]
 fn runtime_command_refusals_are_sway_shaped() {
     let mut f = Fixture::new();
-    for (command, error) in [
-        (
-            "inhibit_idle visible",
-            "inhibit_idle requires user inhibitor policy support",
-        ),
-        (
-            "urgent allow",
-            "urgent allow|deny requires client urgency-request policy support",
-        ),
-    ] {
-        assert_eq!(
-            crate::command::execute(f.niri_state(), command),
-            [swayward_ipc::CommandOutcome {
-                success: false,
-                error: Some(error.into()),
-                parse_error: Some(true),
-            }]
-        );
-    }
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "urgent allow"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("urgent allow|deny requires client urgency-request policy support".into()),
+            parse_error: Some(true),
+        }]
+    );
 }
 
 #[test]
@@ -119,9 +108,23 @@ fn shortcuts_inhibitor_disable_sets_future_policy_and_deactivates_current() {
     assert_eq!(f.client(client).state.shortcut_inhibitor_events, [true]);
 }
 
+/// With a view focused, swayward refuses the per-view presentation commands
+/// it cannot apply, after sway's own argument checks
+/// (`sway/sway/commands/max_render_time.c:9-21`).
 #[test]
 fn runtime_presentation_command_refusals_are_explicit() {
     let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
     for (command, error) in [
         (
             "allow_tearing yes",
@@ -131,18 +134,112 @@ fn runtime_presentation_command_refusals_are_explicit() {
             "max_render_time 1",
             "max_render_time requires per-view render deadline support",
         ),
+        (
+            "max_render_time off",
+            "max_render_time requires per-view render deadline support",
+        ),
+        ("max_render_time 0", "Invalid max render time."),
+        ("max_render_time", "Missing max render time argument."),
+        (
+            "allow_tearing",
+            "Invalid allow_tearing command (expected at least 1 argument, got 0)",
+        ),
     ] {
         let outcome = crate::command::execute(f.niri_state(), command);
         assert!(!outcome[0].success, "{command}");
         assert_eq!(outcome[0].error.as_deref(), Some(error), "{command}");
         assert_eq!(outcome[0].parse_error, Some(true), "{command}");
     }
-    assert_eq!(
-        crate::command::execute(f.niri_state(), "max_render_time")[0]
-            .error
-            .as_deref(),
-        Some("Missing max render time argument.")
-    );
+}
+
+/// Oracle: differential_seed_1003, 1019, 1119, 1121, 1244, 1275 and 1579
+/// (diff-fam-no-view-error-precedence). These sway handlers check for a view,
+/// or for opacity a container, before they read their value, so with no view
+/// focused every well-formed value gets the precondition error, as CMD_INVALID
+/// except for opacity's CMD_FAILURE (`sway/sway/commands/allow_tearing.c:12-15`,
+/// `max_render_time.c:23-27`, `shortcuts_inhibitor.c:14-18`,
+/// `inhibit_idle.c:13-17`, `opacity.c:15-18`).
+#[test]
+fn view_commands_check_for_a_view_before_their_value() {
+    let cases = [
+        (
+            "allow_tearing no",
+            "Tearing can only be allowed on views",
+            true,
+        ),
+        (
+            "allow_tearing yes",
+            "Tearing can only be allowed on views",
+            true,
+        ),
+        (
+            "max_render_time 5",
+            "Only views can have a max_render_time",
+            true,
+        ),
+        (
+            "max_render_time off",
+            "Only views can have a max_render_time",
+            true,
+        ),
+        (
+            "shortcuts_inhibitor enable",
+            "Only views can have shortcuts inhibitors",
+            true,
+        ),
+        (
+            "shortcuts_inhibitor disable",
+            "Only views can have shortcuts inhibitors",
+            true,
+        ),
+        (
+            "inhibit_idle none",
+            "Only views can have idle inhibitors",
+            true,
+        ),
+        (
+            "inhibit_idle visible",
+            "Only views can have idle inhibitors",
+            true,
+        ),
+        (
+            "inhibit_idle bogus",
+            "Only views can have idle inhibitors",
+            true,
+        ),
+        ("opacity minus 0.2", "No current container", false),
+    ];
+    let check = |f: &mut Fixture, context: &str| {
+        for (command, error, parse_error) in cases {
+            assert_eq!(
+                crate::command::execute(f.niri_state(), command),
+                [swayward_ipc::CommandOutcome {
+                    success: false,
+                    error: Some(error.into()),
+                    parse_error: Some(parse_error),
+                }],
+                "{command} ({context})"
+            );
+        }
+    };
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    check(&mut f, "empty workspace");
+
+    // `focus parent` from a lone window focuses the workspace, which is no
+    // container in sway's handler context.
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    check(&mut f, "workspace focused");
 }
 
 #[test]
@@ -507,6 +604,39 @@ fn tiled_axis_resize_without_parallel_siblings_reports_failure() {
     }
 }
 
+/// Oracle: random seeds 169, 332, 346. A view mapped beside a fullscreen view
+/// is never arranged, so its box stays zero-sized and sway refuses to take
+/// any width from it (sway/commands/resize.c:113-120).
+#[test]
+fn tiled_resize_beside_a_view_mapped_under_fullscreen_reports_failure() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    for index in 0..2 {
+        if index == 1 {
+            assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+        }
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "resize grow width 10 px");
+    assert_eq!(
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize any further".into()),
+            parse_error: Some(true),
+        }]
+    );
+}
+
 #[test]
 fn tiled_axis_resize_with_workspace_focus_reports_no_target() {
     let mut f = Fixture::new();
@@ -713,6 +843,225 @@ fn ppt_resize_of_a_floating_group_child_resizes_inside_the_group() {
     assert!(width("group-second") > width("group-first"));
 }
 
+/// Random oracle seed 290: a group floated first and a window floated after it
+/// share sway's one floating list, so GET_TREE lists the group below the window
+/// and only the window is focused (workspace_add_floating appends,
+/// sway/tree/workspace.c:961-971; sway/ipc-json.c:532-540).
+#[test]
+fn floating_nodes_list_groups_and_windows_in_one_stacking_order() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let map = |f: &mut Fixture| {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    map(&mut f);
+    for command in ["focus parent", "floating toggle"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    map(&mut f);
+    let reply = crate::command::execute(f.niri_state(), "floating toggle");
+    assert!(reply[0].success, "{reply:?}");
+
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let floating = &tree.nodes[1].nodes[0].floating_nodes;
+    assert_eq!(floating.len(), 2);
+    assert!(
+        !floating[0].nodes.is_empty(),
+        "the older group is listed first"
+    );
+    assert!(
+        floating[1].nodes.is_empty(),
+        "the newer window is listed last"
+    );
+    assert!(!floating[0].focused && floating[0].nodes.iter().all(|node| !node.focused));
+    assert!(floating[1].focused);
+}
+
+/// A window mapped while a floating group's child is focused joins that group
+/// beside the child; with the group root itself focused it tiles instead
+/// (`view_map`, sway/tree/view.c:849-901). Random oracle seeds 290 and 330.
+#[test]
+fn mapping_with_a_floating_group_child_focused_joins_the_group() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let map = |f: &mut Fixture| {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let group_sizes = |f: &mut Fixture| {
+        let tree: swayward_ipc::Node = serde_json::from_value(get_tree(f)).unwrap();
+        let workspace = &tree.nodes[1].nodes[0];
+        (
+            workspace.nodes.len(),
+            workspace
+                .floating_nodes
+                .iter()
+                .map(|node| node.nodes.len())
+                .collect::<Vec<_>>(),
+        )
+    };
+    map(&mut f);
+    map(&mut f);
+    for command in ["focus parent", "floating enable"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+
+    // The root is focused: the new window tiles.
+    map(&mut f);
+    assert_eq!(group_sizes(&mut f), (1, vec![2]));
+
+    // A child is focused: the new window joins the group.
+    for command in ["focus floating", "focus child"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    map(&mut f);
+    assert_eq!(group_sizes(&mut f), (1, vec![3]));
+}
+
+/// Oracle: floating_group_child_move_direction. A floating group's child is
+/// not floating, so `move left` moves it inside the group like a tiled child
+/// instead of moving the whole group by pixels (`container_is_floating`,
+/// sway/commands/move.c:326-330, 722-728).
+#[test]
+fn directional_move_of_a_floating_group_child_reorders_inside_the_group() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for app_id in ["group-first", "group-second"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    for command in ["focus parent", "floating enable", "focus child"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    let focus = crate::command::execute(f.niri_state(), r#"[app_id="^group-second$"] focus"#);
+    assert!(focus[0].success, "{focus:?}");
+    let before: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let group_rect = before.nodes[1].nodes[0].floating_nodes[0].rect;
+
+    let reply = crate::command::execute(f.niri_state(), "move left");
+    assert!(reply[0].success, "{reply:?}");
+
+    let json = get_tree(&mut f);
+    let tree: swayward_ipc::Node = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(
+        tree.nodes[1].nodes[0].floating_nodes[0].rect, group_rect,
+        "the group did not move"
+    );
+    let order = json["nodes"][1]["nodes"][0]["floating_nodes"][0]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["app_id"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(order, ["group-second", "group-first"]);
+}
+
+/// Random oracle seed 323: a fullscreen child of a floating group hides its
+/// siblings in the group (`view_is_visible`, sway/tree/view.c:1187-1193).
+#[test]
+fn fullscreen_floating_group_child_hides_its_siblings() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for app_id in ["group-first", "group-second"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    for command in [
+        "focus parent",
+        "floating enable",
+        "focus child",
+        r#"[app_id="^group-second$"] focus"#,
+        "fullscreen toggle",
+    ] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    let tree = get_tree(&mut f);
+    let visible = |app_id| {
+        find_json_node_with_app_id(&tree, app_id).unwrap()["visible"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(visible("group-second"));
+    assert!(!visible("group-first"));
+}
+
+/// Oracle: sticky_move_to_same_output_refused. A sticky floating container,
+/// or a child of one, is on every workspace of its output, so moving it to a
+/// workspace there is refused, the current one included
+/// (sway/commands/move.c:498-511, 542-546).
+#[test]
+fn moving_a_sticky_floating_container_on_its_output_is_refused() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in ["floating toggle", "sticky toggle"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    for command in [
+        "move container to workspace 3",
+        "move container to workspace 1",
+    ] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert_eq!(
+            reply[0].error.as_deref(),
+            Some("Can't move sticky container to another workspace on the same output"),
+            "{command}"
+        );
+    }
+    let swayward = f.swayward();
+    let names = swayward
+        .layout
+        .workspaces()
+        .filter_map(|(_, _, workspace)| workspace.sway_name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["1"], "no workspace was created");
+}
+
 #[test]
 fn directional_resize_of_a_floating_group_child_resizes_inside_the_group() {
     // A floating group's child is not itself floating, so sway resizes it like
@@ -903,4 +1252,147 @@ fn floating_toggle_on_a_floating_group_child_tiles_the_whole_group() {
             vec![]
         )]
     );
+}
+
+#[test]
+fn inhibit_idle_updates_get_tree_user_policy_and_effective_state() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    windows::map_window(
+        &mut f,
+        client,
+        windows::WindowSpec {
+            app_id: Some("idle-policy"),
+            ..Default::default()
+        },
+    );
+
+    for (mode, effective) in [
+        ("open", true),
+        ("none", false),
+        ("focus", true),
+        ("visible", true),
+        ("fullscreen", false),
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), &format!("inhibit_idle {mode}"));
+        assert!(outcome[0].success, "{mode}: {outcome:?}");
+        let tree = get_tree(&mut f);
+        let node = find_json_node_with_app_id(&tree, "idle-policy").unwrap();
+        assert_eq!(node["idle_inhibitors"]["user"], mode);
+        assert_eq!(node["inhibit_idle"], effective, "{mode}");
+    }
+
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    let tree = get_tree(&mut f);
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "idle-policy").unwrap()["inhibit_idle"],
+        true
+    );
+}
+
+/// Random oracle seeds 180, 215, 294, 309, 383: `floating toggle` on a
+/// fullscreen view keeps it fullscreen. `container_set_floating` detaches
+/// and re-adds the container without touching `fullscreen_mode`, and
+/// `workspace_add_floating` reinstates it as the workspace's fullscreen
+/// (`container_handle_fullscreen_reparent`, sway/tree/container.c:941-975,
+/// 1380-1391; sway/tree/workspace.c:961-972). The tiled sibling stays hidden
+/// and keeps the half share it had before the fullscreen.
+#[test]
+fn floating_toggle_keeps_a_fullscreen_view_fullscreen() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fs-first", "fs-second"] {
+        windows::map_window(
+            &mut f,
+            client,
+            windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in ["fullscreen toggle", "floating toggle"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let second = find_json_node_with_app_id(&tree, "fs-second").unwrap();
+    assert_eq!(second["type"], "floating_con");
+    assert_eq!(second["fullscreen_mode"], 1);
+    let first = find_json_node_with_app_id(&tree, "fs-first").unwrap();
+    assert_eq!(first["visible"], false);
+    assert_eq!(first["percent"], 0.5);
+
+    // Toggling back tiles it again, still fullscreen.
+    let reply = crate::command::execute(f.niri_state(), "floating toggle");
+    assert!(reply[0].success, "{reply:?}");
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let second = find_json_node_with_app_id(&tree, "fs-second").unwrap();
+    assert_eq!(second["type"], "con");
+    assert_eq!(second["fullscreen_mode"], 1);
+}
+
+/// Random oracle seeds 180 and 294: a view floated while fullscreen is a
+/// floating container, so `layout` refuses it
+/// (`cmd_layout`, sway/commands/layout.c:129-132).
+#[test]
+fn layout_refuses_a_fullscreen_floating_view() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fs-first", "fs-second"] {
+        windows::map_window(
+            &mut f,
+            client,
+            windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in ["fullscreen toggle", "floating toggle", "focus right"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    let reply = crate::command::execute(f.niri_state(), "layout tabbed");
+    assert_eq!(
+        reply[0].error.as_deref(),
+        Some("Unable to change layout of floating windows")
+    );
+}
+
+/// Random oracle seed 309: `fullscreen toggle` on a view floated while
+/// fullscreen returns it to the floating layer, not to its old tiled slot
+/// (`container_fullscreen_disable`, sway/tree/container.c).
+#[test]
+fn unfullscreen_of_a_floated_fullscreen_view_stays_floating() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fs-first", "fs-second"] {
+        windows::map_window(
+            &mut f,
+            client,
+            windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in ["fullscreen toggle", "floating toggle", "fullscreen toggle"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let second = find_json_node_with_app_id(&tree, "fs-second").unwrap();
+    assert_eq!(second["type"], "floating_con");
+    assert_eq!(second["fullscreen_mode"], 0);
+    let first = find_json_node_with_app_id(&tree, "fs-first").unwrap();
+    assert_eq!(first["visible"], true);
+    assert_eq!(first["percent"], 1.0);
 }
