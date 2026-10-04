@@ -67,7 +67,7 @@ use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
 
-pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
+pub use crate::handlers::xdg_shell::{KdeDecorationsModeState, XdgDecorationObject};
 use crate::input::click_grab::ClickGrab;
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::{ActivateWindow, LayoutElement};

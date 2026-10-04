@@ -7,11 +7,6 @@ impl Mapped {
                 .get_data::<ClientState>()
                 .and_then(|data| data.security_context.clone())
         });
-        let has_xdg_decoration = window.toplevel().is_some_and(|toplevel| {
-            toplevel.with_pending_state(|state| {
-                state.decoration_mode == Some(zxdg_toplevel_decoration_v1::Mode::ClientSide)
-            })
-        });
         let natural_size = window.geometry().size;
         let mut rv = Self {
             window,
@@ -30,7 +25,6 @@ impl Mapped {
             is_floating: false,
             is_untiled: false,
             natural_size,
-            has_xdg_decoration,
             is_window_cast_target: false,
             shortcuts_inhibit_policy: ShortcutsInhibitPolicy::Default,
             inhibit_idle_mode: swayward_ipc::command::InhibitIdleMode::None,

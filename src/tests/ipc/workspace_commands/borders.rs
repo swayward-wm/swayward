@@ -751,3 +751,92 @@ fn border_csd_fails_without_client_decoration_support() {
         Some("This window doesn't support client side decorations")
     );
 }
+
+#[test]
+fn border_csd_on_a_tiled_window_keeps_sways_titlebar() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // foot creates an xdg-decoration object and asks for server-side
+    // decorations. Sway accepts `border csd` because the object exists
+    // (sway/commands/border.c:77-80), and on a tiled view it keeps the
+    // stored border and goes on drawing it (border.c:10-14, 25-27).
+    // Differential family diff-fam-border-csd, seeds 1035 1059 1102 1109.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(Mode::ServerSide);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let tree_node = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap();
+        find_json_node(&tree, "con", true).unwrap().clone()
+    };
+    assert!(crate::command::execute(f.niri_state(), "border normal")[0].success);
+    let before = tree_node(&mut f);
+    assert_eq!(before["border"], "normal");
+
+    let outcome = crate::command::execute(f.niri_state(), "border csd");
+    assert!(outcome[0].success, "{:?}", outcome[0].error);
+    f.double_roundtrip(client);
+    assert_eq!(
+        f.client(client).window(&surface).decoration_modes.last(),
+        Some(&Mode::ClientSide)
+    );
+
+    let after = tree_node(&mut f);
+    assert_eq!(after["border"], "normal");
+    for field in ["rect", "window_rect", "deco_rect"] {
+        assert_eq!(after[field], before[field], "{field}");
+    }
+    assert!(after["deco_rect"]["height"].as_i64().unwrap() > 0);
+}
+
+#[test]
+fn border_csd_fails_after_the_decoration_object_is_destroyed() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // Sway clears view->xdg_decoration when the object is destroyed
+    // (sway/xdg_decoration.c:9-20), so `border csd` is refused again
+    // (sway/commands/border.c:77-80).
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(Mode::ServerSide);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    f.client(client)
+        .window(&surface)
+        .xdg_decoration
+        .take()
+        .unwrap()
+        .destroy();
+    f.double_roundtrip(client);
+
+    let outcome = crate::command::execute(f.niri_state(), "border csd");
+    assert!(!outcome[0].success);
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("This window doesn't support client side decorations")
+    );
+}

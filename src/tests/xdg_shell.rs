@@ -151,11 +151,24 @@ fn decoration_mode_follows_sway_tiling_policy() {
     window.set_size(400, 300);
     window.ack_last_and_commit();
     fixture.double_roundtrip(client);
+    // Sway checks only that an xdg-decoration object exists
+    // (sway/commands/border.c:77-80), so a tiled window negotiated to
+    // server-side still accepts `border csd` and is told to draw its own
+    // (view_set_csd_from_server, sway/tree/view.c:515-525).
     let outcome = crate::command::execute(fixture.niri_state(), "border csd");
-    assert!(!outcome[0].success);
+    assert!(outcome[0].success, "{:?}", outcome[0].error);
+    fixture.double_roundtrip(client);
     assert_eq!(
-        outcome[0].error.as_deref(),
-        Some("This window doesn't support client side decorations")
+        fixture
+            .client(client)
+            .state
+            .windows
+            .last()
+            .unwrap()
+            .decoration_modes
+            .last(),
+        Some(&Mode::ClientSide),
+        "border csd must switch the window to client-side decorations"
     );
 
     fixture.swayward().layout.toggle_window_floating(None);

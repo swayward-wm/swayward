@@ -1848,8 +1848,11 @@ impl<W: LayoutElement> Tile<W> {
         // Only `normal` draws a titlebar. When no rule or command has set a
         // border this follows `default_border`, so the answer stays
         // consistent with sway_border() above; they were allowed to disagree
-        // once and the i3 centering test caught it.
-        !self.sway_uses_csd && self.sway_border().0 == BorderStyle::Normal
+        // once and the i3 centering test caught it. A tiled view using CSD
+        // keeps its stored style and sway still draws it (the comment above
+        // set_border, sway/commands/border.c:10-14); only a floating one
+        // stores `csd`.
+        self.sway_border().0 == BorderStyle::Normal
     }
 
     pub fn set_sway_border(
@@ -1896,7 +1899,7 @@ impl<W: LayoutElement> Tile<W> {
         let rules = self.window.rules();
         let mut config = self.options.layout.border.merged_with(&rules.border);
         if let Some((style, width)) = self.sway_border {
-            config.off = self.sway_uses_csd || style == BorderStyle::None;
+            config.off = matches!(style, BorderStyle::None | BorderStyle::Csd);
             if matches!(style, BorderStyle::Pixel | BorderStyle::Normal) {
                 config.width = f64::from(width);
             }
