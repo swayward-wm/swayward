@@ -229,7 +229,7 @@ impl<W: LayoutElement> TilingTree<W> {
             return false;
         }
         if self.split_len(self.root) == Some(1) && self.root_branch(id) == Some(id) {
-            self.set_layout(self.root, wanted_layout);
+            self.set_layout_keeping_previous(self.root, wanted_layout);
             return false;
         }
         let backwards = direction.is_backwards();
@@ -410,7 +410,7 @@ impl<W: LayoutElement> TilingTree<W> {
 
     fn move_only_window(&mut self, id: NodeId, direction: Direction, wanted_layout: Layout) {
         if self.walk_reaches_unparallel_root(id, wanted_layout) {
-            self.set_layout(self.root, wanted_layout);
+            self.set_layout_keeping_previous(self.root, wanted_layout);
             // `set_layout` compacts the tree, which squashes a singleton split.
             // When the moved node was that split, continue with the one window
             // that survives the compaction.

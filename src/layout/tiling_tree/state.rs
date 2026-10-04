@@ -19,7 +19,7 @@ pub(super) fn toplevel_bounds(
 
 /// The layout a new or emptied workspace root takes: the configured orientation, or for `auto`
 /// SplitV on a portrait output and SplitH otherwise.
-fn default_layout(
+pub(super) fn default_layout(
     orientation: swayward_config::DefaultOrientation,
     view_size: Size<f64, Logical>,
 ) -> Layout {

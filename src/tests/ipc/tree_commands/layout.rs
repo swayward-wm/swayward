@@ -894,3 +894,38 @@ fn fullscreen_toggle_after_split_targets_the_view() {
     assert_eq!(wrapper["nodes"][0]["fullscreen_mode"], 1, "{wrapper}");
     assert_eq!(wrapper["nodes"][0]["focused"], true, "{wrapper}");
 }
+
+/// `layout default` restores the split layout the `layout` command last
+/// replaced on that node, including an empty workspace, and fails when none
+/// was recorded (sway/commands/layout.c:106-108,160-189). A move that
+/// reorients the workspace does not record one (sway/commands/move.c:331-340).
+/// Oracle rows differential_seed_1257, 1364, 1718, 1992 and
+/// layout_default_prev_split.
+#[test]
+fn layout_default_restores_only_a_split_the_layout_command_replaced() {
+    let expected_syntax = "Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'";
+    for layout in ["stacking", "tabbed"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        assert!(crate::command::execute(f.niri_state(), &format!("layout {layout}"))[0].success);
+        let reply = &crate::command::execute(f.niri_state(), "layout default")[0];
+        assert!(reply.success, "{layout}: {reply:?}");
+        let tree = tree_json(&mut f);
+        assert_eq!(tree["nodes"][1]["nodes"][0]["layout"], "splith", "{layout}");
+    }
+
+    // With a view focused, the layout lands on a new wrapper whose
+    // prev_split_layout starts empty (sway/commands/layout.c:178-183,
+    // sway/tree/container.c:112), so `layout default` has nothing to restore.
+    for setup in ["layout stacking", "layout tabbed", "move down", "move up"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        let client = f.add_client();
+        map_app(&mut f, client, "fixture-1");
+        assert!(crate::command::execute(f.niri_state(), setup)[0].success);
+        let reply = &crate::command::execute(f.niri_state(), "layout default")[0];
+        assert!(!reply.success, "{setup}: {reply:?}");
+        assert_eq!(reply.error.as_deref(), Some(expected_syntax));
+        assert_eq!(reply.parse_error, Some(true));
+    }
+}

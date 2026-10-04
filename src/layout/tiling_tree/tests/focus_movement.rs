@@ -293,8 +293,12 @@ fn bare_layout_toggle_restores_the_previous_split() {
     t.check_invariants();
 }
 
+/// The wrapper `layout tabbed` creates around the workspace children starts with no
+/// `prev_split_layout` (`container_create`, sway/tree/container.c:112), so `layout toggle split`
+/// falls back to the default orientation, not the workspace axis
+/// (sway/commands/layout.c:29-45,176-183).
 #[test]
-fn layout_toggle_restores_the_previous_split_axis() {
+fn layout_toggle_on_a_fresh_workspace_wrapper_uses_the_default_orientation() {
     for previous in [Layout::SplitH, Layout::SplitV] {
         let mut t = tree((1200., 800.), 0.);
         t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
@@ -307,7 +311,10 @@ fn layout_toggle_restores_the_previous_split_axis() {
         let wrapper = t.nodes[&t.focus().unwrap()].parent.unwrap();
         assert!(matches!(
             t.nodes[&wrapper].value,
-            TreeNode::Split { layout, .. } if layout == previous
+            TreeNode::Split {
+                layout: Layout::SplitH,
+                ..
+            }
         ));
         t.check_invariants();
     }

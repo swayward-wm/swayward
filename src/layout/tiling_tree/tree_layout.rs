@@ -127,6 +127,19 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// Sets `id`'s layout without recording a split layout for `layout default`.
+    /// Only the `layout` command and an empty-workspace split update sway's
+    /// `prev_split_layout` (sway/commands/layout.c:171-189,
+    /// sway/tree/workspace.c:1058-1063); a move that reorients the workspace
+    /// leaves it alone (sway/commands/move.c:331-340).
+    pub(super) fn set_layout_keeping_previous(&mut self, id: NodeId, layout: Layout) {
+        let previous = self.previous_layout(id);
+        self.set_layout(id, layout);
+        if let Some(meta) = self.split_meta_mut(id) {
+            meta.previous_layout = previous;
+        }
+    }
+
     /// Toggles the focused leaf's parent between tabbed and SplitH, splitting the leaf when it
     /// has no parent split. This backs niri's toggle-column-tabbed-display action.
     pub fn toggle_focused_tabbed(&mut self) {
@@ -333,6 +346,12 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
+        // With nothing focused the command targets the workspace and restores
+        // its `prev_split_layout` (sway/commands/layout.c:106-108,160-165).
+        if self.focus.is_none() {
+            let layout = self.previous_layout(self.root)?;
+            return Some(self.set_focused_layout(layout));
+        }
         let (target, remapped) = self.focused_layout_target();
         let target = target?;
         let layout = self.previous_layout(target)?;
@@ -374,7 +393,11 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout: Layout::SplitV,
                 ..
             }) => Layout::SplitH,
-            _ => self.previous_layout(target).unwrap_or(Layout::SplitH),
+            // sway/commands/layout.c:37-44: the previous split, else the
+            // configured orientation, else the output's longer axis.
+            _ => self.previous_layout(target).unwrap_or_else(|| {
+                state::default_layout(self.options.layout.default_orientation, self.view_size)
+            }),
         }
     }
 
@@ -472,15 +495,11 @@ impl<W: LayoutElement> TilingTree<W> {
             return self.root;
         }
         let Some(TreeNode::Split {
-            layout: root_layout,
-            children,
-            percents,
-            ..
+            children, percents, ..
         }) = self.nodes.get_mut(&self.root).map(|node| &mut node.value)
         else {
             return self.root;
         };
-        let root_layout = *root_layout;
         let children = std::mem::take(children);
         let percents = std::mem::take(percents);
         let wrapper = self.alloc(Node {
@@ -489,11 +508,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout,
                 children: children.clone(),
                 percents,
-                meta: SplitMeta {
-                    previous_layout: matches!(root_layout, Layout::SplitH | Layout::SplitV)
-                        .then_some(root_layout),
-                    ..SplitMeta::default()
-                },
+                meta: SplitMeta::default(),
             },
         });
         self.ipc_stale_nodes.insert(wrapper);
