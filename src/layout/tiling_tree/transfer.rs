@@ -108,6 +108,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.moved_under_fullscreen.clear();
             self.fullscreen_layout_wrappers.clear();
             self.pre_layout_ipc_rects.clear();
+            self.stale_fullscreen_rects.clear();
         }
         self.focus = self.focused_leaf_in(self.root);
         self.request_window_sizes();

@@ -152,6 +152,8 @@ struct IpcSnapshot<'a, W: LayoutElement> {
     fullscreen: Option<NodeId>,
     /// Nodes at or below a pending fullscreen layout wrapper (empty without fullscreen).
     in_pending_wrapper: HashSet<NodeId>,
+    /// [`TilingTree::active_stale_fullscreen_rects`], computed once per snapshot.
+    stale_fullscreen_rects: HashMap<NodeId, Rectangle<f64, Logical>>,
 }
 
 impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
@@ -180,6 +182,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             geometries,
             fullscreen,
             in_pending_wrapper,
+            stale_fullscreen_rects: tree.active_stale_fullscreen_rects(),
         }
     }
 
@@ -380,17 +383,27 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             .zip(allocated)
             .map(|((child, stored_percent), allocated)| {
                 let is_fullscreen = self.fullscreen == Some(*child);
-                Some(if excluded.contains(child) && !is_fullscreen {
-                    0.
-                } else if !excluded.is_empty() && !is_fullscreen {
-                    *stored_percent / visible_total
-                } else if is_fullscreen {
-                    self.fullscreen_child_percent(id, *child, *stored_percent)
-                } else if parent_extent > 0. {
-                    allocated / parent_extent
-                } else {
-                    *stored_percent
-                })
+                Some(
+                    if let Some(stale) = self
+                        .stale_fullscreen_rects
+                        .get(child)
+                        .filter(|_| area(parent_rect) > 0.)
+                    {
+                        // Sway's percent is the box's area over the parent's
+                        // (sway/ipc-json.c:744-755).
+                        area(*stale) / area(parent_rect)
+                    } else if excluded.contains(child) && !is_fullscreen {
+                        0.
+                    } else if !excluded.is_empty() && !is_fullscreen {
+                        *stored_percent / visible_total
+                    } else if is_fullscreen {
+                        self.fullscreen_child_percent(id, *child, *stored_percent)
+                    } else if parent_extent > 0. {
+                        allocated / parent_extent
+                    } else {
+                        *stored_percent
+                    },
+                )
             })
             .collect()
     }
@@ -553,4 +566,8 @@ fn child_shares(extent: f64, percents: &[f64]) -> Vec<f64> {
             }
         })
         .collect()
+}
+
+fn area(rect: Rectangle<f64, Logical>) -> f64 {
+    rect.size.w.round() * rect.size.h.round()
 }

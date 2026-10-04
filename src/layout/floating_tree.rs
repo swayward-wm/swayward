@@ -1160,6 +1160,12 @@ impl<W: LayoutElement> FloatingLayout<W> {
         self.tree_entries[idx].tree.set_node_fullscreen(node, mode)
     }
 
+    /// The focused node's own fullscreen mode in the active floating tree.
+    pub fn focused_fullscreen_mode(&self) -> Option<super::tiling_tree::FullscreenMode> {
+        let entry = self.active_tree_entry()?;
+        entry.tree.fullscreen_mode(entry.tree.focus()?)
+    }
+
     pub fn set_focused_fullscreen(
         &mut self,
         mode: Option<super::tiling_tree::FullscreenMode>,

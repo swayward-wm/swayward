@@ -23,6 +23,9 @@ fn seed_side_table(t: &mut TilingTree<TestWindow>, name: &str, id: NodeId) {
         "pre_layout_ipc_rects" => {
             t.pre_layout_ipc_rects.insert(id, Rectangle::default());
         }
+        "stale_fullscreen_rects" => {
+            t.stale_fullscreen_rects.insert(id, Rectangle::default());
+        }
         "tab_indicators" => {
             t.tab_indicators
                 .insert(id, TabIndicator::new(t.options.layout.tab_indicator));

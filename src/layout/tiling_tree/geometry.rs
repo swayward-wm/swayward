@@ -32,6 +32,7 @@ struct AssignContext<'a, W: LayoutElement> {
     titlebar_height: f64,
     fullscreen: &'a HashSet<NodeId>,
     mapped_under_fullscreen: &'a HashSet<NodeId>,
+    stale_fullscreen_rects: &'a HashMap<NodeId, Rectangle<f64, Logical>>,
     workspace_area: Rectangle<f64, Logical>,
     gaps_to_edge: bool,
     hide_edge_borders: HideEdgeBorders,
@@ -64,6 +65,9 @@ pub(crate) struct GeometryInput<'a, W: LayoutElement> {
     pub titlebar_height: f64,
     pub fullscreen: &'a HashSet<NodeId>,
     pub mapped_under_fullscreen: &'a HashSet<NodeId>,
+    /// Boxes that override the tiled pass: former fullscreen containers sway
+    /// no longer arranges (see `TilingTree::stale_fullscreen_rects`).
+    pub stale_fullscreen_rects: &'a HashMap<NodeId, Rectangle<f64, Logical>>,
     pub hide_edge_borders: HideEdgeBorders,
     pub smart_borders: SmartBorders,
     pub visible_leaves: &'a HashSet<NodeId>,
@@ -79,6 +83,7 @@ pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry
         titlebar_height: input.titlebar_height,
         fullscreen: &HashSet::new(),
         mapped_under_fullscreen: input.mapped_under_fullscreen,
+        stale_fullscreen_rects: input.stale_fullscreen_rects,
         workspace_area,
         gaps_to_edge: input.gaps_to_edge,
         hide_edge_borders: input.hide_edge_borders,
@@ -751,6 +756,14 @@ fn assign<W: LayoutElement>(
     let Some(node) = context.nodes.get(&assignment.id) else {
         return;
     };
+    let mut assignment = assignment;
+    if let Some(stale) = context
+        .stale_fullscreen_rects
+        .get(&assignment.id)
+        .filter(|_| context.fullscreen.is_empty())
+    {
+        assignment.rect = *stale;
+    }
     result.ipc_nodes.insert(assignment.id, assignment.rect);
     match &node.value {
         TreeNode::Leaf { tile } => assign_leaf(context, tile, assignment, result),

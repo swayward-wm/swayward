@@ -148,7 +148,7 @@ pub(super) fn fullscreen(state: &mut State, mode: Toggle, global: bool) {
         .layout
         .active_workspace()
         .and_then(crate::layout::workspace::Workspace::focused_floating_tree_root);
-    let current = state.swayward.layout.focused_fullscreen_mode();
+    let current = state.swayward.layout.focused_container_fullscreen_mode();
     let enabled = match mode {
         Toggle::Enable => true,
         Toggle::Disable => false,

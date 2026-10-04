@@ -51,8 +51,30 @@ impl<W: LayoutElement> TilingTree<W> {
         {
             return false;
         }
+        // Fullscreen moving from a container to its descendant leaves the
+        // container, and the splits between them, at their fullscreen boxes
+        // (container_set_fullscreen, sway/tree/container.c:1312-1315).
+        let stale = match (current, fullscreen) {
+            (Some(current), Some(_)) if current != id && self.contains_node(current, id) => {
+                let geometries = self.compute_geometry();
+                let mut stale = self.stale_fullscreen_rects.clone();
+                let mut node = self.nodes.get(&id).and_then(|node| node.parent);
+                while let Some(ancestor) = node {
+                    if let Some(rect) = geometries.ipc_nodes.get(&ancestor) {
+                        stale.insert(ancestor, *rect);
+                    }
+                    if ancestor == current {
+                        break;
+                    }
+                    node = self.nodes.get(&ancestor).and_then(|node| node.parent);
+                }
+                stale
+            }
+            _ => HashMap::new(),
+        };
         self.fullscreen_tile_slot = false;
         self.fullscreen_arrived = false;
+        self.stale_fullscreen_rects = stale;
         if let Some(current) = current {
             if let Some(mode) = self.pending_modes.get_mut(&current) {
                 mode.fullscreen = None;

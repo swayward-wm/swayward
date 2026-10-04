@@ -7,6 +7,11 @@ impl<W: LayoutElement> Layout<W> {
         self.active_workspace().and_then(Workspace::fullscreen_mode)
     }
 
+    pub fn focused_container_fullscreen_mode(&self) -> Option<tiling_tree::FullscreenMode> {
+        self.active_workspace()
+            .and_then(Workspace::focused_container_fullscreen_mode)
+    }
+
     pub fn global_fullscreen_active(&self) -> bool {
         self.workspaces().any(|(_, _, workspace)| {
             workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global)

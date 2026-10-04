@@ -91,6 +91,20 @@ impl<W: LayoutElement> TilingTree<W> {
         self.compute_geometry().leaf_ipc_rects.remove(&id)
     }
 
+    /// The stale boxes that still apply: those of strict ancestors of the
+    /// current fullscreen node. Sway's next full arrange, when fullscreen ends
+    /// or leaves the subtree, gives them their tiled boxes again.
+    pub(super) fn active_stale_fullscreen_rects(&self) -> HashMap<NodeId, Rectangle<f64, Logical>> {
+        let Some(fullscreen) = self.fullscreen_node() else {
+            return HashMap::new();
+        };
+        self.stale_fullscreen_rects
+            .iter()
+            .filter(|(id, _)| **id != fullscreen && self.contains_node(**id, fullscreen))
+            .map(|(id, rect)| (*id, *rect))
+            .collect()
+    }
+
     pub(super) fn compute_geometry(&self) -> geometry::Geometry<W::Id> {
         let excluded = self.split_excluded();
         let fullscreen = self.fullscreen_node().into_iter().collect();
@@ -112,6 +126,7 @@ impl<W: LayoutElement> TilingTree<W> {
             titlebar_height: self.titlebar_height,
             fullscreen: &fullscreen,
             mapped_under_fullscreen: &excluded,
+            stale_fullscreen_rects: &self.active_stale_fullscreen_rects(),
             hide_edge_borders: self.options.layout.hide_edge_borders,
             smart_borders: self.options.layout.smart_borders,
             visible_leaves: &visible_leaves,

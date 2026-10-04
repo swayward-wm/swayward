@@ -858,3 +858,39 @@ fn reaping_the_fullscreen_container_arranges_the_hidden_view() {
     assert_eq!(hidden["percent"], 0.5, "{hidden}");
     assert!(hidden["rect"]["width"].as_i64().unwrap() > 0, "{hidden}");
 }
+
+// random seeds 203 step 5, 447 step 19, 459 step 16 (sway-1.12-random):
+// `splith` on a fullscreen view moves fullscreen to the new wrapper
+// (`container_replace`, sway/tree/container.c:1471-1501) and returns focus to
+// the view (sway/tree/container.c:1554-1560). `fullscreen toggle` then reads
+// the view's own mode (sway/commands/fullscreen.c:33), so it fullscreens the
+// view and drops the wrapper's (sway/tree/container.c:1312-1315).
+#[test]
+fn fullscreen_toggle_after_split_targets_the_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    map_app(&mut f, client, "fixture-2");
+    for command in ["fullscreen toggle", "splith"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    let tree = tree_json(&mut f);
+    let wrapper = &tree["nodes"][1]["nodes"][0]["nodes"][1];
+    assert_eq!(wrapper["fullscreen_mode"], 1, "{wrapper}");
+    assert_eq!(wrapper["nodes"][0]["fullscreen_mode"], 0, "{wrapper}");
+
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    let tree = tree_json(&mut f);
+    let wrapper = &tree["nodes"][1]["nodes"][0]["nodes"][1];
+    assert_eq!(wrapper["type"], "con", "{wrapper}");
+    assert_eq!(wrapper["fullscreen_mode"], 0, "{wrapper}");
+    // Sway arranges only the new fullscreen view (sway/tree/arrange.c:310-316),
+    // so the wrapper keeps the output box it had while fullscreen.
+    assert_eq!(wrapper["rect"]["width"], 1280, "{wrapper}");
+    assert_eq!(wrapper["percent"], 1.0, "{wrapper}");
+    assert_eq!(wrapper["nodes"][0]["percent"], 1.0, "{wrapper}");
+    assert_eq!(wrapper["nodes"][0]["app_id"], "fixture-2", "{wrapper}");
+    assert_eq!(wrapper["nodes"][0]["fullscreen_mode"], 1, "{wrapper}");
+    assert_eq!(wrapper["nodes"][0]["focused"], true, "{wrapper}");
+}

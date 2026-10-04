@@ -63,6 +63,23 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// The focused container's own fullscreen mode, the one sway's `fullscreen`
+    /// toggles (sway/commands/fullscreen.c:33). After `splith` on a fullscreen
+    /// view the wrapper holds the mode and the focused view holds none.
+    pub fn focused_container_fullscreen_mode(
+        &self,
+    ) -> Option<crate::layout::tiling_tree::FullscreenMode> {
+        if self.floating_is_active.get() {
+            let window = self.active_window()?.id();
+            if self.floating.tree_root_for_window(window).is_some() {
+                return self.floating.focused_fullscreen_mode();
+            }
+            return self.fullscreen_mode_for_window(window);
+        }
+        let id = self.tiling.focus().filter(|id| !self.tiling.is_root(*id))?;
+        self.tiling.fullscreen_mode(id)
+    }
+
     pub fn set_focused_fullscreen(
         &mut self,
         mode: Option<crate::layout::tiling_tree::FullscreenMode>,

@@ -422,6 +422,7 @@ macro_rules! side_tables {
             ("moved_under_fullscreen", $($ref)+ $tree.moved_under_fullscreen),
             ("fullscreen_layout_wrappers", $($ref)+ $tree.fullscreen_layout_wrappers),
             ("pre_layout_ipc_rects", $($ref)+ $tree.pre_layout_ipc_rects),
+            ("stale_fullscreen_rects", $($ref)+ $tree.stale_fullscreen_rects),
             ("tab_indicators", $($ref)+ $tree.tab_indicators),
             ("tab_active", $($ref)+ $tree.tab_active),
         ]
@@ -466,6 +467,11 @@ pub struct TilingTree<W: LayoutElement> {
     fullscreen_arrived: bool,
     fullscreen_layout_wrappers: HashSet<NodeId>,
     pre_layout_ipc_rects: HashMap<NodeId, Rectangle<f64, Logical>>,
+    /// Containers that held fullscreen before it moved to a descendant, with
+    /// the output box they were last arranged at. Sway arranges only the new
+    /// fullscreen node (sway/tree/arrange.c:310-316), so these keep that box,
+    /// and the percent it implies, until fullscreen ends.
+    stale_fullscreen_rects: HashMap<NodeId, Rectangle<f64, Logical>>,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,
