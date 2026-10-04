@@ -3,12 +3,7 @@ use super::*;
 pub(super) fn parse_rename(args: &[&str]) -> Result<Command, String> {
     const SYNTAX: &str =
         "Expected 'rename workspace <old_name> to <new_name>' or 'rename workspace to <new_name>'";
-    if args.len() < 3 {
-        return Err(format!(
-            "Invalid rename command (expected at least 3 arguments, got {})",
-            args.len()
-        ));
-    }
+    checkarg(args.len(), "rename", Expected::AtLeast(3))?;
     let [workspace, rest @ ..] = args else {
         return Err(SYNTAX.into());
     };
@@ -124,13 +119,7 @@ pub(super) fn parse_workspace_gaps(args: &[&str], index: usize) -> Result<Comman
     if index == 0 {
         return Err(EXPECTED.into());
     }
-    if args.len() != index + 3 {
-        return Err(format!(
-            "Invalid workspace command (expected {} arguments, got {})",
-            index + 3,
-            args.len()
-        ));
-    }
+    checkarg(args.len(), "workspace", Expected::EqualTo(index + 3))?;
     let (name, suffix) = args.split_at(index);
     let [_, kind, amount] = suffix else {
         return Err(EXPECTED.into());
@@ -167,7 +156,7 @@ pub(super) fn parse_workspace(args: &[&str]) -> Result<WorkspaceTarget, String> 
             }
             Ok(WorkspaceTarget::Number(name))
         }
-        [] => Err("Invalid workspace command (expected at least 1 argument, got 0)".into()),
+        [] => Err(arity_error(0, "workspace", Expected::AtLeast(1))),
         names => Ok(WorkspaceTarget::Name(join_words(names))),
     }
 }

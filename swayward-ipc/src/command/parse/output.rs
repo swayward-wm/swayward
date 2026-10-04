@@ -12,9 +12,10 @@ pub(super) fn parse_input_command(args: &[&str]) -> Result<Command, String> {
         );
     }
     let [target] = values else {
-        return Err(format!(
-            "Invalid xkb_switch_layout command (expected 1 argument, got {})",
-            values.len()
+        return Err(arity_error(
+            values.len(),
+            "xkb_switch_layout",
+            Expected::EqualTo(1),
         ));
     };
     let target = match *target {
@@ -55,7 +56,7 @@ const OUTPUT_SUBCOMMANDS: &[(&[&str], OutputSubcommand)] = &[
 
 pub(super) fn parse_output_command(args: &[&str]) -> Result<Command, String> {
     let Some((target, mut args)) = args.split_first() else {
-        return Err("Invalid output command (expected at least 1 argument, got 0)".into());
+        return Err(arity_error(0, "output", Expected::AtLeast(1)));
     };
     let mut actions = Vec::new();
     while let Some((name, rest)) = args.split_first() {

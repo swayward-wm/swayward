@@ -3,6 +3,7 @@ use super::lexer::*;
 use super::variables::*;
 use crate::CommandOutcome;
 
+mod arity;
 mod bindings;
 mod error;
 mod move_resize;
@@ -11,6 +12,7 @@ mod rules;
 mod settings;
 mod workspace;
 
+use arity::*;
 use bindings::*;
 use error::*;
 use move_resize::*;
@@ -321,20 +323,14 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
         "fullscreen" => parse_fullscreen(rest),
         "floating" => match rest {
             [value] => Ok(Command::Floating(parse_boolean_toggle(value))),
-            _ => Err(format!(
-                "Invalid floating command (expected 1 argument, got {})",
-                rest.len()
-            )),
+            _ => Err(arity_error(rest.len(), "floating", Expected::EqualTo(1))),
         },
         "urgent" => match rest {
             [value] if matches!(*value, "allow" | "deny") => {
                 Err("urgent allow|deny requires client urgency-request policy support".into())
             }
             [value] => Ok(Command::Urgent((*value).to_owned())),
-            _ => Err(format!(
-                "Invalid urgent command (expected 1 argument, got {})",
-                rest.len()
-            )),
+            _ => Err(arity_error(rest.len(), "urgent", Expected::EqualTo(1))),
         },
         "border" => parse_border(rest).map(Command::Border),
         "title_format" => {
@@ -356,16 +352,7 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
         "kill" => Ok(Command::Kill),
         "resize" => parse_resize(rest),
         "reload" => no_args(rest, "reload").map(|()| Command::Reload),
-        "exit" => {
-            if rest.is_empty() {
-                Ok(Command::Exit)
-            } else {
-                Err(format!(
-                    "Invalid exit command (expected 0 arguments, got {})",
-                    rest.len()
-                ))
-            }
-        }
+        "exit" => checkarg(rest.len(), "exit", Expected::EqualTo(0)).map(|()| Command::Exit),
         "opacity" => parse_opacity(rest),
         "inhibit_idle" => match rest {
             ["focus"] => Ok(Command::InhibitIdle(InhibitIdleMode::Focus)),
@@ -374,22 +361,17 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
             ["none"] => Ok(Command::InhibitIdle(InhibitIdleMode::None)),
             ["visible"] => Ok(Command::InhibitIdle(InhibitIdleMode::Visible)),
             [_] => Err("Expected `inhibit_idle focus|fullscreen|open|none|visible`".into()),
-            _ => Err(format!(
-                "Invalid inhibit_idle command (expected 1 argument, got {})",
-                rest.len()
+            _ => Err(arity_error(
+                rest.len(),
+                "inhibit_idle",
+                Expected::EqualTo(1),
             )),
         },
         // Sway's developer-only create_output handler deliberately ignores argv.
         "create_output" => Ok(Command::CreateOutput),
         "input" => {
-            if rest.len() < 2 {
-                Err(format!(
-                    "Invalid input command (expected at least 2 arguments, got {})",
-                    rest.len()
-                ))
-            } else {
-                parse_input_command(rest)
-            }
+            checkarg(rest.len(), "input", Expected::AtLeast(2))?;
+            parse_input_command(rest)
         }
         "output" => parse_output_command(rest),
         "allow_tearing" => Err("allow_tearing requires immediate presentation support".into()),
@@ -429,7 +411,11 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
     }
 }
 
+/// The `checkarg` sway's handler for `name` runs before it reads argv.
+/// Handlers that check later, or only on some paths, call [`checkarg`]
+/// themselves.
 fn check_arity(name: &str, count: usize) -> Result<(), String> {
+    use Expected::{AtLeast, EqualTo};
     let display_name = match name {
         "new_window" => "default_border",
         "new_float" => "default_floating_border",
@@ -442,9 +428,9 @@ fn check_arity(name: &str, count: usize) -> Result<(), String> {
         | "new_float"
         | "font"
         | "mode"
-        | "title_align" => Some(("at least ", 1, false)),
-        "for_window" => Some(("at least ", 2, false)),
-        "swap" => Some(("at least ", 4, false)),
+        | "title_align" => AtLeast(1),
+        "for_window" => AtLeast(2),
+        "swap" => AtLeast(4),
         "focus_follows_mouse"
         | "focus_on_window_activation"
         | "focus_wrapping"
@@ -452,21 +438,12 @@ fn check_arity(name: &str, count: usize) -> Result<(), String> {
         | "popup_during_fullscreen"
         | "sticky"
         | "tiling_drag"
-        | "tiling_drag_threshold" => Some(("", 1, true)),
-        "floating_minimum_size" | "floating_maximum_size" => Some(("", 3, true)),
-        "reload" | "splith" | "splitv" | "splitt" => Some(("", 0, true)),
-        _ => None,
+        | "tiling_drag_threshold" => EqualTo(1),
+        "floating_minimum_size" | "floating_maximum_size" => EqualTo(3),
+        "reload" | "splith" | "splitv" | "splitt" => EqualTo(0),
+        _ => return Ok(()),
     };
-    let Some((qualifier, expected, exact)) = expected else {
-        return Ok(());
-    };
-    if (exact && count != expected) || (!exact && count < expected) {
-        return Err(format!(
-            "Invalid {display_name} command (expected {qualifier}{expected} argument{}, got {count})",
-            if expected == 1 { "" } else { "s" }
-        ));
-    }
-    Ok(())
+    checkarg(count, display_name, expected)
 }
 
 fn no_args(args: &[&str], syntax: &str) -> Result<(), String> {

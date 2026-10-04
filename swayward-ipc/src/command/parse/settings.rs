@@ -1,18 +1,8 @@
 use super::*;
 
 pub(super) fn parse_client_colors(name: &str, args: &[&str]) -> Result<Command, String> {
-    if args.len() < 3 {
-        return Err(format!(
-            "Invalid {name} command (expected at least 3 arguments, got {})",
-            args.len()
-        ));
-    }
-    if args.len() > 5 {
-        return Err(format!(
-            "Invalid {name} command (expected at most 5 arguments, got {})",
-            args.len()
-        ));
-    }
+    checkarg(args.len(), name, Expected::AtLeast(3))?;
+    checkarg(args.len(), name, Expected::AtMost(5))?;
 
     let default_indicator = match name {
         "client.focused" | "client.focused_tab_title" => "#2e9ef4ff",
@@ -22,10 +12,7 @@ pub(super) fn parse_client_colors(name: &str, args: &[&str]) -> Result<Command, 
         _ => return Err(format!("Unknown/invalid command '{name}'")),
     };
     let [border, background, text, rest @ ..] = args else {
-        return Err(format!(
-            "Invalid {name} command (expected at least 3 arguments, got {})",
-            args.len()
-        ));
+        return Err(arity_error(args.len(), name, Expected::AtLeast(3)));
     };
     let properties = [
         ("border", *border),
@@ -205,10 +192,7 @@ pub(super) fn parse_gaps(args: &[&str]) -> Result<Command, String> {
                 amount,
             })
         }
-        args if args.len() < 2 => Err(format!(
-            "Invalid gaps command (expected at least 2 arguments, got {})",
-            args.len()
-        )),
+        args if args.len() < 2 => Err(arity_error(args.len(), "gaps", Expected::AtLeast(2))),
         _ => Err(format!(
             "Expected {GAPS_EXPECTED_RUNTIME} or {GAPS_EXPECTED_DEFAULTS}"
         )),
@@ -494,10 +478,7 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
             // because the check is EXPECTED_AT_LEAST.
             const USAGE: &str = "Usage: floating_modifier <mod> [inverse|normal]";
             let Some((modifier, mode)) = rest.split_first() else {
-                return Err(
-                    "Invalid floating_modifier command (expected at least 1 argument, got 0)"
-                        .into(),
-                );
+                return Err(arity_error(0, "floating_modifier", Expected::AtLeast(1)));
             };
             if modifier.eq_ignore_ascii_case("none") {
                 return Ok(Command::SetLayoutOption(LayoutOption::FloatingModifier {
@@ -576,9 +557,10 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
         "titlebar_border_thickness" => {
             const INVALID: &str = INVALID_SIZE;
             let [value] = rest else {
-                return Err(format!(
-                    "Invalid titlebar_border_thickness command (expected 1 argument, got {})",
-                    rest.len()
+                return Err(arity_error(
+                    rest.len(),
+                    "titlebar_border_thickness",
+                    Expected::EqualTo(1),
                 ));
             };
             let value = value.parse().map_err(|_| INVALID.to_owned())?;

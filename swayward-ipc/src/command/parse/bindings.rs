@@ -15,10 +15,7 @@ fn require_bind_args(
             "Invalid {name} command (expected at least {minimum} non-option arguments, got {got})"
         )
     } else {
-        format!(
-            "Invalid {name} command (expected at least {minimum} argument{}, got {got})",
-            if minimum == 1 { "" } else { "s" },
-        )
+        arity_error(got, name, Expected::AtLeast(minimum))
     })
 }
 
@@ -195,14 +192,9 @@ pub(super) fn parse_mode(args: &[&str]) -> Result<Command, String> {
 }
 
 pub(super) fn parse_set(args: &[&str]) -> Result<Command, String> {
-    if args.len() < 2 {
-        return Err(format!(
-            "Invalid set command (expected at least 2 arguments, got {})",
-            args.len()
-        ));
-    }
+    checkarg(args.len(), "set", Expected::AtLeast(2))?;
     let [name, value @ ..] = args else {
-        return Err("Invalid set command (expected at least 2 arguments, got 0)".into());
+        return Err(arity_error(0, "set", Expected::AtLeast(2)));
     };
     if !name.starts_with('$') {
         return Err(format!("variable '{name}' must start with $"));

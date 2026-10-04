@@ -11,7 +11,7 @@ pub(super) const SPLIT_INVALID: &str =
 pub(super) fn parse_border(args: &[&str]) -> Result<Border, String> {
     const SYNTAX: &str = BORDER_SYNTAX;
     let Some(style) = args.first() else {
-        return Err("Invalid border command (expected at least 1 argument, got 0)".into());
+        return Err(arity_error(0, "border", Expected::AtLeast(1)));
     };
     let (style, mut width) = match style.to_ascii_lowercase().as_str() {
         "normal" => (BorderStyle::Normal, None),
@@ -226,7 +226,7 @@ pub(super) fn parse_layout(args: &[&str]) -> Result<Command, String> {
         }
     }
     let [toggle, rest @ ..] = args else {
-        return Err("Invalid layout command (expected at least 1 argument, got 0)".into());
+        return Err(arity_error(0, "layout", Expected::AtLeast(1)));
     };
     if !toggle.eq_ignore_ascii_case("toggle") {
         return Err(LAYOUT_USAGE.into());
@@ -273,12 +273,7 @@ pub(super) fn parse_split(args: &[&str]) -> Result<Command, String> {
 pub(super) fn parse_opacity(args: &[&str]) -> Result<Command, String> {
     let value = args
         .get(if args.len() == 1 { 0 } else { 1 })
-        .ok_or_else(|| {
-            format!(
-                "Invalid opacity command (expected at least 1 argument, got {})",
-                args.len()
-            )
-        })?
+        .ok_or_else(|| arity_error(args.len(), "opacity", Expected::AtLeast(1)))?
         .parse::<f32>()
         .map_err(|_| OPACITY_FLOAT_INVALID.to_owned())?;
 
