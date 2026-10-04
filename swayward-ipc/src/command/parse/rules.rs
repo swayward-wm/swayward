@@ -164,10 +164,9 @@ pub(super) fn parse_no_focus(input: &str, name: &str) -> Result<Command, String>
     if !rest.starts_with('[') {
         return Err("No criteria".into());
     }
-    let (criteria, trailing) = parse_rule_criteria(input, name, USAGE)?;
-    if !trailing.is_empty() {
-        return Err(USAGE.into());
-    }
+    // `sway/sway/commands/no_focus.c:8-20` hands argv[0] to criteria_parse
+    // and ignores later arguments, which stops at the closing bracket.
+    let (criteria, _) = parse_rule_criteria(input, name, USAGE)?;
     Ok(Command::NoFocus { criteria })
 }
 

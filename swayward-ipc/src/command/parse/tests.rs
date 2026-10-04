@@ -198,7 +198,11 @@ fn runtime_map_rules_reject_x11_only_criteria() {
 fn runtime_map_rules_reject_missing_or_invalid_arguments() {
     assert!(parse_one("assign [app_id=term]").is_err());
     assert!(parse_one("assign [app_id=term] number named").is_err());
-    assert!(parse_one("no_focus [app_id=term] trailing").is_err());
+    // Sway's no_focus reads argv[0] only (`sway/sway/commands/no_focus.c`).
+    assert!(matches!(
+        parse_one("no_focus [app_id=term] trailing"),
+        Ok(Command::NoFocus { criteria }) if criteria == "[app_id=term]"
+    ));
 }
 
 #[test]
