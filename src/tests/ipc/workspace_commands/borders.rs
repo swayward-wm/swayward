@@ -1002,3 +1002,62 @@ fn view_mapped_with_the_workspace_focused_goes_beside_its_focus_inactive_child()
     assert_eq!(three["border"], "normal");
     assert_eq!(three["focused"], true);
 }
+
+#[test]
+fn a_tiled_csd_window_moved_to_the_scratchpad_reports_csd() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // `move scratchpad` floats a tiled view first (root_scratchpad_add_container,
+    // sway/tree/root.c:114-118), and floating a CSD view stores B_CSD
+    // (container_set_floating, sway/tree/container.c:955-959), so the hidden
+    // window reports "csd". Differential family diff-fam-csd-scratchpad,
+    // seed 11055; oracle row scratchpad_tiled_csd_reports_csd.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("hidden".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(Mode::ServerSide);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let node = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap();
+        find_json_node_with_app_id(&tree, "hidden").unwrap().clone()
+    };
+
+    assert!(crate::command::execute(f.niri_state(), "border toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(node(&mut f)["border"], "normal");
+
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    f.double_roundtrip(client);
+    let hidden = node(&mut f);
+    assert_eq!(hidden["scratchpad_state"], "fresh");
+    assert_eq!(hidden["border"], "csd");
+    assert_eq!(
+        f.client(client).window(&surface).decoration_modes.last(),
+        Some(&Mode::ClientSide)
+    );
+
+    // Showing keeps csd; tiling it again restores the saved normal border
+    // (sway/tree/container.c:998-1001).
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(node(&mut f)["border"], "csd");
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(node(&mut f)["border"], "normal");
+}

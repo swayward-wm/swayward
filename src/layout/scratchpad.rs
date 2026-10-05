@@ -62,6 +62,9 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return;
         };
+        // Sway floats a tiled view before hiding it, which stores B_CSD for a
+        // CSD view (root_scratchpad_add_container, sway/tree/root.c:114-118).
+        removed.tile.set_sway_csd_floating(true);
         removed.floating_working_area = floating_working_area;
         if !self.scratchpad_windows.contains(&window) {
             self.scratchpad_windows.push(window);
