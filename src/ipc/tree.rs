@@ -105,7 +105,7 @@ pub fn describe_tree_with_power(
         .into_iter()
         .map(|monitor| output_id(monitor.output_name()))
         .collect();
-    common_node(CommonNodeContext {
+    let mut root = common_node(CommonNodeContext {
         id: ROOT_ID,
         node_type: NodeType::Root,
         layout: NodeLayout::SplitH,
@@ -117,7 +117,9 @@ pub fn describe_tree_with_power(
         focus,
         focused: false,
         properties: NodeProperties::None {},
-    })
+    });
+    refresh_inhibit_idle(&mut root, false);
+    root
 }
 
 fn scratch_output(

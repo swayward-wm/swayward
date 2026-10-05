@@ -122,6 +122,36 @@ pub(super) fn apply_fullscreen_state(nodes: &mut [Node], workspace_visible: bool
     apply(nodes, workspace_visible, true)
 }
 
+/// Recomputes each view's `inhibit_idle` from the finished tree.
+///
+/// Sway serializes `view_inhibit_idle`, which evaluates the user inhibitor
+/// against the view's current state (`sway_idle_inhibit_v1_is_active`,
+/// `sway/sway/desktop/idle_inhibit_v1.c:114-163`): `focus` needs the seat's
+/// focused container to be the view, `fullscreen` needs the view fullscreen
+/// or inside a fullscreen container and visible, and `visible` follows
+/// `view_is_visible`. The per-window `focused` and `visible` flags are only
+/// final once the workspace, tab and fullscreen passes have run, so this runs
+/// last over the whole tree.
+pub(super) fn refresh_inhibit_idle(node: &mut Node, in_fullscreen: bool) {
+    // Sway serializes workspaces with `fullscreen_mode: 1`, so only
+    // containers count (`container_is_fullscreen_or_child`).
+    let in_fullscreen = in_fullscreen
+        || (matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
+            && node.fullscreen_mode != 0);
+    if let swayward_ipc::NodeProperties::View(properties) = &mut node.properties {
+        properties.inhibit_idle = match properties.idle_inhibitors.user.as_str() {
+            "open" => true,
+            "focus" => node.focused,
+            "fullscreen" => in_fullscreen && properties.visible,
+            "visible" => properties.visible,
+            _ => false,
+        };
+    }
+    for child in node.nodes.iter_mut().chain(&mut node.floating_nodes) {
+        refresh_inhibit_idle(child, in_fullscreen);
+    }
+}
+
 pub(super) fn contains_fullscreen(node: &Node) -> bool {
     node.fullscreen_mode != 0 || node.nodes.iter().any(contains_fullscreen)
 }

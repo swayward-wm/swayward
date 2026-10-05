@@ -537,3 +537,85 @@ fn hiding_active_standalone_float_falls_back_to_the_recursive_root() {
         .id();
     assert_eq!(active, standalone[0]);
 }
+
+/// Oracle: inhibit_idle_tree_reports_policy_result; differential seeds 1589,
+/// 1302, 4296. GET_TREE's `inhibit_idle` is `view_inhibit_idle`, the user
+/// policy evaluated against the view's current state
+/// (`sway/sway/desktop/idle_inhibit_v1.c:114-163`), so it turns false when a
+/// `focus` view loses focus or a `visible` view is hidden by a workspace switch
+/// or an inactive tab.
+#[test]
+fn get_tree_inhibit_idle_follows_focus_and_visibility() {
+    fn views(node: &Value, out: &mut Vec<Value>) {
+        if node["type"] == "con" && node["nodes"].as_array().is_none_or(|n| n.is_empty()) {
+            out.push(node.clone());
+        }
+        for key in ["nodes", "floating_nodes"] {
+            for child in node[key].as_array().into_iter().flatten() {
+                views(child, out);
+            }
+        }
+    }
+    let inhibit = |fixture: &mut Fixture| {
+        let mut out = Vec::new();
+        views(&command_tree(fixture), &mut out);
+        out.iter()
+            .map(|view| {
+                (
+                    view["idle_inhibitors"]["user"].as_str().unwrap().to_owned(),
+                    view["inhibit_idle"].as_bool().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let run = |fixture: &mut Fixture, command: &str| {
+        assert!(
+            crate::command::execute(fixture.niri_state(), command)[0].success,
+            "{command}"
+        );
+    };
+    let open = |fixture: &mut Fixture, client| {
+        let window = fixture.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        fixture.roundtrip(client);
+        let window = fixture.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        fixture.double_roundtrip(client);
+    };
+    let pair = |user: &str, active| vec![(user.to_owned(), active)];
+
+    // `focus` holds only while the view has the seat focus.
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1280, 720));
+    let client = fixture.add_client();
+    open(&mut fixture, client);
+    run(&mut fixture, "inhibit_idle focus");
+    assert_eq!(inhibit(&mut fixture), pair("focus", true));
+    run(&mut fixture, "focus parent");
+    assert_eq!(inhibit(&mut fixture), pair("focus", false));
+
+    // `visible` drops when the workspace goes to the background.
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1280, 720));
+    let client = fixture.add_client();
+    open(&mut fixture, client);
+    run(&mut fixture, "inhibit_idle visible");
+    assert_eq!(inhibit(&mut fixture), pair("visible", true));
+    run(&mut fixture, "workspace number 3");
+    assert_eq!(inhibit(&mut fixture), pair("visible", false));
+
+    // ...and when another tab takes the front.
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1280, 720));
+    let client = fixture.add_client();
+    run(&mut fixture, "layout tabbed");
+    open(&mut fixture, client);
+    run(&mut fixture, "inhibit_idle visible");
+    open(&mut fixture, client);
+    assert_eq!(
+        inhibit(&mut fixture),
+        [("visible".to_owned(), false), ("none".to_owned(), false)]
+    );
+}
