@@ -297,6 +297,40 @@ fn splitting_the_workspace_keeps_its_representation_until_the_tree_changes() {
 }
 
 #[test]
+fn splitting_a_tabbed_workspace_keeps_its_tabbed_representation() {
+    // As above with a tabbed workspace: the wrapper keeps the tabbed layout and the workspace
+    // representation keeps the stale T (sway/tree/workspace.c:1058-1079). Differential seed
+    // 11667; oracle row: split_tabbed_workspace_keeps_stale_representation.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
+
+    let workspace_json = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        tree["nodes"][1]["nodes"][0].clone()
+    };
+    let workspace = workspace_json(&mut f);
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["representation"], "T[T[fixture-1]]");
+    assert_eq!(workspace["nodes"][0]["layout"], "tabbed");
+
+    map_test_window(&mut f, client, "fixture-2");
+    let workspace = workspace_json(&mut f);
+    assert_eq!(workspace["representation"], "H[T[fixture-1] fixture-2]");
+}
+
+#[test]
 fn removing_one_of_two_split_windows_preserves_the_wrapper() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
