@@ -631,3 +631,98 @@ fn split_containers_report_sway_container_state_fields() {
     assert_eq!(split["floating"], "auto_off");
     assert_eq!(split["scratchpad_state"], "none");
 }
+
+/// Oracle: kill_under_fullscreen_keeps_sibling_percent; differential seed 3759.
+/// Closing a view while its workspace has a fullscreen container arranges only
+/// the fullscreen container (`view_unmap` -> `arrange_workspace`,
+/// sway/tree/view.c:1001-1006, sway/tree/arrange.c:310-316), so the remaining
+/// siblings keep their old boxes and the percent those imply.
+#[test]
+fn mapping_a_view_after_a_close_under_fullscreen_keeps_the_stale_percent() {
+    // Mapping onto the workspace arranges the workspace, which under
+    // fullscreen arranges only the fullscreen container
+    // (sway/tree/view.c:936-939, sway/tree/arrange.c:310-316).
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+
+    let map = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        surface
+    };
+    let first = map(&mut f, "first");
+    map(&mut f, "second");
+    map(&mut f, "third");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    f.double_roundtrip(client);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let before = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let second_before = find_json_node_with_app_id(&before, "second")
+        .unwrap()
+        .clone();
+
+    f.client(client).window(&first).destroy_role();
+    f.double_roundtrip(client);
+    map(&mut f, "fourth");
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let second = find_json_node_with_app_id(&tree, "second").unwrap();
+    assert_eq!(second["percent"], second_before["percent"]);
+    assert_eq!(second["rect"], second_before["rect"]);
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "third").unwrap()["percent"],
+        1.0
+    );
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "fourth").unwrap()["percent"],
+        0.0
+    );
+}
+
+#[test]
+fn closing_a_sibling_under_fullscreen_keeps_the_others_stale_percent() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+
+    let mut surfaces = Vec::new();
+    for app_id in ["first", "second", "third"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        surfaces.push(surface);
+    }
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    f.double_roundtrip(client);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let before = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let second_before = find_json_node_with_app_id(&before, "second")
+        .unwrap()
+        .clone();
+
+    f.client(client).window(&surfaces[0]).destroy_role();
+    f.double_roundtrip(client);
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let second = find_json_node_with_app_id(&tree, "second").unwrap();
+    let third = find_json_node_with_app_id(&tree, "third").unwrap();
+    assert_eq!(second["percent"], second_before["percent"]);
+    assert_eq!(second["rect"], second_before["rect"]);
+    assert_eq!(third["percent"], 1.0);
+}

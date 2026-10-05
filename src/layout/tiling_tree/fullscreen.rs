@@ -94,6 +94,7 @@ impl<W: LayoutElement> TilingTree<W> {
         self.wrapper_arranged_boxes.clear();
         self.fullscreen_rearranged = false;
         self.stale_fullscreen_rects = stale;
+        self.unarranged_under_fullscreen.clear();
         for node in cleared {
             if let Some(mode) = self.pending_modes.get_mut(&node) {
                 mode.fullscreen = None;

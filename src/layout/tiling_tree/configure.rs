@@ -92,15 +92,21 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     /// The stale boxes that still apply: those of strict ancestors of the
-    /// current fullscreen node. Sway's next full arrange, when fullscreen ends
-    /// or leaves the subtree, gives them their tiled boxes again.
+    /// current fullscreen node, and those left unarranged when a view closed
+    /// under fullscreen. Sway's next full arrange, when fullscreen ends or
+    /// leaves the subtree, gives them their tiled boxes again.
     pub(super) fn active_stale_fullscreen_rects(&self) -> HashMap<NodeId, Rectangle<f64, Logical>> {
         let Some(fullscreen) = self.fullscreen_node() else {
             return HashMap::new();
         };
-        self.stale_fullscreen_rects
+        self.unarranged_under_fullscreen
             .iter()
-            .filter(|(id, _)| **id != fullscreen && self.contains_node(**id, fullscreen))
+            .filter(|(id, _)| !self.contains_node(fullscreen, **id))
+            .chain(
+                self.stale_fullscreen_rects
+                    .iter()
+                    .filter(|(id, _)| **id != fullscreen && self.contains_node(**id, fullscreen)),
+            )
             .map(|(id, rect)| (*id, *rect))
             .collect()
     }

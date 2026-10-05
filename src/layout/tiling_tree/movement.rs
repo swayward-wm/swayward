@@ -156,6 +156,7 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
         };
+        self.unarranged_under_fullscreen.clear();
         self.insert_child(parent, id, after);
         self.reap_empty_from(old_parent);
         self.compact_tree();

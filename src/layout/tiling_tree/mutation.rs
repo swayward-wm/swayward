@@ -121,6 +121,7 @@ impl<W: LayoutElement> TilingTree<W> {
             && fullscreen.is_some_and(|fullscreen| {
                 self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
             });
+        self.forget_unarranged_after_map(parent, mapped_under_fullscreen);
         if fullscreen.is_some_and(|fullscreen| {
             self.divides_box_under_fullscreen(parent, fullscreen)
                 || (parent == self.root && !mapped_under_fullscreen)
@@ -176,6 +177,25 @@ impl<W: LayoutElement> TilingTree<W> {
         self.animate_geometry_changes(old_geometries, Some(id));
         self.request_window_sizes();
         id
+    }
+
+    /// Drops the boxes left unarranged by a close under fullscreen that the
+    /// arrange after mapping a view into `parent` recomputes. A view mapped
+    /// into a container arranges that container (`arrange_container(parent)`,
+    /// sway/tree/view.c:936-939), which gives its descendants new boxes. A
+    /// view mapped onto the workspace arranges the workspace (view.c:938-939),
+    /// which under workspace fullscreen arranges only the fullscreen container
+    /// (sway/tree/arrange.c:310-316) and otherwise everything.
+    fn forget_unarranged_after_map(&mut self, parent: NodeId, mapped_under_fullscreen: bool) {
+        if parent != self.root {
+            let unarranged = std::mem::take(&mut self.unarranged_under_fullscreen);
+            self.unarranged_under_fullscreen = unarranged
+                .into_iter()
+                .filter(|(id, _)| *id == parent || !self.contains_node(parent, *id))
+                .collect();
+        } else if !mapped_under_fullscreen {
+            self.unarranged_under_fullscreen.clear();
+        }
     }
 
     /// Whether a leaf added to `parent` takes a share of a split box inside `fullscreen`. Only
@@ -253,6 +273,24 @@ impl<W: LayoutElement> TilingTree<W> {
             return None;
         }
         let removed_fullscreen = self.fullscreen_node() == Some(id);
+        if let Some(fullscreen) = self.fullscreen_node().filter(|_| !removed_fullscreen) {
+            // Only the fullscreen container is arranged after the close; the
+            // rest keep the boxes they had (sway/tree/view.c:1001-1006,
+            // sway/tree/arrange.c:310-316). Views mapped under fullscreen
+            // already report their empty box.
+            let excluded = self.split_excluded();
+            let unarranged = old_geometries
+                .ipc_nodes
+                .iter()
+                .filter(|(node, _)| {
+                    **node != self.root
+                        && !excluded.contains(*node)
+                        && !self.contains_node(fullscreen, **node)
+                })
+                .map(|(node, rect)| (*node, *rect))
+                .collect::<Vec<_>>();
+            self.unarranged_under_fullscreen.extend(unarranged);
+        }
         let node = self.remove_node(id)?;
         if removed_fullscreen {
             self.mapped_under_fullscreen.clear();
@@ -342,6 +380,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 tile: Box::new(tile),
             },
         });
+        self.unarranged_under_fullscreen.clear();
         self.insert_child(parent, id, None);
         if activate {
             self.set_focus_id(Some(id));

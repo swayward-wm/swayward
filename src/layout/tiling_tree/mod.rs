@@ -444,6 +444,7 @@ macro_rules! side_tables {
             ("wrapper_arranged_boxes", $($ref)+ $tree.wrapper_arranged_boxes),
             ("unarranged_wrappers", $($ref)+ $tree.unarranged_wrappers),
             ("stale_fullscreen_rects", $($ref)+ $tree.stale_fullscreen_rects),
+            ("unarranged_under_fullscreen", $($ref)+ $tree.unarranged_under_fullscreen),
             ("tab_indicators", $($ref)+ $tree.tab_indicators),
             ("tab_active", $($ref)+ $tree.tab_active),
         ]
@@ -511,6 +512,12 @@ pub struct TilingTree<W: LayoutElement> {
     /// fullscreen node (sway/tree/arrange.c:310-316), so these keep that box,
     /// and the percent it implies, until fullscreen ends.
     stale_fullscreen_rects: HashMap<NodeId, Rectangle<f64, Logical>>,
+    /// Boxes of the containers outside the fullscreen subtree when a view
+    /// closed under fullscreen. Sway's `view_unmap` arranges the workspace,
+    /// which arranges only the fullscreen container (sway/tree/view.c:1001-1006,
+    /// sway/tree/arrange.c:310-316), so the others keep these boxes, and the
+    /// percent they imply, until fullscreen ends or the tree gains a child.
+    unarranged_under_fullscreen: HashMap<NodeId, Rectangle<f64, Logical>>,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,
