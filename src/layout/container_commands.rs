@@ -55,6 +55,20 @@ impl<W: LayoutElement> Layout<W> {
             .set_window_border(window, style, width)
     }
 
+    /// See [`Tile::use_client_decorations_from_map`].
+    pub fn use_client_decorations_from_map(&mut self, window: &W::Id) {
+        for workspace in self.workspaces_mut() {
+            let floating = workspace.is_floating(window);
+            if let Some(tile) = workspace
+                .tiles_mut()
+                .find(|tile| tile.window().id() == window)
+            {
+                tile.use_client_decorations_from_map(floating);
+                return;
+            }
+        }
+    }
+
     pub fn set_split_sticky(
         &mut self,
         workspace_id: WorkspaceId,

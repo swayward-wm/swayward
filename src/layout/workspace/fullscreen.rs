@@ -138,6 +138,9 @@ impl<W: LayoutElement> Workspace<W> {
             return false;
         };
         tile.restore_to_floating = floating.unwrap_or(!tile.restore_to_floating);
+        // container_set_floating moves a CSD view's border either way
+        // (sway/tree/container.c:955-965, 995-1003).
+        tile.set_sway_csd_floating(tile.restore_to_floating);
         true
     }
 

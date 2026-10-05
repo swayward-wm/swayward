@@ -73,7 +73,9 @@ pub(super) fn create_window(
     let fullscreen_output = request["fullscreen_output"]
         .as_str()
         .map(|name| fixture.client(client).output(name));
-    let window = fixture.client(client).create_window();
+    // The oracle opens these as X11 windows, which sway maps without
+    // client-side decorations (view_map, sway/desktop/xwayland.c:532).
+    let window = fixture.client(client).create_ssd_window();
     if let Some(app_id) = request["app_id"].as_str() {
         window.xdg_toplevel.set_app_id(app_id.to_owned());
     }

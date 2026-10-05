@@ -183,6 +183,7 @@ fn map_property_window(
         windows::WindowSpec {
             app_id: Some(&app_id),
             title: Some(&title),
+            server_decorations: true,
             ..Default::default()
         },
     )

@@ -1181,6 +1181,7 @@ impl<W: LayoutElement> Layout<W> {
                 let mon = &mut monitors[mon_idx];
 
                 mon.add_window(window, target, activate, is_floating);
+                mark_mapped_into_tiling(mon.workspaces.iter_mut(), &id);
 
                 if activate.map_smart(|| false) {
                     *active_monitor_idx = mon_idx;
@@ -1265,6 +1266,7 @@ impl<W: LayoutElement> Layout<W> {
                         is_floating,
                     },
                 );
+                mark_mapped_into_tiling(std::iter::once(&mut *ws), &id);
 
                 // Set the default height for scrolling windows.
                 if !is_floating {
@@ -5706,5 +5708,18 @@ fn compute_overview_zoom(options: &Options, overview_progress: Option<f64>) -> f
         (1. - p * (1. - zoom)).max(0.0001)
     } else {
         1.
+    }
+}
+
+/// Sway maps every view into the tiling layer before floating it, so the
+/// workspace representation is refreshed even for a view that floats at once
+/// (`view_map` and `workspace_add_tiling`, sway/tree/view.c:895-902,
+/// sway/tree/workspace.c:939-958).
+fn mark_mapped_into_tiling<'a, W: LayoutElement + 'a>(
+    mut workspaces: impl Iterator<Item = &'a mut Workspace<W>>,
+    window: &W::Id,
+) {
+    if let Some(workspace) = workspaces.find(|workspace| workspace.has_window(window)) {
+        workspace.tiling_mut().restore_has_had_tile(true);
     }
 }

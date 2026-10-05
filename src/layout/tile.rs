@@ -1924,6 +1924,17 @@ impl<W: LayoutElement> Tile<W> {
         Ok(self.effective_border_width().unwrap_or(0.) - old_width)
     }
 
+    /// Marks a view that mapped with client-side decorations as using CSD
+    /// (view_update_csd_from_client, sway/tree/view.c:905-907). It runs after
+    /// the default border is stored, as `view_map` stores `floating_border`
+    /// before `container_set_floating` turns a floating view's border into
+    /// `csd` (sway/tree/view.c:909-917, sway/tree/container.c:955-965). A tiled
+    /// view keeps its stored border.
+    pub fn use_client_decorations_from_map(&mut self, floating: bool) {
+        self.sway_uses_csd = true;
+        self.set_sway_csd_floating(floating);
+    }
+
     /// Moves a CSD view's stored border between its tiled and floating
     /// forms, as `container_set_floating` does: floating saves the border and
     /// stores `csd`, tiling restores the saved one, and each tells the client
@@ -1933,24 +1944,25 @@ impl<W: LayoutElement> Tile<W> {
         if !self.sway_uses_csd {
             return;
         }
-        let Some((style, width)) = self.sway_border else {
-            return;
-        };
-        let style = if floating {
+        // A view mapped with CSD may still follow `default_border`; it goes
+        // back to following it when tiled again.
+        let (style, width) = self
+            .sway_border
+            .unwrap_or_else(|| self.default_sway_border());
+        let border = if floating {
             if style == BorderStyle::Csd {
                 return;
             }
-            self.sway_saved_border = Some(style);
-            BorderStyle::Csd
+            self.sway_saved_border = self.sway_border.map(|(style, _)| style);
+            Some((BorderStyle::Csd, width))
         } else {
             if style != BorderStyle::Csd {
                 return;
             }
-            self.sway_saved_border
-                .unwrap_or_else(|| self.default_sway_border().0)
+            self.sway_saved_border.map(|style| (style, width))
         };
         self.window.request_server_decoration(!floating);
-        self.sway_border = Some((style, width));
+        self.sway_border = border;
         self.update_border_config();
     }
 

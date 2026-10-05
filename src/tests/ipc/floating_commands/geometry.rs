@@ -581,7 +581,7 @@ fn floating_input_region_holes_click_through_but_decorations_activate() {
     let client = f.add_client();
     let mut surfaces = Vec::new();
     for app_id in ["bottom", "top"] {
-        let window = f.client(client).create_window();
+        let window = f.client(client).create_ssd_window();
         window.xdg_toplevel.set_app_id(app_id.into());
         window.commit();
         let surface = window.surface.clone();

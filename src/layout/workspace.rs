@@ -804,6 +804,7 @@ impl<W: LayoutElement> Workspace<W> {
                     // A fullscreen floating view stays floating in sway.
                     let has_had_tile = self.tiling.has_had_tile();
                     let keeps_workspace_focus = !activate && self.is_workspace_focused();
+                    let id = tile.window().id().clone();
                     self.tiling.add_tile_with_activation(tile, insert, activate);
                     // An unfocused view leaves a focused workspace focused, even as its first
                     // tiled view (sway/tree/view.c:944-957).
@@ -812,6 +813,7 @@ impl<W: LayoutElement> Workspace<W> {
                     }
                     if is_floating {
                         self.tiling.restore_has_had_tile(has_had_tile);
+                        self.keep_floating_csd(&id);
                     }
 
                     if activate {
@@ -1427,6 +1429,22 @@ impl<W: LayoutElement> Workspace<W> {
                 // `arrange_workspace`, sway/tree/arrange.c:310-316).
                 self.tiling.mark_fullscreen_arrived();
             }
+        }
+        if restore_to_floating {
+            self.keep_floating_csd(window);
+        }
+    }
+
+    /// A fullscreen floating view stays in `ws->floating` in sway, so a CSD
+    /// view keeps its stored `csd` border while swayward parks it in the
+    /// tiling tree (container_set_floating, sway/tree/container.c:955-965).
+    fn keep_floating_csd(&mut self, window: &W::Id) {
+        if let Some(tile) = self
+            .tiling
+            .tiles_mut()
+            .find(|tile| tile.window().id() == window)
+        {
+            tile.set_sway_csd_floating(true);
         }
     }
 

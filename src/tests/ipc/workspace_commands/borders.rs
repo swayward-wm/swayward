@@ -308,7 +308,7 @@ fn tiled_and_floating_default_borders_remain_independent_in_get_tree() {
     f.add_output(1, (800, 600));
     let client = f.add_client();
     for app_id in ["tiled", "floating"] {
-        let window = f.client(client).create_window();
+        let window = f.client(client).create_ssd_window();
         window.xdg_toplevel.set_app_id(app_id.into());
         window.commit();
         let surface = window.surface.clone();
@@ -395,7 +395,7 @@ fn default_floating_border_changes_only_windows_mapped_after_the_command() {
                     .success
             );
         }
-        let window = f.client(client).create_window();
+        let window = f.client(client).create_ssd_window();
         window.xdg_toplevel.set_app_id(app_id.into());
         window.commit();
         let surface = window.surface.clone();
@@ -430,7 +430,7 @@ fn edge_border_modes_apply_to_workspace_edges_and_visible_view_count() {
         f.add_output(1, (800, 600));
         let client = f.add_client();
         for _ in 0..windows {
-            let window = f.client(client).create_window();
+            let window = f.client(client).create_ssd_window();
             window.commit();
             let surface = window.surface.clone();
             f.roundtrip(client);
@@ -576,7 +576,7 @@ fn configured_border_width_matches_rendering_and_tree_for_tiled_and_floating_win
     let mut f = Fixture::with_config(config);
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
-    let window = f.client(client).create_window();
+    let window = f.client(client).create_ssd_window();
     window.commit();
     let surface = window.surface.clone();
     f.roundtrip(client);
@@ -1212,5 +1212,139 @@ fn smart_borders_count_siblings_hidden_by_fullscreen() {
         view["window_rect"],
         serde_json::json!({ "x": 7, "y": 7, "width": 786, "height": 586 }),
         "{view}"
+    );
+}
+
+#[test]
+fn a_view_without_server_decorations_maps_using_csd() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // Sway maps an xdg view as using CSD unless it negotiated server-side
+    // decorations (handle_map, sway/desktop/xdg_shell.c:484-500). A view that
+    // floats at map stores `csd` (container_set_floating,
+    // sway/tree/container.c:955-965); a tiled one keeps `normal` and stores
+    // `csd` once floated. Mapping into the tiling layer first also gives the
+    // workspace a representation (sway/tree/view.c:895-902).
+    // Differential family diff-fam-v3-hinted-csd-border, seeds 3 and 21;
+    // oracle row hinted_view_without_decoration_maps_csd.
+    let config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; }"#,
+    )
+    .unwrap();
+    let (mut f, _) = ipc_fixture_with_config(config);
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id: &str, hints: Option<(i32, i32)>, mode: Option<Mode>| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        if let Some((width, height)) = hints {
+            window.set_min_size(width, height);
+            window.set_max_size(width, height);
+        }
+        if let Some(mode) = mode {
+            f.client(client).decorate_last_window(mode);
+        }
+        let window = f.client(client).state.windows.last_mut().unwrap();
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+
+    map(&mut f, "fixed", Some((400, 300)), None);
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["floating_nodes"][0]["border"], "csd");
+    assert_eq!(workspace["representation"], "H[]", "{workspace:#}");
+    // A fullscreen floating view stays floating in sway and keeps `csd`
+    // (seed 3).
+    for command in ["fullscreen toggle global", "fullscreen toggle"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        let tree = get_tree(&mut f);
+        let fixed = find_json_node_with_app_id(&tree, "fixed").unwrap();
+        assert_eq!(fixed["border"], "csd", "{command}");
+    }
+
+    map(
+        &mut f,
+        "fixed-ssd",
+        Some((300, 200)),
+        Some(Mode::ServerSide),
+    );
+    map(
+        &mut f,
+        "fixed-csd",
+        Some((300, 200)),
+        Some(Mode::ClientSide),
+    );
+    map(&mut f, "tiled", None, None);
+    let tree = get_tree(&mut f);
+    let border = |app_id| find_json_node_with_app_id(&tree, app_id).unwrap()["border"].clone();
+    assert_eq!(border("fixed-ssd"), "normal");
+    assert_eq!(border("fixed-csd"), "csd");
+    assert_eq!(border("tiled"), "normal");
+
+    assert!(
+        crate::command::execute(f.niri_state(), r#"[app_id="tiled"] floating enable"#)[0].success
+    );
+    let tree = get_tree(&mut f);
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "tiled").unwrap()["border"],
+        "csd"
+    );
+    assert!(
+        crate::command::execute(f.niri_state(), r#"[app_id="tiled"] floating disable"#)[0].success
+    );
+    let tree = get_tree(&mut f);
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "tiled").unwrap()["border"],
+        "normal"
+    );
+}
+
+#[test]
+fn a_recreated_decoration_object_forgets_the_old_requested_mode() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // Sway reads the requested mode from the view's current decoration
+    // object (handle_map, sway/desktop/xdg_shell.c:484-490), and wlroots
+    // starts a fresh object at requested_mode NONE. A client-side request on
+    // a destroyed object therefore no longer marks the view as using CSD.
+    let config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; }"#,
+    )
+    .unwrap();
+    let (mut f, _) = ipc_fixture_with_config(config);
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixed".into());
+    window.set_min_size(400, 300);
+    window.set_max_size(400, 300);
+    f.client(client).decorate_last_window(Mode::ClientSide);
+    f.roundtrip(client);
+
+    let state = &mut f.client(client).state;
+    let window = state.windows.last_mut().unwrap();
+    window.xdg_decoration.take().unwrap().destroy();
+    let manager = state.xdg_decoration_manager.as_ref().unwrap();
+    window.xdg_decoration =
+        Some(manager.get_toplevel_decoration(&window.xdg_toplevel, &state.qh, ()));
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(
+        workspace["floating_nodes"][0]["border"], "normal",
+        "{workspace:#}"
     );
 }

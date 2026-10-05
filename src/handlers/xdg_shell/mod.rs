@@ -54,4 +54,4 @@ mod decorations;
 mod requests;
 
 pub use configure::add_mapped_toplevel_pre_commit_hook;
-pub use decorations::{KdeDecorationsModeState, XdgDecorationObject};
+pub use decorations::{maps_with_client_decorations, KdeDecorationsModeState, XdgDecorationObject};

@@ -50,14 +50,60 @@ impl XdgDecorationObject {
     }
 }
 
+/// The mode the client last asked for on its xdg-decoration object, wlroots'
+/// `requested_mode`. Smithay does not keep it.
+#[derive(Default)]
+struct XdgDecorationRequest(Cell<Option<zxdg_toplevel_decoration_v1::Mode>>);
+
+fn record_requested_mode(
+    toplevel: &ToplevelSurface,
+    mode: Option<zxdg_toplevel_decoration_v1::Mode>,
+) {
+    with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get_or_insert(XdgDecorationRequest::default)
+            .0
+            .set(mode);
+    });
+}
+
+/// Whether sway maps this toplevel as using client-side decorations
+/// (`handle_map`, sway/desktop/xdg_shell.c:484-500): with an xdg-decoration
+/// object, when the client requested client-side; otherwise unless a KDE server
+/// decoration negotiated server-side. A client that binds neither protocol
+/// draws its own.
+pub fn maps_with_client_decorations(toplevel: &ToplevelSurface) -> bool {
+    if XdgDecorationObject::is_present(toplevel) {
+        return with_states(toplevel.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<XdgDecorationRequest>()
+                .and_then(|request| request.0.get())
+                == Some(zxdg_toplevel_decoration_v1::Mode::ClientSide)
+        });
+    }
+    with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<KdeDecorationsModeState>()
+            .is_none_or(|state| !state.is_server())
+    })
+}
+
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // A fresh wlroots decoration object starts with requested_mode NONE
+        // (wlr_xdg_decoration_v1.c), so a request on a destroyed object no
+        // longer counts.
+        record_requested_mode(&toplevel, None);
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ServerSide);
         });
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: zxdg_toplevel_decoration_v1::Mode) {
+        record_requested_mode(&toplevel, Some(mode));
         // Match sway: tiled windows always use server-side decorations, while floating windows
         // honour the client's requested mode (sway/xdg_decoration.c:64-90).
         let mode = if self.window_is_or_will_be_floating(&toplevel) {
@@ -83,6 +129,7 @@ impl XdgDecorationHandler for State {
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        record_requested_mode(&toplevel, None);
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ServerSide);
         });
