@@ -864,3 +864,41 @@ fn directional_move_at_output_edge_does_not_wrap_and_fullscreen_crosses() {
         Some(crate::layout::tiling_tree::FullscreenMode::Workspace)
     );
 }
+
+#[test]
+fn moving_workspace_children_keeps_the_source_workspace_layout() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let map = |f: &mut Fixture| {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    };
+    run(&mut f, "splitv");
+    map(&mut f);
+    map(&mut f);
+    run(&mut f, "focus parent");
+    run(&mut f, "move container to workspace 2");
+
+    let tree = get_tree(&mut f);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let source = workspaces.iter().find(|ws| ws["name"] == "1").unwrap();
+    assert_eq!(source["layout"], "splitv");
+    assert_eq!(source["orientation"], "vertical");
+    assert_eq!(source["representation"], "V[]");
+    let target = workspaces.iter().find(|ws| ws["name"] == "2").unwrap();
+    // An empty target unwraps the container and takes its layout
+    // (`workspace_unwrap_children`, sway/tree/workspace.c:912-925).
+    assert_eq!(target["layout"], "splitv");
+    assert_eq!(target["nodes"].as_array().unwrap().len(), 2);
+}

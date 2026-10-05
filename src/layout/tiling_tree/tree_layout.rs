@@ -218,7 +218,7 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    fn split_layout(&self, id: NodeId) -> Option<Layout> {
+    pub(super) fn split_layout(&self, id: NodeId) -> Option<Layout> {
         match self.nodes.get(&id).map(|node| &node.value) {
             Some(TreeNode::Split { layout, .. }) => Some(*layout),
             Some(TreeNode::Leaf { .. }) | None => None,
