@@ -498,7 +498,10 @@ fn swapping_a_marked_container_does_not_leave_multiple_fullscreen_nodes() {
         Op::Command("split horizontal"),
         Op::Command("workspace 2"),
         Op::Open(2),
-        Op::Command("move left"),
+        // Sway's directional move stops at the layout edge. This sequence
+        // once reached the other output through a wraparound `move left`.
+        Op::Command("move container to output right"),
+        Op::Command("focus output right"),
         Op::ConIdCommand(0, "fullscreen toggle"),
         Op::Command("move workspace 2"),
         Op::Command("focus parent"),

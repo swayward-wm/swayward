@@ -5,11 +5,11 @@ use swayward_ipc::{criteria, CommandOutcome};
 
 use super::movement::{
     move_position, move_target_to_mark, move_target_to_workspace, move_tiling_subtree_to_output,
-    move_workspace_to_output, output_target,
+    move_workspace_to_output,
 };
 use super::{
     execute, failure, focus, layout, movement, scratchpad, success, window, ClientColorClass,
-    Command, CommandTarget, Direction, OutputTarget,
+    Command, CommandTarget, Direction,
 };
 use crate::swayward::State;
 use crate::window::mapped::ShortcutsInhibitPolicy;
@@ -61,9 +61,31 @@ fn move_target_to_adjacent_output(
             (reference, window)
         }
     };
-    let destination = OutputTarget::Direction(direction);
-    let reference_point = state.swayward.layout.window_center(&window);
-    if let Ok(output) = output_target(state, &destination, reference, reference_point) {
+    // Sway's `container_move_to_next_output` asks `output_get_in_direction`
+    // for the output adjacent to the reference output's centre and stops at
+    // the layout edge (sway/commands/move.c:277-298, sway/tree/output.c:316-331).
+    let Some(reference) = reference else {
+        return;
+    };
+    let Some(reference_point) = state
+        .swayward
+        .global_space
+        .output_geometry(reference)
+        .map(crate::utils::center)
+    else {
+        return;
+    };
+    let (horizontal, positive) = match direction {
+        Direction::Left => (true, false),
+        Direction::Right => (true, true),
+        Direction::Up => (false, false),
+        Direction::Down => (false, true),
+    };
+    if let Some(output) =
+        state
+            .swayward
+            .adjacent_output(reference, reference_point, horizontal, positive)
+    {
         match target {
             CommandTarget::Window(_) => state.swayward.layout.move_window_to_output_from_direction(
                 &window,
@@ -152,7 +174,15 @@ fn move_focused_direction(
             Direction::Down => state.swayward.layout.move_down(),
         },
     };
-    if !moved && state.swayward.layout.focused_fullscreen_mode().is_none() {
+    // A workspace-fullscreen container only considers outputs; anything
+    // inside a fullscreen ancestor stays put (sway/commands/move.c:303-312,
+    // 326-330).
+    let layout = &state.swayward.layout;
+    if !moved
+        && (layout.focused_fullscreen_mode().is_none()
+            || layout.focused_container_fullscreen_mode()
+                == Some(crate::layout::tiling_tree::FullscreenMode::Workspace))
+    {
         move_target_to_adjacent_output(state, target, direction, activate);
     }
     moved

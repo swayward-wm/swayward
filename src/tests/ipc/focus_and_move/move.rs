@@ -771,3 +771,48 @@ fn directional_move_wrapper_stays_behind_focused_floating_window() {
         [workspace.floating_nodes[0].id, workspace.nodes[0].id]
     );
 }
+
+/// Sway's `output_get_in_direction` (sway/tree/output.c:316-331) does not
+/// wrap, and a workspace-fullscreen view only considers outputs
+/// (sway/commands/move.c:303-312). Oracle row: state two_output_edge_move.
+#[test]
+fn directional_move_at_output_edge_does_not_wrap_and_fullscreen_crosses() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    let client = f.add_client();
+    map_test_window(&mut f, client, "edge");
+    let id = f.swayward().layout.focus().unwrap().id();
+    let output_of = |f: &mut Fixture| {
+        f.swayward()
+            .layout
+            .windows()
+            .find(|(_, mapped)| mapped.id() == id)
+            .unwrap()
+            .0
+            .unwrap()
+            .output_name()
+            .to_owned()
+    };
+
+    assert!(crate::command::execute(f.niri_state(), "move left")[0].success);
+    assert_eq!(output_of(&mut f), "left");
+
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move right")[0].success);
+    assert_eq!(output_of(&mut f), "right");
+    let window = f
+        .swayward()
+        .layout
+        .windows()
+        .find(|(_, mapped)| mapped.id() == id)
+        .unwrap()
+        .1
+        .window
+        .clone();
+    assert_eq!(
+        f.swayward().layout.fullscreen_mode(&window),
+        Some(crate::layout::tiling_tree::FullscreenMode::Workspace)
+    );
+}
