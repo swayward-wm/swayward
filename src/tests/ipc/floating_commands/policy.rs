@@ -1589,3 +1589,57 @@ fn error_precedence_matches_sway() {
         [refusal("No current container", false)]
     );
 }
+
+#[test]
+fn moving_the_only_view_of_a_floating_split_moves_it_tiled() {
+    // Differential family floating-split-move-tiles (random-v2 seeds 11567, 16435; oracle row
+    // floating_split_only_child_workspace_move): after `floating enable; splitv` the view is a
+    // child of the floating split, not floating (`container_is_floating`,
+    // sway/tree/container.c:1041-1049), so it moves as a tiled container and the emptied split
+    // is reaped (sway/commands/move.c:198-235,609-611).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "only");
+    for command in ["floating enable", "splitv", "move container to workspace 2"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    assert_eq!(
+        workspace_shapes(&mut f),
+        [
+            ("1".to_owned(), vec![], vec![]),
+            ("2".to_owned(), vec!["only".to_owned()], vec![]),
+        ]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
+fn moving_a_floating_split_child_to_its_own_workspace_tiles_it() {
+    // Seed 16435: `move container to workspace next` with one workspace resolves to the
+    // current one; the destination is its focused tiling view, and the non-floating child is
+    // added beside it (`container_move_to_container`, sway/commands/move.c:241-261).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "first");
+    map_app(&mut f, client, "second");
+    for command in [
+        "floating enable",
+        "split h",
+        "move container to workspace next",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    assert_eq!(
+        workspace_shapes(&mut f),
+        [(
+            "1".to_owned(),
+            vec!["first".to_owned(), "second".to_owned()],
+            vec![]
+        )]
+    );
+    f.swayward().layout.verify_invariants();
+}

@@ -637,18 +637,16 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating_is_active = FloatingActive::No;
     }
 
-    /// Moves a child of a multi-window floating group into the tiling tree. Sway treats only
-    /// the group root as floating (`container_is_floating`, sway/tree/container.c:1041-1049),
-    /// so a command aimed at the child moves it as a tiled container and leaves its siblings in
-    /// the group. Returns false when the window is not such a child.
+    /// Moves a child of a floating group into the tiling tree. Sway treats only the group root
+    /// as floating (`container_is_floating`, sway/tree/container.c:1041-1049), so a command
+    /// aimed at the child moves it as a tiled container and leaves its siblings in the group,
+    /// or reaps the group when it was the only view (`container_reap_empty`,
+    /// sway/commands/move.c:609-611). Returns false when the window is not such a child.
     pub fn detach_floating_group_child(&mut self, window: &W::Id) -> bool {
-        let Some(root) = self.floating.tree_root_for_window(window) else {
-            return false;
-        };
-        if self
-            .floating
-            .tree_window_ids(root)
-            .is_none_or(|windows| windows.len() < 2)
+        // Any view below the floating root is a child, even the only view of a floating split
+        // (`floating enable; splitv`): sway moves it as tiled and reaps the emptied split.
+        if self.floating.tree_root_for_window(window).is_none()
+            || self.floating.window_is_tree_root(window)
         {
             return false;
         }
