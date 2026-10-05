@@ -38,7 +38,6 @@ pub struct Layout {
     pub floating_maximum_size: FloatingSize,
     pub gaps: f64,
     pub outer_gaps: OuterGaps,
-    pub outer_gaps_configured: bool,
     pub struts: Struts,
     pub background_color: Color,
 }
@@ -77,7 +76,6 @@ impl Default for Layout {
             },
             gaps: 0.,
             outer_gaps: OuterGaps::default(),
-            outer_gaps_configured: false,
             struts: Struts::default(),
             preset_window_heights: vec![
                 PresetSize::Proportion(1. / 3.),
@@ -126,7 +124,6 @@ impl MergeWith<LayoutPart> for Layout {
         }
         if let Some(x) = &part.outer_gaps {
             self.outer_gaps.merge_with(x);
-            self.outer_gaps_configured = true;
         }
 
         if self.preset_column_widths.is_empty() {

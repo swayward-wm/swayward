@@ -560,7 +560,7 @@ fn split_descendant_of_stacked_container_has_no_inner_gap() {
         meta: SplitMeta::default(),
     };
 
-    assert_eq!(t.geometry(first).unwrap().size.w, 240.);
+    assert_eq!(t.geometry(first).unwrap().size.w, 250.);
     assert_eq!(t.geometry(second).unwrap().loc.x, 250.);
 }
 
@@ -597,7 +597,7 @@ fn deeply_nested_split_descendant_of_stacked_container_has_no_inner_gap() {
         meta: SplitMeta::default(),
     };
 
-    assert_eq!(t.geometry(first).unwrap().size.w, 240.);
+    assert_eq!(t.geometry(first).unwrap().size.w, 250.);
     assert_eq!(t.geometry(second).unwrap().loc.x, 250.);
 }
 
@@ -609,8 +609,8 @@ fn inner_gaps_shrink_and_floor_on_both_split_axes() {
     let first = horizontal.add_tile(tile(1, horizontal.view_size()), InsertTarget::Focused);
     let second = horizontal.add_tile(tile(2, horizontal.view_size()), InsertTarget::Focused);
     let geometry = horizontal.compute_geometry();
-    assert_eq!(geometry.ipc_nodes[&first].size.w, 93.);
-    assert_eq!(geometry.ipc_nodes[&second].loc.x, 103.);
+    assert_eq!(geometry.ipc_nodes[&first].size.w, 100.);
+    assert_eq!(geometry.ipc_nodes[&second].loc.x, 105.);
 
     let mut vertical = tree((500., 125.), 10.);
     let first = vertical.add_tile(tile(1, vertical.view_size()), InsertTarget::Focused);
@@ -622,8 +622,8 @@ fn inner_gaps_shrink_and_floor_on_both_split_axes() {
         meta: SplitMeta::default(),
     };
     let geometry = vertical.compute_geometry();
-    assert_eq!(geometry.ipc_nodes[&first].size.h, 53.);
-    assert_eq!(geometry.ipc_nodes[&second].loc.y, 63.);
+    assert_eq!(geometry.ipc_nodes[&first].size.h, 60.);
+    assert_eq!(geometry.ipc_nodes[&second].loc.y, 65.);
 }
 
 #[test]

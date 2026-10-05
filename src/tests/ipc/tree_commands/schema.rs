@@ -368,7 +368,6 @@ fn workspace_rect_includes_outer_and_edge_gaps() {
     let mut config = swayward_config::Config::default();
     config.layout.gaps = 17.;
     config.layout.outer_gaps = swayward_config::OuterGaps::all(23.);
-    config.layout.outer_gaps_configured = true;
     let mut f = Fixture::with_config(config);
     f.add_output(1, (1270, 1408));
 

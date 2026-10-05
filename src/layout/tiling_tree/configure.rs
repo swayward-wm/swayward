@@ -121,7 +121,6 @@ impl<W: LayoutElement> TilingTree<W> {
                 self.options.layout.struts
             },
             gaps: self.gaps,
-            outer_gaps_configured: self.options.layout.outer_gaps_configured || self.resident_root,
             gaps_to_edge: self.gaps_to_edge,
             titlebar_height: self.titlebar_height,
             fullscreen: &fullscreen,

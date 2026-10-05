@@ -195,12 +195,9 @@ pub(super) fn describe_output_node(
     // rect and not to the workspace below it. See the GET_TREE example in
     // sway/sway-ipc.7.scd, where the output is y=0 h=1080 while its workspace
     // is y=23 h=1057 under a 23px bar. Scripts size floating windows from this
-    // rect, so reporting the full output puts them under the bar.
-    let workspace_rect = workspace_rect(
-        global_space,
-        monitor.output(),
-        monitor.active_workspace_ref(),
-    );
+    // rect, so reporting the full output puts them under the bar. Each
+    // workspace carries its own gaps (`workspace_add_gaps`,
+    // sway/sway/tree/workspace.c:1007-1031), so the rect is per workspace.
     let workspaces = monitor
         .sway_workspaces()
         .filter(|(_, workspace)| {
@@ -212,7 +209,7 @@ pub(super) fn describe_output_node(
                 workspace,
                 output: monitor.output_name(),
                 index,
-                rect: workspace_rect,
+                rect: workspace_rect(global_space, monitor.output(), workspace),
                 output_origin: rect,
                 marks,
                 container_marks,

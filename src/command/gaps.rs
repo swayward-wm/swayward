@@ -66,7 +66,6 @@ pub(super) fn defaults(
             ] {
                 *value = value.max(floor);
             }
-            layout.outer_gaps_configured = true;
         }
     }
     // Re-apply through the config path so a later workspace picks the new

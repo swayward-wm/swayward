@@ -355,7 +355,6 @@ fn move_absolute_position_is_verbatim_under_a_bar_and_gaps() {
     let mut config = swayward_config::Config::default();
     config.animations.off = true;
     config.layout.gaps = 4.;
-    config.layout.outer_gaps_configured = true;
     let mut f = Fixture::with_config(config);
     f.add_output(1, (800, 600));
     let client = f.add_client();

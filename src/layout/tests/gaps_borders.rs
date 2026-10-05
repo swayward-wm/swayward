@@ -78,7 +78,6 @@ fn outer_gaps_change_tiled_and_floating_workspace_geometry() {
         top: 20.,
         bottom: 0.,
     };
-    options.layout.outer_gaps_configured = true;
     let mut floating = TestWindowParams::new(2);
     floating.is_floating = true;
     let layout = check_ops_with_options(
@@ -124,7 +123,6 @@ fn smart_borders_no_gaps_uses_resolved_workspace_gaps() {
         options.layout.border.off = false;
         options.layout.gaps = inner;
         options.layout.outer_gaps = swayward_config::OuterGaps::all(outer);
-        options.layout.outer_gaps_configured = true;
         options.layout.smart_borders = swayward_config::SmartBorders::NoGaps;
         let layout = check_ops_with_options(
             options,
@@ -152,7 +150,6 @@ fn negative_outer_gaps_add_to_inner_gaps() {
     let mut options = Options::default();
     options.layout.gaps = 10.;
     options.layout.outer_gaps = swayward_config::OuterGaps::all(-2.);
-    options.layout.outer_gaps_configured = true;
     let layout = check_ops_with_options(options, [Op::AddOutput(1)]);
 
     assert_eq!(
@@ -172,7 +169,6 @@ fn outer_gaps_use_sways_proportional_minimum_size_clamp() {
             bottom: 60.,
         },
         0.,
-        true,
     );
 
     assert_eq!(area, Rectangle::new((12., 10.).into(), (100., 60.).into()));

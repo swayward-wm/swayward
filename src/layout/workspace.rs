@@ -118,7 +118,6 @@ pub struct Workspace<W: LayoutElement> {
     /// Gap defaults copied when this workspace was created or changed at runtime.
     gaps: f64,
     outer_gaps: swayward_config::OuterGaps,
-    outer_gaps_configured: bool,
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
@@ -266,17 +265,12 @@ impl<W: LayoutElement> Workspace<W> {
         let options = Options::clone(&base_options).with_merged_layout(layout_config.as_ref());
         let gaps = options.layout.gaps;
         let outer_gaps = options.layout.outer_gaps;
-        let outer_gaps_configured = options.layout.outer_gaps_configured;
         let options = Rc::new(options.adjusted_for_scale(scale.fractional_scale()));
 
         let view_size = output_size(&output);
         let output_area = compute_working_area(&output);
-        let working_area = apply_outer_gaps(
-            output_area,
-            options.layout.outer_gaps,
-            options.layout.gaps,
-            options.layout.outer_gaps_configured,
-        );
+        let working_area =
+            apply_outer_gaps(output_area, options.layout.outer_gaps, options.layout.gaps);
 
         let tiling = TilingTree::new(
             view_size,
@@ -319,7 +313,6 @@ impl<W: LayoutElement> Workspace<W> {
             layout_config,
             gaps,
             outer_gaps,
-            outer_gaps_configured,
             id: WorkspaceId::next(),
         }
     }
@@ -337,17 +330,12 @@ impl<W: LayoutElement> Workspace<W> {
         let options = Options::clone(&base_options).with_merged_layout(layout_config.as_ref());
         let gaps = options.layout.gaps;
         let outer_gaps = options.layout.outer_gaps;
-        let outer_gaps_configured = options.layout.outer_gaps_configured;
         let options = Rc::new(options.adjusted_for_scale(scale.fractional_scale()));
 
         let view_size = Size::from((1280., 720.));
         let output_area = Rectangle::from_size(view_size);
-        let working_area = apply_outer_gaps(
-            output_area,
-            options.layout.outer_gaps,
-            options.layout.gaps,
-            options.layout.outer_gaps_configured,
-        );
+        let working_area =
+            apply_outer_gaps(output_area, options.layout.outer_gaps, options.layout.gaps);
 
         let tiling = TilingTree::new(
             view_size,
@@ -390,7 +378,6 @@ impl<W: LayoutElement> Workspace<W> {
             layout_config,
             gaps,
             outer_gaps,
-            outer_gaps_configured,
             id: WorkspaceId::next(),
         }
     }
@@ -458,28 +445,13 @@ impl<W: LayoutElement> Workspace<W> {
             Options::clone(&base_options).with_merged_layout(self.layout_config.as_ref());
         options.layout.gaps = self.gaps;
         options.layout.outer_gaps = self.outer_gaps;
-        options.layout.outer_gaps_configured = self.outer_gaps_configured;
         let options = Rc::new(options.adjusted_for_scale(scale));
         let output_area = self
             .output
             .as_ref()
             .map(compute_working_area)
             .unwrap_or_else(|| Rectangle::from_size(self.view_size));
-        let suppress_outer = match options.layout.smart_gaps {
-            swayward_config::SmartGaps::Off => false,
-            swayward_config::SmartGaps::On => self.tiling.visible_window_count() == 1,
-            swayward_config::SmartGaps::InverseOuter => self.tiling.visible_window_count() != 1,
-        };
-        self.working_area = if suppress_outer {
-            output_area
-        } else {
-            apply_outer_gaps(
-                output_area,
-                options.layout.outer_gaps,
-                options.layout.gaps,
-                options.layout.outer_gaps_configured,
-            )
-        };
+        self.working_area = self.gapped_working_area(&options, output_area);
 
         self.tiling.update_config(
             self.view_size,
@@ -525,7 +497,6 @@ impl<W: LayoutElement> Workspace<W> {
             Options::clone(&self.base_options).with_merged_layout(self.layout_config.as_ref());
         self.gaps = merged.layout.gaps;
         self.outer_gaps = merged.layout.outer_gaps;
-        self.outer_gaps_configured = merged.layout.outer_gaps_configured;
         self.update_config(self.base_options.clone());
     }
 
@@ -575,7 +546,6 @@ impl<W: LayoutElement> Workspace<W> {
                 top: values[2],
                 bottom: values[3],
             };
-            self.outer_gaps_configured = true;
             layout.outer_gaps = Some(swayward_config::OuterGapsPart {
                 left: Some(swayward_config::FloatOrInt(values[0])),
                 right: Some(swayward_config::FloatOrInt(values[1])),
@@ -680,12 +650,10 @@ impl<W: LayoutElement> Workspace<W> {
         let transform = output.current_transform();
         let view_size = output_size(output);
         let output_area = compute_working_area(output);
-        let working_area = apply_outer_gaps(
-            output_area,
-            self.options.layout.outer_gaps,
-            self.options.layout.gaps,
-            self.options.layout.outer_gaps_configured,
-        );
+        // Sway re-runs `workspace_add_gaps` on the arrange an output change
+        // triggers (sway/sway/config/output.c:1090-1093, tree/arrange.c:306),
+        // so smart gaps are re-evaluated here as well.
+        let working_area = self.gapped_working_area(&self.options, output_area);
         self.set_view_size(
             scale,
             transform,
@@ -1958,7 +1926,39 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// Sway's `workspace_add_gaps` (sway/sway/tree/workspace.c:1007-1031):
+    /// `smart_gaps on` with one visible container drops every gap, and
+    /// `inverse_outer` with several drops only the outer part; the inner gap
+    /// is otherwise always added to each edge.
+    fn gapped_working_area(
+        &self,
+        options: &Options,
+        output_area: Rectangle<f64, Logical>,
+    ) -> Rectangle<f64, Logical> {
+        let layout = &options.layout;
+        let single = || self.tiling.visible_window_count() == 1;
+        match layout.smart_gaps {
+            swayward_config::SmartGaps::On if single() => output_area,
+            swayward_config::SmartGaps::InverseOuter if !single() => {
+                apply_outer_gaps(output_area, Default::default(), layout.gaps)
+            }
+            _ => apply_outer_gaps(output_area, layout.outer_gaps, layout.gaps),
+        }
+    }
+
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
+        // Sway re-runs `workspace_add_gaps` on every arrange, so a view leaving
+        // or entering the tiling layer re-evaluates smart gaps.
+        if self.options.layout.smart_gaps != swayward_config::SmartGaps::Off {
+            let output_area = self
+                .output
+                .as_ref()
+                .map(compute_working_area)
+                .unwrap_or_else(|| Rectangle::from_size(self.view_size));
+            if self.gapped_working_area(&self.options, output_area) != self.working_area {
+                self.update_config(self.base_options.clone());
+            }
+        }
         self.tiling
             .refresh(is_active && !self.floating_is_active.get(), is_focused);
         self.floating
@@ -2193,7 +2193,6 @@ impl<W: LayoutElement> Workspace<W> {
             Options::clone(&self.base_options).with_merged_layout(self.layout_config.as_ref());
         options.layout.gaps = self.gaps;
         options.layout.outer_gaps = self.outer_gaps;
-        options.layout.outer_gaps_configured = self.outer_gaps_configured;
         let options = options.adjusted_for_scale(scale);
         assert_eq!(
             &*self.options, &options,
@@ -2263,19 +2262,14 @@ fn has_gaps_to_edge(
     outer: swayward_config::OuterGaps,
     inner: f64,
 ) -> bool {
-    apply_outer_gaps(area, outer, inner, true) != area
+    apply_outer_gaps(area, outer, inner) != area
 }
 
 pub(super) fn apply_outer_gaps(
     mut area: Rectangle<f64, Logical>,
     outer: swayward_config::OuterGaps,
     inner: f64,
-    configured: bool,
 ) -> Rectangle<f64, Logical> {
-    if !configured {
-        return area;
-    }
-
     let mut left = (outer.left + inner).max(0.);
     let mut right = (outer.right + inner).max(0.);
     let mut top = (outer.top + inner).max(0.);
