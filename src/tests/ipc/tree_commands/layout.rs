@@ -1070,3 +1070,34 @@ fn view_mapped_under_fullscreen_keeps_whole_pixel_sibling_fractions() {
         assert_eq!(view["percent"], 0.33359375, "{view}");
     }
 }
+
+#[test]
+fn moving_a_fullscreen_floating_window_leaves_the_new_workspace_without_representation() {
+    // sway `workspace_add_floating` (sway/tree/workspace.c:960-970) never calls
+    // `workspace_update_representation`, so a workspace that only ever held a
+    // floating child reports `representation: null`. Oracle rows
+    // differential_seed_7532 and move_fullscreen_floating_keeps_null_representation.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "only");
+    for command in [
+        "floating toggle",
+        "fullscreen toggle",
+        "move container to workspace 2",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let tree = tree_json(&mut f);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let target = workspaces.iter().find(|ws| ws["name"] == "2").unwrap();
+    assert_eq!(
+        target["floating_nodes"].as_array().unwrap().len(),
+        1,
+        "{target}"
+    );
+    assert!(target["representation"].is_null(), "{target}");
+}

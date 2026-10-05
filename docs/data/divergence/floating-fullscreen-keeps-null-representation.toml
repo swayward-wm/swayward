@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs"]
+what = "a floating view that goes fullscreen, or arrives on a workspace already fullscreen, passes through the tiling tree without marking the workspace as having held a tile, so its workspace representation stays null."
+why = "Sway keeps a fullscreen floating view in ws->floating, and workspace_add_floating never calls workspace_update_representation (sway/sway/tree/workspace.c:960-970). Oracle rows differential_seed_7532 and move_fullscreen_floating_keeps_null_representation."

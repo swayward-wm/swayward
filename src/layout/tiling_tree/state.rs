@@ -144,6 +144,14 @@ impl<W: LayoutElement> TilingTree<W> {
         self.has_had_tile
     }
 
+    /// Restores the flag after a fullscreen floating view passed through the
+    /// tiling tree: sway keeps such a view in `ws->floating`, and
+    /// `workspace_add_floating` never refreshes the workspace representation
+    /// (sway/tree/workspace.c:960-970).
+    pub(in crate::layout) fn restore_has_had_tile(&mut self, has_had_tile: bool) {
+        self.has_had_tile = has_had_tile;
+    }
+
     pub fn representation_layout(&self) -> Layout {
         let Some(&TreeNode::Split { layout, .. }) =
             self.nodes.get(&self.root).map(|node| &node.value)

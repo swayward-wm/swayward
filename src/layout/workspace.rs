@@ -813,7 +813,12 @@ impl<W: LayoutElement> Workspace<W> {
                         self.floating.add_tile_to_focused_group(tile);
                         return;
                     }
+                    // A fullscreen floating view stays floating in sway.
+                    let has_had_tile = self.tiling.has_had_tile();
                     self.tiling.add_tile_with_activation(tile, insert, activate);
+                    if is_floating {
+                        self.tiling.restore_has_had_tile(has_had_tile);
+                    }
 
                     if activate {
                         self.floating_is_active = FloatingActive::No;
@@ -1349,7 +1354,9 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating.has_window(window) {
             if is_fullscreen {
                 restore_to_floating = true;
+                let has_had_tile = self.tiling.has_had_tile();
                 self.toggle_window_floating(Some(window));
+                self.tiling.restore_has_had_tile(has_had_tile);
             } else {
                 // Floating windows are never fullscreen, so this is an unfullscreen request for an
                 // already unfullscreen window.
