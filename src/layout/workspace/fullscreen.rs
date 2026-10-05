@@ -91,7 +91,7 @@ impl<W: LayoutElement> Workspace<W> {
             if self.floating.tree_root_for_window(&window).is_some() {
                 return self.floating.set_focused_fullscreen(mode);
             }
-            self.set_fullscreen(&window, mode.is_some());
+            self.set_fullscreen_mode(&window, mode);
             return true;
         }
         // With the workspace itself focused there is no container, and sway's

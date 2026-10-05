@@ -1213,6 +1213,29 @@ fn global_fullscreen_view_inside_workspace_fullscreen_split_coexist() {
     );
 }
 
+// Differential family diff-fam-floating-global-fullscreen, seeds 4063, 4515
+// and 4597. `fullscreen toggle global` on a floating view sets
+// `FULLSCREEN_GLOBAL` like on a tiled one (sway/commands/fullscreen.c:47-52),
+// and the view stays a floating node.
+#[test]
+fn global_fullscreen_on_a_floating_view_reports_mode_2() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "floating");
+    run(&mut f, &["floating toggle", "fullscreen toggle global"]);
+
+    let tree = tree_json(&mut f);
+    let view = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(view["app_id"], "floating", "{tree}");
+    assert_eq!(view["fullscreen_mode"], 2, "{view}");
+
+    run(&mut f, &["fullscreen toggle"]);
+    let tree = tree_json(&mut f);
+    let view = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(view["fullscreen_mode"], 0, "{view}");
+}
+
 // Differential family diff-fam-fullscreen-percent, seed 6264. `layout` wraps
 // the workspace children (sway/tree/workspace.c:898-910); detaching the
 // global fullscreen view clears `root->fullscreen_global`

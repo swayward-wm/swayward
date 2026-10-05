@@ -359,6 +359,11 @@ fn describe_floating_window(
         offset_rect(rect, context.output_origin)
     });
     node.sticky = workspace.is_window_sticky(&tile.window().window);
+    // A fullscreen floating view keeps the mode it was given, global or
+    // workspace (sway/commands/fullscreen.c:47-52, sway/ipc-json.c:619).
+    if let Some(mode) = workspace.fullscreen_mode_for_window(&tile.window().window) {
+        node.fullscreen_mode = mode as i32;
+    }
     node
 }
 

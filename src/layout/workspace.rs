@@ -1337,12 +1337,23 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) {
+        self.set_fullscreen_mode(
+            window,
+            is_fullscreen.then_some(crate::layout::tiling_tree::FullscreenMode::Workspace),
+        );
+    }
+
+    /// `set_fullscreen` with sway's mode: `fullscreen global` on a floating
+    /// view sets `FULLSCREEN_GLOBAL` (sway/commands/fullscreen.c:47-52).
+    pub fn set_fullscreen_mode(
+        &mut self,
+        window: &W::Id,
+        mode: Option<crate::layout::tiling_tree::FullscreenMode>,
+    ) {
+        let is_fullscreen = mode.is_some();
         let mut restore_to_floating = false;
         if self.floating.tree_root_for_window(window).is_some() {
-            self.floating.set_window_fullscreen(
-                window,
-                is_fullscreen.then_some(crate::layout::tiling_tree::FullscreenMode::Workspace),
-            );
+            self.floating.set_window_fullscreen(window, mode);
             return;
         }
         if self.floating.has_window(window) {
@@ -1392,7 +1403,9 @@ impl<W: LayoutElement> Workspace<W> {
         };
         let was_normal = tile.window().pending_sizing_mode().is_normal();
 
-        self.tiling.set_fullscreen(window, is_fullscreen);
+        if let Some(id) = self.tiling.node_for_window(window) {
+            self.tiling.set_node_fullscreen(id, mode);
+        }
 
         // When going from normal to fullscreen, remember if we should unfullscreen to floating.
         // A tile that arrived from another workspace already carries that answer
