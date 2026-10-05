@@ -507,3 +507,44 @@ fn next_on_output_from_the_only_workspace_stays_after_the_empty_one_is_destroyed
         .collect::<Vec<_>>();
     assert_eq!(names, ["3"]);
 }
+
+#[test]
+fn global_fullscreen_refuses_every_workspace_switch() {
+    // sway/sway/commands/workspace.c:175-178 runs before any target is
+    // resolved, so `back_and_forth` without history fails the same way.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle global")[0].success);
+    let before = f.swayward().layout.active_workspace().unwrap().id();
+
+    for command in [
+        "workspace next",
+        "workspace prev",
+        "workspace next_on_output",
+        "workspace back_and_forth",
+        "workspace oracle",
+        "workspace number 4",
+        "workspace current",
+    ] {
+        assert_eq!(
+            crate::command::execute(f.niri_state(), command),
+            [swayward_ipc::CommandOutcome {
+                success: false,
+                error: Some("Can't switch workspaces while fullscreen global".into()),
+                parse_error: Some(false),
+            }],
+            "{command}"
+        );
+    }
+    assert_eq!(f.swayward().layout.active_workspace().unwrap().id(), before);
+    assert!(f.swayward().layout.global_fullscreen_active());
+}

@@ -6,6 +6,14 @@ pub(super) fn activate(
     target: WorkspaceTarget,
     auto_back_and_forth: bool,
 ) -> HandlerResult {
+    // Every switch form, including `back_and_forth` with no history, is
+    // refused while a global fullscreen view is shown
+    // (sway/sway/commands/workspace.c:175-178).
+    if state.swayward.layout.global_fullscreen_active() {
+        return Err(failure(
+            "Can't switch workspaces while fullscreen global".to_owned(),
+        ));
+    }
     if target != WorkspaceTarget::BackAndForth {
         // Sway completes focus changes synchronously. Finish a prior
         // render-only transition before resolving the next named or numbered
