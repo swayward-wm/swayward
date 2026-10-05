@@ -866,3 +866,42 @@ fn a_fullscreen_split_under_a_pending_tabbed_wrapper_keeps_its_box() {
     assert_eq!(rect_of(&t.ipc_tree(), h), Some(before));
     t.check_invariants();
 }
+
+// Differential seed 5144 (oracle row stacked_move_down_shows_moved_split): a
+// directional move neither focuses nor raises anything on sway's seat focus
+// stack (`cmd_move_in_direction`, sway/commands/move.c:672-745). The split the
+// view descends into was raised when focus last entered it, and the sibling
+// the view left was focused before that, so the stacked parent's focus list
+// keeps that sibling first and it stays the shown child
+// (`seat_get_active_tiling_child`, sway/input/seat.c:1408-1429).
+#[test]
+fn directional_move_into_a_stacked_split_keeps_the_stack_focus_order() {
+    let mut t = tree((1200., 800.), 0.);
+    t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    let third = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+    assert!(t.move_node_direction(third, Direction::Up));
+    t.set_focused_layout(Layout::Stacked);
+    let fourth = t.add_tile(tile(4, t.view_size()), InsertTarget::Focused);
+
+    assert!(t.move_node_direction(fourth, Direction::Down));
+
+    assert_eq!(t.focus(), Some(fourth));
+    let IpcNode::Split { children, .. } = t.ipc_tree() else {
+        panic!("root must be a split");
+    };
+    let [IpcNode::Split {
+        layout: Layout::Stacked,
+        focus,
+        children: stacked,
+        ..
+    }] = &children[..]
+    else {
+        panic!("the workspace must hold one stacked container: {children:?}");
+    };
+    let [IpcNode::Leaf { id: shown, .. }, IpcNode::Split { id: split, .. }] = &stacked[..] else {
+        panic!("the stack must hold the view and the split: {stacked:?}");
+    };
+    assert_eq!(*shown, third);
+    assert_eq!(focus, &vec![third, *split]);
+    t.check_invariants();
+}

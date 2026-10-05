@@ -669,6 +669,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     .copied()
                     .find(|child| self.contains_node(*child, focus))
             })
+            .filter(|child| !self.ipc_stale_nodes.contains(child))
             .or_else(|| self.focused_child_in(parent))
     }
 
@@ -676,15 +677,56 @@ impl<W: LayoutElement> TilingTree<W> {
         let TreeNode::Split { children, .. } = &self.nodes.get(&parent)?.value else {
             return None;
         };
-        self.focus_history
+        self.children_in_focus_order(children, |entry| self.ipc_stale_nodes.contains(&entry))
+            .first()
+            .copied()
+    }
+
+    /// `children` most recent first, the order of sway's `focus` list and
+    /// `seat_get_active_tiling_child` (sway/ipc-json.c:786-807,
+    /// sway/input/seat.c:1408-1429). Sway ranks a child by its own seat
+    /// stack entry. Focusing a view raises its ancestors with it, so that
+    /// entry is usually its newest descendant's, but a directional move
+    /// raises nothing (sway/commands/move.c:672-745): a view moved into a
+    /// split leaves the split's entry where it was. A child with no entry
+    /// of its own ranks by its newest descendant, and never-focused children
+    /// follow in tree order. `skip` names nodes whose entries do not count:
+    /// a wrapper the tree created without focusing it (`ipc_stale_nodes`)
+    /// joined the tail of sway's stack (`seat_node_from_node`,
+    /// sway/input/seat.c:327-349), so it ranks there even when a moved view
+    /// now sits inside it.
+    pub(super) fn children_in_focus_order(
+        &self,
+        children: &[NodeId],
+        skip: impl Fn(NodeId) -> bool,
+    ) -> Vec<NodeId> {
+        let entries = self
+            .focus_history
             .iter()
-            .find_map(|focused| {
-                children
-                    .iter()
-                    .copied()
-                    .find(|child| self.contains_node(*child, *focused))
-            })
-            .or_else(|| children.first().copied())
+            .copied()
+            .filter(|entry| !skip(*entry))
+            .collect::<Vec<_>>();
+        let rank = |child: NodeId| {
+            if skip(child) {
+                return None;
+            }
+            entries
+                .iter()
+                .position(|entry| *entry == child)
+                .or_else(|| {
+                    entries
+                        .iter()
+                        .position(|entry| self.contains_node(child, *entry))
+                })
+        };
+        let mut ranked = children
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, child)| (rank(child).unwrap_or(usize::MAX), index, child))
+            .collect::<Vec<_>>();
+        ranked.sort_unstable();
+        ranked.into_iter().map(|(_, _, child)| child).collect()
     }
 
     pub(super) fn focused_leaf_in(&self, id: NodeId) -> Option<NodeId> {

@@ -308,22 +308,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
     /// focus entries (fresh wrappers, see `ipc_stale_nodes`) do not count.
     fn focus_order(&self, children: &[NodeId]) -> Vec<NodeId> {
         let tree = self.tree;
-        tree.focus_history
-            .iter()
-            .filter(|focused| !tree.ipc_stale_nodes.contains(focused))
-            .filter_map(|focused| {
-                children
-                    .iter()
-                    .copied()
-                    .find(|child| tree.contains_node(*child, *focused))
-            })
-            .chain(children.iter().copied())
-            .fold(Vec::new(), |mut focus, child| {
-                if !focus.contains(&child) {
-                    focus.push(child);
-                }
-                focus
-            })
+        tree.children_in_focus_order(children, |entry| tree.ipc_stale_nodes.contains(&entry))
     }
 
     /// Titlebar rows a tabbed or stacked parent reserves above each child's rect.
