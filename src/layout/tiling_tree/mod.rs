@@ -202,6 +202,30 @@ impl<I> IpcNode<I> {
 }
 
 impl<W: LayoutElement> DetachedSubtree<W> {
+    /// A lone view, as a floating view is when it swaps into a tiled slot.
+    pub fn from_tile(tile: Tile<W>) -> Self {
+        let window = tile.window().id().clone();
+        Self {
+            node: DetachedNode::Leaf {
+                old_id: NodeId(NODE_ID_COUNTER.next()),
+                tile: Box::new(tile),
+                pending_mode: None,
+                mapped_under_fullscreen: false,
+            },
+            focus_history: vec![window],
+            root_focused: false,
+            wrapped_workspace: false,
+        }
+    }
+
+    /// The view of a single-leaf subtree, or the subtree back for a container.
+    pub fn into_tile(self) -> Result<Tile<W>, Box<Self>> {
+        match self.node {
+            DetachedNode::Leaf { tile, .. } => Ok(*tile),
+            node => Err(Box::new(Self { node, ..self })),
+        }
+    }
+
     pub fn for_each_window(&self, mut f: impl FnMut(&W)) {
         self.node.for_each_window(&mut f);
     }

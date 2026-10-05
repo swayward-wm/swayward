@@ -665,6 +665,9 @@ pub(super) fn swap_target(
     if source == destination {
         return failure("Cannot swap a container with itself");
     }
+    if let Some(outcome) = swap_with_floating_window(state, source, destination, target) {
+        return outcome;
+    }
     let (source_workspace, source_node) = match resolve_swap_endpoint(state, source, true, || {
         failure("Can only swap with containers and views")
     }) {
@@ -708,6 +711,73 @@ pub(super) fn swap_target(
     }
     state.swayward.queue_redraw_all();
     success()
+}
+
+/// A standalone floating view and the workspace it floats on.
+fn floating_root_window(
+    state: &State,
+    target: CommandTarget,
+) -> Option<(
+    smithay::desktop::Window,
+    crate::layout::workspace::WorkspaceId,
+)> {
+    let CommandTarget::Window(id) = target else {
+        return None;
+    };
+    let window = super::mapped_window(state, id)?;
+    let workspace = state
+        .swayward
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.floating().window_is_floating_root(&window))?
+        .2
+        .id();
+    Some((window, workspace))
+}
+
+/// Sway swaps a floating container with a tiled one, each taking the other's
+/// place (`swap_places`, sway/tree/container.c:1718-1764). `None` when
+/// neither endpoint is a standalone floating view.
+fn swap_with_floating_window(
+    state: &mut State,
+    source: CommandTarget,
+    destination: CommandTarget,
+    target: &SwapTarget,
+) -> Option<CommandOutcome> {
+    let (floater, other, other_is_source) = match (
+        floating_root_window(state, source),
+        floating_root_window(state, destination),
+    ) {
+        (Some(floater), None) => (floater, destination, false),
+        (None, Some(floater)) => (floater, source, true),
+        _ => return None,
+    };
+    let (workspace, node) = match resolve_swap_endpoint(state, other, other_is_source, || {
+        let (kind, value) = swap_kind_value(target);
+        failure(format!("Failed to find {kind} '{value}'"))
+    }) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return Some(error),
+    };
+    if workspace != floater.1
+        || !state
+            .swayward
+            .layout
+            .workspace_contains_tiling_node(workspace, node)
+    {
+        return Some(failure("Can only swap with containers and views"));
+    }
+    let remapped = match state
+        .swayward
+        .layout
+        .swap_floating_window_with_tiling_node(&floater.0, workspace, node)
+    {
+        Ok(remapped) => remapped,
+        Err(error) => return Some(failure(error)),
+    };
+    state.swayward.remap_container_marks(remapped);
+    state.swayward.queue_redraw_all();
+    Some(success())
 }
 
 /// Swap two tiled containers on different workspaces, carrying container

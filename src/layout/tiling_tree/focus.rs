@@ -243,6 +243,16 @@ impl<W: LayoutElement> TilingTree<W> {
         target.is_some()
     }
 
+    /// Points focus at the most recently focused view without reordering the
+    /// focus history, as sway's seat stack is left alone when focus stays on
+    /// a container that left the tree (`swap_focus`,
+    /// sway/tree/container.c:1766-1798).
+    pub fn focus_inactive_view_keeping_history(&mut self) {
+        if let Some(leaf) = self.focused_leaf_in(self.root) {
+            self.focus = Some(leaf);
+        }
+    }
+
     /// Focuses the root without raising it in the focus history.
     pub fn focus_root_keeping_history(&mut self) {
         self.focus = Some(self.root);

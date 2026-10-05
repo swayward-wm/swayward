@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// The view a floating/tiled swap floated, when the tiled side was a view,
+/// and the node IDs the floated container was renumbered with.
+pub type FloatingTiledSwap<Id> = (Option<Id>, Vec<(NodeId, NodeId)>);
+
 impl<W: LayoutElement> Workspace<W> {
     pub fn add_tile_at_drop(
         &mut self,
@@ -52,6 +56,80 @@ impl<W: LayoutElement> Workspace<W> {
             return self.tiling.swap_nodes(first, second);
         }
         self.floating.swap_nodes(first, second)
+    }
+
+    /// Swaps a standalone floating view with a tiled container or view on
+    /// this workspace. Each takes the other's place and geometry, and focus
+    /// stays with the container that had it (`swap_places`, `swap_focus`,
+    /// sway/tree/container.c:1718-1798). Returns the view that became
+    /// floating, when the tiled side was a view, and the remapped node IDs.
+    pub fn swap_floating_window_with_tiling_node(
+        &mut self,
+        window: &W::Id,
+        node: NodeId,
+    ) -> Option<FloatingTiledSwap<W::Id>> {
+        if !self.floating.window_is_floating_root(window)
+            || !self.tiling.contains(node)
+            || self.tiling.is_root(node)
+        {
+            return None;
+        }
+        let floater_rect = self
+            .floating
+            .tiles_with_offsets()
+            .find(|(tile, _)| tile.window().id() == window)
+            .map(|(tile, pos)| Rectangle::new(pos, tile.tile_size()))?;
+        let floater_focused = self.floating_is_active.get()
+            && self
+                .floating
+                .active_window()
+                .is_some_and(|active| active.id() == window);
+        let tiled_focused = !self.floating_is_active.get()
+            && self
+                .tiling
+                .focus()
+                .is_some_and(|focus| self.tiling.contains_node(node, focus));
+        let (mut subtree, slot) = self.detach_tiling_subtree_for_swap(node)?;
+        let RemovedTile { mut tile, .. } = self.floating.remove_tile(window, Transaction::new());
+        let (floating_pos, floating_size) = (tile.floating_pos, tile.floating_window_size);
+        tile.tiling_parent = None;
+        tile.tiling_focus_rank = None;
+        tile.stop_move_animations();
+        let mut leaf = DetachedSubtree::from_tile(tile);
+        leaf.swap_fullscreen_position(&mut subtree);
+        self.tiling.attach_subtree_for_swap(leaf, slot);
+        self.tiling.finish_subtree_detach(None);
+        // swap_places leaves the seat focus stack alone, so the view keeps
+        // its own focus rank rather than the departed node's.
+        self.tiling.rank_arrived_window_by_focus_timestamp(window);
+        if let Some(output) = &self.output {
+            subtree.for_each_window(|window| window.output_enter(output));
+        }
+        let floated = match subtree.into_tile() {
+            Ok(mut tile) => {
+                tile.floating_pos = floating_pos;
+                tile.floating_window_size = floating_size;
+                tile.tiling_parent = None;
+                tile.tiling_focus_rank = None;
+                tile.stop_move_animations();
+                let id = tile.window().id().clone();
+                self.floating.add_tile(tile, tiled_focused);
+                (Some(id), Vec::new())
+            }
+            Err(subtree) => (None, self.floating.add_tree(*subtree, floater_rect).1),
+        };
+        if floater_focused {
+            self.tiling.activate_window(window);
+            self.floating_is_active = FloatingActive::No;
+        } else if tiled_focused {
+            // The floated container keeps focus, so the next view maps
+            // beside the most recently focused tiled view, not the view that
+            // arrived (`seat_get_focus_inactive_tiling`,
+            // `seat_get_focus_inactive_view`, sway/tree/view.c:851-866).
+            self.tiling.focus_inactive_view_keeping_history();
+            self.floating_is_active = FloatingActive::Yes;
+        }
+        Some(floated)
     }
 
     pub fn detach_tiling_subtree_for_swap(

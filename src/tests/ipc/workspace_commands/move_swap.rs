@@ -1740,3 +1740,119 @@ fn move_to_other_output_lands_after_focus_not_an_assigned_view() {
         ["two", "three", "five", "four"]
     );
 }
+
+/// `swap_floating_with_tiled_mark` in the oracle: sway swaps a floating view
+/// and a tiled one, each taking the other's place, and focus follows the
+/// container that had it (`swap_places`, `swap_focus`,
+/// sway/tree/container.c:1718-1798). Differential seed 11697.
+#[test]
+fn swap_trades_places_between_a_floating_and_a_tiled_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for app_id in ["one", "two", "three"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        if app_id == "one" {
+            assert!(crate::command::execute(f.niri_state(), "mark tiled")[0].success);
+        }
+    }
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+
+    let app_id = |window: &crate::window::Mapped| {
+        crate::utils::with_toplevel_role(window.toplevel(), |role| role.app_id.clone()).unwrap()
+    };
+    let state = |f: &mut Fixture| {
+        let layout = &f.swayward().layout;
+        let workspace = layout.active_workspace().unwrap();
+        let tiled = workspace
+            .tiling()
+            .tiles()
+            .map(|tile| app_id(tile.window()))
+            .collect::<Vec<_>>();
+        let floating = workspace
+            .floating()
+            .tiles()
+            .map(|tile| app_id(tile.window()))
+            .collect::<Vec<_>>();
+        (tiled, floating, app_id(layout.focus().unwrap()))
+    };
+
+    let outcome = crate::command::execute(f.niri_state(), "swap container with mark tiled");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(
+        state(&mut f),
+        (
+            vec!["three".into(), "two".into()],
+            vec!["one".into()],
+            "three".into()
+        )
+    );
+
+    assert!(crate::command::execute(f.niri_state(), r#"[app_id="^two$"] focus"#)[0].success);
+    let outcome = crate::command::execute(f.niri_state(), "swap container with mark tiled");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(
+        state(&mut f),
+        (
+            vec!["three".into(), "one".into()],
+            vec!["two".into()],
+            "two".into()
+        )
+    );
+    assert_eq!(f.swayward().marks_by_window.values().flatten().count(), 1);
+}
+
+/// `swap_tiled_with_floating_mark_maps_beside_focus_inactive` in the oracle:
+/// when the focused tiled view swaps with a floating mark, it floats with
+/// focus, and the next view maps beside the most recent tiled view rather
+/// than the view that swapped in (`seat_get_focus_inactive_tiling`,
+/// sway/tree/view.c:851-866). Differential seed 17577.
+#[test]
+fn a_view_mapped_after_a_tiled_floating_swap_lands_beside_the_focus_inactive_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let open = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, command: &str| {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    };
+    open(&mut f, "one");
+    run(&mut f, "mark --add floater");
+    run(&mut f, "floating enable");
+    open(&mut f, "three");
+    open(&mut f, "four");
+    run(&mut f, "swap container with mark floater");
+    open(&mut f, "five");
+
+    let apps = f
+        .swayward()
+        .layout
+        .active_workspace()
+        .unwrap()
+        .tiling()
+        .tiles()
+        .filter_map(|tile| {
+            crate::utils::with_toplevel_role(tile.window().toplevel(), |role| role.app_id.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(apps, ["three", "five", "one"]);
+}

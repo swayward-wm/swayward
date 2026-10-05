@@ -61,6 +61,40 @@ impl<W: LayoutElement> Layout<W> {
             .map_err(str::to_owned)
     }
 
+    /// Swaps a standalone floating view with a tiled node on the same
+    /// workspace. A scratchpad floater hands its scratchpad membership to the
+    /// view that replaces it (`container_swap`,
+    /// sway/tree/container.c:1813-1882).
+    pub fn swap_floating_window_with_tiling_node(
+        &mut self,
+        window: &W::Id,
+        workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+    ) -> Result<Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>, String> {
+        let scratchpad = self.scratchpad_windows.contains(window);
+        if scratchpad
+            && self
+                .workspace(workspace)
+                .is_some_and(|candidate| candidate.tiling().is_split(node))
+        {
+            return Err(
+                "swapping a scratchpad window with a container is not implemented yet".into(),
+            );
+        }
+        let (floated, remapped) = self
+            .workspace_mut(workspace)
+            .and_then(|candidate| candidate.swap_floating_window_with_tiling_node(window, node))
+            .ok_or_else(|| "Can only swap with containers and views".to_owned())?;
+        if let Some(floated) = floated.filter(|_| scratchpad) {
+            for id in &mut self.scratchpad_windows {
+                if id == window {
+                    *id = floated.clone();
+                }
+            }
+        }
+        Ok(remapped)
+    }
+
     pub(crate) fn swap_tiling_nodes_between_workspaces(
         &mut self,
         first_workspace: WorkspaceId,
