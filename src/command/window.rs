@@ -71,7 +71,10 @@ pub(super) fn urgent(
     value: &str,
 ) -> Result<(), CommandOutcome> {
     let CommandTarget::Window(target) = target else {
-        return Err(failure("Only views can be urgent"));
+        // CMD_INVALID (`sway/sway/commands/urgent.c:18-20`).
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can be urgent",
+        ));
     };
     let urgent = state
         .swayward
@@ -563,7 +566,11 @@ pub(super) fn opacity_focused(
 }
 
 pub(super) fn title_format_focused(state: &mut State, format: &str) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
+    // `sway/sway/commands/title_format.c:14-18`: a focused workspace is no
+    // container.
+    let target = super::targeted::focused_target(state)
+        .filter(|_| super::targeted::focused_node(state) != FocusedNode::Nothing);
+    let Some(target) = target else {
         return Err(swayward_ipc::command::parse_error(
             "Only valid containers can have a title_format",
         ));
@@ -699,7 +706,11 @@ pub(super) fn floating_focused(state: &mut State, mode: Toggle) -> super::Handle
 }
 
 pub(super) fn urgent_focused(state: &mut State, value: &str) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
+    // `sway/sway/commands/urgent.c:14-17`: a focused workspace is no
+    // container.
+    let target = super::targeted::focused_target(state)
+        .filter(|_| super::targeted::focused_node(state) != FocusedNode::Nothing);
+    let Some(target) = target else {
         return Err(failure("No current container"));
     };
     super::handled(urgent(state, target, value))

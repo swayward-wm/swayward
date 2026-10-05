@@ -229,6 +229,13 @@ fn view_commands_check_for_a_view_before_their_value() {
             true,
         ),
         ("opacity minus 0.2", "No current container", false),
+        (
+            "title_format %title",
+            "Only valid containers can have a title_format",
+            true,
+        ),
+        ("urgent toggle", "No current container", false),
+        ("urgent enable", "No current container", false),
     ];
     let check = |f: &mut Fixture, context: &str| {
         for (command, error, parse_error) in cases {
@@ -261,6 +268,25 @@ fn view_commands_check_for_a_view_before_their_value() {
     f.double_roundtrip(client);
     assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
     check(&mut f, "workspace focused");
+
+    // A focused split is a container but no view
+    // (`sway/sway/commands/urgent.c:18-20`).
+    assert!(crate::command::execute(f.niri_state(), "focus child")[0].success);
+    crate::tests::windows::map_window(&mut f, client, Default::default());
+    let outcomes = crate::command::execute(f.niri_state(), "splitv; focus parent");
+    assert!(
+        outcomes.iter().all(|outcome| outcome.success),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "urgent toggle"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Only views can be urgent".into()),
+            parse_error: Some(true),
+        }]
+    );
+    assert!(crate::command::execute(f.niri_state(), "title_format %title")[0].success);
 }
 
 /// Oracle: state scenario chained-command-focus
