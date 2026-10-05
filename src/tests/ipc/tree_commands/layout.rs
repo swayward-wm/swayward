@@ -1211,6 +1211,32 @@ fn layout_default_restores_only_a_split_the_layout_command_replaced() {
     }
 }
 
+/// A split on an empty workspace records the old workspace layout as
+/// `prev_split_layout` even when the layout does not change
+/// (sway/tree/workspace.c:1058-1063), so `layout default` succeeds after it.
+/// Differential family diff-fam-split-empty-ws-prev-split, seed 13169.
+#[test]
+fn split_on_an_empty_workspace_records_the_previous_layout() {
+    for (setup, expected) in [
+        (&["split h"][..], "splith"),
+        (&["split v"][..], "splith"),
+        (&["layout tabbed", "split v"][..], "tabbed"),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        for command in setup {
+            assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        }
+        let reply = &crate::command::execute(f.niri_state(), "layout default")[0];
+        assert!(reply.success, "{setup:?}: {reply:?}");
+        let tree = tree_json(&mut f);
+        assert_eq!(
+            tree["nodes"][1]["nodes"][0]["layout"], expected,
+            "{setup:?}"
+        );
+    }
+}
+
 #[test]
 fn split_toggle_reads_the_parent_layout_like_sway() {
     // sway `cmd_split`/`cmd_splitt` (sway/commands/split.c): split H only when the

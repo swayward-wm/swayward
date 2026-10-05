@@ -229,8 +229,15 @@ impl<W: LayoutElement> TilingTree<W> {
         if let Some(focus) = self.focus {
             self.split(focus, layout);
         } else {
+            // sway's workspace_split records the old layout as
+            // `prev_split_layout` unconditionally, even when it is unchanged
+            // or tabbed/stacked (sway/tree/workspace.c:1058-1063).
             let representation = self.representation_layout();
+            let previous = self.split_layout(self.root);
             self.set_layout(self.root, layout);
+            if let Some(meta) = self.split_meta_mut(self.root) {
+                meta.previous_layout = previous;
+            }
             self.empty_representation_layout = Some(representation);
         }
     }
