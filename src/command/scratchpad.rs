@@ -49,6 +49,11 @@ pub(super) fn show_targeted(
     state: &mut State,
     target: CommandTarget,
 ) -> Result<(), CommandOutcome> {
+    // Sway refuses an empty scratchpad before it looks at the matched
+    // container (`sway/sway/commands/scratchpad.c:105-107`).
+    if state.swayward.layout.scratchpad_is_empty() {
+        return Err(swayward_ipc::command::parse_error("Scratchpad is empty"));
+    }
     let window = target_window(state, target)?;
     if !state.swayward.layout.is_scratchpad_window(&window) {
         // CMD_INVALID in sway (`sway/sway/commands/scratchpad.c:118-125`), so it

@@ -1558,3 +1558,34 @@ fn unfullscreen_of_a_floated_fullscreen_view_stays_floating() {
     assert_eq!(first["visible"], true);
     assert_eq!(first["percent"], 1.0);
 }
+
+/// Oracle: state scenario error_precedence (diff-fam-v3-error-precedence,
+/// random-v3 seeds 91 and 94). `urgent` with the workspace focused has no
+/// container (`sway/sway/commands/urgent.c:15-17`), and `scratchpad show`
+/// refuses an empty scratchpad before looking at criteria matches
+/// (`sway/sway/commands/scratchpad.c:105-107`).
+#[test]
+fn error_precedence_matches_sway() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    windows_on_workspaces(&mut f, &[("1", "first"), ("1", "second")]);
+
+    let refusal = |error: &str, parse_error| swayward_ipc::CommandOutcome {
+        success: false,
+        error: Some(error.into()),
+        parse_error: Some(parse_error),
+    };
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "[app_id=second] scratchpad show"),
+        [refusal("Scratchpad is empty", true)]
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    let outcomes = crate::command::execute(f.niri_state(), "focus parent; mark m");
+    assert!(outcomes[0].success, "{outcomes:?}");
+    assert_eq!(outcomes[1], refusal("Only containers can have marks", true));
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "urgent enable"),
+        [refusal("No current container", false)]
+    );
+}
