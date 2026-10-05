@@ -113,10 +113,17 @@ impl<W: LayoutElement> TilingTree<W> {
         // one added to a container is arranged with its siblings
         // (`arrange_container(parent)`, `sway/tree/view.c:931-940`).
         let focus_blocked = fullscreen.is_some();
-        let mapped_under_fullscreen = focus_blocked && parent == self.root;
-        if fullscreen
-            .is_some_and(|fullscreen| self.divides_box_under_fullscreen(parent, fullscreen))
-        {
+        // A global fullscreen container does not set `workspace->fullscreen`
+        // (`container_fullscreen_global`, sway/tree/container.c), so
+        // `arrange_workspace` lays the new view out with its siblings.
+        let mapped_under_fullscreen = parent == self.root
+            && fullscreen.is_some_and(|fullscreen| {
+                self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
+            });
+        if fullscreen.is_some_and(|fullscreen| {
+            self.divides_box_under_fullscreen(parent, fullscreen)
+                || (parent == self.root && !mapped_under_fullscreen)
+        }) {
             self.fullscreen_tile_slot = true;
         }
         if parent == self.root {
@@ -206,6 +213,13 @@ impl<W: LayoutElement> TilingTree<W> {
 
     fn insertion_slot(&self, target: InsertTarget) -> (NodeId, Option<NodeId>) {
         let target = match target {
+            // With the workspace focused, sway maps beside its focus-inactive
+            // container (`seat_get_focus_inactive(ws)`, sway/tree/view.c:849-882).
+            InsertTarget::Focused if self.focus == Some(self.root) => self
+                .focus_history
+                .iter()
+                .copied()
+                .find(|id| *id != self.root && self.contains_node(self.root, *id)),
             InsertTarget::Focused => self.focus,
             InsertTarget::Node(id) => Some(id),
             InsertTarget::MoveDestination => {

@@ -941,3 +941,64 @@ fn border_toggle_on_a_tiled_decorated_window_enters_csd_and_keeps_normal() {
         Some(&Mode::ServerSide)
     );
 }
+
+#[test]
+fn view_mapped_under_global_fullscreen_keeps_its_border_and_share() {
+    // A global fullscreen container does not set workspace->fullscreen
+    // (container_fullscreen_global, sway/tree/container.c), so a view mapped
+    // beside it is arranged with its siblings: border normal at the
+    // configured width, percent 0.5.
+    // Differential family diff-fam-new-view-border, seed 1044.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_app(&mut f, client, "fs");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle global")[0].success);
+    f.double_roundtrip(client);
+    map_app(&mut f, client, "new");
+
+    let tree = tree_json(&mut f);
+    let fs = find_json_node_with_app_id(&tree, "fs").unwrap();
+    let new = find_json_node_with_app_id(&tree, "new").unwrap();
+    assert_eq!(fs["percent"], 0.5);
+    assert_eq!(new["percent"], 0.5);
+    assert_eq!(new["border"], "normal");
+    assert_ne!(new["current_border_width"], 0);
+    assert_eq!(new["current_border_width"], fs["current_border_width"]);
+}
+
+#[test]
+fn view_mapped_with_the_workspace_focused_goes_beside_its_focus_inactive_child() {
+    // With the workspace focused, view_map maps beside
+    // seat_get_focus_inactive(ws), the last focused view
+    // (sway/tree/view.c:849-882), not at the end of the workspace.
+    // Differential family diff-fam-new-view-border, seed 1527.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    for command in ["move up", "focus parent"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    map_app(&mut f, client, "three");
+
+    let tree = tree_json(&mut f);
+    let workspace = &tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] != "__i3")
+        .unwrap()["nodes"][0];
+    let names = workspace["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 3, "{workspace:#}");
+    let three = find_json_node_with_app_id(&tree, "three").unwrap();
+    assert_eq!(workspace["nodes"][1]["id"], three["id"], "{workspace:#}");
+    assert_eq!(three["border"], "normal");
+    assert_eq!(three["focused"], true);
+}

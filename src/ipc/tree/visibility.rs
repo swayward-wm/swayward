@@ -95,7 +95,11 @@ pub(super) fn apply_fullscreen_state(nodes: &mut [Node], workspace_visible: bool
                 let pending_tab_wrapper = node.fullscreen_mode == 0
                     && node.percent == Some(0.)
                     && matches!(node.layout, NodeLayout::Tabbed | NodeLayout::Stacked);
-                if set_full_percent && node.fullscreen_mode != 0 && !pending_tab_wrapper {
+                // A global fullscreen container is not `workspace->fullscreen`
+                // (`container_fullscreen_global`, sway/tree/container.c), so
+                // `arrange_workspace` gives it a tile slot and its percent is
+                // the slot's share, already computed by the layout.
+                if set_full_percent && node.fullscreen_mode == 1 && !pending_tab_wrapper {
                     node.percent = Some(1.);
                 }
                 if node.fullscreen_mode == 0 {
