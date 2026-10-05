@@ -101,6 +101,65 @@ fn empty_auto_tree_tracks_output_orientation_changes() {
     ));
 }
 
+/// Reorienting an empty `auto` workspace to the output's longer axis records no
+/// `prev_split_layout`: sway sets that only in the layout command and
+/// `workspace_split` (sway/commands/layout.c:171-189,
+/// sway/tree/workspace.c:1058-1063), so `layout default` still fails. Oracle row
+/// command_parser_errors.
+#[test]
+fn output_orientation_change_records_no_split_for_layout_default() {
+    let mut t = tree_with_options((1280., 720.), 0., |options| {
+        options.layout.default_orientation = swayward_config::DefaultOrientation::Auto;
+    });
+
+    t.update_config(
+        (720., 1280.).into(),
+        Rectangle::from_size((720., 1280.).into()),
+        false,
+        1.,
+        t.options.clone(),
+    );
+
+    assert_eq!(t.restore_focused_split_layout(), None);
+    assert!(matches!(
+        t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::SplitV,
+            ..
+        }
+    ));
+}
+
+/// The initial workspace created before the output mode is applied resets to the
+/// new axis once the mode lands; that reset is not a `layout` command either, so
+/// `layout default` still fails (sway/commands/layout.c:171-189). Oracle row
+/// command_parser_errors on the 1270x1408 output.
+#[test]
+fn tracked_auto_layout_reset_records_no_split_for_layout_default() {
+    let mut t = tree_with_options((1280., 720.), 0., |options| {
+        options.layout.default_orientation = swayward_config::DefaultOrientation::Auto;
+    });
+    t.preserve_empty_auto_layout();
+    t.update_config(
+        (1270., 1408.).into(),
+        Rectangle::from_size((1270., 1408.).into()),
+        false,
+        1.,
+        t.options.clone(),
+    );
+
+    t.track_empty_auto_layout();
+
+    assert_eq!(t.restore_focused_split_layout(), None);
+    assert!(matches!(
+        t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::SplitV,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn explicit_empty_layout_survives_output_orientation_changes() {
     let mut t = tree_with_options((1280., 720.), 0., |options| {

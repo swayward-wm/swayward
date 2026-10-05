@@ -188,7 +188,9 @@ impl<W: LayoutElement> TilingTree<W> {
             Some(layout) => layout,
             None => default_layout(self.options.layout.default_orientation, self.view_size),
         };
-        self.set_layout(self.root, layout);
+        // Not a `layout` command: records no `prev_split_layout`
+        // (sway/commands/layout.c:171-189).
+        self.set_layout_keeping_previous(self.root, layout);
         self.empty_representation_layout = Some(layout);
     }
 
@@ -228,7 +230,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 Some(TreeNode::Split { layout, .. }) if *layout == old_auto_layout
             )
         {
-            self.set_layout(self.root, new_auto_layout);
+            // Following the output's axis is not a `layout` command, so it records
+            // no `prev_split_layout` for `layout default` (sway/commands/layout.c:171-189).
+            self.set_layout_keeping_previous(self.root, new_auto_layout);
         }
     }
 
