@@ -179,12 +179,13 @@ cost = "medium"
 [[command]]
 name = "bar"
 table = "shared"
-category = "deliberate"
+category = "accepted"
 source = "shared; `commands/bar.c`"
 probe = "bar mode hide"
-parser = "reject"
-state = "no managed bar or `bar {}` state"
-classification = "deliberate subsystem deviation"
+parser = "accept"
+execution = "partial"
+state = "no managed bar or `bar {}` state; `bar mode` and `bar hidden_state` iterate over zero bars and succeed as sway does with no bar configured"
+classification = "partial: `bar <id> <subcommand>` would create a swaybar and is refused"
 cost = "subsystem"
 
 [[command]]

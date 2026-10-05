@@ -193,6 +193,14 @@ bars. A non-empty payload names a bar ID. Because no ID can exist, swayward
 returns `{"success":false,"error":"No bar with that ID"}`, matching sway's
 missing-ID response instead of returning the list-shaped empty result.
 
+The runtime `bar` command answers as sway answers with no bar configured.
+`bar mode <mode> [<id>]` and `bar hidden_state <state> [<id>]` apply to every
+configured bar, so with none they succeed without effect, whatever the value
+(`sway/sway/commands/bar/mode.c:40-77`;
+`sway/sway/commands/bar/hidden_state.c:36-74`). Any other bare subcommand
+returns sway's `No bar defined.`. `bar <id> <subcommand>` would create a bar
+and launch swaybar (`sway/sway/commands/bar.c:60-136`), so swayward refuses it.
+
 Configure Waybar directly as an external layer-shell client. Fedora Waybar
 0.15.0 is covered by the opt-in `contrib/probe-waybar-sway` nested-session
 probe with its `sway/workspaces`, `sway/window`, and `sway/mode` modules. The

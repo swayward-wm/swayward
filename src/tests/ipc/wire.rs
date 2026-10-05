@@ -329,6 +329,48 @@ fn get_bar_config_distinguishes_no_bars_from_an_unknown_id() {
     );
 }
 
+/// With no bar configured, sway's `bar mode` and `bar hidden_state` loop over
+/// zero bars and succeed (`sway/sway/commands/bar/mode.c:40-77`,
+/// `bar/hidden_state.c:36-74`); other bare subcommands report no bar.
+/// Oracle row: differential_seed_1000 (`bar hidden_state show`) and
+/// bar_runtime_without_bars.
+#[test]
+fn runtime_bar_commands_answer_as_sway_with_no_bar() {
+    let (mut fixture, socket) = ipc_fixture();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let mut run = |command: &str| {
+        query_ipc_with_payload(&mut fixture, &mut stream, MessageType::RunCommand, command)
+    };
+
+    for command in [
+        "bar hidden_state show",
+        "bar mode hide",
+        "bar mode dock bar-0",
+    ] {
+        assert_eq!(
+            run(command),
+            serde_json::json!([{"success": true}]),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        run("bar position top"),
+        serde_json::json!([{"success": false, "parse_error": true, "error": "No bar defined."}])
+    );
+    assert_eq!(
+        run("bar mode"),
+        serde_json::json!([{
+            "success": false,
+            "parse_error": true,
+            "error": "Invalid bar command (expected at least 2 arguments, got 1)",
+        }])
+    );
+    assert_eq!(
+        run("bar hidden_state show, nop").as_array().unwrap().len(),
+        2
+    );
+}
+
 /// Sway writes this reply as a C string literal rather than serialising it
 /// (`sway/sway/ipc-server.c:870`), so it carries spaces a JSON encoder would
 /// not produce. A parsed JSON comparison cannot establish byte identity, so

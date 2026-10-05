@@ -105,8 +105,8 @@ runtime commands go through `swayward-ipc`. Most command gaps come from that
 seam: the setting exists in KDL, but there is no safe live mutation path for
 it yet.
 
-The parser accepts 70 of sway 1.12's 82 unique runtime command names. Of those,
-29 command families are complete and 41 are partial. An accepted name means at
+The parser accepts 71 of sway 1.12's 82 unique runtime command names. Of those,
+29 command families are complete and 42 are partial. An accepted name means at
 least one real form works; it does not mean every option, target, or unit works.
 
 The commonly used forms include:

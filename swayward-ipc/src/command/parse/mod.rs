@@ -4,6 +4,7 @@ use super::variables::*;
 use crate::CommandOutcome;
 
 mod arity;
+mod bar;
 mod bindings;
 mod error;
 mod move_resize;
@@ -13,6 +14,7 @@ mod settings;
 mod workspace;
 
 use arity::*;
+use bar::*;
 use bindings::*;
 pub use error::ParseFailure;
 use error::*;
@@ -453,6 +455,7 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
         }
         "mode" => parse_mode(rest),
         "nop" => Ok(Command::Nop),
+        "bar" => parse_bar(rest),
         "exec" | "exec_always" => parse_exec(input, name),
         "mark" => parse_mark(rest),
         "unmark" => Ok(Command::Unmark(
