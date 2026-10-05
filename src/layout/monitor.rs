@@ -1143,6 +1143,11 @@ impl<W: LayoutElement> Monitor<W> {
             WorkspaceActivation::Allow,
             removed.is_floating,
         );
+        if !activate {
+            self.workspaces[new_idx]
+                .tiling_mut()
+                .rank_arrived_window_by_focus_timestamp(&window);
+        }
         if let (Some(fullscreen), Some(fullscreen_window)) = (fullscreen, fullscreen_window) {
             self.workspaces[new_idx].set_window_fullscreen(&fullscreen_window, Some(fullscreen));
             if fullscreen_window == window {

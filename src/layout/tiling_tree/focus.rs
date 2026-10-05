@@ -51,6 +51,37 @@ impl<W: LayoutElement> TilingTree<W> {
             .collect();
     }
 
+    /// Ranks a window that arrived without being activated by when it last had focus. Sway keeps
+    /// one seat-wide focus stack, so a moved view that was focused more recently than the
+    /// destination's focus-inactive container becomes the destination's focus-inactive
+    /// container, and the next move to that workspace lands beside it
+    /// (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389; sway/commands/move.c:515).
+    pub(crate) fn rank_arrived_window_by_focus_timestamp(&mut self, window: &W::Id) {
+        let Some(leaf) = self.node_for_window(window) else {
+            return;
+        };
+        let Some(stamp) = self
+            .tile(leaf)
+            .and_then(|tile| tile.window().focus_timestamp())
+        else {
+            return;
+        };
+        self.focus_history.retain(|candidate| *candidate != leaf);
+        let rank = self
+            .focus_history
+            .iter()
+            .position(|candidate| {
+                self.tile(*candidate)
+                    .is_some_and(|tile| tile.window().focus_timestamp() < Some(stamp))
+            })
+            .unwrap_or(self.focus_history.len());
+        if rank == 0 {
+            self.set_focus_id(Some(leaf));
+        } else {
+            self.focus_history.insert(rank, leaf);
+        }
+    }
+
     pub(crate) fn sort_focus_history_by_timestamp(&mut self) {
         let mut history = self
             .focus_history

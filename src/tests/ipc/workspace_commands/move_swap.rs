@@ -1257,3 +1257,51 @@ fn a_moved_workspace_ranks_by_its_own_focus_not_tree_order() {
         .collect();
     assert_eq!(order, ["wrapper", "1"], "{}", target["representation"]);
 }
+
+/// Sway moves each criteria match after the destination's focus-inactive tiling
+/// container, which the previous match becomes once it is newer on the seat's focus
+/// stack (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389;
+/// sway/commands/move.c:515). The matches keep their order. Oracle row:
+/// `criteria_move_to_workspace_keeps_match_order`.
+#[test]
+fn criteria_move_to_workspace_keeps_match_order() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let open = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    open(&mut f, "one");
+    assert!(crate::command::execute(f.niri_state(), "workspace 2")[0].success);
+    open(&mut f, "two");
+    open(&mut f, "three");
+
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        r#"[workspace="2"] move container to workspace 1"#,
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let target = f
+        .swayward()
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.sway_name().as_deref() == Some("1"))
+        .unwrap()
+        .2;
+    let apps = target
+        .tiles()
+        .filter_map(|tile| {
+            crate::utils::with_toplevel_role(tile.window().toplevel(), |role| role.app_id.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(apps, ["one", "two", "three"]);
+}
