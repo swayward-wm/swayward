@@ -9,12 +9,15 @@ pub(super) fn update(
     operation: swayward_ipc::command::GapOperation,
     amount: i32,
 ) -> HandlerResult {
+    // `configure_gaps` ends in `arrange_workspace` (sway/commands/gaps.c:112-137).
     if all {
         for workspace in state.swayward.layout.workspaces_mut() {
             workspace.update_gaps(inner, sides, operation, amount);
+            workspace.tiling_mut().arrange_workspace();
         }
     } else if let Some(workspace) = state.swayward.layout.active_workspace_mut() {
         workspace.update_gaps(inner, sides, operation, amount);
+        workspace.tiling_mut().arrange_workspace();
     }
     state.swayward.queue_redraw_all();
     Ok(None)

@@ -928,6 +928,125 @@ fn fullscreen_toggle_after_split_targets_the_view() {
     assert_eq!(wrapper["nodes"][0]["focused"], true, "{wrapper}");
 }
 
+fn run(f: &mut Fixture, commands: &[&str]) {
+    for command in commands {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+}
+
+// Differential family diff-fam-fullscreen-percent, seeds 1006 1167 1477
+// (gaps outer) and 1295 1759 (gaps horizontal). A workspace fullscreen view's
+// box is the output's (sway/tree/arrange.c:310-316), and its percent is that
+// box over the workspace's pending box (sway/ipc-json.c:744-755), which the
+// gaps shrink. Sway does not clamp it to 1.
+#[test]
+fn workspace_fullscreen_percent_is_the_output_over_the_gapped_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen enable", "gaps outer current plus 5"]);
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["rect"]["width"], 1280, "{view}");
+    assert_eq!(view["percent"], (1280. / 1270.) * (720. / 710.), "{view}");
+}
+
+// Differential family diff-fam-fullscreen-percent, seeds 1029 (gaps), 1158
+// (titlebar_border_thickness) and 3041 (titlebar_padding). A global
+// fullscreen container is not `workspace->fullscreen`, so a command that
+// arranges only the workspace (sway/commands/gaps.c:136,
+// sway/commands/titlebar_padding.c:35) lays it out in its tile slot
+// (sway/tree/arrange.c:310-322); only its content keeps the root box.
+#[test]
+fn workspace_arrange_puts_a_global_fullscreen_view_in_its_tile_slot() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen toggle global", "titlebar_padding 1"]);
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 0.5, "{view}");
+    assert_eq!(view["rect"]["x"], 640, "{view}");
+    assert_eq!(view["rect"]["width"], 640, "{view}");
+    assert_eq!(view["window_rect"]["x"], -640, "{view}");
+    assert_eq!(view["window_rect"]["width"], 1280, "{view}");
+
+    // smart_gaps arranges the root (sway/commands/smart_gaps.c:25), which
+    // gives the global fullscreen view the root box again
+    // (sway/tree/arrange.c:349-355).
+    run(&mut f, &["smart_gaps on"]);
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 1.0, "{view}");
+    assert_eq!(view["rect"]["width"], 1280, "{view}");
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(
+        &mut f,
+        &["fullscreen toggle global", "gaps outer current plus 5"],
+    );
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 1.0, "{view}");
+    assert_eq!(view["rect"]["x"], 5, "{view}");
+    assert_eq!(view["rect"]["width"], 1270, "{view}");
+    // The normal border's title bar is still enabled from the tiled
+    // arrange, so window_rect.y is 0 (sway/ipc-json.c:596-601).
+    assert_eq!(view["window_rect"]["x"], -5, "{view}");
+    assert_eq!(view["window_rect"]["y"], 0, "{view}");
+}
+
+// Differential family diff-fam-fullscreen-percent, seed 6264. `layout` wraps
+// the workspace children (sway/tree/workspace.c:898-910); detaching the
+// global fullscreen view clears `root->fullscreen_global`
+// (sway/tree/container.c:1440-1446), so the workspace arrange that follows
+// lays the wrapper and the view out in their tile slots.
+#[test]
+fn layout_wrap_under_global_fullscreen_arranges_the_wrapper() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen toggle global", "layout splitv"]);
+
+    let tree = tree_json(&mut f);
+    let wrapper = &tree["nodes"][1]["nodes"][0]["nodes"][0];
+    assert_eq!(wrapper["layout"], "splitv", "{wrapper}");
+    assert_eq!(wrapper["percent"], 1.0, "{wrapper}");
+    assert_eq!(wrapper["rect"]["width"], 1280, "{wrapper}");
+    assert_eq!(wrapper["nodes"][0]["percent"], 1.0, "{wrapper}");
+}
+
+// Differential family diff-fam-fullscreen-percent, seeds 2674 and 1158. Sway gives the
+// last of three columns of 1280 the 426 px remainder (sway/tree/arrange.c:
+// 78-88), and a fullscreen child's percent is the output over that box.
+#[test]
+fn fullscreen_child_percent_uses_the_parents_whole_pixel_slot() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["one", "two", "three"] {
+        map_app(&mut f, client, app_id);
+    }
+    run(&mut f, &["splith", "fullscreen toggle global"]);
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "three").unwrap();
+    assert_eq!(view["percent"], (1280. / 426.) * (720. / 720.), "{view}");
+}
+
 /// `layout default` restores the split layout the `layout` command last
 /// replaced on that node, including an empty workspace, and fails when none
 /// was recorded (sway/commands/layout.c:106-108,160-189). A move that

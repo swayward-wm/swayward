@@ -122,6 +122,24 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// `arrange_workspace` without `arrange_root`. A global fullscreen
+    /// container is not `workspace->fullscreen`, so the workspace arrange lays
+    /// it out in its tile slot (`container_fullscreen_global`,
+    /// sway/tree/container.c:1220-1243; `arrange_workspace`,
+    /// sway/tree/arrange.c:310-322). A workspace fullscreen container keeps
+    /// the output box.
+    pub fn arrange_workspace(&mut self) {
+        if let Some(id) = self.fullscreen_node() {
+            self.fullscreen_tile_slot = self.fullscreen_mode(id) == Some(FullscreenMode::Global);
+        }
+    }
+
+    /// `arrange_root`: every fullscreen container gets the root or output
+    /// box again (sway/tree/arrange.c:310-316 and 340-361).
+    pub fn arrange_root(&mut self) {
+        self.fullscreen_tile_slot = false;
+    }
+
     pub fn mark_fullscreen_arrived(&mut self) {
         if self.fullscreen_node().is_some() {
             self.fullscreen_arrived = true;

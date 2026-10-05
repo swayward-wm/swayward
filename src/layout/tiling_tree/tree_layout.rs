@@ -193,10 +193,20 @@ impl<W: LayoutElement> TilingTree<W> {
             if !self.can_wrap_root_children() {
                 return;
             }
+            // `workspace_wrap_children` detaches every child, and detaching a
+            // global fullscreen container clears `root->fullscreen_global`,
+            // which reattaching does not restore (sway/tree/workspace.c:898-910,
+            // sway/tree/container.c:1380-1391 and 1440-1446). The layout
+            // command then arranges the workspace like any other: the wrapper
+            // and the fullscreen view report their tile slots.
+            let global = self
+                .fullscreen_node()
+                .is_some_and(|id| self.fullscreen_mode(id) == Some(FullscreenMode::Global));
             let pre_layout_ipc_rects = self
                 .fullscreen_node()
+                .filter(|_| !global)
                 .map(|_| self.compute_geometry().ipc_nodes);
-            self.fullscreen_tile_slot = false;
+            self.fullscreen_tile_slot = global;
             let wrapper = self.wrap_root_children(layout);
             if let Some(rects) = pre_layout_ipc_rects {
                 self.fullscreen_layout_wrappers.insert(wrapper);

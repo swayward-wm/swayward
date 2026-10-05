@@ -51,6 +51,27 @@ pub(super) fn execute_global_setting(state: &mut State, option: &LayoutOption) -
 
     let config = state.swayward.config.clone();
     state.swayward.layout.update_config(&config.borrow());
+    match option {
+        // Both re-arrange each output's active workspace
+        // (sway/commands/titlebar_padding.c:31-36,
+        // sway/commands/titlebar_border_thickness.c:21-30).
+        LayoutOption::TitlebarPadding { .. } | LayoutOption::TitlebarBorderThickness(_) => {
+            for monitor in state.swayward.layout.monitors_mut() {
+                monitor.active_workspace().tiling_mut().arrange_workspace();
+            }
+        }
+        // sway/commands/smart_gaps.c:25, smart_borders.c:20,
+        // hide_edge_borders.c:45.
+        LayoutOption::SmartGaps(_)
+        | LayoutOption::SmartBorders(_)
+        | LayoutOption::HideEdgeBorders(_)
+        | LayoutOption::HideEdgeBordersSmart(_) => {
+            for workspace in state.swayward.layout.workspaces_mut() {
+                workspace.tiling_mut().arrange_root();
+            }
+        }
+        _ => {}
+    }
     state.swayward.queue_redraw_all();
     success()
 }

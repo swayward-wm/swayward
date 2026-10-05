@@ -123,9 +123,25 @@ impl<W: LayoutElement> TilingTree<W> {
         id: NodeId,
         geometries: &geometry::Geometry<W::Id>,
     ) -> Option<Rectangle<f64, Logical>> {
-        (self.fullscreen_tile_slot && self.fullscreen_node() == Some(id))
-            .then(|| geometries.tiled_ipc_nodes.get(&id).copied())
-            .flatten()
+        if !self.fullscreen_tile_slot || self.fullscreen_node() != Some(id) {
+            return None;
+        }
+        // A tabbed or stacked child's box is its parent's whole box; the
+        // tab bar is drawn inside it (`apply_tabbed_layout`,
+        // sway/tree/arrange.c:183-219).
+        let parent = self.nodes.get(&id).and_then(|node| node.parent);
+        let slot = parent
+            .filter(|parent| {
+                matches!(
+                    self.nodes.get(parent).map(|node| &node.value),
+                    Some(TreeNode::Split {
+                        layout: Layout::Tabbed | Layout::Stacked,
+                        ..
+                    })
+                )
+            })
+            .unwrap_or(id);
+        geometries.tiled_ipc_nodes.get(&slot).copied()
     }
 
     pub fn ipc_tree(&self) -> IpcNode<W::Id> {
@@ -442,11 +458,48 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         let parent_rect = tree
             .pre_layout_ipc_rects
             .get(&parent)
-            .or_else(|| geometries.tiled_ipc_nodes.get(&parent))
             .copied()
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                let mut rect = geometries
+                    .tiled_ipc_nodes
+                    .get(&parent)
+                    .copied()
+                    .unwrap_or_default();
+                // Only a rounding correction: a parent that keeps a stale box
+                // (see `stale_fullscreen_rects`) is not its share of the split.
+                let extent = self.allocated_extent(parent);
+                match self.parent_layout(parent) {
+                    Some(Layout::SplitH) => {
+                        if let Some(extent) = extent.filter(|e| (e - rect.size.w).abs() < 1.) {
+                            rect.size.w = extent;
+                        }
+                    }
+                    Some(Layout::SplitV) => {
+                        if let Some(extent) = extent.filter(|e| (e - rect.size.h).abs() < 1.) {
+                            rect.size.h = extent;
+                        }
+                    }
+                    _ => {}
+                }
+                rect
+            });
         let child_rect = tree
             .fullscreen_tile_slot_rect(child, geometries)
+            .map(|mut slot| {
+                // The tile slot is the child's whole-pixel share too.
+                if let Some(extent) = self.allocated_extent(child) {
+                    match self.parent_layout(child) {
+                        Some(Layout::SplitH) if (extent - slot.size.w).abs() < 1. => {
+                            slot.size.w = extent;
+                        }
+                        Some(Layout::SplitV) if (extent - slot.size.h).abs() < 1. => {
+                            slot.size.h = extent;
+                        }
+                        _ => {}
+                    }
+                }
+                slot
+            })
             .or_else(|| geometries.ipc_nodes.get(&child).copied())
             .unwrap_or_default();
         let parent_area = parent_rect.size.w.round() * parent_rect.size.h.round();
@@ -456,6 +509,41 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         } else {
             fallback
         }
+    }
+
+    fn parent_layout(&self, id: NodeId) -> Option<Layout> {
+        let parent = self.tree.nodes.get(&id)?.parent?;
+        match &self.tree.nodes.get(&parent)?.value {
+            TreeNode::Split { layout, .. } => Some(*layout),
+            TreeNode::Leaf { .. } => None,
+        }
+    }
+
+    /// The whole-pixel extent sway gives `id` along its linear parent's axis:
+    /// `round(fraction * child_total)`, the last child taking the remainder
+    /// (sway/tree/arrange.c:78-88 and 160-174). The float layout would round
+    /// a third of 1280 to 427 where sway's last column gets 426.
+    fn allocated_extent(&self, id: NodeId) -> Option<f64> {
+        let tree = self.tree;
+        let parent = tree.nodes.get(&id)?.parent?;
+        let TreeNode::Split {
+            layout: layout @ (Layout::SplitH | Layout::SplitV),
+            children,
+            percents,
+            ..
+        } = &tree.nodes.get(&parent)?.value
+        else {
+            return None;
+        };
+        let index = children.iter().position(|child| *child == id)?;
+        let available = children
+            .iter()
+            .filter_map(|child| self.geometries.tiled_ipc_nodes.get(child).copied())
+            .map(|rect| geometry::axis_extent(*layout, rect))
+            .sum::<f64>();
+        child_shares(available.round(), percents)
+            .get(index)
+            .copied()
     }
 
     /// Split percents without fullscreen. Sway reports percent as

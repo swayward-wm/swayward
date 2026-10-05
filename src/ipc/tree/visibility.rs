@@ -86,7 +86,7 @@ pub(super) fn set_windows_visible(node: &mut Node, visible: bool) {
 }
 
 pub(super) fn apply_fullscreen_state(nodes: &mut [Node], workspace_visible: bool) -> bool {
-    fn apply(nodes: &mut [Node], workspace_visible: bool, set_full_percent: bool) -> bool {
+    fn apply(nodes: &mut [Node], workspace_visible: bool) -> bool {
         let Some(fullscreen) = nodes.iter().position(contains_fullscreen) else {
             return false;
         };
@@ -95,20 +95,13 @@ pub(super) fn apply_fullscreen_state(nodes: &mut [Node], workspace_visible: bool
                 let pending_tab_wrapper = node.fullscreen_mode == 0
                     && node.percent == Some(0.)
                     && matches!(node.layout, NodeLayout::Tabbed | NodeLayout::Stacked);
-                // A global fullscreen container is not `workspace->fullscreen`
-                // (`container_fullscreen_global`, sway/tree/container.c), so
-                // `arrange_workspace` gives it a tile slot and its percent is
-                // the slot's share, already computed by the layout.
-                if set_full_percent && node.fullscreen_mode == 1 && !pending_tab_wrapper {
-                    node.percent = Some(1.);
-                }
                 if node.fullscreen_mode == 0 {
                     if pending_tab_wrapper {
                         for child in &mut node.nodes {
                             child.percent = None;
                         }
                     }
-                    apply(&mut node.nodes, workspace_visible, false);
+                    apply(&mut node.nodes, workspace_visible);
                 } else {
                     set_windows_visible(node, workspace_visible);
                 }
@@ -119,7 +112,7 @@ pub(super) fn apply_fullscreen_state(nodes: &mut [Node], workspace_visible: bool
         true
     }
 
-    apply(nodes, workspace_visible, true)
+    apply(nodes, workspace_visible)
 }
 
 /// Recomputes each view's `inhibit_idle` from the finished tree.
