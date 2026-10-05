@@ -894,6 +894,55 @@ fn split_before_the_floating_commit_keeps_the_floating_box() {
     assert_eq!(child["rect"]["height"], 493, "{child}");
 }
 
+/// Differential family floating-split-toggle-border (random-v2 seeds 10229, 10238, 10622;
+/// oracle row `floating_split_toggle_wraps`): `split toggle` and `splitt` on a floating view
+/// wrap it in a new split like `splith`/`splitv`. The floater has no parent, so
+/// `container_parent_layout` reads the workspace layout and the split is V unless that is V
+/// (sway/commands/split.c:64-71,104-115, sway/tree/container.c:1353-1361).
+#[test]
+fn split_toggle_wraps_a_floating_view_against_the_workspace_layout() {
+    // A portrait output gives the workspace a splitv default layout
+    // (`output_get_default_layout`, sway/tree/output.c).
+    for (output, command, expected) in [
+        ((1280, 720), "split toggle", "splitv"),
+        ((1280, 720), "splitt", "splitv"),
+        ((720, 1280), "split toggle", "splith"),
+        ((720, 1280), "splitt", "splith"),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, output);
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+        f.niri_state().ipc_refresh_layout();
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let split = find_json_node(&tree, "floating_con", false).unwrap();
+        assert_eq!(
+            split["layout"], expected,
+            "{command} on {output:?}: {split}"
+        );
+        assert_eq!(split["nodes"].as_array().map(Vec::len), Some(1), "{split}");
+        assert_eq!(split["nodes"][0]["focused"], true, "{split}");
+    }
+}
+
 /// Differential family floating-split-rect, random-v2 seed 2247: `border pixel 3` on a
 /// floating view keeps its content box and moves the container around it
 /// (`container_set_geometry_from_content`, sway/commands/border.c:94-96,

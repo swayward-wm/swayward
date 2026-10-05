@@ -225,6 +225,11 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// The workspace's own split layout (`ws->layout`), not its IPC representation.
+    pub fn root_layout(&self) -> Option<Layout> {
+        self.split_layout(self.root)
+    }
+
     pub fn split_focused(&mut self, layout: Layout) {
         if let Some(focus) = self.focus {
             self.split(focus, layout);

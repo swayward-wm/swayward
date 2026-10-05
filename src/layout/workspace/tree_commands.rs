@@ -537,10 +537,24 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// `split toggle` reads `container_parent_layout`, which for a floating root (no parent) is
+    /// the workspace layout (sway/tree/container.c:1353-1361, sway/commands/split.c:64-71).
     pub fn toggle_focused_split(&mut self) {
         if !self.floating_is_active.get() {
             self.tiling.toggle_focused_split();
+            return;
         }
+        if let Some(tree) = self.floating.focused_child_tree_mut() {
+            tree.toggle_focused_split();
+            return;
+        }
+        use crate::layout::tiling_tree::Layout;
+        let layout = if self.tiling.root_layout() == Some(Layout::SplitV) {
+            Layout::SplitH
+        } else {
+            Layout::SplitV
+        };
+        self.floating.split_active(layout);
     }
 
     pub fn set_focused_display(&mut self, display: ColumnDisplay) {
