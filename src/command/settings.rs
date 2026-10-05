@@ -66,9 +66,7 @@ pub(super) fn execute_global_setting(state: &mut State, option: &LayoutOption) -
         | LayoutOption::SmartBorders(_)
         | LayoutOption::HideEdgeBorders(_)
         | LayoutOption::HideEdgeBordersSmart(_) => {
-            for workspace in state.swayward.layout.workspaces_mut() {
-                workspace.tiling_mut().arrange_root();
-            }
+            state.swayward.layout.arrange_sway_root();
         }
         _ => {}
     }

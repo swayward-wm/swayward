@@ -593,10 +593,21 @@ impl<W: LayoutElement> TilingTree<W> {
             ..
         }) = self.nodes.get_mut(&id)
         {
-            if matches!(*current, Layout::SplitH | Layout::SplitV) && *current != layout {
+            let changed = *current != layout;
+            if matches!(*current, Layout::SplitH | Layout::SplitV) && changed {
                 meta.previous_layout = Some(*current);
             }
             *current = layout;
+            if changed {
+                // A changed layout ends with `arrange_root` under a global
+                // fullscreen container and `arrange_workspace` otherwise
+                // (sway/commands/layout.c:191-195).
+                if self.has_global_fullscreen() {
+                    self.arrange_root();
+                } else {
+                    self.arrange_workspace();
+                }
+            }
             self.request_window_sizes();
         }
     }

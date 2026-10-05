@@ -804,6 +804,98 @@ fn layout_wrap_under_fullscreen_commits_the_hidden_views_border() {
     assert_eq!(hidden["percent"], serde_json::Value::Null);
 }
 
+fn rect(view: &serde_json::Value, key: &str) -> [i64; 4] {
+    ["x", "y", "width", "height"].map(|field| view[key][field].as_i64().unwrap())
+}
+
+// differential seeds 1684 step 4, 2466 step 4 (sway-1.12): under a stacked
+// parent `get_deco_rect` places the titlebar row by sibling index and
+// `ipc_json_describe_node` subtracts one row per sibling from the box, so an
+// unarranged view's empty box is reported 54 px down at height -54
+// (sway/ipc-json.c:543-580, 816-825). Its border is irrelevant: calloc's
+// `border none` view gets the same rows.
+#[test]
+fn unarranged_view_under_stacked_parent_reports_every_titlebar_row() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "layout stacking")[0].success);
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    map_app(&mut f, client, "hidden");
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let titlebar = hidden["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{hidden}");
+    assert_eq!(hidden["border"], "none", "{hidden}");
+    assert_eq!(rect(hidden, "rect"), [0, 2 * titlebar, 0, -2 * titlebar]);
+    assert_eq!(rect(hidden, "deco_rect"), [0, titlebar, 0, titlebar]);
+}
+
+// differential seeds 1482 step 4, 2436 step 5, 4912 step 5 (sway-1.12): a
+// view mapped into a `layout` wrapper under fullscreen makes `view_map`
+// arrange the wrapper (sway/tree/view.c:931-940). The wrapper was never
+// arranged, so its children are laid out inside its empty box: the
+// fullscreen view reports 0x0 and the new view a titlebar over an empty box
+// with a 1x1 content box (sway/tree/arrange.c:183-212,
+// sway/tree/view.c:461-462). `workspace_switch` then arranges the workspace,
+// which restores only the fullscreen view's output box
+// (sway/tree/workspace.c:731-743, sway/tree/arrange.c:310-316).
+#[test]
+fn view_mapped_into_layout_wrapper_under_fullscreen_arranges_it_at_an_empty_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "default_border none")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    map_app(&mut f, client, "hidden");
+
+    let tree = tree_json(&mut f);
+    let fullscreen = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    assert_eq!(rect(fullscreen, "rect"), [0, 0, 0, 0], "{fullscreen}");
+    let titlebar = hidden["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{hidden}");
+    assert_eq!(rect(hidden, "rect"), [0, titlebar, 0, -titlebar]);
+    assert_eq!(rect(hidden, "window_rect"), [0, 0, 1, 1]);
+    assert_eq!(hidden["percent"], serde_json::Value::Null);
+
+    assert!(crate::command::execute(f.niri_state(), "workspace 1")[0].success);
+
+    let tree = tree_json(&mut f);
+    let fullscreen = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    assert_eq!(rect(fullscreen, "rect"), [0, 0, 1280, 720], "{fullscreen}");
+    assert_eq!(rect(hidden, "rect"), [0, titlebar, 0, -titlebar]);
+}
+
+// differential seed 2576 step 4 (sway-1.12): `layout stacking` under
+// fullscreen wraps the workspace without arranging the siblings, so the
+// tiled view keeps its 640 px tiled box but GET_TREE subtracts both stacked
+// rows from it (sway/ipc-json.c:816-825).
+#[test]
+fn layout_stacking_under_fullscreen_reports_every_row_over_the_kept_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout stacking")[0].success);
+
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "tiled").unwrap();
+    let titlebar = tiled["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{tiled}");
+    assert_eq!(
+        rect(tiled, "rect"),
+        [0, 2 * titlebar, 640, 720 - 2 * titlebar]
+    );
+}
+
 // random seed 47 step 6 (sway-1.12-random): with only a floating fullscreen
 // view on the workspace, a new view has no tiling sibling, so `view_map`
 // attaches it with `workspace_add_tiling` (sway/tree/view.c:849-901), which

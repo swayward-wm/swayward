@@ -20,6 +20,9 @@ fn seed_side_table(t: &mut TilingTree<TestWindow>, name: &str, id: NodeId) {
         "fullscreen_layout_wrappers" => {
             t.fullscreen_layout_wrappers.insert(id);
         }
+        "wrapper_arranged_boxes" => {
+            t.wrapper_arranged_boxes.insert(id, Rectangle::default());
+        }
         "pre_layout_ipc_rects" => {
             t.pre_layout_ipc_rects.insert(id, Rectangle::default());
         }

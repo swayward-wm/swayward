@@ -765,6 +765,9 @@ impl<W: LayoutElement> Workspace<W> {
                 // where it can enter those states.
                 if is_floating && tile.window().pending_sizing_mode().is_normal() {
                     self.floating.add_tile(tile, activate);
+                    // A floating view has no parent, so `view_map` arranges
+                    // the workspace (sway/tree/view.c:931-940).
+                    self.tiling.arrange_workspace();
 
                     if activate || self.tiling.is_empty() {
                         self.floating_is_active = FloatingActive::Yes;

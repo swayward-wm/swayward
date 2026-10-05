@@ -251,13 +251,15 @@ fn set_window_floating(state: &mut State, window: &smithay::desktop::Window, mod
         Toggle::Toggle => None,
     };
     let layout = &mut state.swayward.layout;
-    if layout.set_fullscreen_window_floating(window, floating) {
-        return;
+    if !layout.set_fullscreen_window_floating(window, floating) {
+        match floating {
+            Some(floating) => layout.set_window_floating(Some(window), floating),
+            None => layout.toggle_window_floating(Some(window)),
+        }
     }
-    match floating {
-        Some(floating) => layout.set_window_floating(Some(window), floating),
-        None => layout.toggle_window_floating(Some(window)),
-    }
+    // `cmd_floating` ends by arranging the view's workspace
+    // (sway/commands/floating.c:53-56).
+    layout.arrange_sway_workspace_of(window);
 }
 
 pub(super) fn kill(state: &mut State, target: CommandTarget) -> Result<(), CommandOutcome> {

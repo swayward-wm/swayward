@@ -74,6 +74,8 @@ impl<W: LayoutElement> TilingTree<W> {
         };
         self.fullscreen_tile_slot = false;
         self.fullscreen_arrived = false;
+        self.wrapper_arranged_boxes.clear();
+        self.fullscreen_rearranged = false;
         self.stale_fullscreen_rects = stale;
         if let Some(current) = current {
             if let Some(mode) = self.pending_modes.get_mut(&current) {
@@ -122,22 +124,89 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    /// `arrange_workspace` without `arrange_root`. A global fullscreen
-    /// container is not `workspace->fullscreen`, so the workspace arrange lays
-    /// it out in its tile slot (`container_fullscreen_global`,
-    /// sway/tree/container.c:1220-1243; `arrange_workspace`,
-    /// sway/tree/arrange.c:310-322). A workspace fullscreen container keeps
-    /// the output box.
+    /// Sway's `arrange_workspace` on this tree's workspace
+    /// (sway/tree/arrange.c:310-322). A global fullscreen container is not
+    /// `workspace->fullscreen`, so it is laid out in its tile slot
+    /// (`container_fullscreen_global`, sway/tree/container.c:1220-1243). A
+    /// workspace fullscreen container is the only thing arranged, at the
+    /// output box, so a tiled slot or an empty box from an earlier
+    /// `arrange_container` is gone.
     pub fn arrange_workspace(&mut self) {
-        if let Some(id) = self.fullscreen_node() {
-            self.fullscreen_tile_slot = self.fullscreen_mode(id) == Some(FullscreenMode::Global);
+        let Some(id) = self.fullscreen_node() else {
+            return;
+        };
+        if self.fullscreen_mode(id) == Some(FullscreenMode::Global) {
+            self.fullscreen_tile_slot = true;
+        } else {
+            self.fullscreen_tile_slot = false;
+            self.fullscreen_rearranged = true;
         }
     }
 
-    /// `arrange_root`: every fullscreen container gets the root or output
-    /// box again (sway/tree/arrange.c:310-316 and 340-361).
+    /// Sway's `arrange_root` reaching this tree's workspace: every fullscreen
+    /// container gets the root or output box again (sway/tree/arrange.c:310-316
+    /// and 340-361).
     pub fn arrange_root(&mut self) {
+        if self.fullscreen_node().is_none() {
+            return;
+        }
         self.fullscreen_tile_slot = false;
+        self.fullscreen_rearranged = true;
+    }
+
+    /// Whether this tree holds a global fullscreen container
+    /// (`root->fullscreen_global`).
+    pub fn has_global_fullscreen(&self) -> bool {
+        self.fullscreen_node()
+            .is_some_and(|id| self.fullscreen_mode(id) == Some(FullscreenMode::Global))
+    }
+
+    /// Sway's `arrange_container` on each pending fullscreen layout wrapper:
+    /// the wrapper was never arranged, so its subtree is laid out inside its
+    /// empty box, and those pending boxes stay until the workspace is
+    /// arranged without fullscreen. See `wrapper_arranged_boxes`.
+    pub(super) fn arrange_fullscreen_wrappers(&mut self) {
+        if self.fullscreen_node().is_none() {
+            return;
+        }
+        self.fullscreen_rearranged = false;
+        let mut boxes = HashMap::new();
+        let mut stack: Vec<(NodeId, Rectangle<f64, Logical>)> = self
+            .fullscreen_layout_wrappers
+            .iter()
+            .filter(|id| self.nodes.contains_key(id))
+            .map(|id| (*id, Rectangle::default()))
+            .collect();
+        while let Some((id, rect)) = stack.pop() {
+            boxes.insert(id, rect);
+            let Some(TreeNode::Split {
+                layout,
+                children,
+                percents,
+                ..
+            }) = self.nodes.get(&id).map(|node| &node.value)
+            else {
+                continue;
+            };
+            for (index, child) in children.iter().enumerate() {
+                let is_view = matches!(
+                    self.nodes.get(child).map(|node| &node.value),
+                    Some(TreeNode::Leaf { .. })
+                );
+                stack.push((
+                    *child,
+                    sway_child_box(
+                        *layout,
+                        rect,
+                        percents,
+                        index,
+                        is_view,
+                        self.titlebar_height,
+                    ),
+                ));
+            }
+        }
+        self.wrapper_arranged_boxes = boxes;
     }
 
     pub fn mark_fullscreen_arrived(&mut self) {
@@ -198,5 +267,77 @@ impl<W: LayoutElement> TilingTree<W> {
         self.node_for_window(window)
             .and_then(|id| self.pending_modes.get(&id))
             .is_some_and(|mode| mode.maximized)
+    }
+}
+
+/// The pending box `arrange_children` gives one child of a container at
+/// `parent` (sway/tree/arrange.c:15-212): linear splits divide the box by
+/// their fractions with the last child taking the rest, and drop a child
+/// smaller than 10 px to an empty box; tabbed and stacked children take the
+/// whole box, a non-view child below the titlebar rows. Gaps are left out:
+/// sway clamps them to the room the box has, which here is none.
+pub(super) fn sway_child_box(
+    layout: Layout,
+    parent: Rectangle<f64, Logical>,
+    percents: &[f64],
+    index: usize,
+    is_view: bool,
+    titlebar: f64,
+) -> Rectangle<f64, Logical> {
+    let linear = |extent: f64| {
+        let start = percents
+            .iter()
+            .take(index)
+            .map(|percent| (percent * extent).round())
+            .sum::<f64>();
+        let size = if index + 1 == percents.len() {
+            extent - start
+        } else {
+            percents
+                .get(index)
+                .map_or(0., |percent| (percent * extent).round())
+        };
+        (start, size)
+    };
+    let sane = |rect: Rectangle<f64, Logical>| {
+        if rect.size.w < 10. || rect.size.h < 10. {
+            Rectangle::new(rect.loc, Size::default())
+        } else {
+            rect
+        }
+    };
+    match layout {
+        Layout::SplitH => {
+            let (start, width) = linear(parent.size.w);
+            sane(super::introspection::signed_rect(
+                parent.loc.x + start,
+                parent.loc.y,
+                width,
+                parent.size.h,
+            ))
+        }
+        Layout::SplitV => {
+            let (start, height) = linear(parent.size.h);
+            sane(super::introspection::signed_rect(
+                parent.loc.x,
+                parent.loc.y + start,
+                parent.size.w,
+                height,
+            ))
+        }
+        Layout::Tabbed | Layout::Stacked => {
+            let rows = if layout == Layout::Stacked {
+                percents.len()
+            } else {
+                1
+            };
+            let offset = if is_view { 0. } else { titlebar * rows as f64 };
+            super::introspection::signed_rect(
+                parent.loc.x,
+                parent.loc.y + offset,
+                parent.size.w,
+                parent.size.h - offset,
+            )
+        }
     }
 }

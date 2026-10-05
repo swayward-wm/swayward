@@ -261,7 +261,26 @@ pub enum IpcNode<I> {
         mapped_under_fullscreen: bool,
         /// Pre-move IPC box of a leaf moved into a fullscreen workspace.
         moved_under_fullscreen: Option<Rectangle<f64, Logical>>,
+        /// The boxes GET_TREE reports for a leaf sway left unarranged under
+        /// fullscreen, overriding the ones derived from `rect`.
+        unarranged: Option<UnarrangedIpc>,
     },
+}
+
+/// The boxes of a leaf sway left unarranged beside a fullscreen container,
+/// as `ipc_json_describe_node` reports them (sway/ipc-json.c:543-602, 816-825).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnarrangedIpc {
+    pub rect: Rectangle<f64, Logical>,
+    pub deco_rect: Rectangle<f64, Logical>,
+    /// The content box, when sway configured one at the unarranged box.
+    pub window_rect: Option<Rectangle<f64, Logical>>,
+    /// The parent's pending box, when the percent derives from it
+    /// (sway/ipc-json.c:744-755).
+    pub percent_parent: Option<Rectangle<f64, Logical>>,
+    /// `rect` derives from an empty box at the global origin (calloc's, or
+    /// one arranged inside it), so it is not offset by the output position.
+    pub absolute: bool,
 }
 
 impl<I> IpcNode<I> {
@@ -422,6 +441,7 @@ macro_rules! side_tables {
             ("moved_under_fullscreen", $($ref)+ $tree.moved_under_fullscreen),
             ("fullscreen_layout_wrappers", $($ref)+ $tree.fullscreen_layout_wrappers),
             ("pre_layout_ipc_rects", $($ref)+ $tree.pre_layout_ipc_rects),
+            ("wrapper_arranged_boxes", $($ref)+ $tree.wrapper_arranged_boxes),
             ("stale_fullscreen_rects", $($ref)+ $tree.stale_fullscreen_rects),
             ("tab_indicators", $($ref)+ $tree.tab_indicators),
             ("tab_active", $($ref)+ $tree.tab_active),
@@ -468,6 +488,16 @@ pub struct TilingTree<W: LayoutElement> {
     /// sway/tree/arrange.c:310-316), so its siblings keep their old shares
     /// until fullscreen ends.
     fullscreen_arrived: bool,
+    /// The pending boxes of a pending fullscreen layout wrapper's subtree
+    /// after a view mapped into it: `arrange_container(wrapper)`
+    /// (sway/tree/view.c:931-940) laid the subtree out inside the wrapper's
+    /// never-arranged empty box. Sway keeps them until the next arrange of
+    /// the subtree, which under fullscreen never comes.
+    wrapper_arranged_boxes: HashMap<NodeId, Rectangle<f64, Logical>>,
+    /// The workspace was arranged since then, or since a tiled slot was
+    /// reported. `arrange_workspace` puts only the fullscreen container back
+    /// at the output box (sway/tree/arrange.c:310-316).
+    fullscreen_rearranged: bool,
     fullscreen_layout_wrappers: HashSet<NodeId>,
     pre_layout_ipc_rects: HashMap<NodeId, Rectangle<f64, Logical>>,
     /// Containers that held fullscreen before it moved to a descendant, with

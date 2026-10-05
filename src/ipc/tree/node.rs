@@ -142,6 +142,7 @@ pub(crate) fn describe_tiling<'a, I>(
             sticky,
             mapped_under_fullscreen,
             moved_under_fullscreen,
+            unarranged,
             ..
         } => {
             let Some(mapped) = find_window(&window) else {
@@ -259,6 +260,20 @@ pub(crate) fn describe_tiling<'a, I>(
                         height: (source.height - node.current_border_width).max(0),
                     }
                 };
+            }
+            if let Some(unarranged) = unarranged {
+                node.rect = if unarranged.absolute {
+                    let rect = unarranged.rect;
+                    rect_from(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h)
+                } else {
+                    offset_rect(unarranged.rect, workspace_rect)
+                };
+                let deco = unarranged.deco_rect;
+                node.deco_rect = rect_from(deco.loc.x, deco.loc.y, deco.size.w, deco.size.h);
+                if let Some(content) = unarranged.window_rect {
+                    node.window_rect =
+                        rect_from(content.loc.x, content.loc.y, content.size.w, content.size.h);
+                }
             }
             Some(node)
         }

@@ -143,6 +143,34 @@ impl<W: LayoutElement> Layout<W> {
         monitor.switch_workspace_down_wrapping();
     }
 
+    /// Sway's `arrange_root`: every output's workspaces are arranged, which
+    /// under fullscreen re-arranges only the fullscreen container, at the
+    /// output or root box (sway/tree/arrange.c:310-361).
+    pub fn arrange_sway_root(&mut self) {
+        for workspace in self.workspaces_mut() {
+            workspace.tiling_mut().arrange_root();
+        }
+    }
+
+    /// Sway's `arrange_workspace` on the focused workspace, as
+    /// `workspace_switch` (sway/tree/workspace.c:731-743) and `floating`
+    /// (sway/commands/floating.c:53-56) end with.
+    pub fn arrange_active_sway_workspace(&mut self) {
+        if let Some(workspace) = self.active_workspace_mut() {
+            workspace.tiling_mut().arrange_workspace();
+        }
+    }
+
+    /// Sway's `arrange_workspace` on the workspace holding `window`.
+    pub fn arrange_sway_workspace_of(&mut self, window: &W::Id) {
+        if let Some(workspace) = self
+            .workspaces_mut()
+            .find(|workspace| workspace.has_window(window))
+        {
+            workspace.tiling_mut().arrange_workspace();
+        }
+    }
+
     pub fn finish_sway_workspace_switch(&mut self, target: &crate::command::WorkspaceTarget) {
         let target = self
             .workspaces()

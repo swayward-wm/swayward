@@ -230,6 +230,22 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
 
     fn node(&self, id: NodeId, percent: Option<f64>) -> Option<IpcNode<W::Id>> {
         let inside_pending_wrapper = self.in_pending_wrapper.contains(&id);
+        // Sway's percent is the pending box's area over the parent's, and is
+        // omitted when the parent box is empty (sway/ipc-json.c:744-755).
+        let percent = match self.unarranged(id) {
+            Some(UnarrangedIpc {
+                percent_parent: Some(parent),
+                ..
+            }) => {
+                if parent.size.w == 0. || parent.size.h == 0. {
+                    None
+                } else {
+                    self.arranged_wrapper_box(id)
+                        .map(|own| (own.size.w / parent.size.w) * (own.size.h / parent.size.h))
+                }
+            }
+            _ => percent,
+        };
         Some(match &self.tree.nodes.get(&id)?.value {
             TreeNode::Split {
                 layout,
@@ -262,6 +278,8 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             percent: pending_wrapper.then_some(0.).or(percent),
             rect: if pending_wrapper {
                 Rectangle::default()
+            } else if let Some(unarranged) = self.unarranged(id) {
+                unarranged.rect
             } else if let Some(mut pre_layout) = self
                 .in_pending_wrapper
                 .contains(&id)
@@ -294,6 +312,10 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                 .zip(child_percents)
                 .filter_map(|(child, percent)| {
                     let mut node = self.node(*child, percent)?;
+                    if self.unarranged(*child).is_some() {
+                        // Already reported as GET_TREE shows it.
+                        return Some(node);
+                    }
                     inset_split_by_parent_titlebar(
                         &mut node,
                         tree.titlebar_height * titlebar_rows as f64,
@@ -635,7 +657,223 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             sticky: tile.is_sticky,
             mapped_under_fullscreen: tree.mapped_under_fullscreen.contains(&id),
             moved_under_fullscreen: tree.moved_under_fullscreen.get(&id).copied(),
+            unarranged: self.unarranged(id),
         }
+    }
+
+    /// The boxes sway reports for a node it left unarranged beside a
+    /// fullscreen container, or `None` where the regular boxes apply.
+    ///
+    /// Sway never arranges the workspace's tiling children while it has a
+    /// fullscreen container (sway/tree/arrange.c:310-316), so such a node keeps
+    /// whatever pending box it last had:
+    ///
+    /// - calloc's empty box for a view mapped under fullscreen;
+    /// - its pre-`layout` box for a child of a fresh `layout` wrapper;
+    /// - for the subtree of a wrapper a view was mapped into, the boxes
+    ///   `arrange_container(wrapper)` derived from the wrapper's own empty box
+    ///   (sway/tree/view.c:931-940).
+    ///
+    /// GET_TREE then reports that box less the titlebar rows a tabbed or
+    /// stacked parent claims, whatever the child's border (`get_deco_rect`
+    /// and `ipc_json_describe_node`, sway/ipc-json.c:543-580 and 816-825).
+    fn unarranged(&self, id: NodeId) -> Option<UnarrangedIpc> {
+        let tree = self.tree;
+        let fullscreen = self.fullscreen?;
+        let parent = tree.nodes.get(&id)?.parent?;
+        if id == fullscreen && tree.fullscreen_rearranged && self.in_pending_wrapper.contains(&id) {
+            // `arrange_workspace` puts the fullscreen container back at the
+            // output box (sway/tree/arrange.c:310-316).
+            return Some(UnarrangedIpc {
+                rect: self.geometries.ipc_nodes.get(&id).copied()?,
+                deco_rect: Rectangle::default(),
+                window_rect: None,
+                percent_parent: None,
+                absolute: false,
+            });
+        }
+        if let Some(sway_box) = self.arranged_wrapper_box(id) {
+            if id == fullscreen {
+                return Some(UnarrangedIpc {
+                    rect: sway_box,
+                    deco_rect: Rectangle::default(),
+                    window_rect: None,
+                    percent_parent: None,
+                    absolute: true,
+                });
+            }
+            let parent_box = self.arranged_wrapper_box(parent).unwrap_or_default();
+            let mut ipc = self.sway_ipc_boxes(id, parent, sway_box, parent_box);
+            if self.is_view(id) {
+                ipc.window_rect = Some(self.configured_content(id, parent, sway_box));
+            }
+            ipc.percent_parent = Some(parent_box);
+            ipc.absolute = true;
+            return Some(ipc);
+        }
+        if id == fullscreen || !self.is_strip(parent) {
+            return None;
+        }
+        let parent_box = if self.is_pending_wrapper(parent) {
+            Rectangle::default()
+        } else {
+            self.geometries
+                .ipc_nodes
+                .get(&parent)
+                .copied()
+                .unwrap_or_default()
+        };
+        let never_arranged = tree.mapped_under_fullscreen.contains(&id)
+            || tree
+                .moved_under_fullscreen
+                .get(&id)
+                .is_some_and(|rect| rect.size.w == 0. && rect.size.h == 0. && rect.loc.x == 0.);
+        if never_arranged {
+            let mut ipc = self.sway_ipc_boxes(id, parent, Rectangle::default(), parent_box);
+            ipc.absolute = true;
+            return Some(ipc);
+        }
+        if self.is_pending_wrapper(parent) {
+            let sway_box = tree.pre_layout_ipc_rects.get(&id).copied()?;
+            return Some(self.sway_ipc_boxes(id, parent, sway_box, parent_box));
+        }
+        None
+    }
+
+    fn is_view(&self, id: NodeId) -> bool {
+        matches!(
+            self.tree.nodes.get(&id).map(|node| &node.value),
+            Some(TreeNode::Leaf { .. })
+        )
+    }
+
+    fn is_strip(&self, id: NodeId) -> bool {
+        matches!(
+            self.tree.nodes.get(&id).map(|node| &node.value),
+            Some(TreeNode::Split {
+                layout: Layout::Tabbed | Layout::Stacked,
+                ..
+            })
+        )
+    }
+
+    /// The pending box sway's `arrange_container(wrapper)` gave `id`, when
+    /// `id` is at or below a pending `layout` wrapper a view was mapped into
+    /// (see `TilingTree::wrapper_arranged_boxes`).
+    fn arranged_wrapper_box(&self, id: NodeId) -> Option<Rectangle<f64, Logical>> {
+        self.fullscreen?;
+        self.tree.wrapper_arranged_boxes.get(&id).copied()
+    }
+
+    /// GET_TREE's `rect` and `deco_rect` for a node with pending box
+    /// `sway_box` under a parent with pending box `parent_box`
+    /// (`get_deco_rect` and `ipc_json_describe_node`, sway/ipc-json.c:543-580
+    /// and 816-825). Sway's `hide_lone_tab` is always off here.
+    fn sway_ipc_boxes(
+        &self,
+        id: NodeId,
+        parent: NodeId,
+        sway_box: Rectangle<f64, Logical>,
+        parent_box: Rectangle<f64, Logical>,
+    ) -> UnarrangedIpc {
+        let tree = self.tree;
+        let (layout, index, count) = match tree.nodes.get(&parent).map(|node| &node.value) {
+            Some(TreeNode::Split {
+                layout, children, ..
+            }) => (
+                *layout,
+                children
+                    .iter()
+                    .position(|child| *child == id)
+                    .unwrap_or_default(),
+                children.len(),
+            ),
+            _ => (Layout::SplitH, 0, 1),
+        };
+        let strip = matches!(layout, Layout::Tabbed | Layout::Stacked);
+        // A container's border is calloc's `B_NONE`; a view's is its own.
+        let normal = tree.tile(id).is_some_and(|tile| {
+            tile.sway_border_thickness().0 == swayward_ipc::command::BorderStyle::Normal
+        });
+        let titlebar = tree.titlebar_height;
+        let mut deco = Rectangle::default();
+        if strip || normal {
+            deco = signed_rect(
+                sway_box.loc.x - parent_box.loc.x,
+                sway_box.loc.y - parent_box.loc.y,
+                sway_box.size.w,
+                titlebar,
+            );
+            match layout {
+                Layout::Tabbed => {
+                    deco.size.w = (parent_box.size.w / count.max(1) as f64).trunc();
+                    deco.loc.x += deco.size.w * index as f64;
+                }
+                Layout::Stacked => {
+                    if !self.is_view(id) {
+                        deco.loc.y -= titlebar * count as f64;
+                    }
+                    deco.loc.y += titlebar * index as f64;
+                }
+                Layout::SplitH | Layout::SplitV => {}
+            }
+        }
+        let rows = if layout == Layout::Stacked { count } else { 1 };
+        let offset = deco.size.h * rows as f64;
+        UnarrangedIpc {
+            rect: signed_rect(
+                sway_box.loc.x,
+                sway_box.loc.y + offset,
+                sway_box.size.w,
+                sway_box.size.h - offset,
+            ),
+            deco_rect: deco,
+            window_rect: None,
+            percent_parent: None,
+            absolute: false,
+        }
+    }
+
+    /// The content box `view_autoconfigure` gives a view at `sway_box`,
+    /// relative to it as `window_rect` reports it: inset by the side borders
+    /// and below any titlebar, and never smaller than 1x1
+    /// (sway/tree/view.c:376-463, sway/ipc-json.c:595-602).
+    fn configured_content(
+        &self,
+        id: NodeId,
+        parent: NodeId,
+        sway_box: Rectangle<f64, Logical>,
+    ) -> Rectangle<f64, Logical> {
+        use swayward_ipc::command::BorderStyle;
+        let tree = self.tree;
+        let (style, width) = tree
+            .tile(id)
+            .map(|tile| tile.sway_border_thickness())
+            .unwrap_or((BorderStyle::None, 0));
+        let side = match style {
+            BorderStyle::Normal | BorderStyle::Pixel => f64::from(width),
+            _ => 0.,
+        };
+        let rows = match tree.nodes.get(&parent).map(|node| &node.value) {
+            Some(TreeNode::Split {
+                layout: Layout::Stacked,
+                children,
+                ..
+            }) => children.len() as f64,
+            Some(TreeNode::Split {
+                layout: Layout::Tabbed,
+                ..
+            }) => 1.,
+            _ if style == BorderStyle::Normal => 1.,
+            _ => 0.,
+        };
+        Rectangle::new(
+            Point::from((side, 0.)),
+            Size::from((
+                (sway_box.size.w - 2. * side).max(1.),
+                (sway_box.size.h - rows * tree.titlebar_height - side).max(1.),
+            )),
+        )
     }
 }
 
@@ -668,4 +906,17 @@ fn child_shares(extent: f64, percents: &[f64]) -> Vec<f64> {
 
 fn area(rect: Rectangle<f64, Logical>) -> f64 {
     rect.size.w.round() * rect.size.h.round()
+}
+
+/// A rectangle whose size may be negative, as sway's pending boxes are once
+/// GET_TREE subtracts titlebar rows from an empty box. `Size::new` rejects a
+/// negative size in debug builds, so the fields are assigned directly.
+pub(super) fn signed_rect(x: f64, y: f64, w: f64, h: f64) -> Rectangle<f64, Logical> {
+    let mut rect = Rectangle::<f64, Logical> {
+        loc: Point::from((x, y)),
+        ..Default::default()
+    };
+    rect.size.w = w;
+    rect.size.h = h;
+    rect
 }

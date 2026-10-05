@@ -96,7 +96,8 @@ impl<W: LayoutElement> TilingTree<W> {
         let fullscreen = self.fullscreen_node();
         let previous_focus = self.focus;
         let old_geometries = self.compute_geometry();
-        if !self.fullscreen_layout_wrappers.is_empty() {
+        let maps_into_wrapper = !self.fullscreen_layout_wrappers.is_empty();
+        if maps_into_wrapper {
             self.pre_layout_ipc_rects.clear();
         }
         let id = self.alloc(Node {
@@ -163,6 +164,12 @@ impl<W: LayoutElement> TilingTree<W> {
             );
         }
         self.compact_tree();
+        if maps_into_wrapper {
+            // The view maps beside the fullscreen container, inside the
+            // wrapper, and `arrange_container(parent)` lays the wrapper out at
+            // its empty box (sway/tree/view.c:931-940).
+            self.arrange_fullscreen_wrappers();
+        }
         if pending_mode.is_fullscreen() {
             self.replace_fullscreen_state(id, Some(FullscreenMode::Workspace));
         }
@@ -250,6 +257,7 @@ impl<W: LayoutElement> TilingTree<W> {
         if removed_fullscreen {
             self.mapped_under_fullscreen.clear();
             self.moved_under_fullscreen.clear();
+            self.wrapper_arranged_boxes.clear();
         }
         let TreeNode::Leaf { mut tile } = node.value else {
             unreachable!();
