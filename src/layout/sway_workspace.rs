@@ -3,6 +3,10 @@
 use super::*;
 use crate::command::NO_PREVIOUS_WORKSPACE;
 
+/// Sway's `CMD_FAILURE` for `move ... to workspace back_and_forth` without
+/// history (sway/commands/move.c:465-466).
+const MOVE_NO_PREVIOUS_WORKSPACE: &str = "No workspace was previously active.";
+
 impl<W: LayoutElement> Layout<W> {
     pub(super) fn move_activation(focus: bool) -> ActivateWindow {
         if focus {
@@ -559,6 +563,16 @@ impl<W: LayoutElement> Layout<W> {
         };
         if let Some(position) = target_position {
             Ok(position)
+        } else if target == WorkspaceTarget::BackAndForth {
+            // `move ... to workspace back_and_forth` falls back to the
+            // previous workspace's name, or refuses without history
+            // (sway/commands/move.c:460-468).
+            let name = self
+                .active_monitor_ref()
+                .and_then(|monitor| monitor.previous_workspace_name())
+                .ok_or(MOVE_NO_PREVIOUS_WORKSPACE)?
+                .to_owned();
+            self.resolve_sway_workspace_target(WorkspaceTarget::Name(name))
         } else {
             let (name, number) = sway_workspace_identity(target)?;
             let (output, index) = self.create_sway_workspace(name, number)?;

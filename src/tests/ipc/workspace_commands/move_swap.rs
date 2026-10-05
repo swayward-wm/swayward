@@ -1305,3 +1305,71 @@ fn criteria_move_to_workspace_keeps_match_order() {
         .collect::<Vec<_>>();
     assert_eq!(apps, ["one", "two", "three"]);
 }
+
+fn map_window(f: &mut Fixture, client: crate::tests::client::ClientId, app_id: &str) {
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id(app_id.into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+}
+
+// Differential family diff-fam-move-baf-no-history (random-v2 seed 10023):
+// without history sway refuses with CMD_FAILURE "No workspace was previously
+// active." (sway/commands/move.c:460-468), not a parse error.
+#[test]
+fn move_to_workspace_back_and_forth_without_history_uses_sway_error() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_window(&mut f, client, "moved");
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth");
+    assert!(!outcome[0].success);
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("No workspace was previously active.")
+    );
+    assert_eq!(outcome[0].parse_error, Some(false));
+}
+
+// With a previous workspace that was reaped while empty, sway recreates it
+// by name (sway/commands/move.c:462-463).
+#[test]
+fn move_to_workspace_back_and_forth_recreates_a_reaped_previous_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for workspace in ["alpha", "1"] {
+        assert!(
+            crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success
+        );
+    }
+    map_window(&mut f, client, "moved");
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|output| output["nodes"].as_array().unwrap())
+        .find(|workspace| workspace["name"] == "alpha")
+        .expect("previous workspace recreated");
+    assert!(find_json_node_with_app_id(workspace, "moved").is_some());
+}
