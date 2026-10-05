@@ -120,18 +120,31 @@ fn resident_subtree_can_be_detached_with_its_ids_and_focus_history() {
     destination.check_invariants();
 }
 
+/// Moving every workspace child keeps the workspace layout:
+/// `workspace_wrap_children` copies it into the new container and leaves
+/// `ws->layout` alone (sway/tree/workspace.c:898-910).
 #[test]
-fn detaching_the_full_root_resets_the_empty_workspace_layout() {
+fn detaching_the_full_root_keeps_the_empty_workspace_layout() {
     let mut source = tree((800., 1200.), 0.);
     source.reset_empty_layout();
     source.set_layout(source.root, Layout::SplitH);
     let first = source.add_tile(tile(1, source.view_size()), InsertTarget::Focused);
     source.split(first, Layout::SplitV);
     source.add_tile(tile(2, source.view_size()), InsertTarget::Focused);
+    let layout = source.split_layout(source.root).unwrap();
 
-    source.detach_subtree(source.root).unwrap();
+    let (detached, _) = source.detach_subtree(source.root).unwrap();
 
-    assert_eq!(source.representation_layout(), Layout::SplitH);
+    assert_eq!(source.split_layout(source.root), Some(layout));
+    assert_eq!(source.representation_layout(), layout);
+    let DetachedNode::Split {
+        layout: moved_layout,
+        ..
+    } = detached.node
+    else {
+        panic!("the moved workspace children are a split");
+    };
+    assert_eq!(moved_layout, layout);
     source.check_invariants();
 }
 

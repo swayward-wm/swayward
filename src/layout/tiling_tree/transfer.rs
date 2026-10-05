@@ -128,6 +128,10 @@ impl<W: LayoutElement> TilingTree<W> {
     /// Detaches the root's contents as a new split, leaving an empty root behind.
     fn take_root_as_detached(&mut self) -> Option<DetachedNode<W>> {
         let id = self.root;
+        // `workspace_wrap_children` gives the new container a copy of the
+        // workspace layout and leaves `ws->layout` alone, so the emptied
+        // workspace keeps reporting it (sway/tree/workspace.c:898-910).
+        let root_layout = self.split_layout(id)?;
         let TreeNode::Split {
             layout,
             children,
@@ -136,7 +140,7 @@ impl<W: LayoutElement> TilingTree<W> {
         } = std::mem::replace(
             &mut self.nodes.get_mut(&id)?.value,
             TreeNode::Split {
-                layout: Layout::SplitH,
+                layout: root_layout,
                 children: Vec::new(),
                 percents: Vec::new(),
                 meta: SplitMeta::default(),
@@ -145,7 +149,7 @@ impl<W: LayoutElement> TilingTree<W> {
         else {
             return None;
         };
-        self.empty_representation_layout = Some(Layout::SplitH);
+        self.empty_representation_layout = Some(root_layout);
         let children = children
             .into_iter()
             .map(|child| self.take_detached_node(child))
