@@ -295,6 +295,54 @@ fn move_position_uses_workspace_coordinates_and_rejects_absolute_ppt() {
     }
 }
 
+/// Oracle: floating_window_ppt_resize_rejected. A floating view resizes only
+/// in px or unitless amounts; a ppt-only resize is refused and leaves the
+/// window alone (sway/commands/resize.c:523-537). Differential seed 1136.
+#[test]
+fn ppt_only_resize_of_a_floating_window_is_refused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+
+    let rect = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        find_json_node(&tree, "floating_con", false).unwrap()["rect"].clone()
+    };
+    let before = rect(&mut f);
+
+    for command in [
+        "resize shrink width 5 ppt",
+        "resize grow height 10 ppt",
+        "resize grow left 5 ppt",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(!outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(
+            outcome[0].error.as_deref(),
+            Some("Floating containers cannot use ppt measurements"),
+            "{command}"
+        );
+        assert_eq!(rect(&mut f), before, "{command}");
+    }
+}
+
 #[test]
 fn move_absolute_position_is_verbatim_under_a_bar_and_gaps() {
     // `move absolute position` must use the requested coordinate unchanged.

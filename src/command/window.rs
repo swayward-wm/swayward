@@ -394,9 +394,13 @@ impl ResolvedResizeTarget {
                 let window = mapped.window.clone();
                 // A floating group's child is a tiled child of the group, as
                 // `container_is_floating` is true only for the root
-                // (sway/commands/resize.c:523).
-                let floating =
-                    mapped.is_floating() && !state.swayward.layout.is_floating_group_child(&window);
+                // (sway/commands/resize.c:523). Ask the layout: the mapped
+                // window's own flag lags a `floating enable` in the same batch.
+                let floating = state
+                    .swayward
+                    .layout
+                    .workspaces()
+                    .any(|(_, _, ws)| ws.window_is_floating_root(&window));
                 if state.swayward.layout.is_scratchpad_hidden(&window) {
                     return Err(failure("Cannot resize a hidden scratchpad container"));
                 }
@@ -512,7 +516,7 @@ pub(super) fn resize(
     second: Option<ResizeAmount>,
 ) -> Result<(), CommandOutcome> {
     let target = ResolvedResizeTarget::resolve(state, target)?;
-    if matches!(target, ResolvedResizeTarget::FloatingRoot { .. })
+    if target.is_floating()
         && [Some(first), second]
             .into_iter()
             .flatten()
