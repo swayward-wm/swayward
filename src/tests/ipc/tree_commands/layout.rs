@@ -1399,6 +1399,35 @@ fn resize_snaps_fractions_to_whole_pixels_before_a_new_view() {
     );
 }
 
+// random-v2 seed 14415 (diff-fam-move-percent-rounding): after a resize, a
+// directional move that wraps two views in a new split keeps the whole-pixel
+// fractions they had (sway/commands/resize.c:126-131,
+// sway/tree/container.c:1485-1490): 611 / 1280 and 669 / 1280. Oracle row
+// move_wrap_after_resize_keeps_whole_pixel_fractions.
+#[test]
+fn move_wrap_after_resize_keeps_whole_pixel_fractions() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-1", "fixture-2", "fixture-3"] {
+        map_app(&mut f, client, app_id);
+    }
+    for command in ["resize grow left 20 px", "focus next sibling", "move down"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let tree = tree_json(&mut f);
+    let percents = ["fixture-2", "fixture-3", "fixture-1"]
+        .map(|app_id| find_json_node_with_app_id(&tree, app_id).unwrap()["percent"].clone());
+    assert_eq!(
+        percents,
+        [0.47734375, 0.52265625, 0.5].map(serde_json::Value::from)
+    );
+}
+
 // random-v2 seed 1071 step 5 (diff-fam-percent-rounding): under a fullscreen
 // view, sway leaves the other children at the whole-pixel boxes they last had
 // over the visible children (`arrange_workspace`, sway/tree/arrange.c:310-316):
