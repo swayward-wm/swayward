@@ -499,9 +499,18 @@ impl<W: LayoutElement> FloatingLayout<W> {
             return false;
         };
         let entry = &mut self.entries[index];
+        let content_before = entry.tile.window_loc();
         let changed = entry.tile.set_sway_border(style, width, true).is_ok();
         if changed {
             entry.data.update(&entry.tile);
+            // Sway keeps a floating view's content box and moves the container around
+            // it (`container_set_geometry_from_content`, sway/commands/border.c:94-96,
+            // sway/tree/container.c:1018-1039).
+            if entry.tile.sizing_mode().is_normal() {
+                let shift = entry.tile.window_loc() - content_before;
+                let pos = entry.data.logical_pos - shift;
+                entry.data.set_logical_pos(pos);
+            }
         }
         changed
     }

@@ -888,7 +888,10 @@ impl<W: LayoutElement> FloatingLayout<W> {
             return;
         };
         let FloatingEntry { tile, data, .. } = self.remove_entry(index);
-        let rect = Rectangle::new(data.logical_pos, data.size);
+        // Sway's split copies the container's pending box (sway/tree/container.c:1543-1548),
+        // which `container_floating_resize_and_center` set when the view floated, before
+        // the client commits that size. `data.size` still holds the last committed tile.
+        let rect = Rectangle::new(data.logical_pos, tile.tile_expected_or_current_size());
         let mut tree = TilingTree::new(
             self.view_size,
             rect,
