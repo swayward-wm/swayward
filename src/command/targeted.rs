@@ -304,6 +304,8 @@ fn run_targeted(
             super::handled(set_shortcuts_inhibitor(state, target, *enable))
         }
         Command::InhibitIdle(mode) => super::handled(set_inhibit_idle(state, target, *mode)),
+        Command::AllowTearing(allow) => super::handled(set_allow_tearing(state, target, *allow)),
+        Command::MaxRenderTime(msec) => super::handled(set_max_render_time(state, target, *msec)),
         Command::Sticky(value) => super::handled(window::sticky(state, target, value)),
         Command::SetClientColors { class, colors } => {
             set_client_colors(state, *class, *colors);
@@ -576,6 +578,55 @@ pub(super) fn set_inhibit_idle(
     Ok(())
 }
 
+/// Sway stores the override on the view (`sway/sway/commands/allow_tearing.c:12-22`).
+/// It only changes presentation when the output allows tearing too
+/// (`sway/sway/desktop/output.c:253-268`), and swayward's outputs never do.
+pub(super) fn set_allow_tearing(
+    state: &mut State,
+    target: CommandTarget,
+    allow: bool,
+) -> Result<(), CommandOutcome> {
+    let CommandTarget::Window(target) = target else {
+        return Err(swayward_ipc::command::parse_error(
+            "Tearing can only be allowed on views",
+        ));
+    };
+    with_target_window(state, target, |window| window.set_tearing_override(allow))
+}
+
+/// Sway stores the budget on the view (`sway/sway/commands/max_render_time.c:23-31`).
+/// It only delays frame callbacks when the output has a budget too
+/// (`sway/sway/desktop/output.c:177-188`), and swayward's outputs never do.
+pub(super) fn set_max_render_time(
+    state: &mut State,
+    target: CommandTarget,
+    msec: i32,
+) -> Result<(), CommandOutcome> {
+    let CommandTarget::Window(target) = target else {
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can have a max_render_time",
+        ));
+    };
+    with_target_window(state, target, |window| window.set_max_render_time(msec))
+}
+
+fn with_target_window(
+    state: &mut State,
+    target: crate::window::mapped::MappedId,
+    mut apply: impl FnMut(&mut crate::window::Mapped),
+) -> Result<(), CommandOutcome> {
+    let mut found = false;
+    state.swayward.layout.with_windows_mut(|window, _| {
+        if window.id() == target {
+            apply(window);
+            found = true;
+        }
+    });
+    found
+        .then_some(())
+        .ok_or_else(|| failure("No matching node."))
+}
+
 pub(super) fn set_shortcuts_inhibitor(
     state: &mut State,
     target: CommandTarget,
@@ -785,7 +836,21 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
         .map(|mapped| mapped.id())
         .collect::<Vec<_>>();
     let (hidden, rest): (Vec<_>, Vec<_>) = order.into_iter().partition(|id| hidden.contains(id));
-    for id in hidden.into_iter().chain(rest) {
+    // A scratchpad container counts as floating whatever it was before it
+    // was hidden, so `[tiling]` never matches it and `[floating]` does. The
+    // children of a hidden group have a parent and are tiling
+    // (`sway/sway/tree/container.c:1041-1050`).
+    let hidden_tiles = layout
+        .scratchpad_tiles()
+        .map(|(mapped, _)| mapped.id())
+        .collect::<Vec<_>>();
+    for id in hidden {
+        if let Some(mut snapshot) = snapshots.remove(&id) {
+            snapshot.floating = hidden_tiles.contains(&id);
+            candidates.push(Candidate::Window(snapshot));
+        }
+    }
+    for id in rest {
         if let Some(snapshot) = snapshots.remove(&id) {
             candidates.push(Candidate::Window(snapshot));
         }

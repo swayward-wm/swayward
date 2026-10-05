@@ -19,20 +19,7 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     // single choke point for both IPC commands and key bindings, matching
     // sway, where a binding re-enters execute_command at press time
     // (`sway/sway/commands/bind.c:635`).
-    let focused = super::targeted::focused_node(state);
-    let mut parsed = parse_with_variables(input, &state.swayward.sway_variables, focused);
-    // `border` checks for a view before anything else, so a well-formed
-    // border command with nothing focused is refused too
-    // (`sway/sway/commands/border.c:61-67`).
-    if focused != swayward_ipc::command::FocusedNode::View {
-        for parsed in &mut parsed {
-            if matches!(parsed, Ok(parsed) if matches!(parsed.command, Command::Border(_))) {
-                *parsed = Err(swayward_ipc::command::parse_error(
-                    "Only views can have borders",
-                ));
-            }
-        }
-    }
+    let parsed = parse_with_variables(input, &state.swayward.sway_variables);
     // Sway stops the list after the first CMD_INVALID result, whether the
     // parser or a handler produced it, and continues past CMD_FAILURE
     // (`sway/sway/commands.c:296-299`, `316-321`).
@@ -46,7 +33,10 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
                 }
                 execute_one(state, parsed, &mut retained_targets)
             }
-            Err(error) => error,
+            // Sway sets the handler context per command, after earlier
+            // commands in the list have moved focus
+            // (`sway/sway/commands.c:288-293`).
+            Err(error) => error.resolve(super::targeted::focused_node(state)),
         };
         let invalid = is_invalid(&outcome);
         outcomes.push(outcome);
@@ -110,9 +100,9 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
             focus::next_prev_sibling(state, false);
             Ok(None)
         }
-        Command::FocusFloating => focus::mode(state, true).map(Some),
-        Command::FocusTiling => focus::mode(state, false).map(Some),
-        Command::FocusModeToggle => focus::mode_toggle(state).map(Some),
+        Command::FocusFloating => focus::mode(state, true),
+        Command::FocusTiling => focus::mode(state, false),
+        Command::FocusModeToggle => focus::mode_toggle(state),
         Command::MoveDirection { direction, pixels } => {
             movement::direction_focused(state, direction, pixels)
         }
@@ -141,6 +131,8 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
         Command::TitleFormat(format) => window::title_format_focused(state, &format),
         Command::ShortcutsInhibitor(enable) => window::shortcuts_inhibitor_focused(state, enable),
         Command::InhibitIdle(mode) => window::inhibit_idle_focused(state, mode),
+        Command::AllowTearing(allow) => window::allow_tearing_focused(state, allow),
+        Command::MaxRenderTime(msec) => window::max_render_time_focused(state, msec),
         Command::Sticky(value) => window::sticky_focused(state, &value),
         Command::Border(border) => window::border_focused(state, &border),
         Command::Floating(mode) => window::floating_focused(state, mode),

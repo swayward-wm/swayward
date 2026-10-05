@@ -115,9 +115,6 @@ pub struct Mapped {
     /// Client geometry captured when the window first mapped.
     natural_size: Size<i32, Logical>,
 
-    /// Whether the client created an xdg-decoration object for this toplevel.
-    has_xdg_decoration: bool,
-
     /// Whether this window is a target of a window cast.
     is_window_cast_target: bool,
 
@@ -126,6 +123,12 @@ pub struct Mapped {
 
     /// User-configured sway idle-inhibition policy.
     inhibit_idle_mode: swayward_ipc::command::InhibitIdleMode,
+
+    /// Sway's per-view tearing override; `None` follows the window's hint.
+    tearing_override: Option<bool>,
+
+    /// Sway's per-view render budget in milliseconds, 0 when off.
+    max_render_time: i32,
 
     /// Whether this window should ignore opacity set through window rules.
     ignore_opacity_window_rule: bool,

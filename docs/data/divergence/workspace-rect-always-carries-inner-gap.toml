@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs", "swayward-config/src/layout.rs", "src/layout/tiling_tree/geometry.rs"]
+what = "drop the outer_gaps_configured flag: the workspace working area is always the output area inset by outer plus inner gaps, and smart_gaps inverse_outer keeps the inner part."
+why = "Sway's workspace_add_gaps (sway/sway/tree/workspace.c:1007-1031) always adds gaps_inner to current_gaps, so the workspace rect is inset even with no outer gaps and no windows."

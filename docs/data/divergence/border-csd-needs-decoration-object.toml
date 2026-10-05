@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/handlers/mod.rs", "src/handlers/xdg_shell/decorations.rs", "src/handlers/xdg_shell/mod.rs", "src/layout/tile.rs", "src/window/mapped/layout_element.rs", "src/window/mapped/mod.rs", "src/window/mapped/state.rs"]
+what = "report xdg-decoration support while the toplevel has a live decoration object (found by scanning the client's objects, since smithay keeps it private and reports no destroy), not only when it negotiated client-side mode at map time, send a decoration mode only to such a window, and keep drawing the stored sway border and titlebar on a tiled window that uses CSD."
+why = "Sway's `border csd` checks only `view->xdg_decoration` (sway/commands/border.c:77-80), which is cleared when the object is destroyed (sway/xdg_decoration.c:9-20), and `view_set_csd_from_server` sends a mode only when that object exists (sway/tree/view.c:515-525). A tiled foot window is negotiated server-side, so swayward refused `border csd` where sway succeeds. Sway also keeps a tiled CSD view's stored border and draws it (sway/commands/border.c:10-14, 25-27) (differential family diff-fam-border-csd)."

@@ -91,11 +91,13 @@ impl<W: LayoutElement> TilingTree<W> {
         self.interactive_resize = None;
         self.has_had_tile = true;
         tile.update_config(self.view_size, self.scale, self.options.clone());
+        tile.set_sway_csd_floating(false);
         let pending_mode = tile.window().pending_sizing_mode();
         let fullscreen = self.fullscreen_node();
         let previous_focus = self.focus;
         let old_geometries = self.compute_geometry();
-        if !self.fullscreen_layout_wrappers.is_empty() {
+        let maps_into_wrapper = !self.fullscreen_layout_wrappers.is_empty();
+        if maps_into_wrapper {
             self.pre_layout_ipc_rects.clear();
         }
         let id = self.alloc(Node {
@@ -112,10 +114,18 @@ impl<W: LayoutElement> TilingTree<W> {
         // one added to a container is arranged with its siblings
         // (`arrange_container(parent)`, `sway/tree/view.c:931-940`).
         let focus_blocked = fullscreen.is_some();
-        let mapped_under_fullscreen = focus_blocked && parent == self.root;
-        if fullscreen
-            .is_some_and(|fullscreen| self.divides_box_under_fullscreen(parent, fullscreen))
-        {
+        // A global fullscreen container does not set `workspace->fullscreen`
+        // (`container_fullscreen_global`, sway/tree/container.c), so
+        // `arrange_workspace` lays the new view out with its siblings.
+        let mapped_under_fullscreen = parent == self.root
+            && fullscreen.is_some_and(|fullscreen| {
+                self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
+            });
+        self.forget_unarranged_after_map(parent, mapped_under_fullscreen);
+        if fullscreen.is_some_and(|fullscreen| {
+            self.divides_box_under_fullscreen(parent, fullscreen)
+                || (parent == self.root && !mapped_under_fullscreen)
+        }) {
             self.fullscreen_tile_slot = true;
         }
         if parent == self.root {
@@ -155,12 +165,37 @@ impl<W: LayoutElement> TilingTree<W> {
             );
         }
         self.compact_tree();
+        if maps_into_wrapper {
+            // The view maps beside the fullscreen container, inside the
+            // wrapper, and `arrange_container(parent)` lays the wrapper out at
+            // its empty box (sway/tree/view.c:931-940).
+            self.arrange_fullscreen_wrappers();
+        }
         if pending_mode.is_fullscreen() {
             self.replace_fullscreen_state(id, Some(FullscreenMode::Workspace));
         }
         self.animate_geometry_changes(old_geometries, Some(id));
         self.request_window_sizes();
         id
+    }
+
+    /// Drops the boxes left unarranged by a close under fullscreen that the
+    /// arrange after mapping a view into `parent` recomputes. A view mapped
+    /// into a container arranges that container (`arrange_container(parent)`,
+    /// sway/tree/view.c:936-939), which gives its descendants new boxes. A
+    /// view mapped onto the workspace arranges the workspace (view.c:938-939),
+    /// which under workspace fullscreen arranges only the fullscreen container
+    /// (sway/tree/arrange.c:310-316) and otherwise everything.
+    fn forget_unarranged_after_map(&mut self, parent: NodeId, mapped_under_fullscreen: bool) {
+        if parent != self.root {
+            let unarranged = std::mem::take(&mut self.unarranged_under_fullscreen);
+            self.unarranged_under_fullscreen = unarranged
+                .into_iter()
+                .filter(|(id, _)| *id == parent || !self.contains_node(parent, *id))
+                .collect();
+        } else if !mapped_under_fullscreen {
+            self.unarranged_under_fullscreen.clear();
+        }
     }
 
     /// Whether a leaf added to `parent` takes a share of a split box inside `fullscreen`. Only
@@ -205,6 +240,13 @@ impl<W: LayoutElement> TilingTree<W> {
 
     fn insertion_slot(&self, target: InsertTarget) -> (NodeId, Option<NodeId>) {
         let target = match target {
+            // With the workspace focused, sway maps beside its focus-inactive
+            // container (`seat_get_focus_inactive(ws)`, sway/tree/view.c:849-882).
+            InsertTarget::Focused if self.focus == Some(self.root) => self
+                .focus_history
+                .iter()
+                .copied()
+                .find(|id| *id != self.root && self.contains_node(self.root, *id)),
             InsertTarget::Focused => self.focus,
             InsertTarget::Node(id) => Some(id),
             InsertTarget::MoveDestination => {
@@ -231,10 +273,29 @@ impl<W: LayoutElement> TilingTree<W> {
             return None;
         }
         let removed_fullscreen = self.fullscreen_node() == Some(id);
+        if let Some(fullscreen) = self.fullscreen_node().filter(|_| !removed_fullscreen) {
+            // Only the fullscreen container is arranged after the close; the
+            // rest keep the boxes they had (sway/tree/view.c:1001-1006,
+            // sway/tree/arrange.c:310-316). Views mapped under fullscreen
+            // already report their empty box.
+            let excluded = self.split_excluded();
+            let unarranged = old_geometries
+                .ipc_nodes
+                .iter()
+                .filter(|(node, _)| {
+                    **node != self.root
+                        && !excluded.contains(*node)
+                        && !self.contains_node(fullscreen, **node)
+                })
+                .map(|(node, rect)| (*node, *rect))
+                .collect::<Vec<_>>();
+            self.unarranged_under_fullscreen.extend(unarranged);
+        }
         let node = self.remove_node(id)?;
         if removed_fullscreen {
             self.mapped_under_fullscreen.clear();
             self.moved_under_fullscreen.clear();
+            self.wrapper_arranged_boxes.clear();
         }
         let TreeNode::Leaf { mut tile } = node.value else {
             unreachable!();
@@ -311,6 +372,7 @@ impl<W: LayoutElement> TilingTree<W> {
     ) -> NodeId {
         self.interactive_resize = None;
         tile.update_config(self.view_size, self.scale, self.options.clone());
+        tile.set_sway_csd_floating(false);
         let old_geometries = self.compute_geometry();
         let id = self.alloc(Node {
             parent: Some(parent),
@@ -318,6 +380,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 tile: Box::new(tile),
             },
         });
+        self.unarranged_under_fullscreen.clear();
         self.insert_child(parent, id, None);
         if activate {
             self.set_focus_id(Some(id));

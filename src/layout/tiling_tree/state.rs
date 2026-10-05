@@ -19,7 +19,7 @@ pub(super) fn toplevel_bounds(
 
 /// The layout a new or emptied workspace root takes: the configured orientation, or for `auto`
 /// SplitV on a portrait output and SplitH otherwise.
-fn default_layout(
+pub(super) fn default_layout(
     orientation: swayward_config::DefaultOrientation,
     view_size: Size<f64, Logical>,
 ) -> Layout {
@@ -69,9 +69,13 @@ impl<W: LayoutElement> TilingTree<W> {
             ipc_focus_follows_history: false,
             fullscreen_tile_slot: false,
             fullscreen_arrived: false,
+            wrapper_arranged_boxes: HashMap::new(),
+            unarranged_wrappers: HashSet::new(),
+            fullscreen_rearranged: false,
             fullscreen_layout_wrappers: HashSet::new(),
             pre_layout_ipc_rects: HashMap::new(),
             stale_fullscreen_rects: HashMap::new(),
+            unarranged_under_fullscreen: HashMap::new(),
             interactive_resize: None,
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),
@@ -87,6 +91,7 @@ impl<W: LayoutElement> TilingTree<W> {
             gaps: options.layout.gaps,
             options,
             preserved_auto_layout: None,
+            stale_root_representation: None,
         }
     }
 
@@ -143,6 +148,14 @@ impl<W: LayoutElement> TilingTree<W> {
         self.has_had_tile
     }
 
+    /// Restores the flag after a fullscreen floating view passed through the
+    /// tiling tree: sway keeps such a view in `ws->floating`, and
+    /// `workspace_add_floating` never refreshes the workspace representation
+    /// (sway/tree/workspace.c:960-970).
+    pub(in crate::layout) fn restore_has_had_tile(&mut self, has_had_tile: bool) {
+        self.has_had_tile = has_had_tile;
+    }
+
     pub fn representation_layout(&self) -> Layout {
         let Some(&TreeNode::Split { layout, .. }) =
             self.nodes.get(&self.root).map(|node| &node.value)
@@ -152,8 +165,33 @@ impl<W: LayoutElement> TilingTree<W> {
         if self.is_empty() {
             self.empty_representation_layout.unwrap_or(layout)
         } else {
-            layout
+            match &self.stale_root_representation {
+                Some((stale, shape)) if *shape == self.representation_shape() => *stale,
+                _ => layout,
+            }
         }
+    }
+
+    /// Every node with its split layout, depth first. Sway refreshes a workspace's
+    /// representation whenever a child is attached or detached or a layout changes below it
+    /// (`container_update_representation`, sway/tree/container.c:750-773), so a different
+    /// shape means the cached representation was rebuilt.
+    pub(super) fn representation_shape(&self) -> TreeShape {
+        let mut shape = Vec::new();
+        let mut stack = vec![self.root];
+        while let Some(id) = stack.pop() {
+            match self.nodes.get(&id).map(|node| &node.value) {
+                Some(TreeNode::Split {
+                    layout, children, ..
+                }) => {
+                    shape.push((id, Some(*layout)));
+                    stack.extend(children.iter().rev());
+                }
+                Some(TreeNode::Leaf { .. }) => shape.push((id, None)),
+                None => {}
+            }
+        }
+        shape
     }
 
     pub fn reset_empty_layout(&mut self) {
@@ -162,7 +200,9 @@ impl<W: LayoutElement> TilingTree<W> {
             Some(layout) => layout,
             None => default_layout(self.options.layout.default_orientation, self.view_size),
         };
-        self.set_layout(self.root, layout);
+        // Not a `layout` command: records no `prev_split_layout`
+        // (sway/commands/layout.c:171-189).
+        self.set_layout_keeping_previous(self.root, layout);
         self.empty_representation_layout = Some(layout);
     }
 
@@ -202,7 +242,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 Some(TreeNode::Split { layout, .. }) if *layout == old_auto_layout
             )
         {
-            self.set_layout(self.root, new_auto_layout);
+            // Following the output's axis is not a `layout` command, so it records
+            // no `prev_split_layout` for `layout default` (sway/commands/layout.c:171-189).
+            self.set_layout_keeping_previous(self.root, new_auto_layout);
         }
     }
 

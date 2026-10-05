@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/handlers/compositor.rs"]
+what = "a valid xdg-activation launch token at map time no longer forces ActivateWindow::Yes; it falls back to the smart policy, so a view mapped onto a non-focused workspace (for example by assign) does not switch to it."
+why = "sway's should_focus ignores launcher tokens and only focuses views mapped into the focused workspace (sway/sway/tree/view.c:697-731); oracle differential_seed_1030/1157/1187."

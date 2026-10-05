@@ -595,7 +595,13 @@ fn criteria_failure_on_one_match_still_runs_later_matches() {
 fn criteria_invalid_result_stops_later_matches_and_the_list() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
-    windows_on_workspaces(&mut f, &[("1", "fixture-1"), ("1", "fixture-2")]);
+    windows_on_workspaces(
+        &mut f,
+        &[("1", "fixture-1"), ("1", "fixture-2"), ("1", "fixture-3")],
+    );
+    // A non-empty scratchpad, or sway refuses with "Scratchpad is empty"
+    // before checking the matches (`sway/sway/commands/scratchpad.c:105-107`).
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
 
     let outcome = crate::command::execute(
         f.niri_state(),

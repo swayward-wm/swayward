@@ -25,9 +25,24 @@ pub(super) fn rect_from_rectangle(rect: Rectangle<i32, Logical>) -> Rect {
     }
 }
 
+/// The output's box in the layout, sized as wlroots sizes it: the transformed
+/// mode divided by the scale and truncated (wlr_output_effective_resolution,
+/// wlroots/types/output/output.c:472-477). Smithay's `output_geometry` rounds
+/// the same division up.
+pub(super) fn output_rectangle(
+    global_space: &Space<Window>,
+    output: &smithay::output::Output,
+) -> Option<Rectangle<i32, Logical>> {
+    let geometry = global_space.output_geometry(output)?;
+    let size = crate::utils::output_size(output);
+    Some(Rectangle::new(
+        geometry.loc,
+        (size.w.floor() as i32, size.h.floor() as i32).into(),
+    ))
+}
+
 pub(super) fn output_rect(global_space: &Space<Window>, output: &smithay::output::Output) -> Rect {
-    global_space
-        .output_geometry(output)
+    output_rectangle(global_space, output)
         .map(rect_from_rectangle)
         .unwrap_or_default()
 }

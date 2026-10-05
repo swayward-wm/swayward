@@ -60,6 +60,11 @@ impl Swayward {
             .map(|Data { output, .. }| output.clone())
             .collect();
 
+        // wlroots lines auto-placed outputs up from the top-right corner of
+        // the rightmost manually placed output: x continues from its right
+        // edge and y is its y (output_layout_reconfigure,
+        // wlroots/types/wlr_output_layout.c:85-122).
+        let mut auto_y = None;
         for data in outputs.into_iter() {
             let Data {
                 output,
@@ -74,15 +79,21 @@ impl Swayward {
             let new_position = config
                 .map(|pos| Point::from((pos.x, pos.y)))
                 .unwrap_or_else(|| {
-                    let x = self
+                    // wlroots sizes an output by truncating mode / scale
+                    // (wlr_output_effective_resolution,
+                    // wlroots/types/output/output.c:472-477).
+                    let rightmost = self
                         .global_space
                         .outputs()
-                        .map(|output| self.global_space.output_geometry(output).unwrap())
-                        .map(|geom| geom.loc.x + geom.size.w)
-                        .max()
-                        .unwrap_or(0);
+                        .map(|output| {
+                            let loc = self.global_space.output_geometry(output).unwrap().loc;
+                            (loc, output_size(output).w.floor() as i32)
+                        })
+                        .max_by_key(|(loc, width)| loc.x + width);
+                    let x = rightmost.map_or(0, |(loc, width)| loc.x + width);
+                    let y = *auto_y.get_or_insert(rightmost.map_or(0, |(loc, _)| loc.y));
 
-                    Point::from((x, 0))
+                    Point::from((x, y))
                 });
 
             self.global_space.map_output(&output, new_position);

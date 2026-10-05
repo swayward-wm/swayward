@@ -416,10 +416,19 @@ impl LayoutElement for Mapped {
     }
 
     fn has_xdg_decoration(&self) -> bool {
-        self.has_xdg_decoration
+        // Sway asks only whether the view has a live xdg-decoration object
+        // (view->xdg_decoration, sway/commands/border.c:77-80), not which mode
+        // was negotiated: a tiled window is always server-side yet supports
+        // `border csd`.
+        crate::handlers::XdgDecorationObject::is_present(self.toplevel())
     }
 
     fn request_server_decoration(&mut self, server_side: bool) {
+        // view_set_csd_from_server sends a mode only to a view with an
+        // xdg-decoration object (sway/tree/view.c:515-525).
+        if !self.has_xdg_decoration() {
+            return;
+        }
         self.toplevel().with_pending_state(|state| {
             state.decoration_mode = Some(if server_side {
                 zxdg_toplevel_decoration_v1::Mode::ServerSide

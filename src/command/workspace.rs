@@ -30,6 +30,9 @@ pub(super) fn activate(
     if let Err(error) = result {
         return Err(activation_failure(error));
     }
+    // `workspace_switch` arranges the workspace it focuses
+    // (sway/tree/workspace.c:731-743).
+    state.swayward.layout.arrange_active_sway_workspace();
     state.swayward.queue_redraw_all();
     Ok(None)
 }

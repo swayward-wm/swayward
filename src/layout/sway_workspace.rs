@@ -3,6 +3,10 @@
 use super::*;
 use crate::command::NO_PREVIOUS_WORKSPACE;
 
+/// Sway's `CMD_FAILURE` for `move ... to workspace back_and_forth` without
+/// history (sway/commands/move.c:465-466).
+const MOVE_NO_PREVIOUS_WORKSPACE: &str = "No workspace was previously active.";
+
 impl<W: LayoutElement> Layout<W> {
     pub(super) fn move_activation(focus: bool) -> ActivateWindow {
         if focus {
@@ -137,6 +141,34 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         monitor.switch_workspace_down_wrapping();
+    }
+
+    /// Sway's `arrange_root`: every output's workspaces are arranged, which
+    /// under fullscreen re-arranges only the fullscreen container, at the
+    /// output or root box (sway/tree/arrange.c:310-361).
+    pub fn arrange_sway_root(&mut self) {
+        for workspace in self.workspaces_mut() {
+            workspace.tiling_mut().arrange_root();
+        }
+    }
+
+    /// Sway's `arrange_workspace` on the focused workspace, as
+    /// `workspace_switch` (sway/tree/workspace.c:731-743) and `floating`
+    /// (sway/commands/floating.c:53-56) end with.
+    pub fn arrange_active_sway_workspace(&mut self) {
+        if let Some(workspace) = self.active_workspace_mut() {
+            workspace.tiling_mut().arrange_workspace();
+        }
+    }
+
+    /// Sway's `arrange_workspace` on the workspace holding `window`.
+    pub fn arrange_sway_workspace_of(&mut self, window: &W::Id) {
+        if let Some(workspace) = self
+            .workspaces_mut()
+            .find(|workspace| workspace.has_window(window))
+        {
+            workspace.tiling_mut().arrange_workspace();
+        }
     }
 
     pub fn finish_sway_workspace_switch(&mut self, target: &crate::command::WorkspaceTarget) {
@@ -410,10 +442,10 @@ impl<W: LayoutElement> Layout<W> {
         let active_id = active.id();
         let positions = self
             .workspaces()
-            .filter(|(_, _, workspace)| {
-                workspace.has_windows()
-                    || workspace.has_sway_identity()
+            .filter(|(monitor, index, workspace)| {
+                workspace.must_be_kept()
                     || workspace.id() == active_id
+                    || monitor.is_some_and(|monitor| monitor.active_workspace_idx() == *index)
             })
             .map(|(monitor, index, workspace)| WorkspacePosition {
                 output: monitor.map(|monitor| monitor.output().clone()),
@@ -452,9 +484,7 @@ impl<W: LayoutElement> Layout<W> {
             .workspaces
             .iter()
             .enumerate()
-            .filter(|(index, workspace)| {
-                workspace.has_windows() || workspace.has_sway_identity() || *index == current
-            })
+            .filter(|(index, workspace)| workspace.must_be_kept() || *index == current)
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let current = positions.iter().position(|index| *index == current)?;
@@ -559,6 +589,16 @@ impl<W: LayoutElement> Layout<W> {
         };
         if let Some(position) = target_position {
             Ok(position)
+        } else if target == WorkspaceTarget::BackAndForth {
+            // `move ... to workspace back_and_forth` falls back to the
+            // previous workspace's name, or refuses without history
+            // (sway/commands/move.c:460-468).
+            let name = self
+                .active_monitor_ref()
+                .and_then(|monitor| monitor.previous_workspace_name())
+                .ok_or(MOVE_NO_PREVIOUS_WORKSPACE)?
+                .to_owned();
+            self.resolve_sway_workspace_target(WorkspaceTarget::Name(name))
         } else {
             let (name, number) = sway_workspace_identity(target)?;
             let (output, index) = self.create_sway_workspace(name, number)?;

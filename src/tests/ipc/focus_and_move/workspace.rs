@@ -477,3 +477,33 @@ fn test_window_is_urgent(f: &mut Fixture, app_id: &str) -> bool {
         .1
         .is_urgent()
 }
+
+#[test]
+fn next_on_output_from_the_only_workspace_stays_after_the_empty_one_is_destroyed() {
+    // Sway destroys empty workspace 1 when focus leaves it, so 3 is the only
+    // workspace on the output and next/prev_on_output wrap back onto it
+    // (sway/sway/tree/workspace.c:685-698). Differential seeds 2468, 2655.
+    let (mut f, socket) = ipc_fixture_with_config(swayward_config::Config::default());
+    f.add_output(1, (1920, 1080));
+    for command in [
+        "workspace number 3",
+        "workspace next_on_output",
+        "workspace prev_on_output",
+    ] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        assert_eq!(
+            f.swayward().layout.active_workspace().unwrap().sway_name(),
+            Some("3".into()),
+            "after {command}"
+        );
+    }
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let workspaces = query_ipc(&mut f, &mut stream, MessageType::GetWorkspaces);
+    let names = workspaces
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["3"]);
+}

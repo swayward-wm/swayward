@@ -60,7 +60,6 @@ pub(crate) struct GeometryInput<'a, W: LayoutElement> {
     pub scale: f64,
     pub struts: Struts,
     pub gaps: f64,
-    pub outer_gaps_configured: bool,
     pub gaps_to_edge: bool,
     pub titlebar_height: f64,
     pub fullscreen: &'a HashSet<NodeId>,
@@ -76,7 +75,7 @@ pub(crate) struct GeometryInput<'a, W: LayoutElement> {
 
 pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry<W::Id> {
     let gaps = input.gaps.max(0.);
-    let workspace_area = workspace_area(&input, gaps);
+    let workspace_area = workspace_area(&input);
     let mut context = AssignContext {
         nodes: input.nodes,
         gaps,
@@ -124,20 +123,10 @@ pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry
     result
 }
 
-/// The tiled area: the parent area less struts, inset by the inner gap on every side unless
-/// outer gaps were configured separately.
-fn workspace_area<W: LayoutElement>(
-    input: &GeometryInput<'_, W>,
-    gaps: f64,
-) -> Rectangle<f64, Logical> {
-    let mut area = apply_struts(input.parent_area, input.scale, input.struts);
-    if !input.outer_gaps_configured {
-        area.loc.x += gaps;
-        area.loc.y += gaps;
-        area.size.w = (area.size.w - gaps * 2.).max(0.);
-        area.size.h = (area.size.h - gaps * 2.).max(0.);
-    }
-    area
+/// The tiled area: the parent area less struts. The parent area is the workspace rect, which
+/// already carries sway's `current_gaps` (outer plus inner, `workspace_add_gaps`).
+fn workspace_area<W: LayoutElement>(input: &GeometryInput<'_, W>) -> Rectangle<f64, Logical> {
+    apply_struts(input.parent_area, input.scale, input.struts)
 }
 
 /// Lays the fullscreen subtree out over the whole output on top of the tiled pass. Titlebars
@@ -498,6 +487,28 @@ fn visible_shares(
         .collect()
 }
 
+/// Each child's whole-pixel extent along a split: `round(share * available)`, with the last
+/// child that has a share taking the remainder (`apply_horiz_layout` and
+/// `apply_vert_layout`, sway/tree/arrange.c:78-88 and 163-174). Sway's container boxes are
+/// integers, so a nested split divides a whole-pixel extent too.
+pub(super) fn whole_pixel_extents(available: f64, shares: &[f64]) -> Vec<f64> {
+    let last = shares.iter().rposition(|share| *share > 0.);
+    let mut used = 0.;
+    shares
+        .iter()
+        .enumerate()
+        .map(|(index, share)| {
+            if Some(index) == last {
+                (available - used).max(0.)
+            } else {
+                let extent = (share * available).round().min(available - used).max(0.);
+                used += extent;
+                extent
+            }
+        })
+        .collect()
+}
+
 /// The rounded corners a linear split's child may draw. With gaps every child is separate and
 /// draws all four; without, only the corners on the split's outer edge stay rounded.
 fn child_corners(
@@ -582,8 +593,8 @@ fn assign_linear_split<W: LayoutElement>(
         _ => unreachable!(),
     };
     let shares = visible_shares(context.mapped_under_fullscreen, children, percents);
-    for (index, (child, percent)) in children.iter().zip(shares).enumerate() {
-        let extent = available.max(0.) * percent;
+    let extents = whole_pixel_extents(available.max(0.), &shares);
+    for (index, (child, extent)) in children.iter().zip(extents).enumerate() {
         let child_rect = match layout {
             Layout::SplitH => Rectangle::new(
                 Point::from((cursor, rect.loc.y)),

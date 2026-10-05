@@ -874,3 +874,83 @@ fn focus_next_and_prev_follow_the_immediate_parent_layout() {
     assert!(outcome[0].success, "{outcome:?}");
     assert!(f.swayward().layout.focus().is_none());
 }
+
+/// Differential family diff-fam-focus-prev-floating (seeds 1449, 1970): sway answers
+/// `focus next|prev` on a floating window with success, taking the axis from the workspace
+/// layout and leaving focus alone when no other floater lies that way
+/// (sway/commands/focus.c:17-58,434-475).
+#[test]
+fn focus_next_and_prev_on_a_lone_floating_window_succeed() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for app_id in ["tiled", "floater"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    let floater = f.swayward().layout.focus().unwrap().id();
+
+    for command in ["focus prev", "focus next"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(
+            f.swayward().layout.focus().unwrap().id(),
+            floater,
+            "{command}"
+        );
+    }
+}
+
+/// Oracle row focus_prev_next_two_floating: sway moves `focus next|prev` among floaters along the
+/// workspace axis and never wraps, so with nothing on that side focus stays put
+/// (node_get_in_direction_floating, sway/commands/focus.c:243-258). This workspace is splith, so
+/// next looks right and prev looks left; the oracle row covers the splitv axis.
+#[test]
+fn focus_next_and_prev_between_two_floaters_do_not_wrap() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let mut floaters = Vec::new();
+    for (app_id, x) in [("left", 0), ("right", 600)] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        for command in [
+            "floating enable".to_owned(),
+            format!("move position {x} px 0 px"),
+        ] {
+            assert!(crate::command::execute(f.niri_state(), &command)[0].success);
+        }
+        floaters.push(f.swayward().layout.focus().unwrap().id());
+    }
+    let [left, right] = [floaters[0], floaters[1]];
+
+    for (command, expected) in [
+        ("focus next", right),
+        ("focus prev", left),
+        ("focus prev", left),
+        ("focus next", right),
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(
+            f.swayward().layout.focus().unwrap().id(),
+            expected,
+            "{command}"
+        );
+    }
+}

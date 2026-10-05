@@ -489,6 +489,57 @@ fn moving_a_workspace_to_itself_still_wraps_its_children() {
     assert_eq!(workspace["nodes"][0]["nodes"].as_array().unwrap().len(), 3);
 }
 
+// differential seed 15111 (random-v2): sway wraps a focused workspace's
+// tiling children before it resolves the destination, so a move to a missing
+// mark or output fails but leaves the wrapper (sway/commands/move.c:430-436),
+// unarranged. Oracle row workspace_move_to_missing_mark_or_output_wraps_children.
+#[test]
+fn failed_workspace_move_to_missing_mark_or_output_still_wraps_children() {
+    for command in [
+        "move container to mark missing",
+        "move container to output MISSING",
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(!outcome[0].success, "{command}: {outcome:?}");
+
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        assert_eq!(workspace["representation"], "H[H[(null)]]", "{command}");
+        assert_eq!(workspace["nodes"].as_array().unwrap().len(), 1, "{command}");
+        assert_eq!(
+            workspace["nodes"][0]["nodes"].as_array().unwrap().len(),
+            1,
+            "{command}"
+        );
+        // Sway returns before arranging, so the wrapper keeps calloc's empty
+        // box: percent 0 over the workspace, none for the view below it.
+        let wrapper = &workspace["nodes"][0];
+        assert_eq!(wrapper["percent"], 0.0, "{command}");
+        assert_eq!(wrapper["rect"]["width"], 0, "{command}");
+        assert!(wrapper["nodes"][0]["percent"].is_null(), "{command}");
+    }
+}
+
 #[test]
 fn criteria_targeted_move_workspace_preserves_a_container_subtree() {
     let mut f = Fixture::new();
@@ -1256,4 +1307,120 @@ fn a_moved_workspace_ranks_by_its_own_focus_not_tree_order() {
         .map(kind)
         .collect();
     assert_eq!(order, ["wrapper", "1"], "{}", target["representation"]);
+}
+
+/// Sway moves each criteria match after the destination's focus-inactive tiling
+/// container, which the previous match becomes once it is newer on the seat's focus
+/// stack (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389;
+/// sway/commands/move.c:515). The matches keep their order. Oracle row:
+/// `criteria_move_to_workspace_keeps_match_order`.
+#[test]
+fn criteria_move_to_workspace_keeps_match_order() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let open = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    open(&mut f, "one");
+    assert!(crate::command::execute(f.niri_state(), "workspace 2")[0].success);
+    open(&mut f, "two");
+    open(&mut f, "three");
+
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        r#"[workspace="2"] move container to workspace 1"#,
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let target = f
+        .swayward()
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.sway_name().as_deref() == Some("1"))
+        .unwrap()
+        .2;
+    let apps = target
+        .tiles()
+        .filter_map(|tile| {
+            crate::utils::with_toplevel_role(tile.window().toplevel(), |role| role.app_id.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(apps, ["one", "two", "three"]);
+}
+
+fn map_window(f: &mut Fixture, client: crate::tests::client::ClientId, app_id: &str) {
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id(app_id.into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+}
+
+// Differential family diff-fam-move-baf-no-history (random-v2 seed 10023):
+// without history sway refuses with CMD_FAILURE "No workspace was previously
+// active." (sway/commands/move.c:460-468), not a parse error.
+#[test]
+fn move_to_workspace_back_and_forth_without_history_uses_sway_error() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_window(&mut f, client, "moved");
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth");
+    assert!(!outcome[0].success);
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("No workspace was previously active.")
+    );
+    assert_eq!(outcome[0].parse_error, Some(false));
+}
+
+// With a previous workspace that was reaped while empty, sway recreates it
+// by name (sway/commands/move.c:462-463).
+#[test]
+fn move_to_workspace_back_and_forth_recreates_a_reaped_previous_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for workspace in ["alpha", "1"] {
+        assert!(
+            crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success
+        );
+    }
+    map_window(&mut f, client, "moved");
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|output| output["nodes"].as_array().unwrap())
+        .find(|workspace| workspace["name"] == "alpha")
+        .expect("previous workspace recreated");
+    assert!(find_json_node_with_app_id(workspace, "moved").is_some());
 }

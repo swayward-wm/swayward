@@ -70,6 +70,9 @@ pub struct Tile<W: LayoutElement> {
     border: FocusRing,
     sway_border: Option<(BorderStyle, u16)>,
     sway_uses_csd: bool,
+    /// The style a CSD view returns to when it is tiled again
+    /// (`con->saved_border`, sway/commands/border.c:15-31).
+    sway_saved_border: Option<BorderStyle>,
     border_edges: ResizeEdge,
     border_visible: bool,
     titlebar_attached: bool,
@@ -99,6 +102,12 @@ pub struct Tile<W: LayoutElement> {
 
     /// Parent container before this tile became floating.
     pub(super) tiling_parent: Option<super::tiling_tree::NodeId>,
+
+    /// Floating stack stamp this tile held when it left the floating layer.
+    /// A view that goes fullscreen stays in sway's `workspace->floating` list
+    /// at its slot (`container_fullscreen_workspace` does not move it,
+    /// sway/tree/container.c:1186-1218), so IPC lists it there.
+    pub(super) floating_stamp: Option<u64>,
     pub(super) is_sticky: bool,
 
     /// The size that the window should assume when going floating.
@@ -228,6 +237,11 @@ pub(super) struct AlphaAnimation {
 }
 
 impl<W: LayoutElement> Tile<W> {
+    /// See [`Self::floating_stamp`].
+    pub fn floating_stamp(&self) -> Option<u64> {
+        self.floating_stamp
+    }
+
     pub fn new(
         window: W,
         view_size: Size<f64, Logical>,
@@ -249,6 +263,7 @@ impl<W: LayoutElement> Tile<W> {
             border: FocusRing::new(border_config.into()),
             sway_border: None,
             sway_uses_csd: false,
+            sway_saved_border: None,
             border_edges: ResizeEdge::all(),
             border_visible: true,
             titlebar_attached: false,
@@ -261,6 +276,7 @@ impl<W: LayoutElement> Tile<W> {
             restore_to_floating: false,
             tiling_focus_rank: None,
             tiling_parent: None,
+            floating_stamp: None,
             is_sticky: false,
             floating_window_size: None,
             floating_pos: None,
@@ -1848,8 +1864,11 @@ impl<W: LayoutElement> Tile<W> {
         // Only `normal` draws a titlebar. When no rule or command has set a
         // border this follows `default_border`, so the answer stays
         // consistent with sway_border() above; they were allowed to disagree
-        // once and the i3 centering test caught it.
-        !self.sway_uses_csd && self.sway_border().0 == BorderStyle::Normal
+        // once and the i3 centering test caught it. A tiled view using CSD
+        // keeps its stored style and sway still draws it (the comment above
+        // set_border, sway/commands/border.c:10-14); only a floating one
+        // stores `csd`.
+        self.sway_border().0 == BorderStyle::Normal
     }
 
     pub fn set_sway_border(
@@ -1877,6 +1896,9 @@ impl<W: LayoutElement> Tile<W> {
         }
         self.window
             .request_server_decoration(style != BorderStyle::Csd);
+        if style == BorderStyle::Csd && !self.sway_uses_csd {
+            self.sway_saved_border = Some(current_style);
+        }
         self.sway_uses_csd = style == BorderStyle::Csd;
         let style = if style == BorderStyle::Csd && !floating {
             current_style
@@ -1892,11 +1914,41 @@ impl<W: LayoutElement> Tile<W> {
         Ok(self.effective_border_width().unwrap_or(0.) - old_width)
     }
 
+    /// Moves a CSD view's stored border between its tiled and floating
+    /// forms, as `container_set_floating` does: floating saves the border and
+    /// stores `csd`, tiling restores the saved one, and each tells the client
+    /// the matching decoration mode (sway/tree/container.c:955-964, 995-1003).
+    /// A view that is not using CSD is left alone.
+    pub fn set_sway_csd_floating(&mut self, floating: bool) {
+        if !self.sway_uses_csd {
+            return;
+        }
+        let Some((style, width)) = self.sway_border else {
+            return;
+        };
+        let style = if floating {
+            if style == BorderStyle::Csd {
+                return;
+            }
+            self.sway_saved_border = Some(style);
+            BorderStyle::Csd
+        } else {
+            if style != BorderStyle::Csd {
+                return;
+            }
+            self.sway_saved_border
+                .unwrap_or_else(|| self.default_sway_border().0)
+        };
+        self.window.request_server_decoration(!floating);
+        self.sway_border = Some((style, width));
+        self.update_border_config();
+    }
+
     fn update_border_config(&mut self) {
         let rules = self.window.rules();
         let mut config = self.options.layout.border.merged_with(&rules.border);
         if let Some((style, width)) = self.sway_border {
-            config.off = self.sway_uses_csd || style == BorderStyle::None;
+            config.off = matches!(style, BorderStyle::None | BorderStyle::Csd);
             if matches!(style, BorderStyle::Pixel | BorderStyle::Normal) {
                 config.width = f64::from(width);
             }

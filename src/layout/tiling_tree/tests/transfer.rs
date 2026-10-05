@@ -315,8 +315,31 @@ fn swapping_focused_node_into_tabbed_parent_preserves_visible_tab() {
 
     t.swap_nodes(first, second).unwrap();
 
-    assert_eq!(t.focus(), Some(second));
+    // Sway reads parent layouts after the swap; `second` now sits in the split root, so focus
+    // stays on `first`, which the tabbed parent shows (sway/tree/container.c:1772-1788).
+    assert_eq!(t.focus(), Some(first));
     assert_eq!(t.focused_leaf_in(tabbed), Some(first));
+    t.check_invariants();
+}
+
+#[test]
+fn swapping_tabs_keeps_focus_on_the_focused_tab_in_its_new_slot() {
+    // Differential seed 13438: tabbed [1, 2], focus on 2, swap with 1.
+    let mut t = tree((1200., 800.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    t.split(first, Layout::Tabbed);
+    let second = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    let tabbed = t.nodes[&first].parent.unwrap();
+
+    t.swap_nodes(second, first).unwrap();
+
+    assert_eq!(t.focus(), Some(second));
+    assert_eq!(t.focused_leaf_in(tabbed), Some(second));
+    let TreeNode::Split { children, .. } = &t.nodes[&tabbed].value else {
+        panic!("tabbed parent is a split");
+    };
+    assert_eq!(children.as_slice(), [second, first]);
+    assert_eq!(t.window_focus_history().first(), Some(&2));
     t.check_invariants();
 }
 

@@ -72,7 +72,7 @@ pub fn describe_tree_with_power(
     let outputs: Vec<_> = layout.monitors().collect();
     let root_rect = outputs
         .iter()
-        .filter_map(|monitor| global_space.output_geometry(monitor.output()))
+        .filter_map(|monitor| output_rectangle(global_space, monitor.output()))
         .reduce(|a, b| a.merge(b))
         .map(rect_from_rectangle)
         .unwrap_or_default();
@@ -105,7 +105,7 @@ pub fn describe_tree_with_power(
         .into_iter()
         .map(|monitor| output_id(monitor.output_name()))
         .collect();
-    common_node(CommonNodeContext {
+    let mut root = common_node(CommonNodeContext {
         id: ROOT_ID,
         node_type: NodeType::Root,
         layout: NodeLayout::SplitH,
@@ -117,7 +117,9 @@ pub fn describe_tree_with_power(
         focus,
         focused: false,
         properties: NodeProperties::None {},
-    })
+    });
+    refresh_inhibit_idle(&mut root, false);
+    root
 }
 
 fn scratch_output(
@@ -181,7 +183,7 @@ fn scratch_output(
             .filter(|mapped| !tree_window_ids.contains(&mapped.id()))
             .map(|mapped| {
                 let (border, border_width) = layout
-                    .window_border(&mapped.window)
+                    .scratchpad_border_thickness(&mapped.window)
                     .map_or((NodeBorder::Normal, 2), |border| {
                         (ipc_border(border.0), i32::from(border.1))
                     });

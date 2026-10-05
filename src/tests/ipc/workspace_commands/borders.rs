@@ -730,6 +730,43 @@ fn border_command_updates_rendering_and_tree_metadata() {
     }
 }
 
+/// A hidden scratchpad window keeps its border thickness under `border none`,
+/// as sway reports `c->current.border_thickness` (sway/ipc-json.c:760-761).
+/// Oracle row scratchpad_border_none_keeps_thickness; differential seed 1199.
+#[test]
+fn scratchpad_window_under_border_none_reports_its_thickness() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["border pixel 3", "border none", "move scratchpad"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let node = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(node["scratchpad_state"], "fresh");
+    assert_eq!(node["border"], "none");
+    assert_eq!(node["current_border_width"], 3);
+}
+
 #[test]
 fn border_csd_fails_without_client_decoration_support() {
     let mut f = Fixture::new();
@@ -750,4 +787,277 @@ fn border_csd_fails_without_client_decoration_support() {
         outcome[0].error.as_deref(),
         Some("This window doesn't support client side decorations")
     );
+}
+
+#[test]
+fn border_csd_on_a_tiled_window_keeps_sways_titlebar() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // foot creates an xdg-decoration object and asks for server-side
+    // decorations. Sway accepts `border csd` because the object exists
+    // (sway/commands/border.c:77-80), and on a tiled view it keeps the
+    // stored border and goes on drawing it (border.c:10-14, 25-27).
+    // Differential family diff-fam-border-csd, seeds 1035 1059 1102 1109.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(Mode::ServerSide);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let tree_node = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap();
+        find_json_node(&tree, "con", true).unwrap().clone()
+    };
+    assert!(crate::command::execute(f.niri_state(), "border normal")[0].success);
+    let before = tree_node(&mut f);
+    assert_eq!(before["border"], "normal");
+
+    let outcome = crate::command::execute(f.niri_state(), "border csd");
+    assert!(outcome[0].success, "{:?}", outcome[0].error);
+    f.double_roundtrip(client);
+    assert_eq!(
+        f.client(client).window(&surface).decoration_modes.last(),
+        Some(&Mode::ClientSide)
+    );
+
+    let after = tree_node(&mut f);
+    assert_eq!(after["border"], "normal");
+    for field in ["rect", "window_rect", "deco_rect"] {
+        assert_eq!(after[field], before[field], "{field}");
+    }
+    assert!(after["deco_rect"]["height"].as_i64().unwrap() > 0);
+}
+
+#[test]
+fn border_csd_fails_after_the_decoration_object_is_destroyed() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // Sway clears view->xdg_decoration when the object is destroyed
+    // (sway/xdg_decoration.c:9-20), so `border csd` is refused again
+    // (sway/commands/border.c:77-80).
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(Mode::ServerSide);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    f.client(client)
+        .window(&surface)
+        .xdg_decoration
+        .take()
+        .unwrap()
+        .destroy();
+    f.double_roundtrip(client);
+
+    let outcome = crate::command::execute(f.niri_state(), "border csd");
+    assert!(!outcome[0].success);
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("This window doesn't support client side decorations")
+    );
+}
+
+#[test]
+fn border_toggle_on_a_tiled_decorated_window_enters_csd_and_keeps_normal() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // foot has an xdg-decoration object, so sway's toggle cycles
+    // normal -> csd (sway/commands/border.c:45-50). A tiled view does not
+    // store B_CSD (border.c:25-27): GET_TREE still says "normal". The next
+    // toggle leaves CSD for none (border.c:34-37).
+    // Differential family diff-fam-border-toggle-cycle, seeds 1046 1070 1082
+    // 1108 1148 1179 1193 1194.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("toggled".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(Mode::ServerSide);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let border = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap();
+        find_json_node_with_app_id(&tree, "toggled").unwrap()["border"].clone()
+    };
+    assert_eq!(border(&mut f), "normal");
+
+    assert!(crate::command::execute(f.niri_state(), "border toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(border(&mut f), "normal");
+    assert_eq!(
+        f.client(client).window(&surface).decoration_modes.last(),
+        Some(&Mode::ClientSide)
+    );
+
+    // Floating a CSD view saves its border and stores csd; tiling it again
+    // restores the saved one (container_set_floating,
+    // sway/tree/container.c:955-964, 995-1003). Seed 1179.
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(border(&mut f), "csd");
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(border(&mut f), "normal");
+
+    assert!(crate::command::execute(f.niri_state(), "border toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(border(&mut f), "none");
+    assert_eq!(
+        f.client(client).window(&surface).decoration_modes.last(),
+        Some(&Mode::ServerSide)
+    );
+}
+
+#[test]
+fn view_mapped_under_global_fullscreen_keeps_its_border_and_share() {
+    // A global fullscreen container does not set workspace->fullscreen
+    // (container_fullscreen_global, sway/tree/container.c), so a view mapped
+    // beside it is arranged with its siblings: border normal at the
+    // configured width, percent 0.5.
+    // Differential family diff-fam-new-view-border, seed 1044.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_app(&mut f, client, "fs");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle global")[0].success);
+    f.double_roundtrip(client);
+    map_app(&mut f, client, "new");
+
+    let tree = tree_json(&mut f);
+    let fs = find_json_node_with_app_id(&tree, "fs").unwrap();
+    let new = find_json_node_with_app_id(&tree, "new").unwrap();
+    assert_eq!(fs["percent"], 0.5);
+    assert_eq!(new["percent"], 0.5);
+    assert_eq!(new["border"], "normal");
+    assert_ne!(new["current_border_width"], 0);
+    assert_eq!(new["current_border_width"], fs["current_border_width"]);
+}
+
+#[test]
+fn view_mapped_with_the_workspace_focused_goes_beside_its_focus_inactive_child() {
+    // With the workspace focused, view_map maps beside
+    // seat_get_focus_inactive(ws), the last focused view
+    // (sway/tree/view.c:849-882), not at the end of the workspace.
+    // Differential family diff-fam-new-view-border, seed 1527.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    for command in ["move up", "focus parent"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    map_app(&mut f, client, "three");
+
+    let tree = tree_json(&mut f);
+    let workspace = &tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] != "__i3")
+        .unwrap()["nodes"][0];
+    let names = workspace["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 3, "{workspace:#}");
+    let three = find_json_node_with_app_id(&tree, "three").unwrap();
+    assert_eq!(workspace["nodes"][1]["id"], three["id"], "{workspace:#}");
+    assert_eq!(three["border"], "normal");
+    assert_eq!(three["focused"], true);
+}
+
+#[test]
+fn a_tiled_csd_window_moved_to_the_scratchpad_reports_csd() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // `move scratchpad` floats a tiled view first (root_scratchpad_add_container,
+    // sway/tree/root.c:114-118), and floating a CSD view stores B_CSD
+    // (container_set_floating, sway/tree/container.c:955-959), so the hidden
+    // window reports "csd". Differential family diff-fam-csd-scratchpad,
+    // seed 11055; oracle row scratchpad_tiled_csd_reports_csd.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("hidden".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(Mode::ServerSide);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let node = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap();
+        find_json_node_with_app_id(&tree, "hidden").unwrap().clone()
+    };
+
+    assert!(crate::command::execute(f.niri_state(), "border toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(node(&mut f)["border"], "normal");
+
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    f.double_roundtrip(client);
+    let hidden = node(&mut f);
+    assert_eq!(hidden["scratchpad_state"], "fresh");
+    assert_eq!(hidden["border"], "csd");
+    assert_eq!(
+        f.client(client).window(&surface).decoration_modes.last(),
+        Some(&Mode::ClientSide)
+    );
+
+    // Showing keeps csd; tiling it again restores the saved normal border
+    // (sway/tree/container.c:998-1001).
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(node(&mut f)["border"], "csd");
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(node(&mut f)["border"], "normal");
 }

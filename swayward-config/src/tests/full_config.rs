@@ -955,7 +955,6 @@ fn parse() {
                     top: 3.0,
                     bottom: 4.0,
                 },
-                outer_gaps_configured: true,
                 struts: Struts {
                     left: FloatOrInt(
                         1.0,

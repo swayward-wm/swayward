@@ -17,6 +17,39 @@ impl XdgToplevelTagHandler for State {
     }
 }
 
+/// Queries for the toplevel's live xdg-decoration object, sway's
+/// `view->xdg_decoration`.
+///
+/// Smithay reports a new object but not its destruction and keeps the object
+/// private, while sway clears `view->xdg_decoration` on destroy
+/// (sway/xdg_decoration.c:9-20). Scanning the client's live objects answers
+/// both cases. It runs only for `border` commands.
+pub struct XdgDecorationObject;
+
+impl XdgDecorationObject {
+    /// Whether the toplevel currently has a live xdg-decoration object.
+    pub fn is_present(toplevel: &ToplevelSurface) -> bool {
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1;
+
+        let surface = toplevel.wl_surface();
+        let (Some(client), Some(handle)) = (surface.client(), surface.handle().upgrade()) else {
+            return false;
+        };
+        let mut ids = Vec::new();
+        if handle
+            .with_all_objects_for(client.id(), |id| ids.push(id))
+            .is_err()
+        {
+            return false;
+        }
+        let dh = wayland_server::DisplayHandle::from(handle);
+        ids.into_iter()
+            .filter(|id| id.interface().name == ZxdgToplevelDecorationV1::interface().name)
+            .filter_map(|id| ZxdgToplevelDecorationV1::from_id(&dh, id).ok())
+            .any(|object| object.data::<ToplevelSurface>() == Some(toplevel))
+    }
+}
+
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         toplevel.with_pending_state(|state| {

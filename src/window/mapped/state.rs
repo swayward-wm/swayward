@@ -7,11 +7,6 @@ impl Mapped {
                 .get_data::<ClientState>()
                 .and_then(|data| data.security_context.clone())
         });
-        let has_xdg_decoration = window.toplevel().is_some_and(|toplevel| {
-            toplevel.with_pending_state(|state| {
-                state.decoration_mode == Some(zxdg_toplevel_decoration_v1::Mode::ClientSide)
-            })
-        });
         let natural_size = window.geometry().size;
         let mut rv = Self {
             window,
@@ -30,10 +25,11 @@ impl Mapped {
             is_floating: false,
             is_untiled: false,
             natural_size,
-            has_xdg_decoration,
             is_window_cast_target: false,
             shortcuts_inhibit_policy: ShortcutsInhibitPolicy::Default,
             inhibit_idle_mode: swayward_ipc::command::InhibitIdleMode::None,
+            tearing_override: None,
+            max_render_time: 0,
             ignore_opacity_window_rule: false,
             command_opacity: 1.,
             block_out_buffer: RefCell::new(SolidColorBuffer::new((0., 0.), [0., 0., 0., 1.])),
@@ -197,6 +193,24 @@ impl Mapped {
 
     pub fn set_inhibit_idle_mode(&mut self, mode: swayward_ipc::command::InhibitIdleMode) {
         self.inhibit_idle_mode = mode;
+    }
+
+    /// Sway's `view_can_tear` (`sway/sway/tree/view.c:1298-1309`). swayward
+    /// serves no tearing-control protocol, so the window hint is never async.
+    pub fn can_tear(&self) -> bool {
+        self.tearing_override.unwrap_or(false)
+    }
+
+    pub fn set_tearing_override(&mut self, allow: bool) {
+        self.tearing_override = Some(allow);
+    }
+
+    pub fn max_render_time(&self) -> i32 {
+        self.max_render_time
+    }
+
+    pub fn set_max_render_time(&mut self, msec: i32) {
+        self.max_render_time = msec;
     }
 
     pub fn toggle_ignore_opacity_window_rule(&mut self) {
@@ -432,11 +446,22 @@ impl Mapped {
         self.set_urgent_at(urgent, get_monotonic_time());
     }
 
+    /// Sets urgency without the keyboard-focus guard. The caller has already
+    /// applied sway's check against the seat's focused container, which a
+    /// focused parent split makes differ from keyboard focus
+    /// (`view_set_urgent`, sway/sway/tree/view.c:1205-1213).
+    pub fn set_urgent_unguarded(&mut self, urgent: bool) {
+        self.store_urgent(urgent, get_monotonic_time());
+    }
+
     fn set_urgent_at(&mut self, urgent: bool, now: Duration) {
         if self.is_focused && urgent {
             return;
         }
+        self.store_urgent(urgent, now);
+    }
 
+    fn store_urgent(&mut self, urgent: bool, now: Duration) {
         let was_urgent = self.urgent_since.is_some();
         self.urgent_since = urgent.then_some(now);
         self.need_to_recompute_rules |= was_urgent != urgent;

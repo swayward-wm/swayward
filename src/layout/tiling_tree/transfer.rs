@@ -109,6 +109,9 @@ impl<W: LayoutElement> TilingTree<W> {
             self.fullscreen_layout_wrappers.clear();
             self.pre_layout_ipc_rects.clear();
             self.stale_fullscreen_rects.clear();
+            self.wrapper_arranged_boxes.clear();
+            self.fullscreen_rearranged = false;
+            self.unarranged_under_fullscreen.clear();
         }
         self.focus = self.focused_leaf_in(self.root);
         self.request_window_sizes();
@@ -226,6 +229,7 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             (self.root, None)
         };
+        self.unarranged_under_fullscreen.clear();
         self.insert_child(parent, id, after);
         if self
             .fullscreen_node()
@@ -417,6 +421,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 mapped_under_fullscreen,
             } => {
                 tile.update_config(self.view_size, self.scale, self.options.clone());
+                tile.set_sway_csd_floating(false);
                 let id = self.insert_with_id(
                     old_id,
                     Node {

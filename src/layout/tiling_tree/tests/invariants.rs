@@ -20,11 +20,21 @@ fn seed_side_table(t: &mut TilingTree<TestWindow>, name: &str, id: NodeId) {
         "fullscreen_layout_wrappers" => {
             t.fullscreen_layout_wrappers.insert(id);
         }
+        "wrapper_arranged_boxes" => {
+            t.wrapper_arranged_boxes.insert(id, Rectangle::default());
+        }
+        "unarranged_wrappers" => {
+            t.unarranged_wrappers.insert(id);
+        }
         "pre_layout_ipc_rects" => {
             t.pre_layout_ipc_rects.insert(id, Rectangle::default());
         }
         "stale_fullscreen_rects" => {
             t.stale_fullscreen_rects.insert(id, Rectangle::default());
+        }
+        "unarranged_under_fullscreen" => {
+            t.unarranged_under_fullscreen
+                .insert(id, Rectangle::default());
         }
         "tab_indicators" => {
             t.tab_indicators

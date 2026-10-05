@@ -6,7 +6,13 @@ impl<W: LayoutElement> TilingTree<W> {
         if !self.adjacent_fits_min_sane(&old.ipc_nodes, first, second, delta) {
             return false;
         }
+        let snapped = self.snap_shares_to_pixels(&old.ipc_nodes, first);
         let changed = self.resize_adjacent_inner(first, second, delta);
+        if !changed {
+            if let Some((parent, percents)) = snapped {
+                self.restore_shares(parent, percents);
+            }
+        }
         if changed {
             self.interactive_resize = None;
             self.animate_geometry_changes(old, None);
@@ -48,6 +54,54 @@ impl<W: LayoutElement> TilingTree<W> {
             *layout,
             [(first, change), (second, -change.ceil())],
         )
+    }
+
+    /// Sway snaps every sibling's fraction to its whole-pixel box before a
+    /// command resize (`container_resize_tiled`, sway/commands/resize.c:126-131
+    /// and 154-159). Returns the parent and its shares before snapping, or
+    /// `None` when a sibling has no box to snap to.
+    fn snap_shares_to_pixels(
+        &mut self,
+        ipc_nodes: &HashMap<NodeId, Rectangle<f64, Logical>>,
+        child: NodeId,
+    ) -> Option<(NodeId, Vec<f64>)> {
+        let parent = self.nodes.get(&child)?.parent?;
+        let Some(Node {
+            value:
+                TreeNode::Split {
+                    layout,
+                    children,
+                    percents,
+                    ..
+                },
+            ..
+        }) = self.nodes.get_mut(&parent)
+        else {
+            return None;
+        };
+        let extents = children
+            .iter()
+            .map(|child| ipc_nodes.get(child).map(|rect| axis_extent(*layout, rect)))
+            .collect::<Option<Vec<_>>>()?;
+        let total: f64 = extents.iter().sum();
+        if !total.is_finite() || extents.iter().any(|extent| *extent <= 0.) {
+            return None;
+        }
+        let old = std::mem::replace(
+            percents,
+            extents.iter().map(|extent| extent / total).collect(),
+        );
+        Some((parent, old))
+    }
+
+    fn restore_shares(&mut self, parent: NodeId, old: Vec<f64>) {
+        if let Some(Node {
+            value: TreeNode::Split { percents, .. },
+            ..
+        }) = self.nodes.get_mut(&parent)
+        {
+            *percents = old;
+        }
     }
 
     fn resize_adjacent_inner(&mut self, first: NodeId, second: NodeId, delta: f64) -> bool {
@@ -180,7 +234,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     .and_then(|parent| ipc_nodes.get(&parent))
                     .map(|rect| if horizontal { rect.size.w } else { rect.size.h })
                     .unwrap_or(axis_size);
-                parent_extent * value / 100. / axis_size.max(1.)
+                (parent_extent * value / 100.).trunc() / axis_size.max(1.)
             }
             SizeChange::SetFixed(_) | SizeChange::SetProportion(_) => return false,
         };
@@ -483,7 +537,11 @@ impl<W: LayoutElement> TilingTree<W> {
                     .max(1.);
                 let delta = match change {
                     SizeChange::AdjustFixed(value) => f64::from(value) / available,
-                    SizeChange::AdjustProportion(value) => parent_extent * value / 100. / available,
+                    // Sway converts ppt to an int amount of px, truncating
+                    // (resize_adjust_tiled, sway/commands/resize.c:258-277).
+                    SizeChange::AdjustProportion(value) => {
+                        (parent_extent * value / 100.).trunc() / available
+                    }
                     SizeChange::SetFixed(value) => (f64::from(value) - current) / available,
                     SizeChange::SetProportion(value) => {
                         ((parent_extent * value / 100.).trunc() - current) / available
@@ -572,6 +630,29 @@ impl<W: LayoutElement> TilingTree<W> {
             }
         });
         if check_min_sane && !fits_min_sane(&old.ipc_nodes, *layout, changes) {
+            return false;
+        }
+        let snapped = self.snap_shares_to_pixels(&old.ipc_nodes, target);
+        let Some(Node {
+            value: TreeNode::Split { percents, .. },
+            ..
+        }) = self.nodes.get_mut(&parent)
+        else {
+            return false;
+        };
+        if snapped.is_some()
+            && percents.iter().enumerate().any(|(index, percent)| {
+                let changed = if index == target_index {
+                    percent + delta
+                } else {
+                    percent - compensation
+                };
+                changed <= 0.
+            })
+        {
+            if let Some((parent, old)) = snapped {
+                self.restore_shares(parent, old);
+            }
             return false;
         }
         for (index, percent) in percents.iter_mut().enumerate() {

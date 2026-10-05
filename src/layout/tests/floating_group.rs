@@ -202,7 +202,7 @@ fn removing_a_floating_tree_leaf_uses_the_resident_tree() {
 }
 
 #[test]
-fn floating_tree_root_tracks_output_geometry_changes() {
+fn floating_tree_root_keeps_its_position_when_the_output_resizes() {
     let output = test_output();
     let mut workspace = workspace_with_tiled(output.clone(), 2);
     workspace.tiling_mut().focus_root();
@@ -214,16 +214,40 @@ fn floating_tree_root_tracks_output_geometry_changes() {
         Rectangle::new((100., 120.).into(), (600., 450.).into()),
     );
 
+    // Sway's arrange_workspace moves floaters only when the workspace origin
+    // moves (sway/sway/tree/arrange.c:277-304).
+    let area = Rectangle::from_size((2560., 1440.).into());
     workspace.floating_mut().update_config(
         (2560., 1440.).into(),
-        Rectangle::from_size((2560., 1440.).into()),
+        area,
+        area,
+        Some((0., 0.).into()),
         1.,
         Rc::new(Options::default()),
     );
-
     assert_eq!(
         workspace.floating().tree_rect(root),
-        Some(Rectangle::new((200., 240.).into(), (600., 450.).into()))
+        Some(Rectangle::new((100., 120.).into(), (600., 450.).into()))
+    );
+
+    // A moved origin keeps the center at the same fraction of the box
+    // (floating_fix_coordinates, sway/sway/tree/container.c:818-831).
+    let moved = Rectangle::new((0., 40.).into(), (2560., 1400.).into());
+    workspace.floating_mut().update_config(
+        (2560., 1440.).into(),
+        moved,
+        moved,
+        Some((0., 0.).into()),
+        1.,
+        Rc::new(Options::default()),
+    );
+    let center_y = 40. + (120. + 225.) * 1400. / 1440.;
+    assert_eq!(
+        workspace.floating().tree_rect(root),
+        Some(Rectangle::new(
+            (100., center_y - 225.).into(),
+            (600., 450.).into()
+        ))
     );
     workspace.floating().verify_invariants();
 }

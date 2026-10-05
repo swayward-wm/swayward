@@ -19,7 +19,7 @@ impl<W: LayoutElement> TilingTree<W> {
             return Err("No matching node.");
         };
         let old = self.compute_geometry();
-        let focus_after_swap = self.focus_after_swap(first, first_parent, second, second_parent);
+        let raise_after_swap = self.raise_after_swap(first, first_parent, second, second_parent);
         // Both parents and indices were resolved above and nothing has mutated the arena since.
         // Writing each slot works for a shared parent too: the two indices simply trade nodes.
         self.replace_child(first_parent, first_index, second);
@@ -30,8 +30,10 @@ impl<W: LayoutElement> TilingTree<W> {
             }
         }
         self.swap_fullscreen_modes(first, second);
-        if self.focus != focus_after_swap {
-            self.set_focus_id(focus_after_swap);
+        if let Some(other) = raise_after_swap {
+            let focus = self.focus;
+            self.set_focus_id(Some(other));
+            self.set_focus_id(focus);
         }
         self.animate_geometry_changes(old, None);
         self.request_window_sizes();
@@ -56,9 +58,12 @@ impl<W: LayoutElement> TilingTree<W> {
         Ok(())
     }
 
-    /// A focused node moving into a tabbed or stacked parent keeps the focus with it, so that
-    /// parent shows it; otherwise focus stays where it is.
-    fn focus_after_swap(
+    /// The container sway raises in the focus stack when the focused one is swapped out of a
+    /// tabbed or stacked parent. Sway reads each parent layout after the swap, so it checks the
+    /// parent the other container lands in; on one workspace it focuses that container and then
+    /// refocuses the original (`swap_focus`, sway/tree/container.c:1772-1784). Focus stays put
+    /// and the other container becomes the visible child of the tabbed parent.
+    fn raise_after_swap(
         &self,
         first: NodeId,
         first_parent: NodeId,
@@ -74,12 +79,12 @@ impl<W: LayoutElement> TilingTree<W> {
                 })
             )
         };
-        if self.focus == Some(first) && parent_is_tabbed(second_parent) {
+        if self.focus == Some(first) && parent_is_tabbed(first_parent) {
             Some(second)
-        } else if self.focus == Some(second) && parent_is_tabbed(first_parent) {
+        } else if self.focus == Some(second) && parent_is_tabbed(second_parent) {
             Some(first)
         } else {
-            self.focus
+            None
         }
     }
 
@@ -151,6 +156,7 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
         };
+        self.unarranged_under_fullscreen.clear();
         self.insert_child(parent, id, after);
         self.reap_empty_from(old_parent);
         self.compact_tree();
@@ -229,7 +235,7 @@ impl<W: LayoutElement> TilingTree<W> {
             return false;
         }
         if self.split_len(self.root) == Some(1) && self.root_branch(id) == Some(id) {
-            self.set_layout(self.root, wanted_layout);
+            self.set_layout_keeping_previous(self.root, wanted_layout);
             return false;
         }
         let backwards = direction.is_backwards();
@@ -410,7 +416,7 @@ impl<W: LayoutElement> TilingTree<W> {
 
     fn move_only_window(&mut self, id: NodeId, direction: Direction, wanted_layout: Layout) {
         if self.walk_reaches_unparallel_root(id, wanted_layout) {
-            self.set_layout(self.root, wanted_layout);
+            self.set_layout_keeping_previous(self.root, wanted_layout);
             // `set_layout` compacts the tree, which squashes a singleton split.
             // When the moved node was that split, continue with the one window
             // that survives the compaction.
@@ -543,8 +549,11 @@ impl<W: LayoutElement> TilingTree<W> {
             }
             None => return false,
         }
-        // `workspace_squash` (sway/commands/move.c:137,150).
-        self.squash_for_move(None);
+        // Sway zeroes the moved container's fractions, so the next arrange
+        // gives it the average of its new siblings' shares, and squashes the
+        // workspace (`container_move_to_container_from_direction`,
+        // sway/commands/move.c:135-137 and 148-150).
+        self.squash_for_move(Some(id));
         self.finish_directional_move(id);
         true
     }

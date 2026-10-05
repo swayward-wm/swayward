@@ -61,7 +61,7 @@ impl Swayward {
         }
         self.layout.with_windows_mut(|mapped, _| {
             if mapped.id() == id {
-                mapped.set_urgent(urgent);
+                mapped.set_urgent_unguarded(urgent);
             }
         });
     }

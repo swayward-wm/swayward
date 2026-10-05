@@ -295,6 +295,54 @@ fn move_position_uses_workspace_coordinates_and_rejects_absolute_ppt() {
     }
 }
 
+/// Oracle: floating_window_ppt_resize_rejected. A floating view resizes only
+/// in px or unitless amounts; a ppt-only resize is refused and leaves the
+/// window alone (sway/commands/resize.c:523-537). Differential seed 1136.
+#[test]
+fn ppt_only_resize_of_a_floating_window_is_refused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+
+    let rect = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        find_json_node(&tree, "floating_con", false).unwrap()["rect"].clone()
+    };
+    let before = rect(&mut f);
+
+    for command in [
+        "resize shrink width 5 ppt",
+        "resize grow height 10 ppt",
+        "resize grow left 5 ppt",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(!outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(
+            outcome[0].error.as_deref(),
+            Some("Floating containers cannot use ppt measurements"),
+            "{command}"
+        );
+        assert_eq!(rect(&mut f), before, "{command}");
+    }
+}
+
 #[test]
 fn move_absolute_position_is_verbatim_under_a_bar_and_gaps() {
     // `move absolute position` must use the requested coordinate unchanged.
@@ -307,7 +355,6 @@ fn move_absolute_position_is_verbatim_under_a_bar_and_gaps() {
     let mut config = swayward_config::Config::default();
     config.animations.off = true;
     config.layout.gaps = 4.;
-    config.layout.outer_gaps_configured = true;
     let mut f = Fixture::with_config(config);
     f.add_output(1, (800, 600));
     let client = f.add_client();
@@ -790,4 +837,255 @@ fn floating_toggle_centers_the_natural_size_and_split_keeps_it() {
         serde_json::json!({"x": 290, "y": content_top + titlebar, "width": 700, "height": 493}),
         "{child}"
     );
+}
+
+/// Differential family floating-split-rect (random-v2 seeds 1263, 2212, 2247, 5572; oracle row
+/// `floating_split_keeps_rect`): a split that arrives before the client commits its floating
+/// size still wraps the box `container_floating_resize_and_center` gave the view, because
+/// `container_split` copies the container's pending geometry (sway/tree/container.c:1543-1548).
+#[test]
+fn split_before_the_floating_commit_keeps_the_floating_box() {
+    let mut config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let surface = f.client(client).create_window().surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size(696, 491);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    // Tiled at the full workspace, the client commits that size.
+    let window = f.client(client).window(&surface);
+    window.set_size(1266, 1379);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    f.double_roundtrip(client);
+    // The client has not committed the floating size yet.
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
+
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let split = find_json_node(&tree, "floating_con", false).unwrap();
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    assert_eq!(split["layout"], "splith", "{split}");
+    assert_eq!(split["rect"]["width"], 700, "{split}");
+    assert_eq!(split["rect"]["height"], 493 + titlebar, "{split}");
+    assert_eq!(child["rect"]["width"], 700, "{child}");
+    assert_eq!(child["rect"]["height"], 493, "{child}");
+}
+
+/// Differential family floating-split-toggle-border (random-v2 seeds 10229, 10238, 10622;
+/// oracle row `floating_split_toggle_wraps`): `split toggle` and `splitt` on a floating view
+/// wrap it in a new split like `splith`/`splitv`. The floater has no parent, so
+/// `container_parent_layout` reads the workspace layout and the split is V unless that is V
+/// (sway/commands/split.c:64-71,104-115, sway/tree/container.c:1353-1361).
+#[test]
+fn split_toggle_wraps_a_floating_view_against_the_workspace_layout() {
+    // A portrait output gives the workspace a splitv default layout
+    // (`output_get_default_layout`, sway/tree/output.c).
+    for (output, command, expected) in [
+        ((1280, 720), "split toggle", "splitv"),
+        ((1280, 720), "splitt", "splitv"),
+        ((720, 1280), "split toggle", "splith"),
+        ((720, 1280), "splitt", "splith"),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, output);
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+        f.niri_state().ipc_refresh_layout();
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let split = find_json_node(&tree, "floating_con", false).unwrap();
+        assert_eq!(
+            split["layout"], expected,
+            "{command} on {output:?}: {split}"
+        );
+        assert_eq!(split["nodes"].as_array().map(Vec::len), Some(1), "{split}");
+        assert_eq!(split["nodes"][0]["focused"], true, "{split}");
+    }
+}
+
+/// Differential family floating-split-rect, random-v2 seed 2247: `border pixel 3` on a
+/// floating view keeps its content box and moves the container around it
+/// (`container_set_geometry_from_content`, sway/commands/border.c:94-96,
+/// sway/tree/container.c:1018-1039), so a later split wraps the moved box.
+#[test]
+fn floating_border_change_keeps_the_content_box() {
+    let mut config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let surface = f.client(client).create_window().surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size(696, 491);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let floating = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        find_json_node(&tree, "floating_con", false)
+            .unwrap()
+            .clone()
+    };
+    let before = floating(&mut f);
+    let content = |node: &Value| {
+        (
+            node["rect"]["x"].as_i64().unwrap() + node["window_rect"]["x"].as_i64().unwrap(),
+            node["rect"]["y"].as_i64().unwrap()
+                + node["deco_rect"]["height"].as_i64().unwrap()
+                + node["window_rect"]["y"].as_i64().unwrap(),
+        )
+    };
+    let (content_x, content_y) = content(&before);
+
+    assert!(crate::command::execute(f.niri_state(), "border pixel 3")[0].success);
+    let after = floating(&mut f);
+    assert_eq!(content(&after), (content_x, content_y), "{before}\n{after}");
+    assert_eq!(
+        after["rect"],
+        serde_json::json!({"x": content_x - 3, "y": content_y - 3, "width": 702, "height": 497}),
+        "{after}"
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "split v")[0].success);
+    let split = floating(&mut f);
+    assert_eq!(split["rect"], after["rect"], "{split}");
+    assert_eq!(split["nodes"][0]["rect"], after["rect"], "{split}");
+}
+
+/// An output rescale leaves a floater where it was and lets the client pick
+/// its own new size. sway's arrange_workspace moves floaters only when the
+/// workspace origin moves (sway/sway/tree/arrange.c:277-304), sends no
+/// configure bounds (sway/sway/desktop/xdg_shell.c:305), and a floating
+/// client's own size change resizes its container (xdg_shell.c:319-331).
+/// Oracle row: state `floating_output_scale_keeps_position`; differential
+/// seed 10900.
+#[test]
+fn output_rescale_keeps_floating_position_and_client_size() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in [
+        "floating enable",
+        "resize set 700 px 500 px",
+        "move absolute position 290 px 87 px",
+    ] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    f.double_roundtrip(client);
+    f.client(client).window(&surface).ack_last_and_commit();
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    let (w, h) = window.configures_received.last().unwrap().1.size;
+    window.set_size(w as u16, h as u16);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let rect = |f: &mut Fixture| {
+        let tree = get_tree(f);
+        let rect = &find_json_node(&tree, "floating_con", false).unwrap()["rect"];
+        (
+            rect["x"].as_i64().unwrap(),
+            rect["y"].as_i64().unwrap(),
+            rect["width"].as_i64().unwrap(),
+        )
+    };
+    let (x, y, width) = rect(&mut f);
+    assert_eq!((x, y), (290, 87));
+    let _ = f.client(client).window(&surface).format_recent_configures();
+
+    assert!(crate::command::execute(f.niri_state(), "output * scale 2")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(
+        rect(&mut f),
+        (290, 87, width),
+        "a rescale must not move the floater"
+    );
+
+    // The client narrows itself for the new scale, as foot does.
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size((w - 34) as u16, h as u16);
+    window.commit();
+    f.double_roundtrip(client);
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    let stale: Vec<_> = window
+        .recent_configures()
+        .filter(|configure| configure.size == (w, h))
+        .cloned()
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "configures since the rescale repeat the old size: {stale:?}"
+    );
+    assert_eq!(rect(&mut f), (290, 87, width - 34));
 }

@@ -264,6 +264,73 @@ fn splitting_a_focused_container_keeps_it_nested() {
 }
 
 #[test]
+fn splitting_the_workspace_keeps_its_representation_until_the_tree_changes() {
+    // Sway's workspace_split wraps the children and changes the workspace layout without
+    // refreshing the representation (sway/tree/workspace.c:1058-1079). Oracle row:
+    // split_workspace_keeps_stale_representation.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "split v")[0].success);
+
+    let workspace_json = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        tree["nodes"][1]["nodes"][0].clone()
+    };
+    let workspace = workspace_json(&mut f);
+    assert_eq!(workspace["layout"], "splitv");
+    assert_eq!(workspace["representation"], "H[H[fixture-1]]");
+    assert_eq!(workspace["nodes"][0]["layout"], "splith");
+
+    map_test_window(&mut f, client, "fixture-2");
+    let workspace = workspace_json(&mut f);
+    assert_eq!(workspace["representation"], "V[H[fixture-1] fixture-2]");
+}
+
+#[test]
+fn splitting_a_tabbed_workspace_keeps_its_tabbed_representation() {
+    // As above with a tabbed workspace: the wrapper keeps the tabbed layout and the workspace
+    // representation keeps the stale T (sway/tree/workspace.c:1058-1079). Differential seed
+    // 11667; oracle row: split_tabbed_workspace_keeps_stale_representation.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
+
+    let workspace_json = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        tree["nodes"][1]["nodes"][0].clone()
+    };
+    let workspace = workspace_json(&mut f);
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["representation"], "T[T[fixture-1]]");
+    assert_eq!(workspace["nodes"][0]["layout"], "tabbed");
+
+    map_test_window(&mut f, client, "fixture-2");
+    let workspace = workspace_json(&mut f);
+    assert_eq!(workspace["representation"], "H[T[fixture-1] fixture-2]");
+}
+
+#[test]
 fn removing_one_of_two_split_windows_preserves_the_wrapper() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
@@ -381,6 +448,43 @@ fn fullscreen_floating_window_keeps_sways_raw_focus() {
         find_json_node_with_app_id(&tree, "fixture-1").unwrap()["focused"],
         true
     );
+}
+
+// random-v2 seed 13438 (differential): swapping the focused tab with its
+// sibling keeps focus, and so the visible tab, on the focused window in its
+// new slot. Sway reads the parent layout after the swap, focuses the other
+// container and refocuses the original (`swap_focus`,
+// sway/tree/container.c:1772-1788).
+#[test]
+fn swapping_the_focused_tab_keeps_it_focused_and_visible() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "mark oracle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    map_test_window(&mut f, client, "fixture-2");
+
+    let outcome = crate::command::execute(f.niri_state(), "swap container with mark oracle");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let parent = find_json_parent_of_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(parent["layout"], "tabbed");
+    let nodes = parent["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["app_id"], "fixture-2");
+    assert_eq!(nodes[0]["focused"], true);
+    assert_eq!(nodes[0]["visible"], true);
+    assert_eq!(nodes[1]["app_id"], "fixture-1");
+    assert_eq!(nodes[1]["focused"], false);
+    assert_eq!(nodes[1]["visible"], false);
 }
 
 // random seed 260 step 5 (sway-1.12-random): a floating fullscreen window
@@ -771,6 +875,98 @@ fn layout_wrap_under_fullscreen_commits_the_hidden_views_border() {
     assert_eq!(hidden["percent"], serde_json::Value::Null);
 }
 
+fn rect(view: &serde_json::Value, key: &str) -> [i64; 4] {
+    ["x", "y", "width", "height"].map(|field| view[key][field].as_i64().unwrap())
+}
+
+// differential seeds 1684 step 4, 2466 step 4 (sway-1.12): under a stacked
+// parent `get_deco_rect` places the titlebar row by sibling index and
+// `ipc_json_describe_node` subtracts one row per sibling from the box, so an
+// unarranged view's empty box is reported 54 px down at height -54
+// (sway/ipc-json.c:543-580, 816-825). Its border is irrelevant: calloc's
+// `border none` view gets the same rows.
+#[test]
+fn unarranged_view_under_stacked_parent_reports_every_titlebar_row() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "layout stacking")[0].success);
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    map_app(&mut f, client, "hidden");
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let titlebar = hidden["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{hidden}");
+    assert_eq!(hidden["border"], "none", "{hidden}");
+    assert_eq!(rect(hidden, "rect"), [0, 2 * titlebar, 0, -2 * titlebar]);
+    assert_eq!(rect(hidden, "deco_rect"), [0, titlebar, 0, titlebar]);
+}
+
+// differential seeds 1482 step 4, 2436 step 5, 4912 step 5 (sway-1.12): a
+// view mapped into a `layout` wrapper under fullscreen makes `view_map`
+// arrange the wrapper (sway/tree/view.c:931-940). The wrapper was never
+// arranged, so its children are laid out inside its empty box: the
+// fullscreen view reports 0x0 and the new view a titlebar over an empty box
+// with a 1x1 content box (sway/tree/arrange.c:183-212,
+// sway/tree/view.c:461-462). `workspace_switch` then arranges the workspace,
+// which restores only the fullscreen view's output box
+// (sway/tree/workspace.c:731-743, sway/tree/arrange.c:310-316).
+#[test]
+fn view_mapped_into_layout_wrapper_under_fullscreen_arranges_it_at_an_empty_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "default_border none")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    map_app(&mut f, client, "hidden");
+
+    let tree = tree_json(&mut f);
+    let fullscreen = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    assert_eq!(rect(fullscreen, "rect"), [0, 0, 0, 0], "{fullscreen}");
+    let titlebar = hidden["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{hidden}");
+    assert_eq!(rect(hidden, "rect"), [0, titlebar, 0, -titlebar]);
+    assert_eq!(rect(hidden, "window_rect"), [0, 0, 1, 1]);
+    assert_eq!(hidden["percent"], serde_json::Value::Null);
+
+    assert!(crate::command::execute(f.niri_state(), "workspace 1")[0].success);
+
+    let tree = tree_json(&mut f);
+    let fullscreen = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    assert_eq!(rect(fullscreen, "rect"), [0, 0, 1280, 720], "{fullscreen}");
+    assert_eq!(rect(hidden, "rect"), [0, titlebar, 0, -titlebar]);
+}
+
+// differential seed 2576 step 4 (sway-1.12): `layout stacking` under
+// fullscreen wraps the workspace without arranging the siblings, so the
+// tiled view keeps its 640 px tiled box but GET_TREE subtracts both stacked
+// rows from it (sway/ipc-json.c:816-825).
+#[test]
+fn layout_stacking_under_fullscreen_reports_every_row_over_the_kept_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout stacking")[0].success);
+
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "tiled").unwrap();
+    let titlebar = tiled["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{tiled}");
+    assert_eq!(
+        rect(tiled, "rect"),
+        [0, 2 * titlebar, 640, 720 - 2 * titlebar]
+    );
+}
+
 // random seed 47 step 6 (sway-1.12-random): with only a floating fullscreen
 // view on the workspace, a new view has no tiling sibling, so `view_map`
 // attaches it with `workspace_add_tiling` (sway/tree/view.c:849-901), which
@@ -893,4 +1089,365 @@ fn fullscreen_toggle_after_split_targets_the_view() {
     assert_eq!(wrapper["nodes"][0]["app_id"], "fixture-2", "{wrapper}");
     assert_eq!(wrapper["nodes"][0]["fullscreen_mode"], 1, "{wrapper}");
     assert_eq!(wrapper["nodes"][0]["focused"], true, "{wrapper}");
+}
+
+fn run(f: &mut Fixture, commands: &[&str]) {
+    for command in commands {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+}
+
+// Differential family diff-fam-fullscreen-percent, seeds 1006 1167 1477
+// (gaps outer) and 1295 1759 (gaps horizontal). A workspace fullscreen view's
+// box is the output's (sway/tree/arrange.c:310-316), and its percent is that
+// box over the workspace's pending box (sway/ipc-json.c:744-755), which the
+// gaps shrink. Sway does not clamp it to 1.
+#[test]
+fn workspace_fullscreen_percent_is_the_output_over_the_gapped_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen enable", "gaps outer current plus 5"]);
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["rect"]["width"], 1280, "{view}");
+    assert_eq!(view["percent"], (1280. / 1270.) * (720. / 710.), "{view}");
+}
+
+// Differential family diff-fam-fullscreen-percent, seeds 1029 (gaps), 1158
+// (titlebar_border_thickness) and 3041 (titlebar_padding). A global
+// fullscreen container is not `workspace->fullscreen`, so a command that
+// arranges only the workspace (sway/commands/gaps.c:136,
+// sway/commands/titlebar_padding.c:35) lays it out in its tile slot
+// (sway/tree/arrange.c:310-322); only its content keeps the root box.
+#[test]
+fn workspace_arrange_puts_a_global_fullscreen_view_in_its_tile_slot() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen toggle global", "titlebar_padding 1"]);
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 0.5, "{view}");
+    assert_eq!(view["rect"]["x"], 640, "{view}");
+    assert_eq!(view["rect"]["width"], 640, "{view}");
+    assert_eq!(view["window_rect"]["x"], -640, "{view}");
+    assert_eq!(view["window_rect"]["width"], 1280, "{view}");
+
+    // smart_gaps arranges the root (sway/commands/smart_gaps.c:25), which
+    // gives the global fullscreen view the root box again
+    // (sway/tree/arrange.c:349-355).
+    run(&mut f, &["smart_gaps on"]);
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 1.0, "{view}");
+    assert_eq!(view["rect"]["width"], 1280, "{view}");
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(
+        &mut f,
+        &["fullscreen toggle global", "gaps outer current plus 5"],
+    );
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 1.0, "{view}");
+    assert_eq!(view["rect"]["x"], 5, "{view}");
+    assert_eq!(view["rect"]["width"], 1270, "{view}");
+    // The normal border's title bar is still enabled from the tiled
+    // arrange, so window_rect.y is 0 (sway/ipc-json.c:596-601).
+    assert_eq!(view["window_rect"]["x"], -5, "{view}");
+    assert_eq!(view["window_rect"]["y"], 0, "{view}");
+}
+
+// Differential family diff-fam-fullscreen-split-global-coexist, seed 11675.
+// `split toggle` on a fullscreen view hands workspace fullscreen to the new
+// split (`container_replace`, sway/tree/container.c:1471-1501). Making the
+// view global fullscreen then ends only `root->fullscreen_global` and the
+// view's own workspace mode, not `workspace->fullscreen`
+// (sway/tree/container.c:1325-1332), so the split keeps mode 1 beside the
+// view's mode 2.
+#[test]
+fn global_fullscreen_view_inside_workspace_fullscreen_split_coexist() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "fullscreen");
+    run(
+        &mut f,
+        &[
+            "fullscreen enable",
+            "split toggle",
+            "fullscreen toggle global",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["fullscreen_mode"], 2, "{view}");
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let split = &workspace["nodes"][1];
+    assert_eq!(split["type"], "con", "{workspace}");
+    assert_eq!(split["fullscreen_mode"], 1, "{workspace}");
+
+    // Disabling the view's global mode leaves the split fullscreen.
+    run(&mut f, &["fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["fullscreen_mode"], 0, "{view}");
+    assert_eq!(
+        tree["nodes"][1]["nodes"][0]["nodes"][1]["fullscreen_mode"],
+        1
+    );
+}
+
+// Differential family diff-fam-fullscreen-percent, seed 6264. `layout` wraps
+// the workspace children (sway/tree/workspace.c:898-910); detaching the
+// global fullscreen view clears `root->fullscreen_global`
+// (sway/tree/container.c:1440-1446), so the workspace arrange that follows
+// lays the wrapper and the view out in their tile slots.
+#[test]
+fn layout_wrap_under_global_fullscreen_arranges_the_wrapper() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen toggle global", "layout splitv"]);
+
+    let tree = tree_json(&mut f);
+    let wrapper = &tree["nodes"][1]["nodes"][0]["nodes"][0];
+    assert_eq!(wrapper["layout"], "splitv", "{wrapper}");
+    assert_eq!(wrapper["percent"], 1.0, "{wrapper}");
+    assert_eq!(wrapper["rect"]["width"], 1280, "{wrapper}");
+    assert_eq!(wrapper["nodes"][0]["percent"], 1.0, "{wrapper}");
+}
+
+// Differential family diff-fam-fullscreen-percent, seeds 2674 and 1158. Sway gives the
+// last of three columns of 1280 the 426 px remainder (sway/tree/arrange.c:
+// 78-88), and a fullscreen child's percent is the output over that box.
+#[test]
+fn fullscreen_child_percent_uses_the_parents_whole_pixel_slot() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["one", "two", "three"] {
+        map_app(&mut f, client, app_id);
+    }
+    run(&mut f, &["splith", "fullscreen toggle global"]);
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "three").unwrap();
+    assert_eq!(view["percent"], (1280. / 426.) * (720. / 720.), "{view}");
+}
+
+/// `layout default` restores the split layout the `layout` command last
+/// replaced on that node, including an empty workspace, and fails when none
+/// was recorded (sway/commands/layout.c:106-108,160-189). A move that
+/// reorients the workspace does not record one (sway/commands/move.c:331-340).
+/// Oracle rows differential_seed_1257, 1364, 1718, 1992 and
+/// layout_default_prev_split.
+#[test]
+fn layout_default_restores_only_a_split_the_layout_command_replaced() {
+    let expected_syntax = "Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'";
+    for layout in ["stacking", "tabbed"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        assert!(crate::command::execute(f.niri_state(), &format!("layout {layout}"))[0].success);
+        let reply = &crate::command::execute(f.niri_state(), "layout default")[0];
+        assert!(reply.success, "{layout}: {reply:?}");
+        let tree = tree_json(&mut f);
+        assert_eq!(tree["nodes"][1]["nodes"][0]["layout"], "splith", "{layout}");
+    }
+
+    // With a view focused, the layout lands on a new wrapper whose
+    // prev_split_layout starts empty (sway/commands/layout.c:178-183,
+    // sway/tree/container.c:112), so `layout default` has nothing to restore.
+    for setup in ["layout stacking", "layout tabbed", "move down", "move up"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        let client = f.add_client();
+        map_app(&mut f, client, "fixture-1");
+        assert!(crate::command::execute(f.niri_state(), setup)[0].success);
+        let reply = &crate::command::execute(f.niri_state(), "layout default")[0];
+        assert!(!reply.success, "{setup}: {reply:?}");
+        assert_eq!(reply.error.as_deref(), Some(expected_syntax));
+        assert_eq!(reply.parse_error, Some(true));
+    }
+}
+
+/// A split on an empty workspace records the old workspace layout as
+/// `prev_split_layout` even when the layout does not change
+/// (sway/tree/workspace.c:1058-1063), so `layout default` succeeds after it.
+/// Differential family diff-fam-split-empty-ws-prev-split, seed 13169.
+#[test]
+fn split_on_an_empty_workspace_records_the_previous_layout() {
+    for (setup, expected) in [
+        (&["split h"][..], "splith"),
+        (&["split v"][..], "splith"),
+        (&["layout tabbed", "split v"][..], "tabbed"),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        for command in setup {
+            assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        }
+        let reply = &crate::command::execute(f.niri_state(), "layout default")[0];
+        assert!(reply.success, "{setup:?}: {reply:?}");
+        let tree = tree_json(&mut f);
+        assert_eq!(
+            tree["nodes"][1]["nodes"][0]["layout"], expected,
+            "{setup:?}"
+        );
+    }
+}
+
+#[test]
+fn split_toggle_reads_the_parent_layout_like_sway() {
+    // sway `cmd_split`/`cmd_splitt` (sway/commands/split.c): split H only when the
+    // focused container's parent is V; a focused workspace always splits V.
+    // Oracle rows differential_seed_1013 and differential_seed_1732.
+    let workspace_layout = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        (
+            workspace["layout"].as_str().unwrap().to_owned(),
+            workspace["representation"].as_str().map(str::to_owned),
+        )
+    };
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    for command in ["split toggle", "split toggle"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    assert_eq!(workspace_layout(&mut f).0, "splitv");
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "only");
+    assert!(crate::command::execute(f.niri_state(), "splitt")[0].success);
+    assert_eq!(
+        workspace_layout(&mut f),
+        ("splitv".to_owned(), Some("V[only]".to_owned()))
+    );
+}
+
+#[test]
+fn layout_toggle_on_an_empty_workspace_toggles_the_workspace() {
+    // sway/commands/layout.c:159-163,184-188: with no focused container the
+    // workspace layout itself toggles. Oracle rows differential_seed_1174,
+    // differential_seed_1111 and differential_seed_1088.
+    for command in ["layout toggle split", "layout toggle", "layout toggle all"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        assert_eq!(workspace["layout"], "splitv", "{command}");
+        assert_eq!(workspace["representation"], "V[]", "{command}");
+    }
+}
+
+// random-v2 seed 1057 step 5 (diff-fam-percent-rounding): sway snaps the
+// siblings' fractions to their whole-pixel boxes before a command resize
+// (`container_resize_tiled`, sway/commands/resize.c:126-131), and a new view
+// then takes the average of those fractions (sway/tree/arrange.c:48-52).
+#[test]
+fn resize_snaps_fractions_to_whole_pixels_before_a_new_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-1", "fixture-2", "fixture-3"] {
+        map_app(&mut f, client, app_id);
+    }
+    assert!(crate::command::execute(f.niri_state(), "resize grow width 10 px")[0].success);
+    map_app(&mut f, client, "fixture-4");
+
+    let tree = tree_json(&mut f);
+    let percents = ["fixture-1", "fixture-2", "fixture-3", "fixture-4"]
+        .map(|app_id| find_json_node_with_app_id(&tree, app_id).unwrap()["percent"].clone());
+    assert_eq!(
+        percents,
+        [0.24765625, 0.24765625, 0.25546875, 0.24921875].map(serde_json::Value::from)
+    );
+}
+
+// random-v2 seed 1071 step 5 (diff-fam-percent-rounding): under a fullscreen
+// view, sway leaves the other children at the whole-pixel boxes they last had
+// over the visible children (`arrange_workspace`, sway/tree/arrange.c:310-316):
+// 1280 / 3 rounds to 427 px, so percent is 427 / 1280.
+#[test]
+fn view_mapped_under_fullscreen_keeps_whole_pixel_sibling_fractions() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-1", "fixture-2", "fixture-3"] {
+        map_app(&mut f, client, app_id);
+    }
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    map_app(&mut f, client, "fixture-4");
+
+    let tree = tree_json(&mut f);
+    for app_id in ["fixture-1", "fixture-2"] {
+        let view = find_json_node_with_app_id(&tree, app_id).unwrap();
+        assert_eq!(view["percent"], 0.33359375, "{view}");
+    }
+}
+
+#[test]
+fn moving_a_fullscreen_floating_window_leaves_the_new_workspace_without_representation() {
+    // sway `workspace_add_floating` (sway/tree/workspace.c:960-970) never calls
+    // `workspace_update_representation`, so a workspace that only ever held a
+    // floating child reports `representation: null`. Oracle rows
+    // differential_seed_7532 and move_fullscreen_floating_keeps_null_representation.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "only");
+    for command in [
+        "floating toggle",
+        "fullscreen toggle",
+        "move container to workspace 2",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let tree = tree_json(&mut f);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let target = workspaces.iter().find(|ws| ws["name"] == "2").unwrap();
+    assert_eq!(
+        target["floating_nodes"].as_array().unwrap().len(),
+        1,
+        "{target}"
+    );
+    assert!(target["representation"].is_null(), "{target}");
 }

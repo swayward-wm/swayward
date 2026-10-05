@@ -596,7 +596,7 @@ fn mixed_multibyte_command_text_never_panics() {
             input.push_str(PIECES[(state % PIECES.len() as u64) as usize]);
         }
         let _ = parse(&input);
-        let _ = parse_with_variables(&input, &variables, FocusedNode::View);
+        let _ = parse_with_variables(&input, &variables);
     }
 }
 
@@ -623,10 +623,11 @@ fn quoted_command_names_are_unknown_commands() {
             "{input}"
         );
         assert_eq!(
-            parse_with_variables(input, &[("$oracle".into(), "x".into())], FocusedNode::View),
+            parse_with_variables(input, &[("$oracle".into(), "x".into())]),
             vec![Err(parse_error(format!(
                 "Unknown/invalid command '{name}'"
-            )))],
+            ))
+            .into())],
             "{input} with variables"
         );
     }
@@ -686,7 +687,7 @@ fn exec_keeps_quotes_when_variables_are_defined() {
         ("exec_always   a  \"b  c\" $oracle", "a \"b  c\" value"),
         ("exec '$oracle -x'", "value -x"),
     ] {
-        let parsed = parse_with_variables(input, &variables, FocusedNode::View);
+        let parsed = parse_with_variables(input, &variables);
         let Some(Ok(ParsedCommand {
             command: Command::Exec { command, .. },
             ..
@@ -696,4 +697,25 @@ fn exec_keeps_quotes_when_variables_are_defined() {
         };
         assert_eq!(command, expected, "{input}");
     }
+}
+
+/// A rejection whose kind depends on the focus does not end the list at
+/// parse time. Sway stops only on CMD_INVALID (`sway/sway/commands.c:295-299`),
+/// and `opacity bogus` is CMD_FAILURE without a container, so the command
+/// after it must still be there for dispatch to run.
+#[test]
+fn a_focus_dependent_rejection_keeps_the_rest_of_the_list() {
+    let parsed = parse_with_variables("opacity bogus; focus child", &[]);
+    let [Err(failure), Ok(next)] = parsed.as_slice() else {
+        panic!("expected a rejection followed by a command: {parsed:?}");
+    };
+    assert_eq!(next.command, parse_one("focus child").unwrap());
+    let no_container = failure.clone().resolve(FocusedNode::Nothing);
+    assert_eq!(no_container.error.as_deref(), Some("No current container"));
+    assert_eq!(no_container.parse_error, Some(false));
+    let view = failure.clone().resolve(FocusedNode::View);
+    assert_eq!(view.parse_error, Some(true));
+
+    // `parse` resolves as if a view were focused, so it stops there.
+    assert_eq!(parse("opacity bogus; focus child").len(), 1);
 }

@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/window/mapped/"]
+what = "`Mapped` stores sway's per-view tearing override and max_render_time, set by the `allow_tearing` and `max_render_time` commands and reported in GET_TREE."
+why = "Sway keeps both values on the view (`sway/commands/allow_tearing.c:12-22`, `sway/commands/max_render_time.c:23-31`) and serializes them per view (`sway/ipc-json.c:609-611`); niri has no equivalent."

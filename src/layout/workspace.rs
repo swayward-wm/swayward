@@ -53,11 +53,11 @@ pub struct Workspace<W: LayoutElement> {
     /// Whether the floating layout is active instead of the tiling layout.
     floating_is_active: FloatingActive,
 
-    /// The original output of this workspace.
-    ///
-    /// Most of the time this will be the workspace's current output, however, after an output
-    /// disconnection, it may remain pointing to the disconnected output.
-    pub(super) original_output: OutputId,
+    /// Sway's workspace output priority list (`ws->output_priority`): output names or
+    /// `make model serial` identifiers, highest priority first. Evacuation and output
+    /// re-enable place the workspace on the first entry naming an enabled output
+    /// (sway/sway/tree/workspace.c:770-819, sway/sway/tree/output.c:31-89, :206-249).
+    pub(super) output_priority: Vec<String>,
 
     /// Current output of this workspace.
     output: Option<Output>,
@@ -118,20 +118,9 @@ pub struct Workspace<W: LayoutElement> {
     /// Gap defaults copied when this workspace was created or changed at runtime.
     gaps: f64,
     outer_gaps: swayward_config::OuterGaps,
-    outer_gaps_configured: bool,
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
-}
-
-#[derive(Debug, Clone)]
-pub struct OutputId(String);
-
-impl OutputId {
-    pub fn matches(&self, output: &Output) -> bool {
-        let output_name = output.user_data().get::<OutputName>().unwrap();
-        output_name.matches(&self.0)
-    }
 }
 
 static WORKSPACE_ID_COUNTER: IdCounter = IdCounter::new();
@@ -213,11 +202,41 @@ pub struct AddTileOptions {
     pub is_floating: bool,
 }
 
-impl OutputId {
-    pub fn new(output: &Output) -> Self {
-        let output_name = output.user_data().get::<OutputName>().unwrap();
-        Self(output_name.format_make_model_serial_or_connector())
-    }
+/// Sway's output identifier, `make model serial` with `Unknown` for a missing
+/// field (output_get_identifier, sway/sway/config/output.c:31-38).
+pub(super) fn sway_output_identifier(output: &Output) -> String {
+    output
+        .user_data()
+        .get::<OutputName>()
+        .unwrap()
+        .format_make_model_serial()
+}
+
+/// Sway's output_match_name_or_id (sway/sway/desktop/output.c:43-53).
+pub(super) fn sway_output_matches(output: &Output, name_or_id: &str) -> bool {
+    name_or_id == "*"
+        || sway_output_identifier(output).eq_ignore_ascii_case(name_or_id)
+        || output
+            .user_data()
+            .get::<OutputName>()
+            .unwrap()
+            .connector
+            .eq_ignore_ascii_case(name_or_id)
+}
+
+/// The configured outputs a new workspace prefers, before the output it is
+/// created on (workspace_create, sway/sway/tree/workspace.c:245-256).
+fn configured_output_priority(config: Option<&WorkspaceConfig>) -> Vec<String> {
+    config
+        .and_then(|c| {
+            c.sway_output_assignment
+                .clone()
+                .or_else(|| c.open_on_output.clone().map(|output| vec![output]))
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| name != "*")
+        .collect()
 }
 
 impl FloatingActive {
@@ -237,11 +256,8 @@ impl<W: LayoutElement> Workspace<W> {
         clock: Clock,
         base_options: Rc<Options>,
     ) -> Self {
-        let original_output = config
-            .as_ref()
-            .and_then(|c| c.open_on_output.clone())
-            .map(OutputId)
-            .unwrap_or(OutputId::new(&output));
+        let mut output_priority = configured_output_priority(config.as_ref());
+        output_priority::add(&mut output_priority, &output);
 
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
 
@@ -249,17 +265,12 @@ impl<W: LayoutElement> Workspace<W> {
         let options = Options::clone(&base_options).with_merged_layout(layout_config.as_ref());
         let gaps = options.layout.gaps;
         let outer_gaps = options.layout.outer_gaps;
-        let outer_gaps_configured = options.layout.outer_gaps_configured;
         let options = Rc::new(options.adjusted_for_scale(scale.fractional_scale()));
 
         let view_size = output_size(&output);
         let output_area = compute_working_area(&output);
-        let working_area = apply_outer_gaps(
-            output_area,
-            options.layout.outer_gaps,
-            options.layout.gaps,
-            options.layout.outer_gaps_configured,
-        );
+        let working_area =
+            apply_outer_gaps(output_area, options.layout.outer_gaps, options.layout.gaps);
 
         let tiling = TilingTree::new(
             view_size,
@@ -273,6 +284,8 @@ impl<W: LayoutElement> Workspace<W> {
         let floating = FloatingLayout::new(
             view_size,
             working_area,
+            output_area,
+            Some(output.current_location().to_f64()),
             scale.fractional_scale(),
             clock.clone(),
             options.clone(),
@@ -285,7 +298,7 @@ impl<W: LayoutElement> Workspace<W> {
             tiling,
             floating,
             floating_is_active: FloatingActive::No,
-            original_output,
+            output_priority,
             scale,
             transform: output.current_transform(),
             view_size,
@@ -302,7 +315,6 @@ impl<W: LayoutElement> Workspace<W> {
             layout_config,
             gaps,
             outer_gaps,
-            outer_gaps_configured,
             id: WorkspaceId::next(),
         }
     }
@@ -312,12 +324,7 @@ impl<W: LayoutElement> Workspace<W> {
         clock: Clock,
         base_options: Rc<Options>,
     ) -> Self {
-        let original_output = OutputId(
-            config
-                .as_ref()
-                .and_then(|c| c.open_on_output.clone())
-                .unwrap_or_default(),
-        );
+        let output_priority = configured_output_priority(config.as_ref());
 
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
 
@@ -325,17 +332,12 @@ impl<W: LayoutElement> Workspace<W> {
         let options = Options::clone(&base_options).with_merged_layout(layout_config.as_ref());
         let gaps = options.layout.gaps;
         let outer_gaps = options.layout.outer_gaps;
-        let outer_gaps_configured = options.layout.outer_gaps_configured;
         let options = Rc::new(options.adjusted_for_scale(scale.fractional_scale()));
 
         let view_size = Size::from((1280., 720.));
         let output_area = Rectangle::from_size(view_size);
-        let working_area = apply_outer_gaps(
-            output_area,
-            options.layout.outer_gaps,
-            options.layout.gaps,
-            options.layout.outer_gaps_configured,
-        );
+        let working_area =
+            apply_outer_gaps(output_area, options.layout.outer_gaps, options.layout.gaps);
 
         let tiling = TilingTree::new(
             view_size,
@@ -349,6 +351,8 @@ impl<W: LayoutElement> Workspace<W> {
         let floating = FloatingLayout::new(
             view_size,
             working_area,
+            output_area,
+            None,
             scale.fractional_scale(),
             clock.clone(),
             options.clone(),
@@ -364,7 +368,7 @@ impl<W: LayoutElement> Workspace<W> {
             output: None,
             scale,
             transform: Transform::Normal,
-            original_output,
+            output_priority,
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
@@ -378,7 +382,6 @@ impl<W: LayoutElement> Workspace<W> {
             layout_config,
             gaps,
             outer_gaps,
-            outer_gaps_configured,
             id: WorkspaceId::next(),
         }
     }
@@ -446,28 +449,13 @@ impl<W: LayoutElement> Workspace<W> {
             Options::clone(&base_options).with_merged_layout(self.layout_config.as_ref());
         options.layout.gaps = self.gaps;
         options.layout.outer_gaps = self.outer_gaps;
-        options.layout.outer_gaps_configured = self.outer_gaps_configured;
         let options = Rc::new(options.adjusted_for_scale(scale));
         let output_area = self
             .output
             .as_ref()
             .map(compute_working_area)
             .unwrap_or_else(|| Rectangle::from_size(self.view_size));
-        let suppress_outer = match options.layout.smart_gaps {
-            swayward_config::SmartGaps::Off => false,
-            swayward_config::SmartGaps::On => self.tiling.visible_window_count() == 1,
-            swayward_config::SmartGaps::InverseOuter => self.tiling.visible_window_count() != 1,
-        };
-        self.working_area = if suppress_outer {
-            output_area
-        } else {
-            apply_outer_gaps(
-                output_area,
-                options.layout.outer_gaps,
-                options.layout.gaps,
-                options.layout.outer_gaps_configured,
-            )
-        };
+        self.working_area = self.gapped_working_area(&options, output_area);
 
         self.tiling.update_config(
             self.view_size,
@@ -480,6 +468,8 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating.update_config(
             self.view_size,
             self.working_area,
+            output_area,
+            self.output.as_ref().map(|o| o.current_location().to_f64()),
             self.scale.fractional_scale(),
             options.clone(),
         );
@@ -513,7 +503,6 @@ impl<W: LayoutElement> Workspace<W> {
             Options::clone(&self.base_options).with_merged_layout(self.layout_config.as_ref());
         self.gaps = merged.layout.gaps;
         self.outer_gaps = merged.layout.outer_gaps;
-        self.outer_gaps_configured = merged.layout.outer_gaps_configured;
         self.update_config(self.base_options.clone());
     }
 
@@ -563,7 +552,6 @@ impl<W: LayoutElement> Workspace<W> {
                 top: values[2],
                 bottom: values[3],
             };
-            self.outer_gaps_configured = true;
             layout.outer_gaps = Some(swayward_config::OuterGapsPart {
                 left: Some(swayward_config::FloatOrInt(values[0])),
                 right: Some(swayward_config::FloatOrInt(values[1])),
@@ -646,12 +634,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         self.output = output;
 
-        if let Some(output) = &self.output {
-            // Normalize original output: possibly replace connector with make/model/serial.
-            if self.original_output.matches(output) {
-                self.original_output = OutputId::new(output);
-            }
-
+        if self.output.is_some() {
             self.update_output_size();
 
             for win in self.windows() {
@@ -673,17 +656,16 @@ impl<W: LayoutElement> Workspace<W> {
         let transform = output.current_transform();
         let view_size = output_size(output);
         let output_area = compute_working_area(output);
-        let working_area = apply_outer_gaps(
-            output_area,
-            self.options.layout.outer_gaps,
-            self.options.layout.gaps,
-            self.options.layout.outer_gaps_configured,
-        );
+        // Sway re-runs `workspace_add_gaps` on the arrange an output change
+        // triggers (sway/sway/config/output.c:1090-1093, tree/arrange.c:306),
+        // so smart gaps are re-evaluated here as well.
+        let working_area = self.gapped_working_area(&self.options, output_area);
         self.set_view_size(
             scale,
             transform,
             view_size,
             working_area,
+            output_area,
             has_gaps_to_edge(
                 output_area,
                 self.options.layout.outer_gaps,
@@ -698,6 +680,7 @@ impl<W: LayoutElement> Workspace<W> {
         transform: Transform,
         size: Size<f64, Logical>,
         working_area: Rectangle<f64, Logical>,
+        output_area: Rectangle<f64, Logical>,
         gaps_to_edge: bool,
     ) {
         let scale_transform_changed = self.transform != transform
@@ -729,6 +712,8 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.update_config(
                 size,
                 working_area,
+                output_area,
+                self.output.as_ref().map(|o| o.current_location().to_f64()),
                 scale.fractional_scale(),
                 self.options.clone(),
             );
@@ -773,6 +758,8 @@ impl<W: LayoutElement> Workspace<W> {
         } = options;
         self.enter_output_for_window(tile.window());
         tile.restore_to_floating = is_floating;
+        // A slot in another workspace's floating stack means nothing here.
+        tile.floating_stamp = None;
 
         match target {
             WorkspaceAddWindowTarget::Auto | WorkspaceAddWindowTarget::Move => {
@@ -788,6 +775,9 @@ impl<W: LayoutElement> Workspace<W> {
                 // where it can enter those states.
                 if is_floating && tile.window().pending_sizing_mode().is_normal() {
                     self.floating.add_tile(tile, activate);
+                    // A floating view has no parent, so `view_map` arranges
+                    // the workspace (sway/tree/view.c:931-940).
+                    self.tiling.arrange_workspace();
 
                     if activate || self.tiling.is_empty() {
                         self.floating_is_active = FloatingActive::Yes;
@@ -806,7 +796,12 @@ impl<W: LayoutElement> Workspace<W> {
                         self.floating.add_tile_to_focused_group(tile);
                         return;
                     }
+                    // A fullscreen floating view stays floating in sway.
+                    let has_had_tile = self.tiling.has_had_tile();
                     self.tiling.add_tile_with_activation(tile, insert, activate);
+                    if is_floating {
+                        self.tiling.restore_has_had_tile(has_had_tile);
+                    }
 
                     if activate {
                         self.floating_is_active = FloatingActive::No;
@@ -1342,7 +1337,9 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating.has_window(window) {
             if is_fullscreen {
                 restore_to_floating = true;
+                let has_had_tile = self.tiling.has_had_tile();
                 self.toggle_window_floating(Some(window));
+                self.tiling.restore_has_had_tile(has_had_tile);
             } else {
                 // Floating windows are never fullscreen, so this is an unfullscreen request for an
                 // already unfullscreen window.
@@ -1737,6 +1734,7 @@ impl<W: LayoutElement> Workspace<W> {
 mod fullscreen;
 mod identity;
 mod ipc;
+mod output_priority;
 mod rendering;
 mod scratchpad;
 mod sticky;
@@ -1941,11 +1939,48 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// Sway's `workspace_add_gaps` (sway/sway/tree/workspace.c:1007-1031):
+    /// `smart_gaps on` with one visible container drops every gap, and
+    /// `inverse_outer` with several drops only the outer part; the inner gap
+    /// is otherwise always added to each edge.
+    fn gapped_working_area(
+        &self,
+        options: &Options,
+        output_area: Rectangle<f64, Logical>,
+    ) -> Rectangle<f64, Logical> {
+        let layout = &options.layout;
+        let single = || self.tiling.visible_window_count() == 1;
+        match layout.smart_gaps {
+            swayward_config::SmartGaps::On if single() => output_area,
+            swayward_config::SmartGaps::InverseOuter if !single() => {
+                apply_outer_gaps(output_area, Default::default(), layout.gaps)
+            }
+            _ => apply_outer_gaps(output_area, layout.outer_gaps, layout.gaps),
+        }
+    }
+
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
+        // Sway re-runs `workspace_add_gaps` on every arrange, so a view leaving
+        // or entering the tiling layer re-evaluates smart gaps.
+        if self.options.layout.smart_gaps != swayward_config::SmartGaps::Off {
+            let output_area = self
+                .output
+                .as_ref()
+                .map(compute_working_area)
+                .unwrap_or_else(|| Rectangle::from_size(self.view_size));
+            if self.gapped_working_area(&self.options, output_area) != self.working_area {
+                self.update_config(self.base_options.clone());
+            }
+        }
         self.tiling
             .refresh(is_active && !self.floating_is_active.get(), is_focused);
         self.floating
             .refresh(is_active && self.floating_is_active.get(), is_focused);
+        if let Some(output) = &self.output {
+            let origin = output.current_location().to_f64();
+            let frozen = self.fullscreen_window().is_some();
+            self.floating.refresh_ipc_anchors(origin, frozen);
+        }
     }
 
     pub fn is_urgent(&self) -> bool {
@@ -2171,7 +2206,6 @@ impl<W: LayoutElement> Workspace<W> {
             Options::clone(&self.base_options).with_merged_layout(self.layout_config.as_ref());
         options.layout.gaps = self.gaps;
         options.layout.outer_gaps = self.outer_gaps;
-        options.layout.outer_gaps_configured = self.outer_gaps_configured;
         let options = options.adjusted_for_scale(scale);
         assert_eq!(
             &*self.options, &options,
@@ -2241,19 +2275,14 @@ fn has_gaps_to_edge(
     outer: swayward_config::OuterGaps,
     inner: f64,
 ) -> bool {
-    apply_outer_gaps(area, outer, inner, true) != area
+    apply_outer_gaps(area, outer, inner) != area
 }
 
 pub(super) fn apply_outer_gaps(
     mut area: Rectangle<f64, Logical>,
     outer: swayward_config::OuterGaps,
     inner: f64,
-    configured: bool,
 ) -> Rectangle<f64, Logical> {
-    if !configured {
-        return area;
-    }
-
     let mut left = (outer.left + inner).max(0.);
     let mut right = (outer.right + inner).max(0.);
     let mut top = (outer.top + inner).max(0.);

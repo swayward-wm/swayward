@@ -62,6 +62,9 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return;
         };
+        // Sway floats a tiled view before hiding it, which stores B_CSD for a
+        // CSD view (root_scratchpad_add_container, sway/tree/root.c:114-118).
+        removed.tile.set_sway_csd_floating(true);
         removed.floating_working_area = floating_working_area;
         if !self.scratchpad_windows.contains(&window) {
             self.scratchpad_windows.push(window);
@@ -218,6 +221,19 @@ impl<W: LayoutElement> Layout<W> {
         self.scratchpad
             .iter()
             .map(|removed| (removed.tile.window(), removed.tile.is_sticky))
+    }
+
+    /// A hidden scratchpad window's border style and stored thickness. Sway
+    /// reports the thickness as `current_border_width` even under `border
+    /// none` (`c->current.border_thickness`, sway/ipc-json.c:760-761).
+    pub fn scratchpad_border_thickness(
+        &self,
+        window: &W::Id,
+    ) -> Option<(swayward_ipc::command::BorderStyle, u16)> {
+        self.scratchpad
+            .iter()
+            .find(|removed| removed.tile.window().id() == window)
+            .map(|removed| removed.tile.sway_border_thickness())
     }
 
     pub fn scratchpad_windows(&self) -> impl Iterator<Item = &W> {

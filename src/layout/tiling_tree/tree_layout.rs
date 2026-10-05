@@ -14,7 +14,8 @@ impl<W: LayoutElement> TilingTree<W> {
             else {
                 return;
             };
-            let wrapper = self.wrap_root_children(*old_layout);
+            let old_layout = *old_layout;
+            let wrapper = self.wrap_root_children(old_layout);
             if let Some(TreeNode::Split {
                 layout: root_layout,
                 ..
@@ -22,6 +23,7 @@ impl<W: LayoutElement> TilingTree<W> {
             {
                 *root_layout = layout;
             }
+            self.stale_root_representation = Some((old_layout, self.representation_shape()));
             self.set_focus_id(Some(wrapper));
             self.request_window_sizes();
             return;
@@ -127,6 +129,19 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// Sets `id`'s layout without recording a split layout for `layout default`.
+    /// Only the `layout` command and an empty-workspace split update sway's
+    /// `prev_split_layout` (sway/commands/layout.c:171-189,
+    /// sway/tree/workspace.c:1058-1063); a move that reorients the workspace
+    /// leaves it alone (sway/commands/move.c:331-340).
+    pub(super) fn set_layout_keeping_previous(&mut self, id: NodeId, layout: Layout) {
+        let previous = self.previous_layout(id);
+        self.set_layout(id, layout);
+        if let Some(meta) = self.split_meta_mut(id) {
+            meta.previous_layout = previous;
+        }
+    }
+
     /// Toggles the focused leaf's parent between tabbed and SplitH, splitting the leaf when it
     /// has no parent split. This backs niri's toggle-column-tabbed-display action.
     pub fn toggle_focused_tabbed(&mut self) {
@@ -178,10 +193,20 @@ impl<W: LayoutElement> TilingTree<W> {
             if !self.can_wrap_root_children() {
                 return;
             }
+            // `workspace_wrap_children` detaches every child, and detaching a
+            // global fullscreen container clears `root->fullscreen_global`,
+            // which reattaching does not restore (sway/tree/workspace.c:898-910,
+            // sway/tree/container.c:1380-1391 and 1440-1446). The layout
+            // command then arranges the workspace like any other: the wrapper
+            // and the fullscreen view report their tile slots.
+            let global = self
+                .fullscreen_node()
+                .is_some_and(|id| self.fullscreen_mode(id) == Some(FullscreenMode::Global));
             let pre_layout_ipc_rects = self
                 .fullscreen_node()
+                .filter(|_| !global)
                 .map(|_| self.compute_geometry().ipc_nodes);
-            self.fullscreen_tile_slot = false;
+            self.fullscreen_tile_slot = global;
             let wrapper = self.wrap_root_children(layout);
             if let Some(rects) = pre_layout_ipc_rects {
                 self.fullscreen_layout_wrappers.insert(wrapper);
@@ -200,12 +225,24 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// The workspace's own split layout (`ws->layout`), not its IPC representation.
+    pub fn root_layout(&self) -> Option<Layout> {
+        self.split_layout(self.root)
+    }
+
     pub fn split_focused(&mut self, layout: Layout) {
         if let Some(focus) = self.focus {
             self.split(focus, layout);
         } else {
+            // sway's workspace_split records the old layout as
+            // `prev_split_layout` unconditionally, even when it is unchanged
+            // or tabbed/stacked (sway/tree/workspace.c:1058-1063).
             let representation = self.representation_layout();
+            let previous = self.split_layout(self.root);
             self.set_layout(self.root, layout);
+            if let Some(meta) = self.split_meta_mut(self.root) {
+                meta.previous_layout = previous;
+            }
             self.empty_representation_layout = Some(representation);
         }
     }
@@ -259,6 +296,14 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn toggle_focused_layout(&mut self, toggle: &LayoutToggle) -> Vec<(NodeId, NodeId)> {
+        // An empty workspace has no focused container; sway toggles the workspace
+        // layout itself (sway/commands/layout.c:159-163,184-188).
+        if self.focus.is_none() {
+            if let Some(layout) = self.toggled_layout(self.root, toggle) {
+                return self.set_focused_layout(layout);
+            }
+            return Vec::new();
+        }
         let (target, remapped) = self.focused_layout_target();
         if let Some((target, layout)) =
             target.and_then(|target| Some((target, self.toggled_layout(target, toggle)?)))
@@ -333,6 +378,12 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
+        // With nothing focused the command targets the workspace and restores
+        // its `prev_split_layout` (sway/commands/layout.c:106-108,160-165).
+        if self.focus.is_none() {
+            let layout = self.previous_layout(self.root)?;
+            return Some(self.set_focused_layout(layout));
+        }
         let (target, remapped) = self.focused_layout_target();
         let target = target?;
         let layout = self.previous_layout(target)?;
@@ -356,6 +407,10 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn toggle_focused_layout_split(&mut self) -> Vec<(NodeId, NodeId)> {
+        if self.focus.is_none() {
+            let layout = self.split_toggled_layout(self.root);
+            return self.set_focused_layout(layout);
+        }
         let (target, remapped) = self.focused_layout_target();
         if let Some(target) = target {
             let layout = self.split_toggled_layout(target);
@@ -374,20 +429,22 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout: Layout::SplitV,
                 ..
             }) => Layout::SplitH,
-            _ => self.previous_layout(target).unwrap_or(Layout::SplitH),
+            // sway/commands/layout.c:37-44: the previous split, else the
+            // configured orientation, else the output's longer axis.
+            _ => self.previous_layout(target).unwrap_or_else(|| {
+                state::default_layout(self.options.layout.default_orientation, self.view_size)
+            }),
         }
     }
 
+    /// `split toggle`: sway reads the focused container's parent layout and splits
+    /// V unless that is V; a focused workspace always splits V
+    /// (`sway/commands/split.c` `cmd_split`).
     pub fn toggle_focused_split(&mut self) {
-        let focus = self.focus.unwrap_or(self.root);
-        let layout = match self.nodes.get(&focus).map(|node| &node.value) {
-            Some(TreeNode::Split {
-                layout: Layout::SplitH,
-                ..
-            }) => Layout::SplitV,
-            _ => Layout::SplitH,
-        };
-        self.split(focus, layout);
+        match self.focus {
+            Some(focus) => self.toggle_split(focus),
+            None => self.split_focused(Layout::SplitV),
+        }
     }
 
     /// Sets the layout of the focused leaf's parent split.
@@ -436,7 +493,18 @@ impl<W: LayoutElement> TilingTree<W> {
             if let (Some(child), Some(percent)) = (children.get_mut(index), percents.get_mut(index))
             {
                 *child = wrapper;
-                *percent = old_percent;
+                // Sway carries the fraction across the replacement in a
+                // `float` and renormalises on the next arrange
+                // (`container_replace`, sway/tree/container.c:1485-1490;
+                // `apply_horiz_layout`, sway/tree/arrange.c:48-52), so a
+                // share that lands on half a pixel can round the other way.
+                *percent = f64::from(old_percent as f32);
+            }
+            let total: f64 = percents.iter().sum();
+            if total > 0. {
+                for percent in percents.iter_mut() {
+                    *percent /= total;
+                }
             }
         }
         if let Some(node) = self.nodes.get_mut(&id) {
@@ -460,10 +528,30 @@ impl<W: LayoutElement> TilingTree<W> {
     /// the workspace layout (`workspace_wrap_children`,
     /// sway/tree/workspace.c:898-910).
     pub fn wrap_workspace_children(&mut self) {
-        let layout = self.representation_layout();
-        if self.split_len(self.root).is_some_and(|len| len > 0) {
+        if let Some(layout) = self
+            .split_layout(self.root)
+            .filter(|_| self.split_len(self.root).is_some_and(|len| len > 0))
+        {
             self.wrap_root_children(layout);
             self.request_window_sizes();
+        }
+    }
+
+    /// [`Self::wrap_workspace_children`] for a move that then fails: sway
+    /// returns without arranging, so GET_TREE reports the wrapper's empty box
+    /// until the next relayout (see `unarranged_wrappers`).
+    pub fn wrap_workspace_children_unarranged(&mut self) {
+        let unarranged = std::mem::take(&mut self.unarranged_wrappers);
+        let before = self.root_children().and_then(<[_]>::first).copied();
+        self.wrap_workspace_children();
+        self.unarranged_wrappers = unarranged;
+        if let Some(wrapper) = self
+            .root_children()
+            .and_then(<[_]>::first)
+            .copied()
+            .filter(|wrapper| Some(*wrapper) != before)
+        {
+            self.unarranged_wrappers.insert(wrapper);
         }
     }
 
@@ -472,15 +560,11 @@ impl<W: LayoutElement> TilingTree<W> {
             return self.root;
         }
         let Some(TreeNode::Split {
-            layout: root_layout,
-            children,
-            percents,
-            ..
+            children, percents, ..
         }) = self.nodes.get_mut(&self.root).map(|node| &mut node.value)
         else {
             return self.root;
         };
-        let root_layout = *root_layout;
         let children = std::mem::take(children);
         let percents = std::mem::take(percents);
         let wrapper = self.alloc(Node {
@@ -489,11 +573,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 layout,
                 children: children.clone(),
                 percents,
-                meta: SplitMeta {
-                    previous_layout: matches!(root_layout, Layout::SplitH | Layout::SplitV)
-                        .then_some(root_layout),
-                    ..SplitMeta::default()
-                },
+                meta: SplitMeta::default(),
             },
         });
         self.ipc_stale_nodes.insert(wrapper);
@@ -543,10 +623,21 @@ impl<W: LayoutElement> TilingTree<W> {
             ..
         }) = self.nodes.get_mut(&id)
         {
-            if matches!(*current, Layout::SplitH | Layout::SplitV) && *current != layout {
+            let changed = *current != layout;
+            if matches!(*current, Layout::SplitH | Layout::SplitV) && changed {
                 meta.previous_layout = Some(*current);
             }
             *current = layout;
+            if changed {
+                // A changed layout ends with `arrange_root` under a global
+                // fullscreen container and `arrange_workspace` otherwise
+                // (sway/commands/layout.c:191-195).
+                if self.has_global_fullscreen() {
+                    self.arrange_root();
+                } else {
+                    self.arrange_workspace();
+                }
+            }
             self.request_window_sizes();
         }
     }

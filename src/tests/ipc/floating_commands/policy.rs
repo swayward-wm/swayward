@@ -108,11 +108,14 @@ fn shortcuts_inhibitor_disable_sets_future_policy_and_deactivates_current() {
     assert_eq!(f.client(client).state.shortcut_inhibitor_events, [true]);
 }
 
-/// With a view focused, swayward refuses the per-view presentation commands
-/// it cannot apply, after sway's own argument checks
-/// (`sway/sway/commands/max_render_time.c:9-21`).
+/// Oracle: state scenario per_view_render_with_view; differential seeds 10018,
+/// 10020, 10045 and 10058 (diff-fam-per-view-render-with-view). With a view
+/// focused, sway stores both values on the view after its argument checks and
+/// reports them in GET_TREE (`sway/sway/commands/allow_tearing.c:17-22`,
+/// `max_render_time.c:9-31`, `sway/sway/ipc-json.c:609-611`). `toggle` parses
+/// with `current` true, so it always clears the override.
 #[test]
-fn runtime_presentation_command_refusals_are_explicit() {
+fn per_view_render_commands_store_their_value_on_the_view() {
     let mut f = Fixture::new();
     f.add_output(1, (1280, 720));
     let client = f.add_client();
@@ -125,20 +128,37 @@ fn runtime_presentation_command_refusals_are_explicit() {
     window.ack_last_and_commit();
     f.double_roundtrip(client);
 
+    fn find_view(node: &Value) -> Option<&Value> {
+        if node["type"] == "con" && node["pid"].is_number() {
+            return Some(node);
+        }
+        node["nodes"].as_array()?.iter().find_map(find_view)
+    }
+    let view = |f: &mut Fixture| {
+        let tree = command_tree(f);
+        let view = find_view(&tree).expect("one view");
+        (
+            view["allow_tearing"].as_bool().unwrap(),
+            view["max_render_time"].as_i64().unwrap(),
+        )
+    };
+    assert_eq!(view(&mut f), (false, 0));
+    for (command, expected) in [
+        ("allow_tearing yes", (true, 0)),
+        ("max_render_time 5", (true, 5)),
+        ("allow_tearing toggle", (false, 5)),
+        ("allow_tearing enable", (true, 5)),
+        ("allow_tearing no", (false, 5)),
+        ("max_render_time off", (false, 0)),
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(view(&mut f), expected, "{command}");
+    }
+
     for (command, error) in [
-        (
-            "allow_tearing yes",
-            "allow_tearing requires immediate presentation support",
-        ),
-        (
-            "max_render_time 1",
-            "max_render_time requires per-view render deadline support",
-        ),
-        (
-            "max_render_time off",
-            "max_render_time requires per-view render deadline support",
-        ),
         ("max_render_time 0", "Invalid max render time."),
+        ("max_render_time 5ms", "Invalid max render time."),
         ("max_render_time", "Missing max render time argument."),
         (
             "allow_tearing",
@@ -150,6 +170,7 @@ fn runtime_presentation_command_refusals_are_explicit() {
         assert_eq!(outcome[0].error.as_deref(), Some(error), "{command}");
         assert_eq!(outcome[0].parse_error, Some(true), "{command}");
     }
+    assert_eq!(view(&mut f), (false, 0));
 }
 
 /// Oracle: differential_seed_1003, 1019, 1119, 1121, 1244, 1275 and 1579
@@ -208,6 +229,13 @@ fn view_commands_check_for_a_view_before_their_value() {
             true,
         ),
         ("opacity minus 0.2", "No current container", false),
+        (
+            "title_format %title",
+            "Only valid containers can have a title_format",
+            true,
+        ),
+        ("urgent toggle", "No current container", false),
+        ("urgent enable", "No current container", false),
     ];
     let check = |f: &mut Fixture, context: &str| {
         for (command, error, parse_error) in cases {
@@ -240,6 +268,108 @@ fn view_commands_check_for_a_view_before_their_value() {
     f.double_roundtrip(client);
     assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
     check(&mut f, "workspace focused");
+
+    // A focused split is a container but no view
+    // (`sway/sway/commands/urgent.c:18-20`).
+    assert!(crate::command::execute(f.niri_state(), "focus child")[0].success);
+    crate::tests::windows::map_window(&mut f, client, Default::default());
+    let outcomes = crate::command::execute(f.niri_state(), "splitv; focus parent");
+    assert!(
+        outcomes.iter().all(|outcome| outcome.success),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "urgent toggle"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Only views can be urgent".into()),
+            parse_error: Some(true),
+        }]
+    );
+    assert!(crate::command::execute(f.niri_state(), "title_format %title")[0].success);
+}
+
+/// Oracle: state scenario chained-command-focus
+/// (diff-fam-chained-command-focus). Sway sets the handler context for each
+/// command of a list after the earlier ones have run
+/// (`sway/sway/commands.c:288-293`), so a view check sees the focus that
+/// `focus parent` or `focus child` left behind, in both directions.
+#[test]
+fn chained_commands_check_the_focus_left_by_earlier_commands() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let refusal = |error: &str, parse_error| swayward_ipc::CommandOutcome {
+        success: false,
+        error: Some(error.into()),
+        parse_error: Some(parse_error),
+    };
+    let ok = swayward_ipc::CommandOutcome {
+        success: true,
+        error: None,
+        parse_error: None,
+    };
+    for (command, second) in [
+        (
+            "focus parent; allow_tearing yes",
+            refusal("Tearing can only be allowed on views", true),
+        ),
+        (
+            "focus parent; opacity bogus",
+            refusal("No current container", false),
+        ),
+        (
+            "focus parent; border pixel 3",
+            refusal("Only views can have borders", true),
+        ),
+    ] {
+        let outcomes = crate::command::execute(f.niri_state(), command);
+        assert_eq!(outcomes, [ok.clone(), second], "{command}");
+        assert!(crate::command::execute(f.niri_state(), "focus child")[0].success);
+    }
+
+    // `opacity bogus` resolves to CMD_FAILURE without a container, which
+    // does not end the list (`sway/sway/commands.c:295-299`), so the
+    // following `focus child` still runs and gives the view back.
+    let outcomes =
+        crate::command::execute(f.niri_state(), "focus parent; opacity bogus; focus child");
+    assert_eq!(
+        outcomes,
+        [
+            ok.clone(),
+            refusal("No current container", false),
+            ok.clone()
+        ]
+    );
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "border pixel 3"),
+        std::slice::from_ref(&ok),
+        "focus child ran after the failure"
+    );
+
+    // The workspace is focused at the start; `focus child` gives the view
+    // back before the view check runs.
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    for (command, second) in [
+        ("focus child; border pixel 3", ok.clone()),
+        (
+            "focus child; opacity bogus",
+            refusal("opacity float invalid", true),
+        ),
+    ] {
+        let outcomes = crate::command::execute(f.niri_state(), command);
+        assert_eq!(outcomes, [ok.clone(), second], "{command}");
+        assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    }
 }
 
 #[test]
@@ -376,6 +506,38 @@ fn urgent_command_changes_only_an_unfocused_selected_window() {
         assert!(outcome[0].success, "{command}: {outcome:?}");
         assert_eq!(urgent(&mut f), expected, "{command}");
     }
+}
+
+/// Sway compares against the seat's focused container, which is the split
+/// after `focus parent`, so the keyboard-focused view still becomes urgent
+/// (`view_set_urgent`, sway/sway/tree/view.c:1209-1213).
+#[test]
+fn urgent_command_marks_the_focused_view_when_its_parent_is_focused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+
+    for app_id in ["first", "second"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "[app_id=second] urgent enable");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(!test_window_is_urgent(&mut f, "second"));
+
+    let outcome = crate::command::execute(f.niri_state(), "focus parent");
+    assert!(outcome[0].success, "{outcome:?}");
+    let outcome = crate::command::execute(f.niri_state(), "[app_id=second] urgent enable");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(test_window_is_urgent(&mut f, "second"));
 }
 
 #[test]
@@ -1395,4 +1557,35 @@ fn unfullscreen_of_a_floated_fullscreen_view_stays_floating() {
     let first = find_json_node_with_app_id(&tree, "fs-first").unwrap();
     assert_eq!(first["visible"], true);
     assert_eq!(first["percent"], 1.0);
+}
+
+/// Oracle: state scenario error_precedence (diff-fam-v3-error-precedence,
+/// random-v3 seeds 91 and 94). `urgent` with the workspace focused has no
+/// container (`sway/sway/commands/urgent.c:15-17`), and `scratchpad show`
+/// refuses an empty scratchpad before looking at criteria matches
+/// (`sway/sway/commands/scratchpad.c:105-107`).
+#[test]
+fn error_precedence_matches_sway() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    windows_on_workspaces(&mut f, &[("1", "first"), ("1", "second")]);
+
+    let refusal = |error: &str, parse_error| swayward_ipc::CommandOutcome {
+        success: false,
+        error: Some(error.into()),
+        parse_error: Some(parse_error),
+    };
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "[app_id=second] scratchpad show"),
+        [refusal("Scratchpad is empty", true)]
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    let outcomes = crate::command::execute(f.niri_state(), "focus parent; mark m");
+    assert!(outcomes[0].success, "{outcomes:?}");
+    assert_eq!(outcomes[1], refusal("Only containers can have marks", true));
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "urgent enable"),
+        [refusal("No current container", false)]
+    );
 }

@@ -665,3 +665,158 @@ fn an_unfocused_floating_group_does_not_report_itself_focused() {
     collect(&tree, &mut focused);
     assert_eq!(focused, ["con:tiled-new"]);
 }
+
+/// Differential seeds 1117, 1830, 4372, 4674 (diff-fam-fullscreen-mode-transfer).
+/// `focus floating|tiling` never leaves fullscreen: `seat_set_focus` refuses a
+/// view a fullscreen container hides (sway/input/seat.c:1148-1151), and a
+/// fullscreen floating view is the floating layer's target
+/// (sway/commands/focus.c:262-307). A fullscreen floating view keeps its slot
+/// in `floating_nodes` (sway/tree/container.c:1186-1218).
+#[test]
+fn focus_layer_commands_keep_fullscreen() {
+    /// Type, app_id, fullscreen_mode, focused, visible.
+    type Row = (String, String, i64, bool, bool);
+    fn run(seq: &[&str]) -> (Vec<swayward_ipc::CommandOutcome>, Vec<Row>) {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        let mut last = Vec::new();
+        for step in seq {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+            } else {
+                last = crate::command::execute(f.niri_state(), step);
+                f.double_roundtrip(client);
+            }
+        }
+        let tree = get_tree(&mut f);
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        let nodes = workspace["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(workspace["floating_nodes"].as_array().unwrap())
+            .map(|node| {
+                (
+                    node["type"].as_str().unwrap().to_owned(),
+                    node["app_id"].as_str().unwrap().to_owned(),
+                    node["fullscreen_mode"].as_i64().unwrap(),
+                    node["focused"].as_bool().unwrap(),
+                    node["visible"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        (last, nodes)
+    }
+    let node = |kind: &str, app: &str, fs, focused, visible| {
+        (kind.to_owned(), app.to_owned(), fs, focused, visible)
+    };
+    let rule = r#"for_window [app_id="float"] floating enable"#;
+
+    // 1117: no tiling view outside the fullscreen one; it stays fullscreen.
+    let (reply, nodes) = run(&["map tiled", "fullscreen enable", "focus tiling"]);
+    assert!(reply[0].success, "{reply:?}");
+    assert_eq!(nodes, [node("con", "tiled", 1, true, true)]);
+
+    // 1830: the floater is hidden by the fullscreen view, so focus stays.
+    let (reply, nodes) = run(&[
+        "map tiled",
+        "fullscreen toggle",
+        rule,
+        "map float",
+        "focus floating",
+    ]);
+    assert!(reply[0].success, "{reply:?}");
+    assert_eq!(
+        nodes,
+        [
+            node("con", "tiled", 1, true, true),
+            node("floating_con", "float", 0, false, false),
+        ]
+    );
+
+    // 4674: a fullscreen floating view is the floating layer's target.
+    let (reply, nodes) = run(&[
+        "map float",
+        rule,
+        "fullscreen enable",
+        "mark oracle",
+        "focus floating",
+    ]);
+    assert_eq!(
+        reply,
+        [swayward_ipc::CommandOutcome {
+            success: true,
+            error: None,
+            parse_error: None
+        }]
+    );
+    assert_eq!(nodes, [node("floating_con", "float", 1, true, true)]);
+
+    // 4372: a floater mapped above a fullscreen floating view is listed
+    // after it, and stays hidden and unfocused.
+    let (_, nodes) = run(&[
+        "map first",
+        "floating toggle",
+        rule,
+        "fullscreen enable",
+        "map float",
+    ]);
+    assert_eq!(
+        nodes,
+        [
+            node("floating_con", "first", 1, true, true),
+            node("floating_con", "float", 0, false, false),
+        ]
+    );
+
+    // 1830 and 4372, step 5: views mapped under a fullscreen view, floating
+    // or tiled, were never focused, so they join the workspace focus list in
+    // creation order (sway/input/seat.c:327-349).
+    for prefix in [
+        &["map tiled", "fullscreen toggle"][..],
+        &["map tiled", "floating toggle", "fullscreen enable"],
+    ] {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        let mut steps = prefix.to_vec();
+        steps.extend([
+            rule,
+            r#"for_window [app_id="later"] floating enable"#,
+            "map float",
+            "map later",
+            "map tail",
+        ]);
+        for step in steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+            } else {
+                assert!(crate::command::execute(f.niri_state(), step)[0].success);
+                f.double_roundtrip(client);
+            }
+        }
+        let tree = get_tree(&mut f);
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        let id = |app_id| find_json_node_with_app_id(workspace, app_id).unwrap()["id"].clone();
+        assert_eq!(
+            workspace["focus"],
+            serde_json::json!([id("tiled"), id("float"), id("later"), id("tail")]),
+            "{prefix:?}"
+        );
+    }
+}

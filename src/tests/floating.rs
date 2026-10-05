@@ -432,7 +432,7 @@ fn moving_to_floating_doesnt_cancel_resize() {
     // The tree converts the requested content size against the exact allocated sibling extent.
     assert_snapshot!(
         f.client(id).window(&surface).format_recent_configures(),
-        @"size: 499 × 1080, bounds: 1920 × 1080, states: [Activated]"
+        @"size: 500 × 1080, bounds: 1920 × 1080, states: [Activated]"
     );
 
     // Before the window has a chance to respond, make it floating.

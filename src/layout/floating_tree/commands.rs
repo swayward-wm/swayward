@@ -1,8 +1,10 @@
 use super::*;
+use crate::layout::tiling_tree::Layout as TreeLayout;
 
 impl<W: LayoutElement> FloatingLayout<W> {
     pub(super) fn add_tile_at(&mut self, mut idx: usize, mut tile: Tile<W>, activate: bool) {
         tile.update_config(self.view_size, self.scale, self.options.clone());
+        tile.set_sway_csd_floating(true);
         tile.set_border_edges(ResizeEdge::all());
         tile.set_decorated_box(
             crate::layout::tile::DecoratedCorners::ALL,
@@ -191,7 +193,13 @@ impl<W: LayoutElement> FloatingLayout<W> {
     }
 
     fn remove_tile_by_idx(&mut self, idx: usize) -> RemovedTile<W> {
-        let FloatingEntry { mut tile, data, .. } = self.remove_entry(idx);
+        let FloatingEntry {
+            mut tile,
+            data,
+            stamp,
+            ..
+        } = self.remove_entry(idx);
+        tile.floating_stamp = Some(stamp);
 
         if Some(tile.window().id()) == self.active_window_id.as_ref() {
             self.active_window_id = self.fallback_active_window();
@@ -491,9 +499,18 @@ impl<W: LayoutElement> FloatingLayout<W> {
             return false;
         };
         let entry = &mut self.entries[index];
+        let content_before = entry.tile.window_loc();
         let changed = entry.tile.set_sway_border(style, width, true).is_ok();
         if changed {
             entry.data.update(&entry.tile);
+            // Sway keeps a floating view's content box and moves the container around
+            // it (`container_set_geometry_from_content`, sway/commands/border.c:94-96,
+            // sway/tree/container.c:1018-1039).
+            if entry.tile.sizing_mode().is_normal() {
+                let shift = entry.tile.window_loc() - content_before;
+                let pos = entry.data.logical_pos - shift;
+                entry.data.set_logical_pos(pos);
+            }
         }
         changed
     }
@@ -731,6 +748,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
         &mut self,
         direction: Direction,
         distance: impl Fn(Point<f64, Logical>, Point<f64, Logical>) -> f64,
+        wrap: bool,
     ) -> bool {
         let Some(active_id) = &self.active_window_id else {
             return false;
@@ -761,6 +779,19 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 .filter(|(id, _)| *id != active_id)
                 .map(|(id, other)| (id, distance(center, other)))
         };
+        // Without wrap this is sway's node_get_in_direction_floating: skip only `distance < 0`
+        // and leave focus alone when nothing lies that way (sway/commands/focus.c:243-258).
+        if !wrap {
+            let result = candidates()
+                .filter(|(_, dist)| *dist >= 0.)
+                .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b));
+            let Some((id, _)) = result else {
+                return false;
+            };
+            let id = id.clone();
+            self.activate_window(&id);
+            return true;
+        }
         let result = candidates()
             .filter(|(_, dist)| *dist > 0.)
             .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b))
@@ -778,20 +809,51 @@ impl<W: LayoutElement> FloatingLayout<W> {
         }
     }
 
+    /// `focus next|prev` on a floating window. A floating root has no parent, so sway takes the
+    /// axis from the workspace layout (`container_parent_layout`, sway/tree/container.c:1353-1361);
+    /// a window inside a floating split uses that split
+    /// (`get_direction_from_next_prev`, sway/commands/focus.c:17-58).
+    pub fn focus_next_or_prev(&mut self, next: bool, workspace_layout: TreeLayout) -> bool {
+        let Some(active_id) = &self.active_window_id else {
+            return false;
+        };
+        if let Some((idx, _)) = self.tree_entry_for_window(active_id) {
+            let entry = &mut self.tree_entries[idx];
+            let moved = entry.tree.focus_next_or_prev(next);
+            self.active_window_id = entry.tree.active_window().map(|window| window.id().clone());
+            return moved;
+        }
+        // Sway moves among floaters without wrapping (sway/commands/focus.c:458-460).
+        match (next, workspace_layout) {
+            (false, TreeLayout::SplitH | TreeLayout::Tabbed) => {
+                self.focus_directional(Direction::Left, |focus, other| focus.x - other.x, false)
+            }
+            (true, TreeLayout::SplitH | TreeLayout::Tabbed) => {
+                self.focus_directional(Direction::Right, |focus, other| other.x - focus.x, false)
+            }
+            (false, TreeLayout::SplitV | TreeLayout::Stacked) => {
+                self.focus_directional(Direction::Up, |focus, other| focus.y - other.y, false)
+            }
+            (true, TreeLayout::SplitV | TreeLayout::Stacked) => {
+                self.focus_directional(Direction::Down, |focus, other| other.y - focus.y, false)
+            }
+        }
+    }
+
     pub fn focus_left(&mut self) -> bool {
-        self.focus_directional(Direction::Left, |focus, other| focus.x - other.x)
+        self.focus_directional(Direction::Left, |focus, other| focus.x - other.x, true)
     }
 
     pub fn focus_right(&mut self) -> bool {
-        self.focus_directional(Direction::Right, |focus, other| other.x - focus.x)
+        self.focus_directional(Direction::Right, |focus, other| other.x - focus.x, true)
     }
 
     pub fn focus_up(&mut self) -> bool {
-        self.focus_directional(Direction::Up, |focus, other| focus.y - other.y)
+        self.focus_directional(Direction::Up, |focus, other| focus.y - other.y, true)
     }
 
     pub fn focus_down(&mut self) -> bool {
-        self.focus_directional(Direction::Down, |focus, other| other.y - focus.y)
+        self.focus_directional(Direction::Down, |focus, other| other.y - focus.y, true)
     }
 
     pub fn focus_leftmost(&mut self) {
@@ -851,6 +913,11 @@ impl<W: LayoutElement> FloatingLayout<W> {
         if let Some((idx, _)) = self.tree_entry_for_window(active_id) {
             let entry = &mut self.tree_entries[idx];
             entry.rect.loc += amount;
+            // container_floating_translate moves the children along
+            // (sway/sway/tree/container.c:1113-1128).
+            if let Some(anchor) = &mut entry.ipc_anchor {
+                *anchor += amount;
+            }
             entry.pos =
                 Data::logical_to_size_frac_in_working_area(self.working_area, entry.rect.loc);
             entry.tree.update_config(
@@ -901,6 +968,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 apply_position_change(pos.x, x, self.working_area.size.w, self.working_area.loc.x);
             pos.y =
                 apply_position_change(pos.y, y, self.working_area.size.h, self.working_area.loc.y);
+            if let Some(anchor) = &mut entry.ipc_anchor {
+                *anchor += pos - entry.rect.loc;
+            }
             entry.rect.loc = pos;
             entry.pos = Data::logical_to_size_frac_in_working_area(self.working_area, pos);
             entry.tree.update_config(
@@ -932,7 +1002,11 @@ impl<W: LayoutElement> FloatingLayout<W> {
         };
         if let Some((idx, _)) = self.tree_entry_for_window(&id) {
             let entry = &mut self.tree_entries[idx];
-            entry.rect.loc = center_preferring_top_left_in_area(self.working_area, entry.rect.size);
+            let center = center_preferring_top_left_in_area(self.working_area, entry.rect.size);
+            if let Some(anchor) = &mut entry.ipc_anchor {
+                *anchor += center - entry.rect.loc;
+            }
+            entry.rect.loc = center;
             entry.pos =
                 Data::logical_to_size_frac_in_working_area(self.working_area, entry.rect.loc);
             entry.tree.update_config(

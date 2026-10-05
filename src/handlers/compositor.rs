@@ -408,11 +408,13 @@ impl State {
         });
         let activate = activate.unwrap_or_else(|| {
             // Check the token timestamp again in case the window took a while between
-            // requesting activation and mapping.
+            // requesting activation and mapping. A launch token does not force focus:
+            // sway's should_focus ignores it, so a view mapped onto another workspace
+            // stays unfocused (sway/sway/tree/view.c:697-731).
             let token = activation_token_data
                 .filter(|token| token.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT);
             if token.is_some() {
-                ActivateWindow::Yes
+                ActivateWindow::Smart
             } else {
                 let config = self.swayward.config.borrow();
                 if config.debug.strict_new_window_focus_policy {

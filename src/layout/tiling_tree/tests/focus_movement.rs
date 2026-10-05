@@ -293,8 +293,12 @@ fn bare_layout_toggle_restores_the_previous_split() {
     t.check_invariants();
 }
 
+/// The wrapper `layout tabbed` creates around the workspace children starts with no
+/// `prev_split_layout` (`container_create`, sway/tree/container.c:112), so `layout toggle split`
+/// falls back to the default orientation, not the workspace axis
+/// (sway/commands/layout.c:29-45,176-183).
 #[test]
-fn layout_toggle_restores_the_previous_split_axis() {
+fn layout_toggle_on_a_fresh_workspace_wrapper_uses_the_default_orientation() {
     for previous in [Layout::SplitH, Layout::SplitV] {
         let mut t = tree((1200., 800.), 0.);
         t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
@@ -307,7 +311,10 @@ fn layout_toggle_restores_the_previous_split_axis() {
         let wrapper = t.nodes[&t.focus().unwrap()].parent.unwrap();
         assert!(matches!(
             t.nodes[&wrapper].value,
-            TreeNode::Split { layout, .. } if layout == previous
+            TreeNode::Split {
+                layout: Layout::SplitH,
+                ..
+            }
         ));
         t.check_invariants();
     }
@@ -553,7 +560,7 @@ fn split_descendant_of_stacked_container_has_no_inner_gap() {
         meta: SplitMeta::default(),
     };
 
-    assert_eq!(t.geometry(first).unwrap().size.w, 240.);
+    assert_eq!(t.geometry(first).unwrap().size.w, 250.);
     assert_eq!(t.geometry(second).unwrap().loc.x, 250.);
 }
 
@@ -590,7 +597,7 @@ fn deeply_nested_split_descendant_of_stacked_container_has_no_inner_gap() {
         meta: SplitMeta::default(),
     };
 
-    assert_eq!(t.geometry(first).unwrap().size.w, 240.);
+    assert_eq!(t.geometry(first).unwrap().size.w, 250.);
     assert_eq!(t.geometry(second).unwrap().loc.x, 250.);
 }
 
@@ -602,8 +609,8 @@ fn inner_gaps_shrink_and_floor_on_both_split_axes() {
     let first = horizontal.add_tile(tile(1, horizontal.view_size()), InsertTarget::Focused);
     let second = horizontal.add_tile(tile(2, horizontal.view_size()), InsertTarget::Focused);
     let geometry = horizontal.compute_geometry();
-    assert_eq!(geometry.ipc_nodes[&first].size.w, 92.5);
-    assert_eq!(geometry.ipc_nodes[&second].loc.x, 102.5);
+    assert_eq!(geometry.ipc_nodes[&first].size.w, 100.);
+    assert_eq!(geometry.ipc_nodes[&second].loc.x, 105.);
 
     let mut vertical = tree((500., 125.), 10.);
     let first = vertical.add_tile(tile(1, vertical.view_size()), InsertTarget::Focused);
@@ -615,8 +622,8 @@ fn inner_gaps_shrink_and_floor_on_both_split_axes() {
         meta: SplitMeta::default(),
     };
     let geometry = vertical.compute_geometry();
-    assert_eq!(geometry.ipc_nodes[&first].size.h, 52.5);
-    assert_eq!(geometry.ipc_nodes[&second].loc.y, 62.5);
+    assert_eq!(geometry.ipc_nodes[&first].size.h, 60.);
+    assert_eq!(geometry.ipc_nodes[&second].loc.y, 65.);
 }
 
 #[test]

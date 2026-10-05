@@ -125,6 +125,9 @@ pub(crate) fn describe_tiling<'a, I>(
             node.fullscreen_mode = fullscreen_mode;
             node.sticky = sticky;
             node.marks = container_marks.get(&id).cloned().unwrap_or_default();
+            // A split reports whether any view below it is urgent
+            // (`container_has_urgent_child`, sway/sway/ipc-json.c:728-730).
+            node.urgent = node.nodes.iter().any(|child| child.urgent);
             Some(node)
         }
         IpcNode::Leaf {
@@ -139,6 +142,7 @@ pub(crate) fn describe_tiling<'a, I>(
             sticky,
             mapped_under_fullscreen,
             moved_under_fullscreen,
+            unarranged,
             ..
         } => {
             let Some(mapped) = find_window(&window) else {
@@ -177,10 +181,16 @@ pub(crate) fn describe_tiling<'a, I>(
             } else if fullscreen_mode != 0 && frame.rect.width > 0 && frame.rect.height > 0 {
                 // A fullscreen view's content is the output box, even while
                 // its container reports a tiled slot (`view_autoconfigure`,
-                // sway/sway/tree/view.c:358-363).
+                // sway/sway/tree/view.c:358-363). A normal-border view keeps
+                // the title bar its tiled arrange enabled, so y is 0
+                // (sway/sway/ipc-json.c:596-601).
                 Rect {
                     x: workspace_rect.x - frame.rect.x,
-                    y: workspace_rect.y - frame.rect.y,
+                    y: if frame.border == NodeBorder::Normal {
+                        0
+                    } else {
+                        workspace_rect.y - frame.rect.y
+                    },
                     width: workspace_rect.width,
                     height: workspace_rect.height,
                 }
@@ -251,6 +261,20 @@ pub(crate) fn describe_tiling<'a, I>(
                     }
                 };
             }
+            if let Some(unarranged) = unarranged {
+                node.rect = if unarranged.absolute {
+                    let rect = unarranged.rect;
+                    rect_from(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h)
+                } else {
+                    offset_rect(unarranged.rect, workspace_rect)
+                };
+                let deco = unarranged.deco_rect;
+                node.deco_rect = rect_from(deco.loc.x, deco.loc.y, deco.size.w, deco.size.h);
+                if let Some(content) = unarranged.window_rect {
+                    node.window_rect =
+                        rect_from(content.loc.x, content.loc.y, content.size.w, content.size.h);
+                }
+            }
             Some(node)
         }
     }
@@ -320,7 +344,7 @@ pub(super) fn describe_window(context: WindowNodeContext<'_>) -> Node {
         swayward_ipc::command::InhibitIdleMode::Visible => "visible",
     };
     let properties = with_toplevel_role(mapped.toplevel(), |role| ViewProperties {
-        allow_tearing: false,
+        allow_tearing: mapped.can_tear(),
         app_id: role.app_id.clone(),
         foreign_toplevel_identifier: Some(mapped.id().to_protocol_identifier()),
         idle_inhibitors: IdleInhibitors {
@@ -328,7 +352,7 @@ pub(super) fn describe_window(context: WindowNodeContext<'_>) -> Node {
             user: user_inhibitor.into(),
         },
         inhibit_idle,
-        max_render_time: 0,
+        max_render_time: mapped.max_render_time(),
         pid: mapped
             .credentials()
             .map(|credentials| i64::from(credentials.pid)),

@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/monitor.rs"]
+what = "after moving a window to another workspace on the same output without activating it, rank it in the destination's focus history by its last keyboard-focus timestamp, so a window focused more recently than the destination's focus becomes the destination's focus-inactive container."
+why = "Sway keeps one seat-wide focus stack and inserts a moved container after `seat_get_focus_inactive_tiling` of the destination (sway/input/seat.c:1374-1389; sway/commands/move.c:515, 241-260). Successive criteria matches therefore land after one another and keep their order; swayward inserted each after the destination's old focus, reversing them (differential family diff-fam-multi-match-move-order, seed 3613)."

@@ -150,7 +150,6 @@ fn runtime_gaps_all_changes_existing_workspaces() {
     let mut config = swayward_config::Config::default();
     config.layout.gaps = 10.;
     config.layout.outer_gaps = swayward_config::layout::OuterGaps::all(-2.);
-    config.layout.outer_gaps_configured = true;
     config.layout.border.off = true;
     let mut fixture = Fixture::with_config(config);
     fixture.add_output(1, (1280, 800));
@@ -174,7 +173,6 @@ fn gaps_defaults_form_does_not_disturb_an_existing_workspace() {
     let mut config = swayward_config::Config::default();
     config.layout.gaps = 10.;
     config.layout.outer_gaps = swayward_config::layout::OuterGaps::all(-2.);
-    config.layout.outer_gaps_configured = true;
     config.layout.border.off = true;
     let mut fixture = Fixture::with_config(config);
     fixture.add_output(1, (1280, 800));
@@ -328,4 +326,223 @@ fn workspace_gaps_are_per_exact_name_and_clamp_outer_to_inner() {
     };
     assert_eq!(gaps("web"), (Some(5.), None));
     assert_eq!(gaps("Web"), (Some(30.), Some(-30.)));
+}
+
+fn workspace_rect_named(fixture: &mut Fixture, name: &str) -> Value {
+    let swayward = fixture.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    fn find(value: &Value, name: &str) -> Option<Value> {
+        if value["type"] == "workspace" && value["name"] == name {
+            return Some(value["rect"].clone());
+        }
+        value["nodes"]
+            .as_array()?
+            .iter()
+            .find_map(|child| find(child, name))
+    }
+    find(&tree, name).expect("workspace in tree")
+}
+
+/// Sway's workspace rect always carries the inner gap on each edge, even with
+/// no outer gaps configured and no windows (`workspace_add_gaps`,
+/// `sway/sway/tree/workspace.c:1024-1031`). Differential family
+/// gaps-inner-empty-rect, oracle row `gaps_inner_current_empty_workspace_rect`.
+#[test]
+fn runtime_inner_gaps_inset_the_workspace_rect() {
+    let mut fixture = Fixture::with_config(swayward_config::Config::default());
+    fixture.add_output(1, (1270, 1408));
+
+    assert!(crate::command::execute(fixture.niri_state(), "gaps inner current set 10")[0].success);
+    assert_eq!(
+        workspace_rect_named(&mut fixture, "1"),
+        serde_json::json!({"x": 10, "y": 10, "width": 1250, "height": 1388})
+    );
+
+    // A window then tiles inside that rect, not inside a second inset.
+    add_two_tiled_windows(&mut fixture);
+    let rects = tiled_window_rects(&mut fixture);
+    assert_eq!(rects[0]["x"], 10);
+    assert_eq!(rects[0]["y"], 10);
+}
+
+/// Gaps belong to one workspace, so changing them on the focused workspace
+/// leaves another workspace's rect alone (`configure_gaps` acts on one
+/// `sway_workspace`, sway/sway/commands/gaps.c:112-137). Differential seeds
+/// 1318 1676 1679 1876 1950 1492 1612.
+#[test]
+fn runtime_gaps_leave_another_workspace_rect_alone() {
+    let mut fixture = Fixture::with_config(swayward_config::Config::default());
+    fixture.add_output(1, (1270, 1408));
+    add_two_tiled_windows(&mut fixture);
+    assert!(crate::command::execute(fixture.niri_state(), "workspace number 3")[0].success);
+    assert!(
+        crate::command::execute(fixture.niri_state(), "gaps horizontal current toggle 8")[0]
+            .success
+    );
+
+    assert_eq!(
+        workspace_rect_named(&mut fixture, "1"),
+        serde_json::json!({"x": 0, "y": 0, "width": 1270, "height": 1408})
+    );
+    assert_eq!(
+        workspace_rect_named(&mut fixture, "3"),
+        serde_json::json!({"x": 8, "y": 0, "width": 1254, "height": 1408})
+    );
+}
+
+/// A fullscreen view's percent is its output box over the workspace box
+/// (sway/sway/ipc-json.c:744-755), so inner gaps lift it above 1: sway 1.12
+/// reports 1270*1408 / (1250*1388). Differential seeds 1054 and 1950.
+#[test]
+fn fullscreen_percent_is_measured_against_the_gapped_workspace() {
+    let mut fixture = Fixture::with_config(swayward_config::Config::default());
+    fixture.add_output(1, (1270, 1408));
+    let client = fixture.add_client();
+    windows::map_window(
+        &mut fixture,
+        client,
+        windows::WindowSpec {
+            app_id: Some("full"),
+            ..Default::default()
+        },
+    );
+    assert!(crate::command::execute(fixture.niri_state(), "fullscreen enable")[0].success);
+    assert!(crate::command::execute(fixture.niri_state(), "gaps inner current set 10")[0].success);
+
+    let swayward = fixture.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let view = &tree["nodes"][1]["nodes"][0]["nodes"][0];
+    assert_eq!(view["fullscreen_mode"], 1);
+    assert_eq!(
+        view["percent"].as_f64().unwrap(),
+        1270. * 1408. / (1250. * 1388.)
+    );
+}
+
+/// `smart_gaps on` drops the gaps only while one tiled view is visible; sway
+/// re-runs `workspace_add_gaps` on every arrange
+/// (sway/sway/tree/workspace.c:1007-1015), so floating that view brings the
+/// workspace's gaps back. Differential seed 2611.
+#[test]
+fn smart_gaps_return_when_the_only_tiled_view_floats() {
+    let mut fixture = Fixture::with_config(swayward_config::Config::default());
+    fixture.add_output(1, (1270, 1408));
+    assert!(crate::command::execute(fixture.niri_state(), "smart_gaps on")[0].success);
+    let client = fixture.add_client();
+    windows::map_window(
+        &mut fixture,
+        client,
+        windows::WindowSpec {
+            app_id: Some("solo"),
+            ..Default::default()
+        },
+    );
+    assert!(
+        crate::command::execute(fixture.niri_state(), "gaps horizontal current toggle 8")[0]
+            .success
+    );
+    assert_eq!(
+        workspace_rect_named(&mut fixture, "1"),
+        serde_json::json!({"x": 0, "y": 0, "width": 1270, "height": 1408})
+    );
+
+    assert!(crate::command::execute(fixture.niri_state(), "floating enable")[0].success);
+    fixture.double_roundtrip(client);
+    assert_eq!(
+        workspace_rect_named(&mut fixture, "1"),
+        serde_json::json!({"x": 8, "y": 0, "width": 1254, "height": 1408})
+    );
+}
+
+/// An output mode change re-arranges the workspace, and sway's arrange re-runs
+/// `workspace_add_gaps` (sway/sway/config/output.c:1090-1093,
+/// sway/sway/tree/arrange.c:306), so smart gaps still suppress the inner gap
+/// around a lone tiled view after the resize.
+#[test]
+fn smart_gaps_survive_an_output_resize() {
+    let mut fixture = Fixture::with_config(swayward_config::Config::default());
+    fixture.add_output(1, (1270, 1408));
+    assert!(crate::command::execute(fixture.niri_state(), "smart_gaps on")[0].success);
+    let client = fixture.add_client();
+    windows::map_window(
+        &mut fixture,
+        client,
+        windows::WindowSpec {
+            app_id: Some("solo"),
+            ..Default::default()
+        },
+    );
+    assert!(crate::command::execute(fixture.niri_state(), "gaps inner current set 10")[0].success);
+    assert_eq!(
+        workspace_rect_named(&mut fixture, "1"),
+        serde_json::json!({"x": 0, "y": 0, "width": 1270, "height": 1408})
+    );
+
+    let output = fixture.niri_output(1);
+    output.change_current_state(
+        Some(smithay::output::Mode {
+            size: (1200, 1000).into(),
+            refresh: 60_000,
+        }),
+        None,
+        None,
+        None,
+    );
+    fixture.swayward().output_resized(&output);
+    assert_eq!(
+        workspace_rect_named(&mut fixture, "1"),
+        serde_json::json!({"x": 0, "y": 0, "width": 1200, "height": 1000})
+    );
+}
+
+/// `gaps` ends in `arrange_workspace` (sway/sway/commands/gaps.c:136), which
+/// lays a global fullscreen container out in its tile slot because it is not
+/// `workspace->fullscreen` (sway/sway/tree/arrange.c:310-321). Differential
+/// seed 2271.
+#[test]
+fn gaps_rearrange_a_global_fullscreen_view_into_its_slot() {
+    let mut fixture = Fixture::with_config(swayward_config::Config::default());
+    fixture.add_output(1, (1270, 1408));
+    let client = fixture.add_client();
+    windows::map_window(
+        &mut fixture,
+        client,
+        windows::WindowSpec {
+            app_id: Some("global"),
+            ..Default::default()
+        },
+    );
+    assert!(crate::command::execute(fixture.niri_state(), "fullscreen toggle global")[0].success);
+    assert!(
+        crate::command::execute(fixture.niri_state(), "gaps horizontal current toggle 8")[0]
+            .success
+    );
+
+    let swayward = fixture.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let view = &tree["nodes"][1]["nodes"][0]["nodes"][0];
+    assert_eq!(view["fullscreen_mode"], 2);
+    assert_eq!(
+        view["rect"],
+        serde_json::json!({"x": 8, "y": 0, "width": 1254, "height": 1408})
+    );
+    assert_eq!(view["percent"], 1.0);
 }

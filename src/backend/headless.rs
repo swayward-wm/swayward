@@ -130,15 +130,35 @@ impl Headless {
         size: (u16, u16),
         position: Option<(i32, i32)>,
     ) {
+        self.add_output_with_serial(swayward, connector, size, position, None);
+    }
+
+    /// Adds an output whose identifier carries `serial`, as a monitor with an
+    /// EDID does, instead of the all-Unknown one wlroots headless outputs share.
+    pub fn add_output_with_serial(
+        &mut self,
+        swayward: &mut Swayward,
+        connector: String,
+        size: (u16, u16),
+        position: Option<(i32, i32)>,
+        serial: Option<String>,
+    ) {
         if let Some(number) = connector
             .strip_prefix("headless-")
             .and_then(|number| number.parse::<u8>().ok())
         {
             self.last_output_number = self.last_output_number.max(number);
         }
-        let make = "swayward".to_string();
-        let model = "headless".to_string();
-        let serial = connector.clone();
+        // wlroots' headless backend sets no make, model or serial
+        // (backend/headless/output.c:120-160), so sway reports each as
+        // "Unknown" and every headless output shares the identifier
+        // "Unknown Unknown Unknown" (output_get_identifier,
+        // sway/sway/config/output.c:31-38). Workspace output priorities
+        // depend on that: an entry matches the first enabled output.
+        let make = "Unknown".to_string();
+        let model = "Unknown".to_string();
+        let name_serial = serial.clone();
+        let serial = serial.unwrap_or_else(|| "Unknown".to_string());
 
         let output = Output::new(
             connector.clone(),
@@ -160,9 +180,9 @@ impl Headless {
 
         output.user_data().insert_if_missing(|| OutputName {
             connector: connector.clone(),
-            make: Some(make),
-            model: Some(model),
-            serial: Some(serial),
+            make: None,
+            model: None,
+            serial: name_serial,
         });
 
         let physical_properties = output.physical_properties();

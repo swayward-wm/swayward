@@ -71,7 +71,10 @@ pub(super) fn urgent(
     value: &str,
 ) -> Result<(), CommandOutcome> {
     let CommandTarget::Window(target) = target else {
-        return Err(failure("Only views can be urgent"));
+        // CMD_INVALID (`sway/sway/commands/urgent.c:18-20`).
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can be urgent",
+        ));
     };
     let urgent = state
         .swayward
@@ -80,6 +83,15 @@ pub(super) fn urgent(
         .find_map(|(_, window)| (window.id() == target).then(|| window.is_urgent()))
         .ok_or_else(|| failure("No matching node."))?;
     let urgent = parse_boolean(value, urgent);
+    // Sway refuses only when the view's container is the seat's focused
+    // container; a focused parent split leaves the view open to urgency
+    // (`view_set_urgent`, sway/sway/tree/view.c:1209-1213).
+    if urgent
+        && matches!(super::targeted::focused_node(state), FocusedNode::View)
+        && super::targeted::focused_target(state) == Some(CommandTarget::Window(target))
+    {
+        return Ok(());
+    }
     state.swayward.set_window_urgent(target, urgent);
     state.swayward.queue_redraw_all();
     Ok(())
@@ -242,13 +254,15 @@ fn set_window_floating(state: &mut State, window: &smithay::desktop::Window, mod
         Toggle::Toggle => None,
     };
     let layout = &mut state.swayward.layout;
-    if layout.set_fullscreen_window_floating(window, floating) {
-        return;
+    if !layout.set_fullscreen_window_floating(window, floating) {
+        match floating {
+            Some(floating) => layout.set_window_floating(Some(window), floating),
+            None => layout.toggle_window_floating(Some(window)),
+        }
     }
-    match floating {
-        Some(floating) => layout.set_window_floating(Some(window), floating),
-        None => layout.toggle_window_floating(Some(window)),
-    }
+    // `cmd_floating` ends by arranging the view's workspace
+    // (sway/commands/floating.c:53-56).
+    layout.arrange_sway_workspace_of(window);
 }
 
 pub(super) fn kill(state: &mut State, target: CommandTarget) -> Result<(), CommandOutcome> {
@@ -394,9 +408,13 @@ impl ResolvedResizeTarget {
                 let window = mapped.window.clone();
                 // A floating group's child is a tiled child of the group, as
                 // `container_is_floating` is true only for the root
-                // (sway/commands/resize.c:523).
-                let floating =
-                    mapped.is_floating() && !state.swayward.layout.is_floating_group_child(&window);
+                // (sway/commands/resize.c:523). Ask the layout: the mapped
+                // window's own flag lags a `floating enable` in the same batch.
+                let floating = state
+                    .swayward
+                    .layout
+                    .workspaces()
+                    .any(|(_, _, ws)| ws.window_is_floating_root(&window));
                 if state.swayward.layout.is_scratchpad_hidden(&window) {
                     return Err(failure("Cannot resize a hidden scratchpad container"));
                 }
@@ -512,7 +530,7 @@ pub(super) fn resize(
     second: Option<ResizeAmount>,
 ) -> Result<(), CommandOutcome> {
     let target = ResolvedResizeTarget::resolve(state, target)?;
-    if matches!(target, ResolvedResizeTarget::FloatingRoot { .. })
+    if target.is_floating()
         && [Some(first), second]
             .into_iter()
             .flatten()
@@ -548,7 +566,11 @@ pub(super) fn opacity_focused(
 }
 
 pub(super) fn title_format_focused(state: &mut State, format: &str) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
+    // `sway/sway/commands/title_format.c:14-18`: a focused workspace is no
+    // container.
+    let target = super::targeted::focused_target(state)
+        .filter(|_| super::targeted::focused_node(state) != FocusedNode::Nothing);
+    let Some(target) = target else {
         return Err(swayward_ipc::command::parse_error(
             "Only valid containers can have a title_format",
         ));
@@ -570,6 +592,26 @@ pub(super) fn inhibit_idle_focused(
         return Err(failure("No matching node."));
     };
     super::handled(super::targeted::set_inhibit_idle(state, target, mode))
+}
+
+pub(super) fn allow_tearing_focused(state: &mut State, allow: bool) -> super::HandlerResult {
+    // `sway/sway/commands/allow_tearing.c:12-15`.
+    let target = view_target(state, "Tearing can only be allowed on views")?;
+    super::handled(super::targeted::set_allow_tearing(state, target, allow))
+}
+
+pub(super) fn max_render_time_focused(state: &mut State, msec: i32) -> super::HandlerResult {
+    // `sway/sway/commands/max_render_time.c:23-27`.
+    let target = view_target(state, "Only views can have a max_render_time")?;
+    super::handled(super::targeted::set_max_render_time(state, target, msec))
+}
+
+/// The focused view, or sway's CMD_INVALID `error` when none is focused.
+fn view_target(state: &State, error: &str) -> Result<CommandTarget, CommandOutcome> {
+    if super::targeted::focused_node(state) != FocusedNode::View {
+        return Err(swayward_ipc::command::parse_error(error));
+    }
+    super::targeted::focused_target(state).ok_or_else(|| failure("No matching node."))
 }
 
 pub(super) fn shortcuts_inhibitor_focused(state: &mut State, enable: bool) -> super::HandlerResult {
@@ -627,8 +669,17 @@ pub(super) fn sticky_focused(state: &mut State, value: &str) -> super::HandlerRe
 }
 
 pub(super) fn border_focused(state: &mut State, border: &Border) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
-        return Err(failure("Only views can have borders"));
+    // `border` checks for a view before anything else, so a well-formed
+    // border command without one is refused as CMD_INVALID
+    // (`sway/sway/commands/border.c:61-67`). With criteria the command runs
+    // through the targeted path on each match instead, and no match is
+    // `No matching node.` (`sway/sway/commands.c:301-303`).
+    let target = super::targeted::focused_target(state)
+        .filter(|_| super::targeted::focused_node(state) == FocusedNode::View);
+    let Some(target) = target else {
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can have borders",
+        ));
     };
     super::handled(self::border(state, target, border))
 }
@@ -655,7 +706,11 @@ pub(super) fn floating_focused(state: &mut State, mode: Toggle) -> super::Handle
 }
 
 pub(super) fn urgent_focused(state: &mut State, value: &str) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
+    // `sway/sway/commands/urgent.c:14-17`: a focused workspace is no
+    // container.
+    let target = super::targeted::focused_target(state)
+        .filter(|_| super::targeted::focused_node(state) != FocusedNode::Nothing);
+    let Some(target) = target else {
         return Err(failure("No current container"));
     };
     super::handled(urgent(state, target, value))
