@@ -102,17 +102,25 @@ impl<W: LayoutElement> TilingTree<W> {
     /// The most recent focus entry strictly inside `node`, like sway's
     /// `seat_get_focus_inactive` (sway/input/seat.c:1357-1372).
     pub fn focus_inactive_in(&self, node: NodeId) -> Option<NodeId> {
-        self.focus_inactive_in_excluding(node, node)
+        self.focus_inactive_in_matching(node, |_| true)
     }
 
     /// As `focus_inactive_in`, ignoring `excluded` and everything inside it: sway runs this
     /// after detaching the moved container, so its entries are no longer under `node`.
     pub fn focus_inactive_in_excluding(&self, node: NodeId, excluded: NodeId) -> Option<NodeId> {
+        self.focus_inactive_in_matching(node, |candidate| !self.contains_node(excluded, candidate))
+    }
+
+    fn focus_inactive_in_matching(
+        &self,
+        node: NodeId,
+        keep: impl Fn(NodeId) -> bool,
+    ) -> Option<NodeId> {
         self.focus_history.iter().copied().find(|candidate| {
             *candidate != node
                 && self.nodes.contains_key(candidate)
                 && self.contains_node(node, *candidate)
-                && !self.contains_node(excluded, *candidate)
+                && keep(*candidate)
         })
     }
 
@@ -195,6 +203,18 @@ impl<W: LayoutElement> TilingTree<W> {
 
     pub fn is_root(&self, id: NodeId) -> bool {
         id == self.root
+    }
+
+    /// Focuses the most recent focus entry under the root, if any; returns whether it did.
+    pub fn focus_inactive_below_root(&mut self) -> bool {
+        let target = self.focus_inactive_in(self.root);
+        self.set_focus_id(target.or(self.focus));
+        target.is_some()
+    }
+
+    /// Focuses the root without raising it in the focus history.
+    pub fn focus_root_keeping_history(&mut self) {
+        self.focus = Some(self.root);
     }
 
     pub fn focus_root(&mut self) {
@@ -335,6 +355,11 @@ impl<W: LayoutElement> TilingTree<W> {
         let mut current = focus;
         let mut wrap = None;
         while let Some(parent) = self.nodes.get(&current).and_then(|node| node.parent) {
+            // A fullscreen container ends the walk: sway leaves for another output or does
+            // nothing (`node_get_in_direction_tiling`, sway/commands/focus.c:143-155).
+            if self.fullscreen_mode(current).is_some() {
+                return false;
+            }
             let Some(TreeNode::Split {
                 layout, children, ..
             }) = self.nodes.get(&parent).map(|node| &node.value)
@@ -366,6 +391,9 @@ impl<W: LayoutElement> TilingTree<W> {
                     } else {
                         children.last().copied()
                     };
+                    // Even `sibling` descends into a wrap candidate's focus-inactive view
+                    // (sway/commands/focus.c:187-191, 216-220).
+                    wrap = wrap.and_then(|wrap| self.focused_leaf_in(wrap));
                     if self.options.layout.focus_wrapping == swayward_config::FocusWrapping::Force {
                         break;
                     }

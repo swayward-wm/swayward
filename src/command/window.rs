@@ -685,6 +685,16 @@ pub(super) fn border_focused(state: &mut State, border: &Border) -> super::Handl
 }
 
 pub(super) fn floating_focused(state: &mut State, mode: Toggle) -> super::HandlerResult {
+    // Disabling floating on the wrapper leaves it tiled; enabling floats the whole tree, which
+    // `set_container_floating` already does for a focused root.
+    if mode == Toggle::Disable {
+        if let Some(workspace) = state.swayward.layout.active_workspace_mut() {
+            if workspace.wrap_and_focus_workspace_children().is_some() {
+                state.swayward.queue_redraw_all();
+                return Ok(None);
+            }
+        }
+    }
     if let Some(CommandTarget::Container(workspace, node)) = super::targeted::focused_target(state)
     {
         set_container_floating(state, workspace, node, mode)?;

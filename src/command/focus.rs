@@ -197,6 +197,17 @@ pub(super) fn targeted(state: &mut State, target: CommandTarget) -> Result<(), C
                         workspace.floating_tree_root_for_window(&window).is_some()
                     });
                 state.swayward.layout.activate_window(&window);
+                // Each criteria match takes seat focus in turn (sway/commands.c:305-326), so
+                // stamp it now: the keyboard focus update after the command only sees the last.
+                if let Some(mapped) = state
+                    .swayward
+                    .layout
+                    .workspaces_mut()
+                    .flat_map(|workspace| workspace.windows_mut())
+                    .find(|mapped| mapped.id() == target)
+                {
+                    mapped.set_focus_timestamp(crate::utils::get_monotonic_time());
+                }
                 if in_floating_group {
                     state.ipc_refresh_layout();
                     state.ipc_emit_window_change(

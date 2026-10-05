@@ -151,11 +151,15 @@ impl<W: LayoutElement> TilingTree<W> {
     /// workspace fullscreen container is the only thing arranged, at the
     /// output box, so a tiled slot or an empty box from an earlier
     /// `arrange_container` is gone.
+    /// Without a workspace fullscreen container it arranges the tiling children, which gives a
+    /// wrapper a failed move left unarranged its box (sway/tree/arrange.c:317-321).
     pub fn arrange_workspace(&mut self) {
         let Some(id) = self.fullscreen_node() else {
+            self.unarranged_wrappers.clear();
             return;
         };
         if self.fullscreen_mode(id) == Some(FullscreenMode::Global) {
+            self.unarranged_wrappers.clear();
             self.fullscreen_tile_slot = true;
         } else {
             self.fullscreen_tile_slot = false;

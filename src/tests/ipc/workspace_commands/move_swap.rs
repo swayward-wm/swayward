@@ -537,6 +537,23 @@ fn failed_workspace_move_to_missing_mark_or_output_still_wraps_children() {
         assert_eq!(wrapper["percent"], 0.0, "{command}");
         assert_eq!(wrapper["rect"]["width"], 0, "{command}");
         assert!(wrapper["nodes"][0]["percent"].is_null(), "{command}");
+
+        // `workspace X` runs `arrange_workspace`, which gives the wrapper its box
+        // (sway/tree/workspace.c:741, sway/tree/arrange.c:317-321).
+        let name = workspace["name"].as_str().unwrap().to_owned();
+        let switch = format!("workspace --no-auto-back-and-forth {name}");
+        assert!(crate::command::execute(f.niri_state(), &switch)[0].success);
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let wrapper = &tree["nodes"][1]["nodes"][0]["nodes"][0];
+        assert_eq!(wrapper["percent"], 1.0, "{command}");
+        assert_eq!(wrapper["nodes"][0]["percent"], 1.0, "{command}");
     }
 }
 

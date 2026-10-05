@@ -527,14 +527,28 @@ impl<W: LayoutElement> TilingTree<W> {
     /// Wrap the workspace's tiling children in one new container that keeps
     /// the workspace layout (`workspace_wrap_children`,
     /// sway/tree/workspace.c:898-910).
-    pub fn wrap_workspace_children(&mut self) {
-        if let Some(layout) = self
+    pub fn wrap_workspace_children(&mut self) -> Option<NodeId> {
+        let layout = self
             .split_layout(self.root)
-            .filter(|_| self.split_len(self.root).is_some_and(|len| len > 0))
+            .filter(|_| self.split_len(self.root).is_some_and(|len| len > 0))?;
+        let wrapper = self.wrap_root_children(layout);
+        self.request_window_sizes();
+        (wrapper != self.root).then_some(wrapper)
+    }
+
+    /// `floating` on a focused workspace wraps its children and then makes the workspace
+    /// horizontal without refreshing its representation, which keeps the old layout
+    /// (sway/commands/floating.c:28-33). Returns the wrapper.
+    pub fn wrap_workspace_children_for_floating(&mut self) -> Option<NodeId> {
+        let old_layout = self.split_layout(self.root)?;
+        let wrapper = self.wrap_workspace_children()?;
+        if let Some(TreeNode::Split { layout, .. }) =
+            self.nodes.get_mut(&self.root).map(|node| &mut node.value)
         {
-            self.wrap_root_children(layout);
-            self.request_window_sizes();
+            *layout = Layout::SplitH;
         }
+        self.stale_root_representation = Some((old_layout, self.representation_shape()));
+        Some(wrapper)
     }
 
     /// [`Self::wrap_workspace_children`] for a move that then fails: sway

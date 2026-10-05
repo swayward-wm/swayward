@@ -606,7 +606,11 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.active_window()
         } else {
-            self.tiling.active_window()
+            // With the workspace itself focused sway's seat focuses no view, so a view that
+            // never had focus does not receive keyboard focus (sway/tree/view.c:944-957).
+            self.tiling
+                .active_window()
+                .filter(|window| !self.is_workspace_focused() || window.focus_timestamp().is_some())
         }
     }
 
@@ -799,7 +803,13 @@ impl<W: LayoutElement> Workspace<W> {
                     }
                     // A fullscreen floating view stays floating in sway.
                     let has_had_tile = self.tiling.has_had_tile();
+                    let keeps_workspace_focus = !activate && self.is_workspace_focused();
                     self.tiling.add_tile_with_activation(tile, insert, activate);
+                    // An unfocused view leaves a focused workspace focused, even as its first
+                    // tiled view (sway/tree/view.c:944-957).
+                    if keeps_workspace_focus {
+                        self.tiling.focus_root_keeping_history();
+                    }
                     if is_floating {
                         self.tiling.restore_has_had_tile(has_had_tile);
                     }
@@ -1511,6 +1521,13 @@ impl<W: LayoutElement> Workspace<W> {
             } else {
                 self.tiling.remove_tile(&id, Transaction::new()).unwrap()
             };
+            // Floating the focused view raises its old parent to the tiling layer's
+            // focus-inactive node (`container_set_floating`, sway/tree/container.c:969-973).
+            if let Some(parent) =
+                parent.filter(|parent| target_is_active && self.tiling.contains(*parent))
+            {
+                self.tiling.set_focus(parent);
+            }
             tile.tiling_focus_rank = rank;
             tile.tiling_parent = parent;
             tile.stop_move_animations();

@@ -147,6 +147,27 @@ impl<W: LayoutElement> Workspace<W> {
         Some(tile)
     }
 
+    /// Moves focus from the workspace node to its focus-inactive tiling container, as
+    /// `workspace_switch` does with `seat_get_focus_inactive(ws)`, which only returns the
+    /// workspace itself when nothing under it was focused (sway/tree/workspace.c:731-743;
+    /// sway/input/seat.c:1357-1372).
+    pub fn focus_inactive_below_workspace(&mut self) {
+        if !self.is_workspace_focused() {
+            return;
+        }
+        let newest = |tiles: &mut dyn Iterator<Item = &Tile<W>>| {
+            tiles
+                .filter_map(|tile| tile.window().focus_timestamp())
+                .max()
+        };
+        let floating = newest(&mut self.floating.tiles());
+        if floating.is_some() && floating > newest(&mut self.tiling.tiles()) {
+            self.focus_floating();
+        } else if self.tiling.focus_inactive_below_root() {
+            self.floating_is_active = FloatingActive::No;
+        }
+    }
+
     pub fn focus_parent(&mut self) -> bool {
         if self.floating_is_active.get() {
             if self.floating.focus_parent() {
@@ -772,6 +793,18 @@ impl<W: LayoutElement> Workspace<W> {
                 .tree_root_for_node(id)
                 .and_then(|root| self.floating.tree(root))
                 .is_some_and(|tree| tree.is_split(id))
+    }
+
+    /// `floating` with the workspace focused first wraps its tiling children in a container
+    /// and focuses it (sway/commands/floating.c:28-33). Returns the wrapper.
+    pub fn wrap_and_focus_workspace_children(&mut self) -> Option<NodeId> {
+        if !self.is_workspace_focused() {
+            return None;
+        }
+        let wrapper = self.tiling.wrap_workspace_children_for_floating()?;
+        self.tiling.set_focus(wrapper);
+        self.floating_is_active = FloatingActive::No;
+        Some(wrapper)
     }
 
     pub fn set_container_floating(&mut self, node: NodeId, floating: bool) -> Option<NodeId> {

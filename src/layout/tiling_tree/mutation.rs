@@ -214,8 +214,9 @@ impl<W: LayoutElement> TilingTree<W> {
             )
     }
 
-    /// Focuses a new leaf, or ranks it behind the kept focus: second when merely not
-    /// activated, last when a fullscreen container blocks focus.
+    /// Focuses a new leaf, or ranks it last behind the kept focus: sway appends every new node
+    /// to the tail of the seat's focus stack (`seat_node_from_node`, sway/input/seat.c:349) and
+    /// only a focused view moves to the head.
     fn place_new_leaf_in_focus_order(
         &mut self,
         id: NodeId,
@@ -226,12 +227,7 @@ impl<W: LayoutElement> TilingTree<W> {
         match previous_focus {
             Some(previous_focus) if !activate || focus_blocked => {
                 self.focus_history.retain(|candidate| *candidate != id);
-                if focus_blocked {
-                    self.focus_history.push(id);
-                } else {
-                    self.focus_history
-                        .insert(1.min(self.focus_history.len()), id);
-                }
+                self.focus_history.push(id);
                 self.focus = Some(previous_focus);
             }
             _ => self.set_focus_id(Some(id)),
@@ -291,6 +287,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 .collect::<Vec<_>>();
             self.unarranged_under_fullscreen.extend(unarranged);
         }
+        let removed_global = removed_fullscreen
+            && self.fullscreen_mode(id) == Some(FullscreenMode::Global)
+            && self.focus == Some(id);
         let node = self.remove_node(id)?;
         if removed_fullscreen {
             self.mapped_under_fullscreen.clear();
@@ -315,6 +314,11 @@ impl<W: LayoutElement> TilingTree<W> {
             self.empty_representation_layout = Some(layout);
             self.pending_modes.clear();
             self.set_focus_id(None);
+        } else if removed_global {
+            // Sway emits the destroy signal while the view is still global fullscreen
+            // (sway/tree/container.c:488-501), so the seat refuses every sibling it obstructs
+            // and focus stays on the workspace (sway/input/seat.c:1148-1151).
+            self.set_focus_id(Some(self.root));
         } else if self.focus == Some(id) {
             self.set_focus_id(
                 self.fullscreen_node()

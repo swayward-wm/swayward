@@ -110,6 +110,10 @@ pub struct Tile<W: LayoutElement> {
     pub(super) floating_stamp: Option<u64>,
     pub(super) is_sticky: bool,
 
+    /// When this tile joined the tail of sway's seat focus stack; see
+    /// [`super::tiling_tree::next_seat_stack_seq`].
+    seat_stack_seq: u64,
+
     /// The size that the window should assume when going floating.
     ///
     /// This is generally the last size the window had when it was floating. It can be unknown if
@@ -242,6 +246,11 @@ impl<W: LayoutElement> Tile<W> {
         self.floating_stamp
     }
 
+    /// See [`Self::seat_stack_seq`].
+    pub fn seat_stack_seq(&self) -> u64 {
+        self.seat_stack_seq
+    }
+
     pub fn new(
         window: W,
         view_size: Size<f64, Logical>,
@@ -278,6 +287,7 @@ impl<W: LayoutElement> Tile<W> {
             tiling_parent: None,
             floating_stamp: None,
             is_sticky: false,
+            seat_stack_seq: super::tiling_tree::next_seat_stack_seq(),
             floating_window_size: None,
             floating_pos: None,
             floating_preset_width_idx: None,

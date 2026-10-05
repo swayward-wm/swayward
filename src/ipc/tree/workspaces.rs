@@ -362,8 +362,7 @@ fn describe_floating_window(
     node
 }
 
-/// Merge floating ids into the tiled focus list, then order it most recent
-/// first unless the floating layer is active.
+/// Merge floating ids into the tiled focus list, then order it most recent first.
 fn order_focus(
     workspace: &crate::layout::workspace::Workspace<Mapped>,
     focus: &mut Vec<i64>,
@@ -379,6 +378,12 @@ fn order_focus(
         })
         .collect::<std::collections::HashMap<_, _>>();
     let floating_focus = floating_nodes.iter().rev().map(|node| node.id);
+    focus.extend(floating_focus);
+    // With a floating container focused, every entry follows the focus stack, which the
+    // recency sort reproduces (`focus_inactive_children_iterator`, sway/ipc-json.c:786-807).
+    if workspace.floating_is_active() || !workspace.tiling().ipc_focus_follows_history() {
+        order_by_recency(workspace, focus, nodes, floating_nodes, &focus_timestamps);
+    }
     if workspace.floating_is_active() {
         // The focused floating container heads the seat stack even when it
         // is not on top, as after a move onto a floating mark stacks it
@@ -386,39 +391,37 @@ fn order_focus(
         let active = workspace
             .active_window()
             .map(|window| window_id(window.id()));
-        let mut floating_focus = floating_focus.collect::<Vec<_>>();
-        if let Some(index) = floating_nodes
+        let index = floating_nodes
             .iter()
-            .rev()
-            .position(|node| active.is_some_and(|active| node_holds(node, active)))
-        {
-            let id = floating_focus.remove(index);
-            floating_focus.insert(0, id);
-        }
-        focus.splice(0..0, floating_focus);
-    } else {
-        focus.extend(floating_focus);
-        if !workspace.tiling().ipc_focus_follows_history() {
-            order_by_recency(workspace, focus, nodes, floating_nodes, &focus_timestamps);
+            .find(|node| active.is_some_and(|active| node_holds(node, active)))
+            .and_then(|node| focus.iter().position(|entry| *entry == node.id));
+        if let Some(index) = index {
+            let id = focus[index];
+            focus.remove(index);
+            focus.insert(0, id);
         }
     }
-    // A view never focused, such as one mapped under a fullscreen view,
-    // joined the tail of the focus stack when it was created and has not
-    // moved (`seat_node_from_node`, sway/input/seat.c:327-349). Window ids
-    // follow creation order.
-    let never_focused = workspace
-        .windows()
-        .filter(|window| window.focus_timestamp().is_none())
-        .map(|window| window_id(window.id()))
-        .collect::<std::collections::HashSet<_>>();
-    let mut tail = focus
-        .iter()
-        .copied()
-        .filter(|id| never_focused.contains(id))
+    // A view never focused, such as one mapped under a fullscreen view, and a
+    // wrapper the tree created without focusing it joined the tail of the focus
+    // stack when they were created and have not moved (`seat_node_from_node`,
+    // sway/input/seat.c:327-349). They follow in creation order.
+    let mut tail = workspace
+        .tiles()
+        .filter(|tile| tile.window().focus_timestamp().is_none())
+        .map(|tile| (window_id(tile.window().id()), tile.seat_stack_seq()))
+        .chain(
+            workspace
+                .ipc_tiling_tree()
+                .nodes()
+                .into_iter()
+                .filter(|(id, _)| workspace.tiling().ipc_focus_is_stale(*id))
+                .map(|(id, _)| (container_id(id), id.0)),
+        )
+        .filter(|(id, _)| focus.contains(id))
         .collect::<Vec<_>>();
-    tail.sort_unstable();
-    focus.retain(|id| !never_focused.contains(id));
-    focus.extend(tail);
+    tail.sort_unstable_by_key(|(_, seq)| *seq);
+    focus.retain(|id| !tail.iter().any(|(entry, _)| entry == id));
+    focus.extend(tail.into_iter().map(|(id, _)| id));
 }
 
 fn node_holds(node: &Node, id: i64) -> bool {

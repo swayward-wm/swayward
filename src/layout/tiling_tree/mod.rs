@@ -394,6 +394,13 @@ pub(super) enum DecorationLayer {
 
 static NODE_ID_COUNTER: IdCounter = IdCounter::new();
 
+/// A position in creation order shared with container ids. Sway appends every new node to the
+/// tail of the seat focus stack (`seat_node_from_node`, sway/input/seat.c:349), so a view that
+/// was never focused and a wrapper the tree created without focusing it rank there by this.
+pub(crate) fn next_seat_stack_seq() -> u64 {
+    NODE_ID_COUNTER.next()
+}
+
 /// A collection keyed by node id that must forget a node when it leaves the arena.
 trait SideTable {
     fn ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_>;

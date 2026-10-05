@@ -752,6 +752,14 @@ impl<W: LayoutElement> Monitor<W> {
         is_floating: bool,
     ) {
         let (workspace_idx, target) = self.resolve_add_window_target(target);
+        // Only a view mapped into the active workspace may take focus (`should_focus`,
+        // sway/tree/view.c:712-715).
+        let tile_activate = match activate {
+            ActivateWindow::Smart if workspace_idx != self.active_workspace_idx => {
+                ActivateWindow::No
+            }
+            activate => activate,
+        };
 
         let workspace = &mut self.workspaces[workspace_idx];
 
@@ -759,7 +767,7 @@ impl<W: LayoutElement> Monitor<W> {
             tile,
             target,
             super::workspace::AddTileOptions {
-                activate,
+                activate: tile_activate,
                 is_floating,
             },
         );

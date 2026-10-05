@@ -38,8 +38,11 @@ pub(super) fn activate(
     if let Err(error) = result {
         return Err(activation_failure(error));
     }
-    // `workspace_switch` arranges the workspace it focuses
-    // (sway/tree/workspace.c:731-743).
+    // `workspace_switch` focuses the workspace's focus-inactive node, even when the target is
+    // the workspace already focused, then arranges it (sway/tree/workspace.c:731-743).
+    if let Some(workspace) = state.swayward.layout.active_workspace_mut() {
+        workspace.focus_inactive_below_workspace();
+    }
     state.swayward.layout.arrange_active_sway_workspace();
     state.swayward.queue_redraw_all();
     Ok(None)
