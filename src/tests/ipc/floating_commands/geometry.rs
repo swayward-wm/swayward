@@ -1014,6 +1014,82 @@ fn floating_border_change_keeps_the_content_box() {
     assert_eq!(split["nodes"][0]["rect"], after["rect"], "{split}");
 }
 
+/// Differential family csd-floating-split-rect, random-v2 seed 13795 (oracle row
+/// `floating_csd_split_keeps_content`): `border csd` on a floating view shrinks the container
+/// to its content box (sway/commands/border.c:94-96), and a later `split v` wraps that box.
+/// The wrapped child gets the default `normal` border back, so its titlebar sits inside the
+/// wrapper and the child rect starts below it.
+#[test]
+fn floating_csd_split_wraps_the_content_box() {
+    let mut config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let surface = f.client(client).create_window().surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size(696, 491);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let floating = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        find_json_node(&tree, "floating_con", false)
+            .unwrap()
+            .clone()
+    };
+    let before = floating(&mut f);
+    let content_x =
+        before["rect"]["x"].as_i64().unwrap() + before["window_rect"]["x"].as_i64().unwrap();
+    let content_y = before["rect"]["y"].as_i64().unwrap()
+        + before["deco_rect"]["height"].as_i64().unwrap()
+        + before["window_rect"]["y"].as_i64().unwrap();
+
+    assert!(crate::command::execute(f.niri_state(), "border csd")[0].success);
+    f.double_roundtrip(client);
+    let csd = floating(&mut f);
+    let content = serde_json::json!({"x": content_x, "y": content_y, "width": 696, "height": 491});
+    assert_eq!(csd["border"], "csd", "{csd}");
+    assert_eq!(csd["rect"], content, "{before}\n{csd}");
+
+    assert!(crate::command::execute(f.niri_state(), "split v")[0].success);
+    f.double_roundtrip(client);
+    let split = floating(&mut f);
+    assert_eq!(split["layout"], "splitv", "{split}");
+    assert_eq!(split["rect"], content, "{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{child}");
+    assert_eq!(child["border"], "normal", "{child}");
+    assert_eq!(
+        child["rect"],
+        serde_json::json!({"x": content_x, "y": content_y + titlebar, "width": 696, "height": 491 - titlebar}),
+        "{child}"
+    );
+}
+
 /// An output rescale leaves a floater where it was and lets the client pick
 /// its own new size. sway's arrange_workspace moves floaters only when the
 /// workspace origin moves (sway/sway/tree/arrange.c:277-304), sends no
