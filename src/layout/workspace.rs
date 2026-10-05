@@ -284,6 +284,8 @@ impl<W: LayoutElement> Workspace<W> {
         let floating = FloatingLayout::new(
             view_size,
             working_area,
+            output_area,
+            Some(output.current_location().to_f64()),
             scale.fractional_scale(),
             clock.clone(),
             options.clone(),
@@ -349,6 +351,8 @@ impl<W: LayoutElement> Workspace<W> {
         let floating = FloatingLayout::new(
             view_size,
             working_area,
+            output_area,
+            None,
             scale.fractional_scale(),
             clock.clone(),
             options.clone(),
@@ -464,6 +468,8 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating.update_config(
             self.view_size,
             self.working_area,
+            output_area,
+            self.output.as_ref().map(|o| o.current_location().to_f64()),
             self.scale.fractional_scale(),
             options.clone(),
         );
@@ -659,6 +665,7 @@ impl<W: LayoutElement> Workspace<W> {
             transform,
             view_size,
             working_area,
+            output_area,
             has_gaps_to_edge(
                 output_area,
                 self.options.layout.outer_gaps,
@@ -673,6 +680,7 @@ impl<W: LayoutElement> Workspace<W> {
         transform: Transform,
         size: Size<f64, Logical>,
         working_area: Rectangle<f64, Logical>,
+        output_area: Rectangle<f64, Logical>,
         gaps_to_edge: bool,
     ) {
         let scale_transform_changed = self.transform != transform
@@ -704,6 +712,8 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.update_config(
                 size,
                 working_area,
+                output_area,
+                self.output.as_ref().map(|o| o.current_location().to_f64()),
                 scale.fractional_scale(),
                 self.options.clone(),
             );

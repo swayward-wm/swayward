@@ -115,9 +115,11 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 .map(|resize| resize.data);
             win.set_interactive_resize(resize_data);
 
-            let border_config = self.options.layout.border.merged_with(&win.rules().border);
-            let bounds = compute_toplevel_bounds(border_config, self.working_area.size);
-            win.set_bounds(bounds);
+            // Sway never sends configure bounds (sway/sway/desktop/xdg_shell.c:305), so a
+            // floater's configure carries only its own size. Updating the bounds here on an
+            // output rescale would send a configure holding the size from before the client
+            // reacted to the new scale, and the client would take that stale size back
+            // where sway lets it resize itself (xdg_shell.c:319-331).
 
             // If transactions are disabled, also disable combined throttling, for more
             // intuitive behavior.
@@ -334,7 +336,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
 
             let mut data2 = *data;
             data2.update(tile);
-            data2.update_config(self.view_size, self.working_area);
+            data2.update_config(self.view_size, self.working_area, data.logical_pos);
             assert_eq!(data, &data2, "tile data must be up to date");
 
             for entry_below in &self.entries[i + 1..] {

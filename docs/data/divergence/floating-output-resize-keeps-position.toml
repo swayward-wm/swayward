@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/floating_tree.rs", "src/layout/floating_tree/interaction.rs", "src/layout/workspace.rs"]
+what = "keep a floater's absolute position when the output resizes or rescales, remap it with sway's center-fraction rule only when the workspace origin moves, and stop sending configure bounds to floating windows."
+why = "Sway's arrange_workspace moves floaters only when the workspace origin moves, then keeps each center at the same fraction of the old gapped box inside the new ungapped one (sway/tree/arrange.c:277-304, floating_fix_coordinates in sway/tree/container.c:818-831). Sway never sends configure bounds (sway/desktop/xdg_shell.c:305). niri stored floating positions as fractions of the working area, so `output * scale 2` moved a floater from 290,87 to 145,44. Its bounds update sent a configure that still carried the size from before the rescale, so the client went back to that size where under sway it resizes itself (differential seed 10900)."

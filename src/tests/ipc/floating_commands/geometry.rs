@@ -964,3 +964,79 @@ fn floating_border_change_keeps_the_content_box() {
     assert_eq!(split["rect"], after["rect"], "{split}");
     assert_eq!(split["nodes"][0]["rect"], after["rect"], "{split}");
 }
+
+/// An output rescale leaves a floater where it was and lets the client pick
+/// its own new size. sway's arrange_workspace moves floaters only when the
+/// workspace origin moves (sway/sway/tree/arrange.c:277-304), sends no
+/// configure bounds (sway/sway/desktop/xdg_shell.c:305), and a floating
+/// client's own size change resizes its container (xdg_shell.c:319-331).
+/// Oracle row: state `floating_output_scale_keeps_position`; differential
+/// seed 10900.
+#[test]
+fn output_rescale_keeps_floating_position_and_client_size() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in [
+        "floating enable",
+        "resize set 700 px 500 px",
+        "move absolute position 290 px 87 px",
+    ] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    f.double_roundtrip(client);
+    f.client(client).window(&surface).ack_last_and_commit();
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    let (w, h) = window.configures_received.last().unwrap().1.size;
+    window.set_size(w as u16, h as u16);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let rect = |f: &mut Fixture| {
+        let tree = get_tree(f);
+        let rect = &find_json_node(&tree, "floating_con", false).unwrap()["rect"];
+        (
+            rect["x"].as_i64().unwrap(),
+            rect["y"].as_i64().unwrap(),
+            rect["width"].as_i64().unwrap(),
+        )
+    };
+    let (x, y, width) = rect(&mut f);
+    assert_eq!((x, y), (290, 87));
+    let _ = f.client(client).window(&surface).format_recent_configures();
+
+    assert!(crate::command::execute(f.niri_state(), "output * scale 2")[0].success);
+    f.double_roundtrip(client);
+    assert_eq!(
+        rect(&mut f),
+        (290, 87, width),
+        "a rescale must not move the floater"
+    );
+
+    // The client narrows itself for the new scale, as foot does.
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size((w - 34) as u16, h as u16);
+    window.commit();
+    f.double_roundtrip(client);
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    let stale: Vec<_> = window
+        .recent_configures()
+        .filter(|configure| configure.size == (w, h))
+        .cloned()
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "configures since the rescale repeat the old size: {stale:?}"
+    );
+    assert_eq!(rect(&mut f), (290, 87, width - 34));
+}

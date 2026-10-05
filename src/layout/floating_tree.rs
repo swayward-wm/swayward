@@ -132,6 +132,13 @@ pub struct FloatingLayout<W: LayoutElement> {
     /// Working area for this space.
     working_area: Rectangle<f64, Logical>,
 
+    /// Working area before gaps; its origin moving remaps floaters (see
+    /// [`Self::update_config`]).
+    output_area: Rectangle<f64, Logical>,
+
+    /// Global location of the output last configured, if any.
+    output_loc: Option<Point<f64, Logical>>,
+
     /// Scale of the output the space is on (and rounds its sizes to).
     scale: f64,
 
@@ -315,18 +322,16 @@ impl Data {
         self.logical_pos = Self::scale_by_working_area(self.working_area, self.pos);
     }
 
+    /// Moves to a new working area, keeping the window at `logical_pos`.
     pub fn update_config(
         &mut self,
         view_size: Size<f64, Logical>,
         working_area: Rectangle<f64, Logical>,
+        logical_pos: Point<f64, Logical>,
     ) {
-        if self.view_size == view_size && self.working_area == working_area {
-            return;
-        }
-
         self.view_size = view_size;
         self.working_area = working_area;
-        self.recompute_logical_pos();
+        self.set_logical_pos(logical_pos);
     }
 
     pub fn update<W: LayoutElement>(&mut self, tile: &Tile<W>) {
@@ -426,6 +431,8 @@ impl<W: LayoutElement> FloatingLayout<W> {
     pub fn new(
         view_size: Size<f64, Logical>,
         working_area: Rectangle<f64, Logical>,
+        output_area: Rectangle<f64, Logical>,
+        output_loc: Option<Point<f64, Logical>>,
         scale: f64,
         clock: Clock,
         options: Rc<Options>,
@@ -439,19 +446,51 @@ impl<W: LayoutElement> FloatingLayout<W> {
             closing_windows: Vec::new(),
             view_size,
             working_area,
+            output_area,
+            output_loc,
             scale,
             clock,
             options,
         }
     }
 
+    /// `output_area` is the working area before gaps, sway's workspace box
+    /// before `workspace_add_gaps`, and `output_loc` the global location of
+    /// the output, `None` while the workspace has none.
+    ///
+    /// Sway keeps a floater's absolute position when the output resizes or
+    /// rescales. arrange_workspace moves floaters only when the workspace
+    /// origin moves, and then keeps each center at the same fraction of the
+    /// old gapped box within the new ungapped one (sway/sway/tree/arrange.c:277-304,
+    /// floating_fix_coordinates in sway/sway/tree/container.c:818-831).
     pub fn update_config(
         &mut self,
         view_size: Size<f64, Logical>,
         working_area: Rectangle<f64, Logical>,
+        output_area: Rectangle<f64, Logical>,
+        output_loc: Option<Point<f64, Logical>>,
         scale: f64,
         options: Rc<Options>,
     ) {
+        // Positions are output-local; sway compares global workspace origins.
+        let remap = match (self.output_loc, output_loc) {
+            (Some(old_loc), Some(new_loc))
+                if old_loc + self.output_area.loc != new_loc + output_area.loc =>
+            {
+                Some((old_loc, new_loc))
+            }
+            _ => None,
+        };
+        let old_area = self.working_area;
+        let place = |rect: Rectangle<f64, Logical>| match remap {
+            Some((old_loc, new_loc)) => {
+                let old_box = Rectangle::new(old_area.loc + old_loc, old_area.size);
+                let new_box = Rectangle::new(output_area.loc + new_loc, output_area.size);
+                let rect = Rectangle::new(rect.loc + old_loc, rect.size);
+                remap_rect_center(rect, old_box, new_box).loc - new_loc
+            }
+            None => rect.loc,
+        };
         for (tile, data) in self
             .entries
             .iter_mut()
@@ -459,10 +498,12 @@ impl<W: LayoutElement> FloatingLayout<W> {
         {
             tile.update_config(view_size, scale, options.clone());
             data.update(tile);
-            data.update_config(view_size, working_area);
+            let pos = place(Rectangle::new(data.logical_pos, data.size));
+            data.update_config(view_size, working_area, pos);
         }
         for entry in &mut self.tree_entries {
-            entry.rect.loc = Data::scale_by_working_area(working_area, entry.pos);
+            entry.rect.loc = place(entry.rect);
+            entry.pos = Data::logical_to_size_frac_in_working_area(working_area, entry.rect.loc);
             entry
                 .tree
                 .update_config(view_size, entry.rect, false, scale, options.clone());
@@ -470,6 +511,10 @@ impl<W: LayoutElement> FloatingLayout<W> {
 
         self.view_size = view_size;
         self.working_area = working_area;
+        self.output_area = output_area;
+        if output_loc.is_some() {
+            self.output_loc = output_loc;
+        }
         self.scale = scale;
         self.options = options;
     }
@@ -1134,6 +1179,11 @@ impl<W: LayoutElement> FloatingLayout<W> {
     /// while sway would skip arranging them; a root without a record takes
     /// its current position either way.
     pub fn refresh_ipc_anchors(&mut self, origin: Point<f64, Logical>, frozen: bool) {
+        // Positions are output-local, so an output move alone carries every
+        // floater along; floating_fix_coordinates does the same for an
+        // unchanged box size. Record the location so a later resize does not
+        // read the move as a workspace origin change.
+        self.output_loc = Some(origin);
         for entry in &mut self.tree_entries {
             if !frozen || entry.ipc_anchor.is_none() {
                 entry.ipc_anchor = Some(origin + entry.rect.loc);
