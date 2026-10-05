@@ -730,6 +730,43 @@ fn border_command_updates_rendering_and_tree_metadata() {
     }
 }
 
+/// A hidden scratchpad window keeps its border thickness under `border none`,
+/// as sway reports `c->current.border_thickness` (sway/ipc-json.c:760-761).
+/// Oracle row scratchpad_border_none_keeps_thickness; differential seed 1199.
+#[test]
+fn scratchpad_window_under_border_none_reports_its_thickness() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["border pixel 3", "border none", "move scratchpad"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let node = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(node["scratchpad_state"], "fresh");
+    assert_eq!(node["border"], "none");
+    assert_eq!(node["current_border_width"], 3);
+}
+
 #[test]
 fn border_csd_fails_without_client_decoration_support() {
     let mut f = Fixture::new();

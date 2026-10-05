@@ -181,7 +181,7 @@ fn scratch_output(
             .filter(|mapped| !tree_window_ids.contains(&mapped.id()))
             .map(|mapped| {
                 let (border, border_width) = layout
-                    .window_border(&mapped.window)
+                    .scratchpad_border_thickness(&mapped.window)
                     .map_or((NodeBorder::Normal, 2), |border| {
                         (ipc_border(border.0), i32::from(border.1))
                     });

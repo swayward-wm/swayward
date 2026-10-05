@@ -220,6 +220,19 @@ impl<W: LayoutElement> Layout<W> {
             .map(|removed| (removed.tile.window(), removed.tile.is_sticky))
     }
 
+    /// A hidden scratchpad window's border style and stored thickness. Sway
+    /// reports the thickness as `current_border_width` even under `border
+    /// none` (`c->current.border_thickness`, sway/ipc-json.c:760-761).
+    pub fn scratchpad_border_thickness(
+        &self,
+        window: &W::Id,
+    ) -> Option<(swayward_ipc::command::BorderStyle, u16)> {
+        self.scratchpad
+            .iter()
+            .find(|removed| removed.tile.window().id() == window)
+            .map(|removed| removed.tile.sway_border_thickness())
+    }
+
     pub fn scratchpad_windows(&self) -> impl Iterator<Item = &W> {
         self.scratchpad
             .iter()
