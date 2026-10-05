@@ -416,6 +416,43 @@ fn fullscreen_floating_window_keeps_sways_raw_focus() {
     );
 }
 
+// random-v2 seed 13438 (differential): swapping the focused tab with its
+// sibling keeps focus, and so the visible tab, on the focused window in its
+// new slot. Sway reads the parent layout after the swap, focuses the other
+// container and refocuses the original (`swap_focus`,
+// sway/tree/container.c:1772-1788).
+#[test]
+fn swapping_the_focused_tab_keeps_it_focused_and_visible() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "mark oracle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    map_test_window(&mut f, client, "fixture-2");
+
+    let outcome = crate::command::execute(f.niri_state(), "swap container with mark oracle");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let parent = find_json_parent_of_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(parent["layout"], "tabbed");
+    let nodes = parent["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["app_id"], "fixture-2");
+    assert_eq!(nodes[0]["focused"], true);
+    assert_eq!(nodes[0]["visible"], true);
+    assert_eq!(nodes[1]["app_id"], "fixture-1");
+    assert_eq!(nodes[1]["focused"], false);
+    assert_eq!(nodes[1]["visible"], false);
+}
+
 // random seed 260 step 5 (sway-1.12-random): a floating fullscreen window
 // hides the tiled windows beside it (`view_is_visible`,
 // sway/tree/view.c:1187-1193).
