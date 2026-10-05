@@ -1503,3 +1503,31 @@ fn moving_a_fullscreen_floating_window_leaves_the_new_workspace_without_represen
     );
     assert!(target["representation"].is_null(), "{target}");
 }
+
+// v3 differential seed 16 step 4 (sway-1.12; oracle row
+// resize_set_ppt_singleton_split): `split h` wraps the focused view in a
+// one-child H split. Sway converts `resize set width 50 ppt` against that
+// nearest H ancestor even though it has no siblings, so 50 ppt is half of the
+// view's own width, and the resize lands on the workspace split
+// (resize_set_tiled, sway/commands/resize.c:293-311).
+#[test]
+fn resize_set_ppt_converts_against_the_nearest_axis_ancestor() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "first");
+    map_test_window(&mut f, client, "second");
+    for command in ["split h", "resize set width 50 ppt"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let tree = tree_json(&mut f);
+    let children = tree["nodes"][1]["nodes"][0]["nodes"].as_array().unwrap();
+    let percents: Vec<f64> = children
+        .iter()
+        .map(|child| child["percent"].as_f64().unwrap())
+        .collect();
+    assert_eq!(percents, [0.75, 0.25], "{tree}");
+}

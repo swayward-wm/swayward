@@ -502,6 +502,23 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             Layout::SplitV
         };
+        // Sway converts ppt against the nearest ancestor with the axis layout,
+        // whatever its child count, else the workspace (resize_set_tiled and
+        // resize_adjust_tiled, sway/commands/resize.c:249-270,297-305).
+        let ppt_base = {
+            let mut ancestor = self.nodes.get(&id).and_then(|node| node.parent);
+            while let Some(ancestor_id) = ancestor {
+                match self.nodes.get(&ancestor_id) {
+                    Some(Node {
+                        value: TreeNode::Split { layout, .. },
+                        ..
+                    }) if *layout == wanted => break,
+                    Some(node) => ancestor = node.parent,
+                    None => return false,
+                }
+            }
+            ancestor.unwrap_or(self.root)
+        };
         let mut branch = id;
         let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
         while let Some(parent_id) = parent {
@@ -523,7 +540,7 @@ impl<W: LayoutElement> TilingTree<W> {
                         rect.size.h
                     }
                 };
-                let Some(parent_extent) = geometries.ipc_nodes.get(&parent_id).map(extent) else {
+                let Some(parent_extent) = geometries.ipc_nodes.get(&ppt_base).map(extent) else {
                     return false;
                 };
                 let child_extent = |child| geometries.ipc_nodes.get(child).map(extent);
