@@ -543,8 +543,11 @@ impl<W: LayoutElement> TilingTree<W> {
             }
             None => return false,
         }
-        // `workspace_squash` (sway/commands/move.c:137,150).
-        self.squash_for_move(None);
+        // Sway zeroes the moved container's fractions, so the next arrange
+        // gives it the average of its new siblings' shares, and squashes the
+        // workspace (`container_move_to_container_from_direction`,
+        // sway/commands/move.c:135-137 and 148-150).
+        self.squash_for_move(Some(id));
         self.finish_directional_move(id);
         true
     }

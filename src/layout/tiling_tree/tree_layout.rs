@@ -471,7 +471,18 @@ impl<W: LayoutElement> TilingTree<W> {
             if let (Some(child), Some(percent)) = (children.get_mut(index), percents.get_mut(index))
             {
                 *child = wrapper;
-                *percent = old_percent;
+                // Sway carries the fraction across the replacement in a
+                // `float` and renormalises on the next arrange
+                // (`container_replace`, sway/tree/container.c:1485-1490;
+                // `apply_horiz_layout`, sway/tree/arrange.c:48-52), so a
+                // share that lands on half a pixel can round the other way.
+                *percent = f64::from(old_percent as f32);
+            }
+            let total: f64 = percents.iter().sum();
+            if total > 0. {
+                for percent in percents.iter_mut() {
+                    *percent /= total;
+                }
             }
         }
         if let Some(node) = self.nodes.get_mut(&id) {

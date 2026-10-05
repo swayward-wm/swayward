@@ -1024,3 +1024,49 @@ fn layout_toggle_on_an_empty_workspace_toggles_the_workspace() {
         assert_eq!(workspace["representation"], "V[]", "{command}");
     }
 }
+
+// random-v2 seed 1057 step 5 (diff-fam-percent-rounding): sway snaps the
+// siblings' fractions to their whole-pixel boxes before a command resize
+// (`container_resize_tiled`, sway/commands/resize.c:126-131), and a new view
+// then takes the average of those fractions (sway/tree/arrange.c:48-52).
+#[test]
+fn resize_snaps_fractions_to_whole_pixels_before_a_new_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-1", "fixture-2", "fixture-3"] {
+        map_app(&mut f, client, app_id);
+    }
+    assert!(crate::command::execute(f.niri_state(), "resize grow width 10 px")[0].success);
+    map_app(&mut f, client, "fixture-4");
+
+    let tree = tree_json(&mut f);
+    let percents = ["fixture-1", "fixture-2", "fixture-3", "fixture-4"]
+        .map(|app_id| find_json_node_with_app_id(&tree, app_id).unwrap()["percent"].clone());
+    assert_eq!(
+        percents,
+        [0.24765625, 0.24765625, 0.25546875, 0.24921875].map(serde_json::Value::from)
+    );
+}
+
+// random-v2 seed 1071 step 5 (diff-fam-percent-rounding): under a fullscreen
+// view, sway leaves the other children at the whole-pixel boxes they last had
+// over the visible children (`arrange_workspace`, sway/tree/arrange.c:310-316):
+// 1280 / 3 rounds to 427 px, so percent is 427 / 1280.
+#[test]
+fn view_mapped_under_fullscreen_keeps_whole_pixel_sibling_fractions() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-1", "fixture-2", "fixture-3"] {
+        map_app(&mut f, client, app_id);
+    }
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    map_app(&mut f, client, "fixture-4");
+
+    let tree = tree_json(&mut f);
+    for app_id in ["fixture-1", "fixture-2"] {
+        let view = find_json_node_with_app_id(&tree, app_id).unwrap();
+        assert_eq!(view["percent"], 0.33359375, "{view}");
+    }
+}

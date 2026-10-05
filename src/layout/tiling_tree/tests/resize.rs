@@ -14,10 +14,10 @@ fn axis_resize_compensates_every_sibling() {
     percents.fill(0.25);
     t.set_window_width(Some(&4), SizeChange::AdjustProportion(25.));
 
-    for id in [first, second, third] {
-        assert!((t.geometry(id).unwrap().size.w - 1000. / 6.).abs() < 1e-9);
-    }
-    assert!((t.geometry(fourth).unwrap().size.w - 500.).abs() < 1e-9);
+    // Sway rounds each child to whole pixels and gives the last the remainder
+    // (sway/tree/arrange.c:78-88): round(1000 / 6) = 167, 1000 - 3 * 167 = 499.
+    let widths = [first, second, third, fourth].map(|id| t.geometry(id).unwrap().size.w);
+    assert_eq!(widths, [167., 167., 167., 499.]);
     t.check_invariants();
 }
 
@@ -73,9 +73,9 @@ fn set_size_entry_points_use_parent_extent_and_all_siblings() {
     for (actual, expected) in resize(false).into_iter().zip(sway) {
         assert!((actual - expected).abs() < 1e-9);
     }
-    for (actual, expected) in sway.into_iter().zip([300., 100., 100.]) {
-        assert!((actual - expected).abs() < 1e-9);
-    }
+    // The 500 px column splits 167/167/166; snapped, 60 ppt makes 300, then
+    // round(100.5) = 101 and the remainder 99 (sway/commands/resize.c:126-136).
+    assert_eq!(sway, [300., 101., 99.]);
 }
 
 #[test]
@@ -86,9 +86,11 @@ fn resizing_adjacent_siblings_changes_only_that_boundary() {
     let c = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
 
     assert!(t.resize_adjacent(a, b, 0.1));
-    assert!((t.geometry(a).unwrap().size.w - 1000. * (1. / 3. + 0.1)).abs() < 1e-9);
-    assert!((t.geometry(b).unwrap().size.w - 1000. * (1. / 3. - 0.1)).abs() < 1e-9);
-    assert!((t.geometry(c).unwrap().size.w - 1000. / 3.).abs() < 1e-9);
+    // 1000 px splits 333/333/334 and the fractions snap to those boxes first.
+    assert_eq!(
+        [a, b, c].map(|id| t.geometry(id).unwrap().size.w),
+        [433., 233., 334.]
+    );
     assert!(!t.resize_adjacent(a, b, 0.6));
     t.check_invariants();
 }
@@ -367,10 +369,7 @@ fn sway_set_percentage_uses_nearest_axis_parent_and_all_its_siblings() {
 
     let widths = [outer_left, nested_top, nested_middle, nested_right]
         .map(|id| t.geometry(id).unwrap().size.w);
-    assert_eq!(widths[0], 500.5);
-    assert_eq!(widths[1], 300.);
-    assert!((widths[2] - 100.25).abs() < 1e-9);
-    assert!((widths[3] - 100.25).abs() < 1e-9);
+    assert_eq!(widths, [501., 300., 101., 99.]);
     t.check_invariants();
 }
 

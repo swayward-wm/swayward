@@ -498,6 +498,28 @@ fn visible_shares(
         .collect()
 }
 
+/// Each child's whole-pixel extent along a split: `round(share * available)`, with the last
+/// child that has a share taking the remainder (`apply_horiz_layout` and
+/// `apply_vert_layout`, sway/tree/arrange.c:78-88 and 163-174). Sway's container boxes are
+/// integers, so a nested split divides a whole-pixel extent too.
+pub(super) fn whole_pixel_extents(available: f64, shares: &[f64]) -> Vec<f64> {
+    let last = shares.iter().rposition(|share| *share > 0.);
+    let mut used = 0.;
+    shares
+        .iter()
+        .enumerate()
+        .map(|(index, share)| {
+            if Some(index) == last {
+                (available - used).max(0.)
+            } else {
+                let extent = (share * available).round().min(available - used).max(0.);
+                used += extent;
+                extent
+            }
+        })
+        .collect()
+}
+
 /// The rounded corners a linear split's child may draw. With gaps every child is separate and
 /// draws all four; without, only the corners on the split's outer edge stay rounded.
 fn child_corners(
@@ -582,8 +604,8 @@ fn assign_linear_split<W: LayoutElement>(
         _ => unreachable!(),
     };
     let shares = visible_shares(context.mapped_under_fullscreen, children, percents);
-    for (index, (child, percent)) in children.iter().zip(shares).enumerate() {
-        let extent = available.max(0.) * percent;
+    let extents = whole_pixel_extents(available.max(0.), &shares);
+    for (index, (child, extent)) in children.iter().zip(extents).enumerate() {
         let child_rect = match layout {
             Layout::SplitH => Rectangle::new(
                 Point::from((cursor, rect.loc.y)),

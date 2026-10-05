@@ -609,8 +609,8 @@ fn inner_gaps_shrink_and_floor_on_both_split_axes() {
     let first = horizontal.add_tile(tile(1, horizontal.view_size()), InsertTarget::Focused);
     let second = horizontal.add_tile(tile(2, horizontal.view_size()), InsertTarget::Focused);
     let geometry = horizontal.compute_geometry();
-    assert_eq!(geometry.ipc_nodes[&first].size.w, 92.5);
-    assert_eq!(geometry.ipc_nodes[&second].loc.x, 102.5);
+    assert_eq!(geometry.ipc_nodes[&first].size.w, 93.);
+    assert_eq!(geometry.ipc_nodes[&second].loc.x, 103.);
 
     let mut vertical = tree((500., 125.), 10.);
     let first = vertical.add_tile(tile(1, vertical.view_size()), InsertTarget::Focused);
@@ -622,8 +622,8 @@ fn inner_gaps_shrink_and_floor_on_both_split_axes() {
         meta: SplitMeta::default(),
     };
     let geometry = vertical.compute_geometry();
-    assert_eq!(geometry.ipc_nodes[&first].size.h, 52.5);
-    assert_eq!(geometry.ipc_nodes[&second].loc.y, 62.5);
+    assert_eq!(geometry.ipc_nodes[&first].size.h, 53.);
+    assert_eq!(geometry.ipc_nodes[&second].loc.y, 63.);
 }
 
 #[test]

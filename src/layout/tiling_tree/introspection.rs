@@ -380,34 +380,56 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             .filter(|(child, _)| !excluded.contains(child))
             .map(|(_, percent)| percent)
             .sum::<f64>();
+        // Sway leaves the other children at the whole-pixel boxes they last
+        // had over the visible children (`arrange_workspace`,
+        // sway/tree/arrange.c:310-316).
+        let visible_shares: Vec<f64> = children
+            .iter()
+            .zip(percents)
+            .map(|(child, percent)| {
+                if excluded.contains(child) {
+                    0.
+                } else {
+                    percent / visible_total
+                }
+            })
+            .collect();
+        let visible_allocated = geometry::whole_pixel_extents(parent_extent, &visible_shares);
         children
             .iter()
             .zip(percents)
             .zip(allocated)
-            .map(|((child, stored_percent), allocated)| {
-                let is_fullscreen = self.fullscreen == Some(*child);
-                Some(
-                    if let Some(stale) = self
-                        .stale_fullscreen_rects
-                        .get(child)
-                        .filter(|_| area(parent_rect) > 0.)
-                    {
-                        // Sway's percent is the box's area over the parent's
-                        // (sway/ipc-json.c:744-755).
-                        area(*stale) / area(parent_rect)
-                    } else if excluded.contains(child) && !is_fullscreen {
-                        0.
-                    } else if !excluded.is_empty() && !is_fullscreen {
-                        *stored_percent / visible_total
-                    } else if is_fullscreen {
-                        self.fullscreen_child_percent(id, *child, *stored_percent)
-                    } else if parent_extent > 0. {
-                        allocated / parent_extent
-                    } else {
-                        *stored_percent
-                    },
-                )
-            })
+            .zip(visible_allocated)
+            .map(
+                |(((child, stored_percent), allocated), visible_allocated)| {
+                    let is_fullscreen = self.fullscreen == Some(*child);
+                    Some(
+                        if let Some(stale) = self
+                            .stale_fullscreen_rects
+                            .get(child)
+                            .filter(|_| area(parent_rect) > 0.)
+                        {
+                            // Sway's percent is the box's area over the parent's
+                            // (sway/ipc-json.c:744-755).
+                            area(*stale) / area(parent_rect)
+                        } else if excluded.contains(child) && !is_fullscreen {
+                            0.
+                        } else if !excluded.is_empty() && !is_fullscreen {
+                            if parent_extent > 0. {
+                                visible_allocated / parent_extent
+                            } else {
+                                *stored_percent / visible_total
+                            }
+                        } else if is_fullscreen {
+                            self.fullscreen_child_percent(id, *child, *stored_percent)
+                        } else if parent_extent > 0. {
+                            allocated / parent_extent
+                        } else {
+                            *stored_percent
+                        },
+                    )
+                },
+            )
             .collect()
     }
 
