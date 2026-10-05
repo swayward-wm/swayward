@@ -446,11 +446,22 @@ impl Mapped {
         self.set_urgent_at(urgent, get_monotonic_time());
     }
 
+    /// Sets urgency without the keyboard-focus guard. The caller has already
+    /// applied sway's check against the seat's focused container, which a
+    /// focused parent split makes differ from keyboard focus
+    /// (`view_set_urgent`, sway/sway/tree/view.c:1205-1213).
+    pub fn set_urgent_unguarded(&mut self, urgent: bool) {
+        self.store_urgent(urgent, get_monotonic_time());
+    }
+
     fn set_urgent_at(&mut self, urgent: bool, now: Duration) {
         if self.is_focused && urgent {
             return;
         }
+        self.store_urgent(urgent, now);
+    }
 
+    fn store_urgent(&mut self, urgent: bool, now: Duration) {
         let was_urgent = self.urgent_since.is_some();
         self.urgent_since = urgent.then_some(now);
         self.need_to_recompute_rules |= was_urgent != urgent;

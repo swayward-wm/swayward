@@ -80,6 +80,15 @@ pub(super) fn urgent(
         .find_map(|(_, window)| (window.id() == target).then(|| window.is_urgent()))
         .ok_or_else(|| failure("No matching node."))?;
     let urgent = parse_boolean(value, urgent);
+    // Sway refuses only when the view's container is the seat's focused
+    // container; a focused parent split leaves the view open to urgency
+    // (`view_set_urgent`, sway/sway/tree/view.c:1209-1213).
+    if urgent
+        && matches!(super::targeted::focused_node(state), FocusedNode::View)
+        && super::targeted::focused_target(state) == Some(CommandTarget::Window(target))
+    {
+        return Ok(());
+    }
     state.swayward.set_window_urgent(target, urgent);
     state.swayward.queue_redraw_all();
     Ok(())

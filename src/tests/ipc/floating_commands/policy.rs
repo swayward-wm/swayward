@@ -482,6 +482,38 @@ fn urgent_command_changes_only_an_unfocused_selected_window() {
     }
 }
 
+/// Sway compares against the seat's focused container, which is the split
+/// after `focus parent`, so the keyboard-focused view still becomes urgent
+/// (`view_set_urgent`, sway/sway/tree/view.c:1209-1213).
+#[test]
+fn urgent_command_marks_the_focused_view_when_its_parent_is_focused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+
+    for app_id in ["first", "second"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "[app_id=second] urgent enable");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(!test_window_is_urgent(&mut f, "second"));
+
+    let outcome = crate::command::execute(f.niri_state(), "focus parent");
+    assert!(outcome[0].success, "{outcome:?}");
+    let outcome = crate::command::execute(f.niri_state(), "[app_id=second] urgent enable");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(test_window_is_urgent(&mut f, "second"));
+}
+
 #[test]
 fn scratchpad_show_remaps_floating_center_between_asymmetric_outputs() {
     let mut f = Fixture::new();
