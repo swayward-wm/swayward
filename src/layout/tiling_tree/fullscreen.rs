@@ -44,13 +44,30 @@ impl<W: LayoutElement> TilingTree<W> {
         if !self.nodes.contains_key(&id) {
             return false;
         }
-        let current = self.fullscreen_node();
-        if fullscreen.is_none() && current != Some(id)
-            || current == Some(id)
-                && self.pending_modes.get(&id).and_then(|mode| mode.fullscreen) == fullscreen
-        {
+        if self.fullscreen_mode(id) == fullscreen {
             return false;
         }
+        let current = self.fullscreen_node();
+        // `container_set_fullscreen` (sway/tree/container.c:1307-1333):
+        // disabling touches only `id`; workspace mode ends both the global
+        // and the workspace fullscreen container; global mode ends only the
+        // global one and `id`'s own workspace mode, so a workspace fullscreen
+        // ancestor keeps its mode beside the new global view.
+        let cleared: Vec<NodeId> = self
+            .pending_modes
+            .iter()
+            .filter_map(|(node, mode)| {
+                let mode = mode.fullscreen?;
+                let keep = match fullscreen {
+                    None => *node != id,
+                    Some(FullscreenMode::Global) => {
+                        *node != id && mode == FullscreenMode::Workspace
+                    }
+                    Some(FullscreenMode::Workspace) => false,
+                };
+                (!keep).then_some(*node)
+            })
+            .collect();
         // Fullscreen moving from a container to its descendant leaves the
         // container, and the splits between them, at their fullscreen boxes
         // (container_set_fullscreen, sway/tree/container.c:1312-1315).
@@ -77,10 +94,12 @@ impl<W: LayoutElement> TilingTree<W> {
         self.wrapper_arranged_boxes.clear();
         self.fullscreen_rearranged = false;
         self.stale_fullscreen_rects = stale;
-        if let Some(current) = current {
-            if let Some(mode) = self.pending_modes.get_mut(&current) {
+        for node in cleared {
+            if let Some(mode) = self.pending_modes.get_mut(&node) {
                 mode.fullscreen = None;
             }
+        }
+        if current.is_some() {
             self.mapped_under_fullscreen.clear();
             self.moved_under_fullscreen.clear();
             self.fullscreen_layout_wrappers.clear();
@@ -215,10 +234,16 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// The fullscreen container this tree shows: a global fullscreen view
+    /// (`root->fullscreen_global`) over a workspace fullscreen container it
+    /// may sit inside (`arrange_root`, sway/tree/arrange.c:340-361).
     pub fn fullscreen_node(&self) -> Option<NodeId> {
-        self.pending_modes
-            .iter()
-            .find_map(|(id, mode)| mode.fullscreen.map(|_| *id))
+        let find = |wanted: FullscreenMode| {
+            self.pending_modes
+                .iter()
+                .find_map(|(id, mode)| (mode.fullscreen == Some(wanted)).then_some(*id))
+        };
+        find(FullscreenMode::Global).or_else(|| find(FullscreenMode::Workspace))
     }
 
     pub fn fullscreen_mode(&self, id: NodeId) -> Option<FullscreenMode> {

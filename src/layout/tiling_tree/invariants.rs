@@ -69,14 +69,18 @@ impl<W: LayoutElement> TilingTree<W> {
                 .get(id)
                 .is_some_and(|node| matches!(node.value, TreeNode::Leaf { .. }) || !mode.maximized)
         }));
-        assert!(
-            self.pending_modes
-                .values()
-                .filter(|mode| mode.fullscreen.is_some())
-                .count()
-                <= 1,
-            "multiple fullscreen nodes"
-        );
+        // At most one workspace and one global fullscreen container
+        // (`workspace->fullscreen`, `root->fullscreen_global`).
+        for wanted in [FullscreenMode::Workspace, FullscreenMode::Global] {
+            assert!(
+                self.pending_modes
+                    .values()
+                    .filter(|mode| mode.fullscreen == Some(wanted))
+                    .count()
+                    <= 1,
+                "multiple fullscreen nodes"
+            );
+        }
     }
 
     fn check_resize(&self) {

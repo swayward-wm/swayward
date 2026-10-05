@@ -1171,6 +1171,48 @@ fn workspace_arrange_puts_a_global_fullscreen_view_in_its_tile_slot() {
     assert_eq!(view["window_rect"]["y"], 0, "{view}");
 }
 
+// Differential family diff-fam-fullscreen-split-global-coexist, seed 11675.
+// `split toggle` on a fullscreen view hands workspace fullscreen to the new
+// split (`container_replace`, sway/tree/container.c:1471-1501). Making the
+// view global fullscreen then ends only `root->fullscreen_global` and the
+// view's own workspace mode, not `workspace->fullscreen`
+// (sway/tree/container.c:1325-1332), so the split keeps mode 1 beside the
+// view's mode 2.
+#[test]
+fn global_fullscreen_view_inside_workspace_fullscreen_split_coexist() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "fullscreen");
+    run(
+        &mut f,
+        &[
+            "fullscreen enable",
+            "split toggle",
+            "fullscreen toggle global",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["fullscreen_mode"], 2, "{view}");
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let split = &workspace["nodes"][1];
+    assert_eq!(split["type"], "con", "{workspace}");
+    assert_eq!(split["fullscreen_mode"], 1, "{workspace}");
+
+    // Disabling the view's global mode leaves the split fullscreen.
+    run(&mut f, &["fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["fullscreen_mode"], 0, "{view}");
+    assert_eq!(
+        tree["nodes"][1]["nodes"][0]["nodes"][1]["fullscreen_mode"],
+        1
+    );
+}
+
 // Differential family diff-fam-fullscreen-percent, seed 6264. `layout` wraps
 // the workspace children (sway/tree/workspace.c:898-910); detaching the
 // global fullscreen view clears `root->fullscreen_global`
