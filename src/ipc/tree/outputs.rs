@@ -38,7 +38,7 @@ pub fn describe_outputs_with_power(
 ) -> Vec<Output> {
     let root_rect = layout
         .monitors()
-        .filter_map(|monitor| global_space.output_geometry(monitor.output()))
+        .filter_map(|monitor| output_rectangle(global_space, monitor.output()))
         .reduce(|a, b| a.merge(b));
     layout
         .monitors()

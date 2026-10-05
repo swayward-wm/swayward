@@ -256,6 +256,9 @@ fn floating_part(context: &WorkspaceNodeContext<'_>, state: &WorkspaceState) -> 
                 context.marks,
                 context.container_marks,
             )?;
+            if let Some(shift) = workspace.floating_tree_ipc_shift(root) {
+                shift_descendants(&mut node, shift.x.round() as i32, shift.y.round() as i32);
+            }
             node.node_type = NodeType::FloatingCon;
             node.floating = Some("user_on".into());
             node.scratchpad_state = Some(if in_scratchpad { "fresh" } else { "none" }.into());
@@ -295,6 +298,14 @@ fn floating_part(context: &WorkspaceNodeContext<'_>, state: &WorkspaceState) -> 
     };
     floating_nodes.sort_by_key(|(slot, _)| std::cmp::Reverse(depth(slot)));
     floating_nodes.into_iter().map(|(_, node)| node).collect()
+}
+
+fn shift_descendants(node: &mut Node, dx: i32, dy: i32) {
+    for child in &mut node.nodes {
+        child.rect.x += dx;
+        child.rect.y += dy;
+        shift_descendants(child, dx, dy);
+    }
 }
 
 fn describe_floating_window(

@@ -6,18 +6,13 @@
 //! workspace. Some public names still use column and scrolling terminology for compatibility with
 //! the inherited configuration and legacy IPC schemas; the active layout model is the tiling tree.
 //!
-//! One output is designated as primary. When one of several outputs disappears, workspaces with
-//! non-sticky windows are appended to the primary output. Workspaces without non-sticky windows
-//! are destroyed, after any sticky windows are moved to the primary output's active workspace.
-//! Removing the last output is different: all workspaces remain in `MonitorSet::NoOutputs` until
-//! an output returns.
-//!
-//! A moved workspace retains its `original_output` while it is temporarily on the primary output.
-//! Reconnecting that output reclaims matching workspaces that still satisfy
-//! [`Workspace::must_be_kept`]. Adding a window to an unnamed workspace makes its current output
-//! the new original output, as does an explicit workspace move. The field therefore supports
-//! reconnecting surviving workspaces; it does not guarantee that every workspace from a removed
-//! output survives or returns.
+//! Outputs follow sway's workspace output priority. Each workspace keeps an ordered list of the
+//! outputs it belongs on. When an output disappears, each of its workspaces with non-sticky
+//! windows moves to the first enabled output on its list, or else to the first enabled output;
+//! workspaces without non-sticky windows are destroyed after their sticky windows move to that
+//! output's active workspace. Removing the last output keeps all workspaces in
+//! `MonitorSet::NoOutputs` until an output returns. Enabling an output takes back every workspace
+//! whose first enabled output it now is (sway/sway/tree/output.c:31-89, :206-249).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
@@ -42,7 +37,7 @@ use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 use self::monitor::Monitor;
 pub use self::monitor::MonitorRenderElement;
-use self::workspace::{OutputId, Workspace};
+use self::workspace::Workspace;
 use self::workspace_naming::{
     initial_workspace_names, sway_identity_from_name, sway_workspace_identity, sway_workspace_num,
     workspace_matches_target, workspace_name_matches_number,
@@ -864,6 +859,12 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Sway's output_enable (sway/sway/tree/output.c:150-183).
+    ///
+    /// restore_workspaces (:31-89) first takes from every other output each
+    /// workspace whose highest-priority enabled output is now this one, then
+    /// every workspace saved while no output was enabled. Only then, if this
+    /// output still has none, does it get a fresh default workspace.
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {
         // Consult this output's assignments, as sway does: workspace_next_name
         // takes the output name (sway/sway/tree/workspace.c:436) and is called
@@ -877,128 +878,98 @@ impl<W: LayoutElement> Layout<W> {
             })
             .flatten();
         let preserve_initial_auto_layout = self.workspaces().next().is_none();
-        self.monitor_set = match mem::take(&mut self.monitor_set) {
-            MonitorSet::Normal {
-                mut monitors,
-                primary_idx,
-                mut active_monitor_idx,
-            } => {
-                let focused_workspace = monitors[active_monitor_idx].workspaces
-                    [monitors[active_monitor_idx].active_workspace_idx]
-                    .id();
-                let primary = &mut monitors[primary_idx];
-
-                let mut stopped_primary_ws_switch = false;
-
-                // Only the primary gives workspaces away here. Repair it
-                // afterwards if it did: restoring unconditionally resurrects
-                // workspaces other outputs deliberately discarded.
-                let mut reclaimed_any = false;
-                let mut workspaces = vec![];
-                for i in (0..primary.workspaces.len()).rev() {
-                    if primary.workspaces[i].original_output.matches(&output) {
-                        let ws = primary.workspaces.remove(i);
-                        primary
-                            .sway_workspace_order
-                            .retain(|candidate| *candidate != ws.id());
-                        reclaimed_any = true;
-
-                        // Retaining the switch when only invisible workspaces move is tracked by
-                        // mu task layout-invisible-workspace-switch.
-                        if primary.workspace_switch.is_some() {
-                            primary.workspace_switch = None;
-                            stopped_primary_ws_switch = true;
-                        }
-
-                        // The user could've closed a window while remaining on this workspace, on
-                        // another monitor. However, we will add an empty workspace in the end
-                        // instead.
-                        if ws.must_be_kept() {
-                            workspaces.push(ws);
-                        }
-
-                        // A reclaimed workspace at or before the active one shifts the
-                        // active index down.
-                        if i <= primary.active_workspace_idx {
-                            primary.active_workspace_idx =
-                                primary.active_workspace_idx.saturating_sub(1);
-                        }
-                    }
-                }
-
-                // If we stopped a workspace switch, then we might need to clean up workspaces.
-                if stopped_primary_ws_switch {
-                    primary.clean_up_workspaces();
-                }
-
-                workspaces.reverse();
-                let restores_focused_workspace = workspaces
-                    .iter()
-                    .any(|workspace| workspace.id() == focused_workspace);
-
-                let ws_id_to_activate = self.last_active_workspace_id.remove(&output.name());
-
-                let mut monitor = Monitor::new(monitor::MonitorInit {
-                    output,
-                    workspaces,
-                    ws_id_to_activate,
-                    initial_workspace_name: initial_workspace_name.clone(),
-                    initial_workspace_number,
-                    preserve_initial_auto_layout,
-                    clock: self.clock.clone(),
-                    base_options: self.options.clone(),
-                    layout_config,
-                });
-                monitor.overview_open = self.overview_open;
-                monitor.set_overview_progress(self.overview_progress.as_ref());
-                // Monitor::new adopts workspaces reclaimed from the primary
-                // monitor; drop any that are empty and inactive.
-                monitor.reap_empty_workspaces();
-                monitors.push(monitor);
-                if restores_focused_workspace {
-                    active_monitor_idx = monitors.len() - 1;
-                }
-                // Reclaiming workspaces mutates the monitor they came from too,
-                // and sorting can leave it ending in an addressable workspace.
-                // Only repair monitors that actually lost one: restoring
-                // unconditionally resurrects workspaces other outputs
-                // deliberately discarded.
-                if reclaimed_any {
-                    monitors[primary_idx].reap_empty_workspaces();
-                }
-
+        let ws_id_to_activate = self.last_active_workspace_id.remove(&output.name());
+        let (mut monitors, primary_idx, active_monitor_idx, workspaces) =
+            match mem::take(&mut self.monitor_set) {
                 MonitorSet::Normal {
-                    monitors,
+                    mut monitors,
                     primary_idx,
-                    active_monitor_idx,
+                    mut active_monitor_idx,
+                } => {
+                    let focused_workspace =
+                        monitors[active_monitor_idx].active_workspace_ref().id();
+                    // `root->outputs` once this output is enabled: appended last.
+                    let enabled = monitors
+                        .iter()
+                        .map(|monitor| monitor.output.clone())
+                        .chain([output.clone()])
+                        .collect::<Vec<_>>();
+                    let mut workspaces = Vec::new();
+                    for monitor in &mut monitors {
+                        let reclaimed = monitor
+                            .sway_workspaces()
+                            .filter(|(_, ws)| {
+                                ws.highest_available_output(&enabled) == Some(&output)
+                            })
+                            .map(|(_, ws)| ws.id())
+                            .collect::<Vec<_>>();
+                        workspaces.extend(
+                            reclaimed
+                                .into_iter()
+                                .filter_map(|id| monitor.detach_workspace(id)),
+                        );
+                    }
+                    let restores_focused_workspace = workspaces
+                        .iter()
+                        .any(|workspace| workspace.id() == focused_workspace);
+                    workspaces.retain(Workspace::must_be_kept);
+                    if restores_focused_workspace {
+                        active_monitor_idx = monitors.len();
+                    }
+                    (monitors, primary_idx, active_monitor_idx, workspaces)
                 }
-            }
-            MonitorSet::NoOutputs { workspaces } => {
-                let ws_id_to_activate = self.last_active_workspace_id.remove(&output.name());
+                // Saved workspaces: everything the fallback output holds.
+                MonitorSet::NoOutputs { workspaces } => (Vec::new(), 0, 0, workspaces),
+            };
 
-                let mut monitor = Monitor::new(monitor::MonitorInit {
-                    output,
-                    workspaces,
-                    ws_id_to_activate,
-                    initial_workspace_name,
-                    initial_workspace_number,
-                    preserve_initial_auto_layout,
-                    clock: self.clock.clone(),
-                    base_options: self.options.clone(),
-                    layout_config,
-                });
-                monitor.overview_open = self.overview_open;
-                monitor.set_overview_progress(self.overview_progress.as_ref());
+        let mut monitor = Monitor::new(monitor::MonitorInit {
+            output,
+            workspaces,
+            ws_id_to_activate,
+            initial_workspace_name,
+            initial_workspace_number,
+            preserve_initial_auto_layout,
+            clock: self.clock.clone(),
+            base_options: self.options.clone(),
+            layout_config,
+        });
+        monitor.overview_open = self.overview_open;
+        monitor.set_overview_progress(self.overview_progress.as_ref());
+        monitor.reap_empty_workspaces();
+        monitors.push(monitor);
+        self.monitor_set = MonitorSet::Normal {
+            monitors,
+            primary_idx,
+            active_monitor_idx,
+        };
 
-                MonitorSet::Normal {
-                    monitors: vec![monitor],
-                    primary_idx: 0,
-                    active_monitor_idx: 0,
-                }
+        // An output left without workspaces gets the next free name for it
+        // (sway/sway/tree/output.c:51-56). Names are chosen only now, once the
+        // reclaimed workspaces are back in the layout.
+        let emptied = self
+            .monitors()
+            .filter(|monitor| monitor.workspaces.is_empty())
+            .map(|monitor| monitor.output.clone())
+            .collect::<Vec<_>>();
+        for other in emptied {
+            let (identity, layout_config) = self.replacement_identity_for(Some(&other));
+            if let Some(monitor) = self.monitor_for_output_mut(&other) {
+                monitor.ensure_workspace(identity, layout_config);
             }
+        }
+        for monitor in self.monitors_mut() {
+            monitor.reap_empty_workspaces();
         }
     }
 
+    /// Sway's output_disable and output_evacuate
+    /// (sway/sway/tree/output.c:206-249, :276-297).
+    ///
+    /// Each workspace moves to its highest-priority enabled output, or else to
+    /// the first enabled output, which is added to its priority list. A
+    /// workspace holding only sticky windows hands them to the target's active
+    /// workspace and is destroyed. With no output left, the workspaces wait in
+    /// `MonitorSet::NoOutputs`, sway's fallback output.
     pub fn remove_output(&mut self, output: &Output) {
         self.monitor_set = match mem::take(&mut self.monitor_set) {
             MonitorSet::Normal {
@@ -1026,6 +997,10 @@ impl<W: LayoutElement> Layout<W> {
                     for ws in &mut workspaces {
                         // Reset base options to layout ones.
                         ws.update_config(self.options.clone());
+                        // workspace_output_add_priority with the fallback
+                        // output, whose identifier is all Unknown
+                        // (sway/sway/tree/output.c:240, config/output.c:31-38).
+                        ws.add_output_priority_entry("Unknown Unknown Unknown".into());
                     }
 
                     MonitorSet::NoOutputs { workspaces }
@@ -1042,43 +1017,52 @@ impl<W: LayoutElement> Layout<W> {
                         active_monitor_idx = active_monitor_idx.saturating_sub(1);
                     }
 
-                    let primary = &mut monitors[primary_idx];
-                    let mut sticky_trees = Vec::new();
-                    let mut sticky = Vec::new();
-                    workspaces.retain_mut(|workspace| {
-                        if workspace.has_non_sticky_windows() {
-                            true
-                        } else {
-                            sticky_trees.extend(workspace.take_sticky_trees());
-                            sticky.extend(workspace.take_sticky_tiles());
-                            false
+                    let enabled = monitors
+                        .iter()
+                        .map(|monitor| monitor.output.clone())
+                        .collect::<Vec<_>>();
+                    for mut workspace in workspaces {
+                        let target = workspace
+                            .highest_available_output(&enabled)
+                            .and_then(|target| enabled.iter().position(|o| o == target))
+                            .unwrap_or(0);
+                        let monitor = &mut monitors[target];
+                        if !workspace.has_non_sticky_windows() {
+                            let target_workspace = monitor.active_workspace();
+                            for removed in workspace.take_sticky_trees() {
+                                target_workspace.add_floating_tree(removed, true);
+                            }
+                            for mut removed in workspace.take_sticky_tiles() {
+                                target_workspace.remap_floating_position(
+                                    &mut removed.tile,
+                                    removed.floating_working_area,
+                                );
+                                target_workspace.add_tile(
+                                    removed.tile,
+                                    WorkspaceAddWindowTarget::Auto,
+                                    workspace::AddTileOptions {
+                                        activate: ActivateWindow::No,
+                                        is_floating: true,
+                                    },
+                                );
+                            }
+                            continue;
                         }
-                    });
-                    let target_workspace = primary.active_workspace();
-                    for removed in sticky_trees {
-                        target_workspace.add_floating_tree(removed, true);
-                    }
-                    for mut removed in sticky {
-                        target_workspace.remap_floating_position(
-                            &mut removed.tile,
-                            removed.floating_working_area,
-                        );
-                        target_workspace.add_tile(
-                            removed.tile,
-                            WorkspaceAddWindowTarget::Auto,
-                            workspace::AddTileOptions {
-                                activate: ActivateWindow::No,
-                                is_floating: true,
-                            },
-                        );
-                    }
-                    primary.append_workspaces(workspaces);
-                    if removed_was_active {
-                        if let Some(idx) = primary.idx_of_ws(removed_active_workspace) {
-                            primary.active_workspace_idx = idx;
-                            active_monitor_idx = primary_idx;
-                            primary.reap_empty_workspaces();
+                        workspace.add_output_priority(&monitor.output);
+                        let id = workspace.id();
+                        let end = monitor.workspaces.len();
+                        monitor.attach_workspace(workspace, end, false);
+                        monitor.sort_sway_workspaces();
+                        if removed_was_active && id == removed_active_workspace {
+                            // The seat focus stays inside the moved workspace,
+                            // which makes it the target's active workspace.
+                            if let Some(idx) = monitor.idx_of_ws(id) {
+                                monitor.activate_workspace(idx);
+                                monitor.workspace_switch = None;
+                            }
+                            active_monitor_idx = target;
                         }
+                        monitor.reap_empty_workspaces();
                     }
 
                     MonitorSet::Normal {
@@ -2891,7 +2875,7 @@ impl<W: LayoutElement> Layout<W> {
         assert!(primary_idx < monitors.len());
         assert!(active_monitor_idx < monitors.len());
 
-        for (idx, monitor) in monitors.iter().enumerate() {
+        for monitor in monitors {
             assert_eq!(self.clock, monitor.clock);
             assert_eq!(
                 monitor.base_options, self.options,
@@ -2905,34 +2889,6 @@ impl<W: LayoutElement> Layout<W> {
             );
 
             monitor.verify_invariants(detached_move_source);
-
-            if idx == primary_idx {
-                for ws in &monitor.workspaces {
-                    if ws.original_output.matches(&monitor.output) {
-                        // This is the primary monitor's own workspace.
-                        continue;
-                    }
-
-                    let own_monitor_exists = monitors
-                        .iter()
-                        .any(|m| ws.original_output.matches(&m.output));
-                    assert!(
-                        !own_monitor_exists,
-                        "primary monitor cannot have workspaces for which their own monitor exists"
-                    );
-                }
-            } else {
-                assert!(
-                    monitor
-                        .workspaces
-                        .iter()
-                        .any(|workspace| workspace.original_output.matches(&monitor.output)),
-                    "secondary monitor must not have any non-own workspaces"
-                );
-            }
-
-            // FIXME: verify that primary doesn't have any workspaces for which their own monitor
-            // exists.
 
             for workspace in &monitor.workspaces {
                 assert!(
@@ -4139,8 +4095,6 @@ impl<W: LayoutElement> Layout<W> {
 
         // Do not do anything if the output is already correct.
         if current_idx == target_idx {
-            let current = &mut monitors[current_idx];
-            current.workspaces[old_idx].original_output = OutputId::new(&current.output);
             return false;
         }
 
@@ -4182,7 +4136,8 @@ impl<W: LayoutElement> Layout<W> {
                 .unwrap_or(0);
         }
         monitors[current_idx].reap_empty_workspaces();
-        ws.original_output = OutputId::new(new_output);
+        let old = monitors[current_idx].output.clone();
+        ws.raise_output_priority(&old, new_output);
 
         let target_active = monitors[target_idx].active_workspace_ref().id();
         let insert_idx = monitors[target_idx].active_workspace_idx + 1;

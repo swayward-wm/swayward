@@ -110,6 +110,21 @@ impl Fixture {
             .add_named_output_at(swayward, name, size, position);
     }
 
+    /// Adds `headless-{n}` with a distinct serial, so that workspace output
+    /// priorities tell it apart from the other outputs, as they tell apart
+    /// monitors with EDIDs.
+    pub fn add_identified_output(&mut self, n: u8, size: (u16, u16)) {
+        let state = self.niri_state();
+        let swayward = &mut state.swayward;
+        state.backend.headless().add_output_with_serial(
+            swayward,
+            format!("headless-{n}"),
+            size,
+            None,
+            Some(format!("serial-{n}")),
+        );
+    }
+
     pub fn replace_outputs(&mut self, outputs: Vec<((i32, i32), (u16, u16))>) {
         let existing = self
             .swayward()

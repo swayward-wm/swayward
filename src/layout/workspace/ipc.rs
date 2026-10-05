@@ -49,4 +49,13 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> impl Iterator<Item = (NodeId, crate::layout::tiling_tree::IpcNode<W::Id>, bool)> + '_ {
         self.floating.ipc_trees()
     }
+
+    /// The offset GET_TREE applies to a floating root's descendants while
+    /// sway would not have re-arranged them, because the workspace holds a
+    /// fullscreen container (sway/sway/tree/arrange.c:310-321).
+    pub fn floating_tree_ipc_shift(&self, root: NodeId) -> Option<Point<f64, Logical>> {
+        self.fullscreen_window()?;
+        let origin = self.output.as_ref()?.current_location().to_f64();
+        self.floating.tree_ipc_shift(root, origin)
+    }
 }

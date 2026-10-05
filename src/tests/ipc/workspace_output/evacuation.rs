@@ -387,8 +387,8 @@ fn nested_tabbed_and_stacked_splits_survive_output_unplug() {
 
     for (command_layout, ipc_layout) in [("tabbed", "tabbed"), ("stacking", "stacked")] {
         let (mut f, socket) = ipc_fixture();
-        f.add_output(1, (1280, 720));
-        f.add_output(2, (1920, 1080));
+        f.add_identified_output(1, (1280, 720));
+        f.add_identified_output(2, (1920, 1080));
         let unplugged_name = f.niri_output(1).name();
         let fallback_name = f.niri_output(2).name();
         let client = f.add_client();
@@ -432,7 +432,7 @@ fn nested_tabbed_and_stacked_splits_survive_output_unplug() {
             "{command_layout}: focus"
         );
 
-        f.add_named_output_at(unplugged_name.clone(), (1280, 720), None);
+        f.add_identified_output(1, (1280, 720));
         let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
         let output = output_holding(&tree, "outside").unwrap();
         assert_eq!(
@@ -450,4 +450,98 @@ fn nested_tabbed_and_stacked_splits_survive_output_unplug() {
         );
         assert_eq!(workspace["nodes"][1]["nodes"][1]["focused"], true);
     }
+}
+
+/// wlroots headless outputs set no make, model or serial, so every one has
+/// sway's identifier "Unknown Unknown Unknown" (sway/config/output.c:31-38).
+/// A workspace evacuated from HEADLESS-2 gains that identifier in its
+/// priority list, and it names HEADLESS-1 first, so re-enabling HEADLESS-2
+/// does not take the workspace back (`restore_workspaces`,
+/// sway/tree/output.c:31-57). HEADLESS-2 gets a fresh workspace instead.
+/// Oracle row: state `output_reenable` (scenario output_config_live_changes).
+#[test]
+fn reenabled_headless_output_keeps_workspaces_on_the_first_output() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_named_output_at("headless-1".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("headless-2".into(), (1280, 720), Some((1280, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output headless-2")[0].success);
+    map_test_window(&mut f, client, "evacuated");
+
+    assert!(crate::command::execute(f.niri_state(), "output headless-2 disable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "output headless-2 enable")[0].success);
+
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let outputs = query_ipc(&mut f, &mut stream, MessageType::GetOutputs);
+    let current = |name: &str| {
+        outputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|output| output["name"] == name)
+            .map(|output| output["current_workspace"].clone())
+            .unwrap()
+    };
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let holder = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| find_json_node_with_app_id(output, "evacuated").is_some())
+        .unwrap();
+    assert_eq!(holder["name"], "headless-1");
+    assert_eq!(current("headless-1"), "2");
+    assert_eq!(current("headless-2"), "1");
+}
+
+/// A floating container on a workspace with a fullscreen view: sway moves
+/// the floater when the output moves (floating_fix_coordinates) but skips
+/// arrange_floating while the workspace is fullscreen
+/// (sway/tree/arrange.c:288-321), so the children keep their old global
+/// rects. Oracle row: state `output_position` (scenario
+/// output_config_live_changes).
+#[test]
+fn floating_group_children_keep_their_rects_under_fullscreen_output_moves() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_named_output_at("headless-1".into(), (1280, 720), Some((0, 0)));
+    let client = f.add_client();
+    // The action sequence of oracle scenario output_config_live_changes.
+    map_test_window(&mut f, client, "tiled");
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
+    map_test_window(&mut f, client, "group-1");
+    map_test_window(&mut f, client, "group-2");
+    for command in ["focus parent", "floating enable"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    map_test_window(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    f.niri_state().refresh_and_flush_clients();
+
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let child_rect = |tree: &Value| {
+        let child = find_json_node_with_app_id(tree, "group-1").unwrap();
+        (
+            child["rect"]["x"].as_i64().unwrap(),
+            child["rect"]["y"].as_i64().unwrap(),
+        )
+    };
+    let floater_rect = |tree: &Value| {
+        let workspace = find_json_parent_of_app_id(tree, "fullscreen").unwrap();
+        let floater = &workspace["floating_nodes"][0];
+        (
+            floater["rect"]["x"].as_i64().unwrap(),
+            floater["rect"]["y"].as_i64().unwrap(),
+        )
+    };
+    let before = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+
+    assert!(
+        crate::command::execute(f.niri_state(), "output headless-1 position 200 300")[0].success
+    );
+    f.niri_state().refresh_and_flush_clients();
+    let after = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+
+    let (bx, by) = floater_rect(&before);
+    assert_eq!(floater_rect(&after), (bx + 200, by + 300));
+    assert_eq!(child_rect(&after), child_rect(&before));
 }

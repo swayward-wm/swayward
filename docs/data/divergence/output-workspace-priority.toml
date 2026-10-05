@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/layout/monitor.rs", "src/layout/workspace.rs", "src/backend/headless.rs", "src/swayward/outputs.rs"]
+what = "replace niri's primary-output evacuation and single `original_output` with sway's per-workspace output priority list; give headless outputs wlroots' all-Unknown identity; place auto-positioned outputs at the rightmost manual output's y with truncated logical sizes."
+why = "Sway's output_disable/output_evacuate and output_enable/restore_workspaces move workspaces by workspace_output_get_highest_available (sway/sway/tree/output.c:31-89, :206-249; sway/sway/tree/workspace.c:770-819). wlroots headless outputs have no make/model/serial (backend/headless/output.c:120-160) and auto-placed outputs line up with the rightmost manual one (types/wlr_output_layout.c:85-122, output.c:472-477). Oracle state rows output_reenable, output_power_off, output_power_on (scenario output_config_live_changes)."

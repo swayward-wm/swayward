@@ -851,6 +851,11 @@ impl<W: LayoutElement> FloatingLayout<W> {
         if let Some((idx, _)) = self.tree_entry_for_window(active_id) {
             let entry = &mut self.tree_entries[idx];
             entry.rect.loc += amount;
+            // container_floating_translate moves the children along
+            // (sway/sway/tree/container.c:1113-1128).
+            if let Some(anchor) = &mut entry.ipc_anchor {
+                *anchor += amount;
+            }
             entry.pos =
                 Data::logical_to_size_frac_in_working_area(self.working_area, entry.rect.loc);
             entry.tree.update_config(
@@ -901,6 +906,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 apply_position_change(pos.x, x, self.working_area.size.w, self.working_area.loc.x);
             pos.y =
                 apply_position_change(pos.y, y, self.working_area.size.h, self.working_area.loc.y);
+            if let Some(anchor) = &mut entry.ipc_anchor {
+                *anchor += pos - entry.rect.loc;
+            }
             entry.rect.loc = pos;
             entry.pos = Data::logical_to_size_frac_in_working_area(self.working_area, pos);
             entry.tree.update_config(
@@ -932,7 +940,11 @@ impl<W: LayoutElement> FloatingLayout<W> {
         };
         if let Some((idx, _)) = self.tree_entry_for_window(&id) {
             let entry = &mut self.tree_entries[idx];
-            entry.rect.loc = center_preferring_top_left_in_area(self.working_area, entry.rect.size);
+            let center = center_preferring_top_left_in_area(self.working_area, entry.rect.size);
+            if let Some(anchor) = &mut entry.ipc_anchor {
+                *anchor += center - entry.rect.loc;
+            }
+            entry.rect.loc = center;
             entry.pos =
                 Data::logical_to_size_frac_in_working_area(self.working_area, entry.rect.loc);
             entry.tree.update_config(

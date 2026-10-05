@@ -14,8 +14,7 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::tile::Tile;
 use super::tiling_tree::NodeId;
 use super::workspace::{
-    compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
-    WorkspaceRenderElement,
+    compute_working_area, Workspace, WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
 };
 use super::{
     compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options, WorkspaceActivation,
@@ -595,6 +594,22 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
+    /// Gives a monitor that lost every workspace a fresh one, active.
+    pub(super) fn ensure_workspace(
+        &mut self,
+        (name, number): (Option<String>, Option<i32>),
+        layout_config: Option<LayoutPart>,
+    ) {
+        if self.workspaces.is_empty() {
+            self.add_sway_workspace_at(0, name, number, layout_config);
+            self.active_workspace_idx = 0;
+            let id = self.workspaces[0].id();
+            self.workspace_focus_history
+                .retain(|candidate| *candidate != id);
+            self.workspace_focus_history.insert(0, id);
+        }
+    }
+
     pub fn add_workspace_top(&mut self) {
         self.add_workspace_at(0);
     }
@@ -721,11 +736,6 @@ impl<W: LayoutElement> Monitor<W> {
 
         workspace.add_tiling_tile(tile, activate);
 
-        // After adding a new window, workspace becomes this output's own.
-        if workspace.name().is_none() {
-            workspace.original_output = OutputId::new(&self.output);
-        }
-
         if activate {
             self.activate_workspace(workspace_idx);
         }
@@ -754,11 +764,6 @@ impl<W: LayoutElement> Monitor<W> {
             },
         );
 
-        // After adding a new window, workspace becomes this output's own.
-        if workspace.name().is_none() {
-            workspace.original_output = OutputId::new(&self.output);
-        }
-
         if workspace_activation.allowed() && activate.map_smart(|| false) {
             self.activate_workspace(workspace_idx);
         }
@@ -778,10 +783,6 @@ impl<W: LayoutElement> Monitor<W> {
         let workspace = &mut self.workspaces[workspace_idx];
 
         workspace.add_tile_at_drop(tile, target, edge, activate);
-
-        if workspace.name().is_none() {
-            workspace.original_output = OutputId::new(&self.output);
-        }
 
         if workspace_activation.allowed() && activate {
             self.activate_workspace(workspace_idx);

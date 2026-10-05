@@ -375,14 +375,15 @@ fn drain_workspace_window_events(
 /// Output power and idle wake likewise have no workspace/window event. A real
 /// connector replug moves the affected workspace; restoring the focused
 /// workspace also empties the fallback output, so sway creates its replacement
-/// workspace (`sway/tree/output.c:48-56`). After replug, selecting a new
-/// workspace initializes it and destroys the empty unaddressable workspace that
-/// loses focus (`sway/tree/workspace.c:313-330`).
+/// workspace with the next free name, here "2" (`sway/tree/output.c:48-56`).
+/// After replug, `workspace 2` therefore focuses that existing workspace, and
+/// it survives losing focus as its output's active workspace
+/// (`sway/tree/workspace.c:313-330`).
 #[test]
 fn lock_power_idle_and_hotplug_have_bounded_workspace_window_events() {
     let (mut fixture, socket) = ipc_fixture();
-    fixture.add_output(1, (800, 600));
-    fixture.add_output(2, (1024, 768));
+    fixture.add_identified_output(1, (800, 600));
+    fixture.add_identified_output(2, (1024, 768));
     let client = fixture.add_client();
     map_test_window(&mut fixture, client, "event-burst-probe");
     let window_surface_id = fixture
@@ -493,7 +494,7 @@ fn lock_power_idle_and_hotplug_have_bounded_workspace_window_events() {
     let removed = fixture.niri_output(1);
     fixture.swayward().remove_output(&removed);
     fixture.niri_state().refresh_and_flush_clients();
-    fixture.add_output(1, (800, 600));
+    fixture.add_identified_output(1, (800, 600));
     fixture.niri_state().refresh_and_flush_clients();
     let (events, next) = drain_workspace_window_events(&mut fixture, &mut subscriber, remainder);
     assert_eq!(
@@ -515,7 +516,7 @@ fn lock_power_idle_and_hotplug_have_bounded_workspace_window_events() {
             .iter()
             .map(|event| event["change"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["init", "focus", "focus", "empty"]
+        ["focus", "focus"]
     );
 }
 

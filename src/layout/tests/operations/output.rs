@@ -29,11 +29,14 @@ pub(super) fn apply(op: Op, layout: &mut Layout<TestWindow>) -> Applied {
                 None,
                 None,
             );
+            // A distinct serial gives each output its own sway identifier, as
+            // real monitors have; an all-Unknown identifier would match the
+            // first enabled output in every workspace output priority.
             output.user_data().insert_if_missing(|| OutputName {
+                serial: Some(name.clone()),
                 connector: name,
                 make: None,
                 model: None,
-                serial: None,
             });
             layout.add_output(output.clone(), None);
         }
@@ -66,11 +69,14 @@ pub(super) fn apply(op: Op, layout: &mut Layout<TestWindow>) -> Applied {
                 Some(smithay::output::Scale::Fractional(scale)),
                 None,
             );
+            // A distinct serial gives each output its own sway identifier, as
+            // real monitors have; an all-Unknown identifier would match the
+            // first enabled output in every workspace output priority.
             output.user_data().insert_if_missing(|| OutputName {
+                serial: Some(name.clone()),
                 connector: name,
                 make: None,
                 model: None,
-                serial: None,
             });
             layout.add_output(output.clone(), layout_config.map(|x| *x));
         }

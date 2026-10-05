@@ -180,6 +180,14 @@ struct FloatingTreeEntry<W: LayoutElement> {
     rect: Rectangle<f64, Logical>,
     pos: Point<f64, SizeFrac>,
     sticky: bool,
+    /// Global position of the root when sway last arranged the children.
+    ///
+    /// arrange_workspace skips arrange_floating while the workspace has a
+    /// fullscreen container (sway/sway/tree/arrange.c:310-321), and
+    /// floating_fix_coordinates moves only the floater itself
+    /// (sway/sway/tree/container.c:818-831). Until the next arrange, the
+    /// children keep the global rects they had, which GET_TREE reports.
+    ipc_anchor: Option<Point<f64, Logical>>,
 }
 
 /// A nested floating root detached for scratchpad or workspace transfer.
@@ -930,6 +938,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 rect,
                 pos: Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc),
                 sticky,
+                ipc_anchor: None,
             },
         );
         (root, remapped)
@@ -965,6 +974,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 rect,
                 pos: Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc),
                 sticky: removed.sticky,
+                ipc_anchor: None,
             },
         );
         (root, Vec::new())
@@ -1092,6 +1102,28 @@ impl<W: LayoutElement> FloatingLayout<W> {
         self.tree_entries
             .iter()
             .map(|entry| (entry.root, entry.tree.ipc_tree(), entry.sticky))
+    }
+
+    /// Records where each root's children were arranged. `frozen` is true
+    /// while sway would skip arranging them; a root without a record takes
+    /// its current position either way.
+    pub fn refresh_ipc_anchors(&mut self, origin: Point<f64, Logical>, frozen: bool) {
+        for entry in &mut self.tree_entries {
+            if !frozen || entry.ipc_anchor.is_none() {
+                entry.ipc_anchor = Some(origin + entry.rect.loc);
+            }
+        }
+    }
+
+    /// How far the children's reported rects sit from where the root's
+    /// current position lays them out (see `FloatingTreeEntry::ipc_anchor`).
+    pub fn tree_ipc_shift(
+        &self,
+        root: NodeId,
+        origin: Point<f64, Logical>,
+    ) -> Option<Point<f64, Logical>> {
+        let entry = self.tree_entries.iter().find(|entry| entry.root == root)?;
+        Some(entry.ipc_anchor? - (origin + entry.rect.loc))
     }
 
     pub fn tree_root_for_node(&self, node: NodeId) -> Option<NodeId> {
@@ -1502,6 +1534,8 @@ impl<W: LayoutElement> FloatingLayout<W> {
         };
         entry.rect = rect;
         entry.pos = Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc);
+        // A resize arranges the container (sway/sway/commands/resize.c:229).
+        entry.ipc_anchor = None;
         entry.tree.update_config(
             self.view_size,
             rect,

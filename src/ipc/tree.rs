@@ -72,7 +72,7 @@ pub fn describe_tree_with_power(
     let outputs: Vec<_> = layout.monitors().collect();
     let root_rect = outputs
         .iter()
-        .filter_map(|monitor| global_space.output_geometry(monitor.output()))
+        .filter_map(|monitor| output_rectangle(global_space, monitor.output()))
         .reduce(|a, b| a.merge(b))
         .map(rect_from_rectangle)
         .unwrap_or_default();

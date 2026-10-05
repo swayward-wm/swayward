@@ -53,11 +53,11 @@ pub struct Workspace<W: LayoutElement> {
     /// Whether the floating layout is active instead of the tiling layout.
     floating_is_active: FloatingActive,
 
-    /// The original output of this workspace.
-    ///
-    /// Most of the time this will be the workspace's current output, however, after an output
-    /// disconnection, it may remain pointing to the disconnected output.
-    pub(super) original_output: OutputId,
+    /// Sway's workspace output priority list (`ws->output_priority`): output names or
+    /// `make model serial` identifiers, highest priority first. Evacuation and output
+    /// re-enable place the workspace on the first entry naming an enabled output
+    /// (sway/sway/tree/workspace.c:770-819, sway/sway/tree/output.c:31-89, :206-249).
+    pub(super) output_priority: Vec<String>,
 
     /// Current output of this workspace.
     output: Option<Output>,
@@ -122,16 +122,6 @@ pub struct Workspace<W: LayoutElement> {
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
-}
-
-#[derive(Debug, Clone)]
-pub struct OutputId(String);
-
-impl OutputId {
-    pub fn matches(&self, output: &Output) -> bool {
-        let output_name = output.user_data().get::<OutputName>().unwrap();
-        output_name.matches(&self.0)
-    }
 }
 
 static WORKSPACE_ID_COUNTER: IdCounter = IdCounter::new();
@@ -213,11 +203,41 @@ pub struct AddTileOptions {
     pub is_floating: bool,
 }
 
-impl OutputId {
-    pub fn new(output: &Output) -> Self {
-        let output_name = output.user_data().get::<OutputName>().unwrap();
-        Self(output_name.format_make_model_serial_or_connector())
-    }
+/// Sway's output identifier, `make model serial` with `Unknown` for a missing
+/// field (output_get_identifier, sway/sway/config/output.c:31-38).
+pub(super) fn sway_output_identifier(output: &Output) -> String {
+    output
+        .user_data()
+        .get::<OutputName>()
+        .unwrap()
+        .format_make_model_serial()
+}
+
+/// Sway's output_match_name_or_id (sway/sway/desktop/output.c:43-53).
+pub(super) fn sway_output_matches(output: &Output, name_or_id: &str) -> bool {
+    name_or_id == "*"
+        || sway_output_identifier(output).eq_ignore_ascii_case(name_or_id)
+        || output
+            .user_data()
+            .get::<OutputName>()
+            .unwrap()
+            .connector
+            .eq_ignore_ascii_case(name_or_id)
+}
+
+/// The configured outputs a new workspace prefers, before the output it is
+/// created on (workspace_create, sway/sway/tree/workspace.c:245-256).
+fn configured_output_priority(config: Option<&WorkspaceConfig>) -> Vec<String> {
+    config
+        .and_then(|c| {
+            c.sway_output_assignment
+                .clone()
+                .or_else(|| c.open_on_output.clone().map(|output| vec![output]))
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| name != "*")
+        .collect()
 }
 
 impl FloatingActive {
@@ -237,11 +257,8 @@ impl<W: LayoutElement> Workspace<W> {
         clock: Clock,
         base_options: Rc<Options>,
     ) -> Self {
-        let original_output = config
-            .as_ref()
-            .and_then(|c| c.open_on_output.clone())
-            .map(OutputId)
-            .unwrap_or(OutputId::new(&output));
+        let mut output_priority = configured_output_priority(config.as_ref());
+        output_priority::add(&mut output_priority, &output);
 
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
 
@@ -285,7 +302,7 @@ impl<W: LayoutElement> Workspace<W> {
             tiling,
             floating,
             floating_is_active: FloatingActive::No,
-            original_output,
+            output_priority,
             scale,
             transform: output.current_transform(),
             view_size,
@@ -312,12 +329,7 @@ impl<W: LayoutElement> Workspace<W> {
         clock: Clock,
         base_options: Rc<Options>,
     ) -> Self {
-        let original_output = OutputId(
-            config
-                .as_ref()
-                .and_then(|c| c.open_on_output.clone())
-                .unwrap_or_default(),
-        );
+        let output_priority = configured_output_priority(config.as_ref());
 
         let layout_config = config.as_mut().and_then(|c| c.layout.take().map(|x| x.0));
 
@@ -364,7 +376,7 @@ impl<W: LayoutElement> Workspace<W> {
             output: None,
             scale,
             transform: Transform::Normal,
-            original_output,
+            output_priority,
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
@@ -646,12 +658,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         self.output = output;
 
-        if let Some(output) = &self.output {
-            // Normalize original output: possibly replace connector with make/model/serial.
-            if self.original_output.matches(output) {
-                self.original_output = OutputId::new(output);
-            }
-
+        if self.output.is_some() {
             self.update_output_size();
 
             for win in self.windows() {
@@ -1737,6 +1744,7 @@ impl<W: LayoutElement> Workspace<W> {
 mod fullscreen;
 mod identity;
 mod ipc;
+mod output_priority;
 mod rendering;
 mod scratchpad;
 mod sticky;
@@ -1946,6 +1954,11 @@ impl<W: LayoutElement> Workspace<W> {
             .refresh(is_active && !self.floating_is_active.get(), is_focused);
         self.floating
             .refresh(is_active && self.floating_is_active.get(), is_focused);
+        if let Some(output) = &self.output {
+            let origin = output.current_location().to_f64();
+            let frozen = self.fullscreen_window().is_some();
+            self.floating.refresh_ipc_anchors(origin, frozen);
+        }
     }
 
     pub fn is_urgent(&self) -> bool {
