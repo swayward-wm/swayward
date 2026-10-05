@@ -232,6 +232,15 @@ impl<W: LayoutElement> TilingTree<W> {
         transaction: Option<Transaction>,
         animate: bool,
     ) {
+        // Forget a stale representation once the tree changed, so a mutation that later
+        // restores the same shape does not bring it back.
+        if self
+            .stale_root_representation
+            .as_ref()
+            .is_some_and(|(_, shape)| *shape != self.representation_shape())
+        {
+            self.stale_root_representation = None;
+        }
         let geometries = self.compute_geometry();
         for (id, node) in &mut self.nodes {
             if let TreeNode::Leaf { tile } = &mut node.value {

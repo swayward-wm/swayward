@@ -430,6 +430,9 @@ macro_rules! side_tables {
 }
 use side_tables;
 
+/// Every node with its split layout (`None` for a leaf), depth first.
+type TreeShape = Vec<(NodeId, Option<Layout>)>;
+
 #[derive(Debug)]
 pub struct TilingTree<W: LayoutElement> {
     nodes: HashMap<NodeId, Node<W>>,
@@ -487,6 +490,11 @@ pub struct TilingTree<W: LayoutElement> {
     options: Rc<Options>,
     gaps: f64,
     preserved_auto_layout: Option<Layout>,
+    /// The workspace layout the representation still shows after `split` wrapped the root's
+    /// children, with the tree shape at that moment. Sway's `workspace_split` changes the
+    /// layout without `workspace_update_representation` (sway/tree/workspace.c:1058-1079), so
+    /// the cached string keeps the old layout until the next mutation refreshes it.
+    stale_root_representation: Option<(Layout, TreeShape)>,
 }
 
 #[cfg(test)]

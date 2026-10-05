@@ -91,6 +91,9 @@ impl<W: LayoutElement> TilingTree<W> {
             return false;
         };
         meta.title_format = (format != "%title").then_some(format);
+        // `title_format` on a container refreshes the representation up to the workspace
+        // (sway/commands/title_format.c:27).
+        self.stale_root_representation = None;
         true
     }
 

@@ -87,6 +87,7 @@ impl<W: LayoutElement> TilingTree<W> {
             gaps: options.layout.gaps,
             options,
             preserved_auto_layout: None,
+            stale_root_representation: None,
         }
     }
 
@@ -152,8 +153,33 @@ impl<W: LayoutElement> TilingTree<W> {
         if self.is_empty() {
             self.empty_representation_layout.unwrap_or(layout)
         } else {
-            layout
+            match &self.stale_root_representation {
+                Some((stale, shape)) if *shape == self.representation_shape() => *stale,
+                _ => layout,
+            }
         }
+    }
+
+    /// Every node with its split layout, depth first. Sway refreshes a workspace's
+    /// representation whenever a child is attached or detached or a layout changes below it
+    /// (`container_update_representation`, sway/tree/container.c:750-773), so a different
+    /// shape means the cached representation was rebuilt.
+    pub(super) fn representation_shape(&self) -> TreeShape {
+        let mut shape = Vec::new();
+        let mut stack = vec![self.root];
+        while let Some(id) = stack.pop() {
+            match self.nodes.get(&id).map(|node| &node.value) {
+                Some(TreeNode::Split {
+                    layout, children, ..
+                }) => {
+                    shape.push((id, Some(*layout)));
+                    stack.extend(children.iter().rev());
+                }
+                Some(TreeNode::Leaf { .. }) => shape.push((id, None)),
+                None => {}
+            }
+        }
+        shape
     }
 
     pub fn reset_empty_layout(&mut self) {

@@ -264,6 +264,39 @@ fn splitting_a_focused_container_keeps_it_nested() {
 }
 
 #[test]
+fn splitting_the_workspace_keeps_its_representation_until_the_tree_changes() {
+    // Sway's workspace_split wraps the children and changes the workspace layout without
+    // refreshing the representation (sway/tree/workspace.c:1058-1079). Oracle row:
+    // split_workspace_keeps_stale_representation.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "split v")[0].success);
+
+    let workspace_json = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        tree["nodes"][1]["nodes"][0].clone()
+    };
+    let workspace = workspace_json(&mut f);
+    assert_eq!(workspace["layout"], "splitv");
+    assert_eq!(workspace["representation"], "H[H[fixture-1]]");
+    assert_eq!(workspace["nodes"][0]["layout"], "splith");
+
+    map_test_window(&mut f, client, "fixture-2");
+    let workspace = workspace_json(&mut f);
+    assert_eq!(workspace["representation"], "V[H[fixture-1] fixture-2]");
+}
+
+#[test]
 fn removing_one_of_two_split_windows_preserves_the_wrapper() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));

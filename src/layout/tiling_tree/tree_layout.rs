@@ -14,7 +14,8 @@ impl<W: LayoutElement> TilingTree<W> {
             else {
                 return;
             };
-            let wrapper = self.wrap_root_children(*old_layout);
+            let old_layout = *old_layout;
+            let wrapper = self.wrap_root_children(old_layout);
             if let Some(TreeNode::Split {
                 layout: root_layout,
                 ..
@@ -22,6 +23,7 @@ impl<W: LayoutElement> TilingTree<W> {
             {
                 *root_layout = layout;
             }
+            self.stale_root_representation = Some((old_layout, self.representation_shape()));
             self.set_focus_id(Some(wrapper));
             self.request_window_sizes();
             return;
@@ -493,8 +495,10 @@ impl<W: LayoutElement> TilingTree<W> {
     /// the workspace layout (`workspace_wrap_children`,
     /// sway/tree/workspace.c:898-910).
     pub fn wrap_workspace_children(&mut self) {
-        let layout = self.representation_layout();
-        if self.split_len(self.root).is_some_and(|len| len > 0) {
+        if let Some(layout) = self
+            .split_layout(self.root)
+            .filter(|_| self.split_len(self.root).is_some_and(|len| len > 0))
+        {
             self.wrap_root_children(layout);
             self.request_window_sizes();
         }
