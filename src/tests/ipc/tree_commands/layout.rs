@@ -929,3 +929,65 @@ fn layout_default_restores_only_a_split_the_layout_command_replaced() {
         assert_eq!(reply.parse_error, Some(true));
     }
 }
+
+#[test]
+fn split_toggle_reads_the_parent_layout_like_sway() {
+    // sway `cmd_split`/`cmd_splitt` (sway/commands/split.c): split H only when the
+    // focused container's parent is V; a focused workspace always splits V.
+    // Oracle rows differential_seed_1013 and differential_seed_1732.
+    let workspace_layout = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        (
+            workspace["layout"].as_str().unwrap().to_owned(),
+            workspace["representation"].as_str().map(str::to_owned),
+        )
+    };
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    for command in ["split toggle", "split toggle"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    assert_eq!(workspace_layout(&mut f).0, "splitv");
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "only");
+    assert!(crate::command::execute(f.niri_state(), "splitt")[0].success);
+    assert_eq!(
+        workspace_layout(&mut f),
+        ("splitv".to_owned(), Some("V[only]".to_owned()))
+    );
+}
+
+#[test]
+fn layout_toggle_on_an_empty_workspace_toggles_the_workspace() {
+    // sway/commands/layout.c:159-163,184-188: with no focused container the
+    // workspace layout itself toggles. Oracle rows differential_seed_1174,
+    // differential_seed_1111 and differential_seed_1088.
+    for command in ["layout toggle split", "layout toggle", "layout toggle all"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        assert_eq!(workspace["layout"], "splitv", "{command}");
+        assert_eq!(workspace["representation"], "V[]", "{command}");
+    }
+}

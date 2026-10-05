@@ -304,6 +304,24 @@ fn toggle_split_on_an_empty_tree_changes_the_root_layout() {
 }
 
 #[test]
+fn split_toggle_on_an_empty_tree_always_splits_vertical() {
+    // sway `cmd_split` toggle: no focused container means `do_split(L_VERT)`.
+    let mut t = tree((1200., 800.), 0.);
+    t.toggle_focused_split();
+    t.toggle_focused_split();
+
+    assert!(matches!(
+        t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::SplitV,
+            ..
+        }
+    ));
+    assert_eq!(t.representation_layout(), Layout::SplitH);
+    t.check_invariants();
+}
+
+#[test]
 fn split_on_an_empty_tree_sets_the_root_layout() {
     let mut t = tree((1200., 800.), 0.);
 

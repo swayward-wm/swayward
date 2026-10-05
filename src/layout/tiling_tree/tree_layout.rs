@@ -272,6 +272,14 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn toggle_focused_layout(&mut self, toggle: &LayoutToggle) -> Vec<(NodeId, NodeId)> {
+        // An empty workspace has no focused container; sway toggles the workspace
+        // layout itself (sway/commands/layout.c:159-163,184-188).
+        if self.focus.is_none() {
+            if let Some(layout) = self.toggled_layout(self.root, toggle) {
+                return self.set_focused_layout(layout);
+            }
+            return Vec::new();
+        }
         let (target, remapped) = self.focused_layout_target();
         if let Some((target, layout)) =
             target.and_then(|target| Some((target, self.toggled_layout(target, toggle)?)))
@@ -375,6 +383,10 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn toggle_focused_layout_split(&mut self) -> Vec<(NodeId, NodeId)> {
+        if self.focus.is_none() {
+            let layout = self.split_toggled_layout(self.root);
+            return self.set_focused_layout(layout);
+        }
         let (target, remapped) = self.focused_layout_target();
         if let Some(target) = target {
             let layout = self.split_toggled_layout(target);
@@ -401,16 +413,14 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// `split toggle`: sway reads the focused container's parent layout and splits
+    /// V unless that is V; a focused workspace always splits V
+    /// (`sway/commands/split.c` `cmd_split`).
     pub fn toggle_focused_split(&mut self) {
-        let focus = self.focus.unwrap_or(self.root);
-        let layout = match self.nodes.get(&focus).map(|node| &node.value) {
-            Some(TreeNode::Split {
-                layout: Layout::SplitH,
-                ..
-            }) => Layout::SplitV,
-            _ => Layout::SplitH,
-        };
-        self.split(focus, layout);
+        match self.focus {
+            Some(focus) => self.toggle_split(focus),
+            None => self.split_focused(Layout::SplitV),
+        }
     }
 
     /// Sets the layout of the focused leaf's parent split.
