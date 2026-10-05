@@ -323,7 +323,7 @@ pub(super) fn describe_window(context: WindowNodeContext<'_>) -> Node {
         swayward_ipc::command::InhibitIdleMode::Visible => "visible",
     };
     let properties = with_toplevel_role(mapped.toplevel(), |role| ViewProperties {
-        allow_tearing: false,
+        allow_tearing: mapped.can_tear(),
         app_id: role.app_id.clone(),
         foreign_toplevel_identifier: Some(mapped.id().to_protocol_identifier()),
         idle_inhibitors: IdleInhibitors {
@@ -331,7 +331,7 @@ pub(super) fn describe_window(context: WindowNodeContext<'_>) -> Node {
             user: user_inhibitor.into(),
         },
         inhibit_idle,
-        max_render_time: 0,
+        max_render_time: mapped.max_render_time(),
         pid: mapped
             .credentials()
             .map(|credentials| i64::from(credentials.pid)),

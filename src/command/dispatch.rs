@@ -131,6 +131,8 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
         Command::TitleFormat(format) => window::title_format_focused(state, &format),
         Command::ShortcutsInhibitor(enable) => window::shortcuts_inhibitor_focused(state, enable),
         Command::InhibitIdle(mode) => window::inhibit_idle_focused(state, mode),
+        Command::AllowTearing(allow) => window::allow_tearing_focused(state, allow),
+        Command::MaxRenderTime(msec) => window::max_render_time_focused(state, msec),
         Command::Sticky(value) => window::sticky_focused(state, &value),
         Command::Border(border) => window::border_focused(state, &border),
         Command::Floating(mode) => window::floating_focused(state, mode),

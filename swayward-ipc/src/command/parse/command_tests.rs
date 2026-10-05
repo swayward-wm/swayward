@@ -455,16 +455,20 @@ fn inhibit_idle_parses_sway_modes_and_errors() {
 }
 
 #[test]
-fn runtime_presentation_commands_fail_loud() {
+fn per_view_render_commands_parse_sway_values() {
+    assert_eq!(command("allow_tearing yes"), Command::AllowTearing(true));
+    assert_eq!(command("allow_tearing no"), Command::AllowTearing(false));
+    assert_eq!(
+        command("allow_tearing toggle"),
+        Command::AllowTearing(false)
+    );
+    assert_eq!(command("max_render_time 1"), Command::MaxRenderTime(1));
+    assert_eq!(command("max_render_time off"), Command::MaxRenderTime(0));
     for (input, error) in [
-        (
-            "allow_tearing yes",
-            "allow_tearing requires immediate presentation support",
-        ),
-        (
-            "max_render_time 1",
-            "max_render_time requires per-view render deadline support",
-        ),
+        ("max_render_time", "Missing max render time argument."),
+        ("max_render_time 0", "Invalid max render time."),
+        ("max_render_time -3", "Invalid max render time."),
+        ("max_render_time OFF", "Invalid max render time."),
     ] {
         assert_eq!(
             parse(input)[0].as_ref().unwrap_err().error.as_deref(),
@@ -472,14 +476,6 @@ fn runtime_presentation_commands_fail_loud() {
             "{input}"
         );
     }
-    assert_eq!(
-        parse("max_render_time")[0]
-            .as_ref()
-            .unwrap_err()
-            .error
-            .as_deref(),
-        Some("Missing max render time argument.")
-    );
 }
 
 #[test]

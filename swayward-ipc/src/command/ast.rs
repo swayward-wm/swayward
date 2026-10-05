@@ -329,6 +329,11 @@ pub enum Command {
     Sticky(String),
     ShortcutsInhibitor(bool),
     InhibitIdle(InhibitIdleMode),
+    /// Sway's per-view tearing override (`sway/sway/commands/allow_tearing.c`).
+    AllowTearing(bool),
+    /// Per-view render budget in milliseconds, 0 for `off`
+    /// (`sway/sway/commands/max_render_time.c`).
+    MaxRenderTime(i32),
     Opacity(f32),
     OpacityRelative(f32),
     /// A sway directive that sets a layout option for the whole session.

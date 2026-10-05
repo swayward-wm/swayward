@@ -304,6 +304,8 @@ fn run_targeted(
             super::handled(set_shortcuts_inhibitor(state, target, *enable))
         }
         Command::InhibitIdle(mode) => super::handled(set_inhibit_idle(state, target, *mode)),
+        Command::AllowTearing(allow) => super::handled(set_allow_tearing(state, target, *allow)),
+        Command::MaxRenderTime(msec) => super::handled(set_max_render_time(state, target, *msec)),
         Command::Sticky(value) => super::handled(window::sticky(state, target, value)),
         Command::SetClientColors { class, colors } => {
             set_client_colors(state, *class, *colors);
@@ -574,6 +576,55 @@ pub(super) fn set_inhibit_idle(
     }
     state.swayward.refresh_idle_inhibit();
     Ok(())
+}
+
+/// Sway stores the override on the view (`sway/sway/commands/allow_tearing.c:12-22`).
+/// It only changes presentation when the output allows tearing too
+/// (`sway/sway/desktop/output.c:253-268`), and swayward's outputs never do.
+pub(super) fn set_allow_tearing(
+    state: &mut State,
+    target: CommandTarget,
+    allow: bool,
+) -> Result<(), CommandOutcome> {
+    let CommandTarget::Window(target) = target else {
+        return Err(swayward_ipc::command::parse_error(
+            "Tearing can only be allowed on views",
+        ));
+    };
+    with_target_window(state, target, |window| window.set_tearing_override(allow))
+}
+
+/// Sway stores the budget on the view (`sway/sway/commands/max_render_time.c:23-31`).
+/// It only delays frame callbacks when the output has a budget too
+/// (`sway/sway/desktop/output.c:177-188`), and swayward's outputs never do.
+pub(super) fn set_max_render_time(
+    state: &mut State,
+    target: CommandTarget,
+    msec: i32,
+) -> Result<(), CommandOutcome> {
+    let CommandTarget::Window(target) = target else {
+        return Err(swayward_ipc::command::parse_error(
+            "Only views can have a max_render_time",
+        ));
+    };
+    with_target_window(state, target, |window| window.set_max_render_time(msec))
+}
+
+fn with_target_window(
+    state: &mut State,
+    target: crate::window::mapped::MappedId,
+    mut apply: impl FnMut(&mut crate::window::Mapped),
+) -> Result<(), CommandOutcome> {
+    let mut found = false;
+    state.swayward.layout.with_windows_mut(|window, _| {
+        if window.id() == target {
+            apply(window);
+            found = true;
+        }
+    });
+    found
+        .then_some(())
+        .ok_or_else(|| failure("No matching node."))
 }
 
 pub(super) fn set_shortcuts_inhibitor(

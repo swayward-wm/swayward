@@ -576,6 +576,26 @@ pub(super) fn inhibit_idle_focused(
     super::handled(super::targeted::set_inhibit_idle(state, target, mode))
 }
 
+pub(super) fn allow_tearing_focused(state: &mut State, allow: bool) -> super::HandlerResult {
+    // `sway/sway/commands/allow_tearing.c:12-15`.
+    let target = view_target(state, "Tearing can only be allowed on views")?;
+    super::handled(super::targeted::set_allow_tearing(state, target, allow))
+}
+
+pub(super) fn max_render_time_focused(state: &mut State, msec: i32) -> super::HandlerResult {
+    // `sway/sway/commands/max_render_time.c:23-27`.
+    let target = view_target(state, "Only views can have a max_render_time")?;
+    super::handled(super::targeted::set_max_render_time(state, target, msec))
+}
+
+/// The focused view, or sway's CMD_INVALID `error` when none is focused.
+fn view_target(state: &State, error: &str) -> Result<CommandTarget, CommandOutcome> {
+    if super::targeted::focused_node(state) != FocusedNode::View {
+        return Err(swayward_ipc::command::parse_error(error));
+    }
+    super::targeted::focused_target(state).ok_or_else(|| failure("No matching node."))
+}
+
 pub(super) fn shortcuts_inhibitor_focused(state: &mut State, enable: bool) -> super::HandlerResult {
     // `sway/sway/commands/shortcuts_inhibitor.c:14-18`.
     if super::targeted::focused_node(state) != FocusedNode::View {

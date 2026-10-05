@@ -283,14 +283,15 @@ are deliberate safety deviations.
 
 **Command gap.**
 
-Swayward refuses `allow_tearing` and `max_render_time`. Sway stores each value
-on the target view and exposes it in `GET_TREE`
-(`sway/commands/allow_tearing.c:6-25` and
-`sway/commands/max_render_time.c:6-32`). Swayward's frame clock has no per-view
-tearing or render-deadline controls. Returning success would therefore report
-state that the compositor does not apply. The refusal comes after sway's own
-checks: with no view focused, both commands give sway's precondition error,
-and `max_render_time` still rejects a missing or invalid value first.
+`allow_tearing` and `max_render_time` store sway's per-view value and report it
+in `GET_TREE` (`sway/commands/allow_tearing.c:6-25` and
+`sway/commands/max_render_time.c:6-32`). Sway applies a view's value only when
+its output enables tearing or has a render budget
+(`sway/desktop/output.c:150-185,253-268`). Both output settings default to
+off, and swayward refuses `output <name> allow_tearing` and
+`output <name> max_render_time`, so the view value never changes presentation. Swayward also serves no tearing-control protocol, so a
+view without an override reports `allow_tearing` false where sway reports the
+client's async hint.
 
 `inhibit_idle` is implemented with sway's focus, fullscreen, open, none, and
 visible user policies and composes with application idle-inhibitor protocol
