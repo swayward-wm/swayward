@@ -862,3 +862,41 @@ fn get_tree_output_nodes_report_runtime_power_like_get_outputs() {
         }
     }
 }
+
+#[test]
+fn new_workspace_on_a_rotated_output_takes_the_portrait_default_layout() {
+    // Oracle row: move_transformed_output_new_workspace_layout. Sway picks a new workspace's
+    // layout from the output's transformed size (`output_get_default_layout`,
+    // sway/tree/output.c:441-448), so a landscape output rotated 90 degrees gives splitv.
+    let (mut fixture, _socket) = ipc_fixture();
+    fixture.add_output(1, (1280, 720));
+    let client = fixture.add_client();
+    let window = fixture.client(client).create_window();
+    let surface = window.surface.clone();
+    window.commit();
+    fixture.roundtrip(client);
+    let window = fixture.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    fixture.double_roundtrip(client);
+
+    for command in ["output * transform 90", "move container to workspace 2"] {
+        assert!(crate::command::execute(fixture.niri_state(), command)[0].success);
+        fixture.double_roundtrip(client);
+    }
+    assert!(crate::command::execute(fixture.niri_state(), "workspace 3")[0].success);
+    fixture.double_roundtrip(client);
+
+    let workspaces = get_workspaces(&mut fixture);
+    let layout = |name: &str| {
+        workspaces
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|ws| ws["name"] == name)
+            .unwrap()["layout"]
+            .clone()
+    };
+    assert_eq!(layout("2"), "splitv");
+    assert_eq!(layout("3"), "splitv");
+}
