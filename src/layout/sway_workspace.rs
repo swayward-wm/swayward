@@ -414,10 +414,10 @@ impl<W: LayoutElement> Layout<W> {
         let active_id = active.id();
         let positions = self
             .workspaces()
-            .filter(|(_, _, workspace)| {
-                workspace.has_windows()
-                    || workspace.has_sway_identity()
+            .filter(|(monitor, index, workspace)| {
+                workspace.must_be_kept()
                     || workspace.id() == active_id
+                    || monitor.is_some_and(|monitor| monitor.active_workspace_idx() == *index)
             })
             .map(|(monitor, index, workspace)| WorkspacePosition {
                 output: monitor.map(|monitor| monitor.output().clone()),
@@ -456,9 +456,7 @@ impl<W: LayoutElement> Layout<W> {
             .workspaces
             .iter()
             .enumerate()
-            .filter(|(index, workspace)| {
-                workspace.has_windows() || workspace.has_sway_identity() || *index == current
-            })
+            .filter(|(index, workspace)| workspace.must_be_kept() || *index == current)
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let current = positions.iter().position(|index| *index == current)?;
