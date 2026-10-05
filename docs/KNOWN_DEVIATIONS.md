@@ -14,7 +14,7 @@ explains how the tests encode these differences.
 | GNOME portal backend | The GNOME backend is the default, with `xdg-desktop-portal-wlr` available as a fallback. | [Desktop integration](#desktop-integration) |
 | Reload keeps display changes | A display change made by a protocol client survives `reload` unless the file changes the output settings. | [Reload and transient output configuration](#reload-and-transient-output-configuration) |
 | Malformed IPC frames | A malformed IPC client is disconnected or receives a failure instead of waiting indefinitely. | [Malformed IPC frames](#malformed-ipc-frames) |
-| Layout and Xwayland limits | Scrollable tiling, some i3-only structures, and full X11 identity are not available. | [Layout and Xwayland](#layout-and-xwayland) |
+| Layout and Xwayland limits | Scrollable tiling, some i3-only structures, and full X11 identity are not available. Global fullscreen covers one output. | [Layout and Xwayland](#layout-and-xwayland) |
 
 The details use three labels, because each kind needs something different from
 you:
@@ -594,6 +594,28 @@ The i3 conformance adapter does not synthesize this node. Fabricating a node in
 the adapter would make an upstream assertion observe a tree that a real sway IPC
 client never receives. Tests that directly traverse or inspect i3's `content`
 node are excluded as i3-only tree-structure tests.
+
+### Global fullscreen on several outputs
+
+**Infrastructure gap.**
+
+Sway's `fullscreen enable global` sizes the view to the root box, the
+bounding box of every output (`sway/tree/arrange.c:349-355`,
+`sway/tree/view.c:365-369`). `GET_TREE` reports that box as the view's `rect`
+and `window_rect`. The view's `percent` is its area over its workspace's area
+(`sway/ipc-json.c:744-755`), so with two equal outputs side by side it is
+`2.0`.
+
+Swayward lays a global fullscreen view over its own output only. It reports
+that output's box and `percent` `1.0`, and the other outputs keep showing
+their workspaces. With one output the two agree. Reporting sway's numbers
+while the window covers one output would make the reply describe a window
+that does not exist, so swayward reports what it draws.
+
+Spanning every output is a planned feature. It needs the layout to size the
+view to the root box, and rendering, input and bar hiding on the other
+outputs. The oracle row `fullscreen_global_two_outputs` measures the
+difference.
 
 ### Urgency for assigned windows
 
