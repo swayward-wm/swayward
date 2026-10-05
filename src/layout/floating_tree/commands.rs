@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout::tiling_tree::Layout as TreeLayout;
 
 impl<W: LayoutElement> FloatingLayout<W> {
     pub(super) fn add_tile_at(&mut self, mut idx: usize, mut tile: Tile<W>, activate: bool) {
@@ -732,6 +733,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
         &mut self,
         direction: Direction,
         distance: impl Fn(Point<f64, Logical>, Point<f64, Logical>) -> f64,
+        wrap: bool,
     ) -> bool {
         let Some(active_id) = &self.active_window_id else {
             return false;
@@ -762,6 +764,19 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 .filter(|(id, _)| *id != active_id)
                 .map(|(id, other)| (id, distance(center, other)))
         };
+        // Without wrap this is sway's node_get_in_direction_floating: skip only `distance < 0`
+        // and leave focus alone when nothing lies that way (sway/commands/focus.c:243-258).
+        if !wrap {
+            let result = candidates()
+                .filter(|(_, dist)| *dist >= 0.)
+                .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b));
+            let Some((id, _)) = result else {
+                return false;
+            };
+            let id = id.clone();
+            self.activate_window(&id);
+            return true;
+        }
         let result = candidates()
             .filter(|(_, dist)| *dist > 0.)
             .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b))
@@ -779,20 +794,51 @@ impl<W: LayoutElement> FloatingLayout<W> {
         }
     }
 
+    /// `focus next|prev` on a floating window. A floating root has no parent, so sway takes the
+    /// axis from the workspace layout (`container_parent_layout`, sway/tree/container.c:1353-1361);
+    /// a window inside a floating split uses that split
+    /// (`get_direction_from_next_prev`, sway/commands/focus.c:17-58).
+    pub fn focus_next_or_prev(&mut self, next: bool, workspace_layout: TreeLayout) -> bool {
+        let Some(active_id) = &self.active_window_id else {
+            return false;
+        };
+        if let Some((idx, _)) = self.tree_entry_for_window(active_id) {
+            let entry = &mut self.tree_entries[idx];
+            let moved = entry.tree.focus_next_or_prev(next);
+            self.active_window_id = entry.tree.active_window().map(|window| window.id().clone());
+            return moved;
+        }
+        // Sway moves among floaters without wrapping (sway/commands/focus.c:458-460).
+        match (next, workspace_layout) {
+            (false, TreeLayout::SplitH | TreeLayout::Tabbed) => {
+                self.focus_directional(Direction::Left, |focus, other| focus.x - other.x, false)
+            }
+            (true, TreeLayout::SplitH | TreeLayout::Tabbed) => {
+                self.focus_directional(Direction::Right, |focus, other| other.x - focus.x, false)
+            }
+            (false, TreeLayout::SplitV | TreeLayout::Stacked) => {
+                self.focus_directional(Direction::Up, |focus, other| focus.y - other.y, false)
+            }
+            (true, TreeLayout::SplitV | TreeLayout::Stacked) => {
+                self.focus_directional(Direction::Down, |focus, other| other.y - focus.y, false)
+            }
+        }
+    }
+
     pub fn focus_left(&mut self) -> bool {
-        self.focus_directional(Direction::Left, |focus, other| focus.x - other.x)
+        self.focus_directional(Direction::Left, |focus, other| focus.x - other.x, true)
     }
 
     pub fn focus_right(&mut self) -> bool {
-        self.focus_directional(Direction::Right, |focus, other| other.x - focus.x)
+        self.focus_directional(Direction::Right, |focus, other| other.x - focus.x, true)
     }
 
     pub fn focus_up(&mut self) -> bool {
-        self.focus_directional(Direction::Up, |focus, other| focus.y - other.y)
+        self.focus_directional(Direction::Up, |focus, other| focus.y - other.y, true)
     }
 
     pub fn focus_down(&mut self) -> bool {
-        self.focus_directional(Direction::Down, |focus, other| other.y - focus.y)
+        self.focus_directional(Direction::Down, |focus, other| other.y - focus.y, true)
     }
 
     pub fn focus_leftmost(&mut self) {

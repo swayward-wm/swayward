@@ -85,11 +85,8 @@ pub(super) fn next_prev_sibling(state: &mut State, next: bool) {
 }
 
 pub(super) fn next_or_prev(state: &mut State, next: bool) -> Result<(), CommandOutcome> {
-    state
-        .swayward
-        .layout
-        .focus_next_or_prev(next)
-        .ok_or_else(|| failure("Expected a tiling container"))?;
+    // Sway answers success whether or not focus moved (sway/commands/focus.c:434-475).
+    state.swayward.layout.focus_next_or_prev(next);
     state.swayward.queue_redraw_all();
     Ok(())
 }

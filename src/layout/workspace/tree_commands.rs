@@ -285,11 +285,13 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.focus_from_output_direction(direction)
     }
 
-    pub fn focus_next_or_prev(&mut self, next: bool) -> Option<bool> {
+    pub fn focus_next_or_prev(&mut self, next: bool) -> bool {
         if self.floating_is_active.get() {
-            return None;
+            let layout = self.tiling.representation_layout();
+            self.floating.focus_next_or_prev(next, layout)
+        } else {
+            self.tiling.focus_next_or_prev(next)
         }
-        Some(self.tiling.focus_next_or_prev(next))
     }
 
     pub fn focus_left_without_wrap(&mut self) -> bool {
