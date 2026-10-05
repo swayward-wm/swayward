@@ -70,6 +70,7 @@ impl<W: LayoutElement> TilingTree<W> {
             fullscreen_tile_slot: false,
             fullscreen_arrived: false,
             wrapper_arranged_boxes: HashMap::new(),
+            unarranged_wrappers: HashSet::new(),
             fullscreen_rearranged: false,
             fullscreen_layout_wrappers: HashSet::new(),
             pre_layout_ipc_rects: HashMap::new(),

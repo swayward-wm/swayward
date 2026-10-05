@@ -231,6 +231,7 @@ impl<W: LayoutElement> TilingTree<W> {
         transaction: Option<Transaction>,
         animate: bool,
     ) {
+        self.unarranged_wrappers.clear();
         // Forget a stale representation once the tree changed, so a mutation that later
         // restores the same shape does not bring it back.
         if self

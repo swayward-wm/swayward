@@ -14,6 +14,30 @@ impl<W: LayoutElement> Layout<W> {
             .is_some_and(|candidate| candidate.tiling().is_root(node))
     }
 
+    /// Sway wraps a focused workspace's tiling children before it resolves
+    /// a move destination (`workspace_wrap_children` in `cmd_move_container`,
+    /// sway/commands/move.c:430-436), so the wrapper survives a destination
+    /// that turns out to be the same workspace, a missing mark or a missing
+    /// output. A failed move returns before any arrange, so its wrapper is
+    /// left `unarranged`.
+    pub fn wrap_moved_workspace_root(
+        &mut self,
+        workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+        unarranged: bool,
+    ) {
+        if let Some(workspace) = self
+            .workspace_mut(workspace)
+            .filter(|workspace| workspace.tiling().is_root(node))
+        {
+            if unarranged {
+                workspace.tiling_mut().wrap_workspace_children_unarranged();
+            } else {
+                workspace.tiling_mut().wrap_workspace_children();
+            }
+        }
+    }
+
     pub fn workspace_contains_tiling_node(
         &self,
         workspace: WorkspaceId,
@@ -235,16 +259,9 @@ impl<W: LayoutElement> Layout<W> {
         }
         .ok_or_else(|| "target workspace does not exist".to_owned())?;
         if source_workspace == target_workspace {
-            // Sway wraps a focused workspace's tiling children before it
-            // resolves the destination (`workspace_wrap_children` in
-            // `cmd_move_container`, sway/commands/move.c:430-436), so the wrapper
-            // survives even when the destination is the same workspace.
-            if let Some(workspace) = self
-                .workspace_mut(source_workspace)
-                .filter(|workspace| workspace.tiling().is_root(node))
-            {
-                workspace.tiling_mut().wrap_workspace_children();
-            }
+            // The wrapper survives even when the destination is the same
+            // workspace.
+            self.wrap_moved_workspace_root(source_workspace, node, false);
             return Ok((target_workspace, Vec::new()));
         }
         if empty_root {

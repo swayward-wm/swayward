@@ -532,6 +532,24 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// [`Self::wrap_workspace_children`] for a move that then fails: sway
+    /// returns without arranging, so GET_TREE reports the wrapper's empty box
+    /// until the next relayout (see `unarranged_wrappers`).
+    pub fn wrap_workspace_children_unarranged(&mut self) {
+        let unarranged = std::mem::take(&mut self.unarranged_wrappers);
+        let before = self.root_children().and_then(<[_]>::first).copied();
+        self.wrap_workspace_children();
+        self.unarranged_wrappers = unarranged;
+        if let Some(wrapper) = self
+            .root_children()
+            .and_then(<[_]>::first)
+            .copied()
+            .filter(|wrapper| Some(*wrapper) != before)
+        {
+            self.unarranged_wrappers.insert(wrapper);
+        }
+    }
+
     fn wrap_root_children(&mut self, layout: Layout) -> NodeId {
         if !self.can_wrap_root_children() {
             return self.root;

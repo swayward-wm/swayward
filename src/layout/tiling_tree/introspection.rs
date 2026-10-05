@@ -210,6 +210,12 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         self.fullscreen.is_some() && self.tree.fullscreen_layout_wrappers.contains(&id)
     }
 
+    /// A wrapper sway never arranged (see `unarranged_wrappers`): reported
+    /// with calloc's empty box, so its children omit percent.
+    fn is_unarranged_wrapper(&self, id: NodeId) -> bool {
+        self.tree.unarranged_wrappers.contains(&id)
+    }
+
     fn under_tabbed_pending_wrapper(&self, id: NodeId) -> bool {
         self.tree
             .nodes
@@ -275,8 +281,13 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             title: tree
                 .split_meta(id)
                 .and_then(|meta| meta.title_format.clone()),
-            percent: pending_wrapper.then_some(0.).or(percent),
-            rect: if pending_wrapper {
+            percent: if self.is_unarranged_wrapper(id) {
+                // Its empty box over a nonempty parent's (sway/ipc-json.c:744-755).
+                percent.map(|_| 0.)
+            } else {
+                pending_wrapper.then_some(0.).or(percent)
+            },
+            rect: if pending_wrapper || self.is_unarranged_wrapper(id) {
                 Rectangle::default()
             } else if let Some(unarranged) = self.unarranged(id) {
                 unarranged.rect
@@ -354,7 +365,9 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         match layout {
             // A pending wrapper reports a 0x0 box, and sway omits percent
             // when the parent box is empty (sway/ipc-json.c:744-755).
-            _ if self.is_pending_wrapper(id) => vec![None; children.len()],
+            _ if self.is_pending_wrapper(id) || self.is_unarranged_wrapper(id) => {
+                vec![None; children.len()]
+            }
             // Every child fills the strip's content box, so it reports 1,
             // except a fullscreen child, whose box is the output's.
             Layout::Tabbed | Layout::Stacked => children

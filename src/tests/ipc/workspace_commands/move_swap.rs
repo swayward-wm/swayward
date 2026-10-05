@@ -489,6 +489,57 @@ fn moving_a_workspace_to_itself_still_wraps_its_children() {
     assert_eq!(workspace["nodes"][0]["nodes"].as_array().unwrap().len(), 3);
 }
 
+// differential seed 15111 (random-v2): sway wraps a focused workspace's
+// tiling children before it resolves the destination, so a move to a missing
+// mark or output fails but leaves the wrapper (sway/commands/move.c:430-436),
+// unarranged. Oracle row workspace_move_to_missing_mark_or_output_wraps_children.
+#[test]
+fn failed_workspace_move_to_missing_mark_or_output_still_wraps_children() {
+    for command in [
+        "move container to mark missing",
+        "move container to output MISSING",
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(!outcome[0].success, "{command}: {outcome:?}");
+
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        assert_eq!(workspace["representation"], "H[H[(null)]]", "{command}");
+        assert_eq!(workspace["nodes"].as_array().unwrap().len(), 1, "{command}");
+        assert_eq!(
+            workspace["nodes"][0]["nodes"].as_array().unwrap().len(),
+            1,
+            "{command}"
+        );
+        // Sway returns before arranging, so the wrapper keeps calloc's empty
+        // box: percent 0 over the workspace, none for the view below it.
+        let wrapper = &workspace["nodes"][0];
+        assert_eq!(wrapper["percent"], 0.0, "{command}");
+        assert_eq!(wrapper["rect"]["width"], 0, "{command}");
+        assert!(wrapper["nodes"][0]["percent"].is_null(), "{command}");
+    }
+}
+
 #[test]
 fn criteria_targeted_move_workspace_preserves_a_container_subtree() {
     let mut f = Fixture::new();

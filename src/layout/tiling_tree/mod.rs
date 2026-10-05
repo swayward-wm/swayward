@@ -442,6 +442,7 @@ macro_rules! side_tables {
             ("fullscreen_layout_wrappers", $($ref)+ $tree.fullscreen_layout_wrappers),
             ("pre_layout_ipc_rects", $($ref)+ $tree.pre_layout_ipc_rects),
             ("wrapper_arranged_boxes", $($ref)+ $tree.wrapper_arranged_boxes),
+            ("unarranged_wrappers", $($ref)+ $tree.unarranged_wrappers),
             ("stale_fullscreen_rects", $($ref)+ $tree.stale_fullscreen_rects),
             ("tab_indicators", $($ref)+ $tree.tab_indicators),
             ("tab_active", $($ref)+ $tree.tab_active),
@@ -494,6 +495,11 @@ pub struct TilingTree<W: LayoutElement> {
     /// never-arranged empty box. Sway keeps them until the next arrange of
     /// the subtree, which under fullscreen never comes.
     wrapper_arranged_boxes: HashMap<NodeId, Rectangle<f64, Logical>>,
+    /// Workspace wrappers a failed move created (`workspace_wrap_children`
+    /// before the destination lookup fails, sway/commands/move.c:430-436 and
+    /// 516-531). Sway returns before any arrange, so the wrapper keeps
+    /// calloc's empty box until the next relayout of this tree.
+    unarranged_wrappers: HashSet<NodeId>,
     /// The workspace was arranged since then, or since a tiled slot was
     /// reported. `arrange_workspace` puts only the fullscreen container back
     /// at the output box (sway/tree/arrange.c:310-316).

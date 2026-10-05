@@ -814,12 +814,25 @@ fn move_window_to_mark_workspace(
     success()
 }
 
+/// The wrapper a move leaves when its destination lookup fails; see
+/// [`crate::layout::Layout::wrap_moved_workspace_root`].
+fn wrap_moved_workspace_root(state: &mut State, source: CommandTarget) {
+    if let CommandTarget::Container(workspace, node) = source {
+        state
+            .swayward
+            .layout
+            .wrap_moved_workspace_root(workspace, node, true);
+        state.swayward.queue_redraw_all();
+    }
+}
+
 pub(super) fn move_target_to_mark(
     state: &mut State,
     source: CommandTarget,
     mark: &str,
 ) -> CommandOutcome {
     let Some(destination) = marked_target(state, mark) else {
+        wrap_moved_workspace_root(state, source);
         return failure(format!("Mark '{mark}' not found"));
     };
     let destination = match resolve_mark_destination(state, destination) {
@@ -1023,7 +1036,10 @@ pub(super) fn to_output_focused(state: &mut State, target: &OutputTarget) -> sup
         .as_ref()
         .and_then(|(window, _)| state.swayward.layout.window_center(window));
     let reference_output = focused.as_ref().map(|(_, output)| output);
-    let output = output_target(state, target, reference_output, reference).map_err(failure)?;
+    let output = output_target(state, target, reference_output, reference).map_err(|error| {
+        wrap_moved_workspace_root(state, focused_target);
+        failure(error)
+    })?;
     if let CommandTarget::Container(workspace, node) = focused_target {
         super::handled_outcome(move_tiling_subtree_to_output(
             state, workspace, node, &output,

@@ -23,6 +23,9 @@ fn seed_side_table(t: &mut TilingTree<TestWindow>, name: &str, id: NodeId) {
         "wrapper_arranged_boxes" => {
             t.wrapper_arranged_boxes.insert(id, Rectangle::default());
         }
+        "unarranged_wrappers" => {
+            t.unarranged_wrappers.insert(id);
+        }
         "pre_layout_ipc_rects" => {
             t.pre_layout_ipc_rects.insert(id, Rectangle::default());
         }
