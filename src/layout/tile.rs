@@ -102,6 +102,12 @@ pub struct Tile<W: LayoutElement> {
 
     /// Parent container before this tile became floating.
     pub(super) tiling_parent: Option<super::tiling_tree::NodeId>,
+
+    /// Floating stack stamp this tile held when it left the floating layer.
+    /// A view that goes fullscreen stays in sway's `workspace->floating` list
+    /// at its slot (`container_fullscreen_workspace` does not move it,
+    /// sway/tree/container.c:1186-1218), so IPC lists it there.
+    pub(super) floating_stamp: Option<u64>,
     pub(super) is_sticky: bool,
 
     /// The size that the window should assume when going floating.
@@ -231,6 +237,11 @@ pub(super) struct AlphaAnimation {
 }
 
 impl<W: LayoutElement> Tile<W> {
+    /// See [`Self::floating_stamp`].
+    pub fn floating_stamp(&self) -> Option<u64> {
+        self.floating_stamp
+    }
+
     pub fn new(
         window: W,
         view_size: Size<f64, Logical>,
@@ -265,6 +276,7 @@ impl<W: LayoutElement> Tile<W> {
             restore_to_floating: false,
             tiling_focus_rank: None,
             tiling_parent: None,
+            floating_stamp: None,
             is_sticky: false,
             floating_window_size: None,
             floating_pos: None,

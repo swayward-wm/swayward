@@ -287,16 +287,25 @@ fn floating_part(context: &WorkspaceNodeContext<'_>, state: &WorkspaceState) -> 
         .collect::<Vec<_>>();
     // Sway lists the workspace's floating containers bottom to top, a group
     // and a single window in one list (`workspace->floating`,
-    // sway/ipc-json.c:532-540). A fullscreen tile that restores to floating
-    // is not in the floating stack yet; it is listed on top.
-    let stacking = workspace.floating().stacking();
-    let depth = |slot: &StackSlot<_>| {
-        stacking
-            .iter()
-            .position(|candidate| candidate == slot)
-            .map_or(0, |index| index + 1)
+    // sway/ipc-json.c:532-540). A fullscreen floating view is a tiled tile
+    // here, but sway keeps it at its slot in that list
+    // (sway/tree/container.c:1186-1218), so it sorts by the stamp it left
+    // the floating layer with; one that never had a slot is on top.
+    let stacking = workspace.floating().stacking_stamps();
+    let key = |slot: &StackSlot<_>| {
+        if let Some(index) = stacking.iter().position(|(candidate, _)| candidate == slot) {
+            return (stacking[index].1, std::cmp::Reverse(index));
+        }
+        let stamp = match slot {
+            StackSlot::Window(window) => workspace
+                .tiles()
+                .find(|tile| tile.window().window == *window)
+                .and_then(|tile| tile.floating_stamp()),
+            StackSlot::Tree(_) => None,
+        };
+        (stamp.unwrap_or(u64::MAX), std::cmp::Reverse(0))
     };
-    floating_nodes.sort_by_key(|(slot, _)| std::cmp::Reverse(depth(slot)));
+    floating_nodes.sort_by_key(|(slot, _)| key(slot));
     floating_nodes.into_iter().map(|(_, node)| node).collect()
 }
 
@@ -361,15 +370,49 @@ fn order_focus(
     nodes: &[Node],
     floating_nodes: &[Node],
 ) {
+    let focus_timestamps = workspace
+        .windows()
+        .filter_map(|window| {
+            window
+                .focus_timestamp()
+                .map(|timestamp| (window_id(window.id()), timestamp))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let floating_focus = floating_nodes.iter().rev().map(|node| node.id);
     if workspace.floating_is_active() {
         focus.splice(0..0, floating_focus);
-        return;
+    } else {
+        focus.extend(floating_focus);
+        if !workspace.tiling().ipc_focus_follows_history() {
+            order_by_recency(workspace, focus, nodes, floating_nodes, &focus_timestamps);
+        }
     }
-    focus.extend(floating_focus);
-    if workspace.tiling().ipc_focus_follows_history() {
-        return;
-    }
+    // A view never focused, such as one mapped under a fullscreen view,
+    // joined the tail of the focus stack when it was created and has not
+    // moved (`seat_node_from_node`, sway/input/seat.c:327-349). Window ids
+    // follow creation order.
+    let never_focused = workspace
+        .windows()
+        .filter(|window| window.focus_timestamp().is_none())
+        .map(|window| window_id(window.id()))
+        .collect::<std::collections::HashSet<_>>();
+    let mut tail = focus
+        .iter()
+        .copied()
+        .filter(|id| never_focused.contains(id))
+        .collect::<Vec<_>>();
+    tail.sort_unstable();
+    focus.retain(|id| !never_focused.contains(id));
+    focus.extend(tail);
+}
+
+fn order_by_recency(
+    workspace: &crate::layout::workspace::Workspace<Mapped>,
+    focus: &mut [i64],
+    nodes: &[Node],
+    floating_nodes: &[Node],
+    focus_timestamps: &std::collections::HashMap<i64, std::time::Duration>,
+) {
     let stale_tiling = workspace
         .ipc_tiling_tree()
         .nodes()
@@ -381,14 +424,6 @@ fn order_focus(
                 .then_some(container_id(id))
         })
         .collect::<std::collections::HashSet<_>>();
-    let focus_timestamps = workspace
-        .windows()
-        .filter_map(|window| {
-            window
-                .focus_timestamp()
-                .map(|timestamp| (window_id(window.id()), timestamp))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
     let children = nodes.iter().chain(floating_nodes).collect::<Vec<_>>();
     // A node that was never focused joins the tail of sway's focus stack
     // (`seat_node_from_node`, sway/input/seat.c:327-349). So a wrapper that
@@ -399,7 +434,7 @@ fn order_focus(
         children
             .iter()
             .find(|child| child.id == *id)
-            .and_then(|child| newest_focus_timestamp(child, &focus_timestamps))
+            .and_then(|child| newest_focus_timestamp(child, focus_timestamps))
     };
     // The tiled list already follows sway's focus stack, which raises a
     // container whenever focus enters it (`seat_set_raw_focus`,

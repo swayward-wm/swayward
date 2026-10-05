@@ -1041,6 +1041,29 @@ impl<W: LayoutElement> FloatingLayout<W> {
         stacking
     }
 
+    /// [`Self::stacking`] with each root's stamp.
+    pub fn stacking_stamps(&self) -> Vec<(StackSlot<W::Id>, u64)> {
+        let stamp = |slot: &StackSlot<W::Id>| match slot {
+            StackSlot::Tree(root) => self
+                .tree_entries
+                .iter()
+                .find(|entry| entry.root == *root)
+                .map(|entry| entry.stamp),
+            StackSlot::Window(id) => self
+                .entries
+                .iter()
+                .find(|entry| entry.tile.window().id() == id)
+                .map(|entry| entry.stamp),
+        };
+        self.stacking()
+            .into_iter()
+            .map(|slot| {
+                let stamp = stamp(&slot).unwrap_or_default();
+                (slot, stamp)
+            })
+            .collect()
+    }
+
     /// Floating roots bottom to top: `Some(root)` for a group, `None` for a
     /// single window.
     #[cfg(test)]

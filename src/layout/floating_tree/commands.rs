@@ -193,7 +193,13 @@ impl<W: LayoutElement> FloatingLayout<W> {
     }
 
     fn remove_tile_by_idx(&mut self, idx: usize) -> RemovedTile<W> {
-        let FloatingEntry { mut tile, data, .. } = self.remove_entry(idx);
+        let FloatingEntry {
+            mut tile,
+            data,
+            stamp,
+            ..
+        } = self.remove_entry(idx);
+        tile.floating_stamp = Some(stamp);
 
         if Some(tile.window().id()) == self.active_window_id.as_ref() {
             self.active_window_id = self.fallback_active_window();

@@ -780,6 +780,8 @@ impl<W: LayoutElement> Workspace<W> {
         } = options;
         self.enter_output_for_window(tile.window());
         tile.restore_to_floating = is_floating;
+        // A slot in another workspace's floating stack means nothing here.
+        tile.floating_stamp = None;
 
         match target {
             WorkspaceAddWindowTarget::Auto | WorkspaceAddWindowTarget::Move => {

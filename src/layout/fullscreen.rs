@@ -26,21 +26,6 @@ impl<W: LayoutElement> Layout<W> {
             .is_some_and(|workspace| workspace.fullscreen_contains_window(window.id()))
     }
 
-    pub fn disable_active_workspace_fullscreen(&mut self) {
-        let window = self.active_workspace().and_then(|workspace| {
-            let fullscreen = workspace.tiling().fullscreen_node()?;
-            workspace.tiling().windows().find_map(|(id, window)| {
-                workspace
-                    .tiling()
-                    .contains_node(fullscreen, id)
-                    .then(|| window.id().clone())
-            })
-        });
-        if let (Some(workspace), Some(window)) = (self.active_workspace_mut(), window) {
-            workspace.set_fullscreen(&window, false);
-        }
-    }
-
     pub fn set_focused_fullscreen_mode(&mut self, mode: Option<tiling_tree::FullscreenMode>) {
         if mode.is_some() {
             for workspace in self.workspaces_mut() {

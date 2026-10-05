@@ -91,28 +91,52 @@ pub(super) fn next_or_prev(state: &mut State, next: bool) -> Result<(), CommandO
     Ok(())
 }
 
-pub(super) fn mode(state: &mut State, floating: bool) -> Result<Action, CommandOutcome> {
-    let Some(workspace) = state.swayward.layout.active_workspace() else {
+/// `focus floating|tiling` (`focus_mode`, sway/commands/focus.c:262-307).
+/// The target is the layer's most recently focused view, and a fullscreen
+/// view counts on the layer it restores to. Sway never leaves fullscreen
+/// here: `seat_set_focus` refuses a target a fullscreen container hides
+/// (`container_obstructing_fullscreen_container`, sway/input/seat.c:1148-1151),
+/// so the command succeeds and nothing changes.
+pub(super) fn mode(state: &mut State, floating: bool) -> Result<Option<Action>, CommandOutcome> {
+    use crate::layout::tiling_tree::FullscreenMode;
+    use crate::layout::LayoutElement as _;
+
+    let layout = &state.swayward.layout;
+    let Some(workspace) = layout.active_workspace() else {
         return Err(failure("Target container is not in a workspace"));
     };
-    let missing = if floating {
-        workspace.floating().is_empty()
-    } else {
-        workspace.tiling().is_empty()
-    };
-    if missing {
+    let Some(target) = workspace
+        .windows()
+        .filter(|mapped| workspace.is_floating_for_ipc(&mapped.window) == floating)
+        .max_by_key(|mapped| mapped.focus_timestamp())
+        .map(|mapped| mapped.window.clone())
+    else {
         let layer = if floating { "floating" } else { "tiling" };
         return Err(failure(format!(
             "Failed to find a {layer} container in workspace."
         )));
+    };
+    let hidden_by_workspace =
+        workspace.fullscreen_mode().is_some() && !workspace.fullscreen_contains_window(&target);
+    let hidden_by_global = layout.workspaces().any(|(_, _, candidate)| {
+        candidate.fullscreen_mode() == Some(FullscreenMode::Global)
+            && !candidate.fullscreen_contains_window(&target)
+    });
+    if hidden_by_workspace || hidden_by_global {
+        return Ok(None);
     }
-
-    state.swayward.layout.disable_active_workspace_fullscreen();
-    Ok(if floating {
+    // A fullscreen floating view lives in the tiling tree until it leaves
+    // fullscreen, so the floating layer's focus action cannot reach it.
+    if floating && !workspace.floating().has_window(&target) {
+        state.swayward.layout.activate_window(&target);
+        state.swayward.queue_redraw_all();
+        return Ok(None);
+    }
+    Ok(Some(if floating {
         Action::FocusFloating
     } else {
         Action::FocusTiling
-    })
+    }))
 }
 
 pub(super) fn targeted(state: &mut State, target: CommandTarget) -> Result<(), CommandOutcome> {
@@ -226,11 +250,13 @@ pub(super) fn targeted_direction(
     Ok(())
 }
 
-pub(super) fn mode_toggle(state: &mut State) -> Result<Action, CommandOutcome> {
+pub(super) fn mode_toggle(state: &mut State) -> Result<Option<Action>, CommandOutcome> {
     let floating = state
         .swayward
         .layout
         .active_workspace()
-        .is_some_and(|workspace| workspace.floating_is_active());
+        .is_some_and(|workspace| {
+            workspace.floating_is_active() || workspace.active_floating_is_fullscreen()
+        });
     mode(state, !floating)
 }

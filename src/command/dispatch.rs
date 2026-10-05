@@ -100,9 +100,9 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
             focus::next_prev_sibling(state, false);
             Ok(None)
         }
-        Command::FocusFloating => focus::mode(state, true).map(Some),
-        Command::FocusTiling => focus::mode(state, false).map(Some),
-        Command::FocusModeToggle => focus::mode_toggle(state).map(Some),
+        Command::FocusFloating => focus::mode(state, true),
+        Command::FocusTiling => focus::mode(state, false),
+        Command::FocusModeToggle => focus::mode_toggle(state),
         Command::MoveDirection { direction, pixels } => {
             movement::direction_focused(state, direction, pixels)
         }

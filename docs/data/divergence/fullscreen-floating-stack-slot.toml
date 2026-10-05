@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/tile.rs", "src/layout/workspace.rs"]
+what = "remember the floating stack stamp a tile held when it left the floating layer, and forget it when the tile joins another workspace, so GET_TREE lists a fullscreen floating view at its old slot in floating_nodes."
+why = "Sway keeps a fullscreen floating container in `workspace->floating` where it was (`container_fullscreen_workspace`, sway/tree/container.c:1186-1218); a floater mapped afterwards is listed above it. Differential seed 4372."
