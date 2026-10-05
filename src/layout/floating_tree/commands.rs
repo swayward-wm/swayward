@@ -1076,3 +1076,69 @@ impl<W: LayoutElement> FloatingLayout<W> {
         true
     }
 }
+
+impl<W: LayoutElement> FloatingLayout<W> {
+    /// Moves floating root `moved` directly above `anchor` in the stacking
+    /// order. Sway inserts a container moved onto a floating view into
+    /// `workspace->floating` right after the view (`container_add_sibling`,
+    /// sway/tree/container.c:1410-1423), and that list is the stacking order.
+    pub fn restack_above(&mut self, moved: &StackSlot<W::Id>, anchor: &StackSlot<W::Id>) {
+        let mut order = self.stacking();
+        if moved == anchor || !order.contains(anchor) {
+            return;
+        }
+        let Some(from) = order.iter().position(|slot| slot == moved) else {
+            return;
+        };
+        let slot = order.remove(from);
+        let Some(at) = order.iter().position(|slot| slot == anchor) else {
+            return;
+        };
+        order.insert(at, slot);
+
+        // Renumber every root bottom to top, which keeps the merged order.
+        let base = self.next_stamp;
+        for (offset, slot) in order.iter().rev().enumerate() {
+            let stamp = base + 1 + offset as u64;
+            match slot {
+                StackSlot::Window(id) => {
+                    if let Some(entry) = self
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.tile.window().id() == id)
+                    {
+                        entry.stamp = stamp;
+                    }
+                }
+                StackSlot::Tree(root) => {
+                    if let Some(entry) = self
+                        .tree_entries
+                        .iter_mut()
+                        .find(|entry| entry.root == *root)
+                    {
+                        entry.stamp = stamp;
+                    }
+                }
+            }
+        }
+        self.next_stamp = base + order.len() as u64;
+
+        // Each vector stays sorted top first; only the moved root changed place.
+        match moved {
+            StackSlot::Window(id) => {
+                if let Some(idx) = self.idx_of(id) {
+                    let entry = self.remove_entry(idx);
+                    let idx = self
+                        .entries
+                        .iter()
+                        .position(|other| other.stamp < entry.stamp)
+                        .unwrap_or(self.entries.len());
+                    self.insert_entry(idx, entry);
+                }
+            }
+            StackSlot::Tree(_) => self
+                .tree_entries
+                .sort_by_key(|entry| std::cmp::Reverse(entry.stamp)),
+        }
+    }
+}

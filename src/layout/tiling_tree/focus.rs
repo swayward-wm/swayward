@@ -23,6 +23,10 @@ impl<W: LayoutElement> TilingTree<W> {
         self.nodes.get(&self.node_for_window(window)?)?.parent
     }
 
+    pub fn parent_of_node(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes.get(&id)?.parent
+    }
+
     pub fn non_root_parent_for_window(&self, window: &W::Id) -> Option<NodeId> {
         self.parent_of_window(window)
             .filter(|parent| *parent != self.root && self.split_len(*parent).is_some_and(|n| n > 1))

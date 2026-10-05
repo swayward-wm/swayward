@@ -16,6 +16,7 @@ use swayward_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 
 use super::floating_tree::{
     apply_position_change, FloatingLayout, FloatingLayoutRenderElement, RemovedFloatingTree,
+    StackSlot,
 };
 use super::shadow::Shadow;
 use super::tile::{Tile, TileRenderSnapshot};

@@ -826,6 +826,49 @@ fn wrap_moved_workspace_root(state: &mut State, source: CommandTarget) {
     }
 }
 
+/// A tiled container moved onto a floating view's mark becomes floating
+/// beside it (`container_move_to_container`, sway/commands/move.c:243-261).
+/// Returns `None` for the cases this does not cover: a floating source, or a
+/// mark on a floating group's child.
+fn move_tiling_to_floating_mark(
+    state: &mut State,
+    source: CommandTarget,
+    destination: CommandTarget,
+) -> Option<CommandOutcome> {
+    let CommandTarget::Window(anchor) = destination else {
+        return None;
+    };
+    let anchor = super::mapped_window(state, anchor)?;
+    let layout = &state.swayward.layout;
+    if !layout
+        .workspaces()
+        .any(|(_, _, workspace)| workspace.is_floating(&anchor))
+    {
+        return None;
+    }
+    let (workspace, node) = match source {
+        CommandTarget::Container(workspace, node) => (workspace, node),
+        CommandTarget::Window(window) => {
+            let window = super::mapped_window(state, window)?;
+            layout.tiling_target_for_window(&window)?
+        }
+    };
+    if !layout.workspace_contains_tiling_node(workspace, node)
+        || layout.is_tiling_root(workspace, node)
+    {
+        return None;
+    }
+    if let Err(error) = state
+        .swayward
+        .layout
+        .move_tiling_node_to_floating_window(workspace, node, &anchor)
+    {
+        return Some(failure(error));
+    }
+    state.swayward.queue_redraw_all();
+    Some(success())
+}
+
 pub(super) fn move_target_to_mark(
     state: &mut State,
     source: CommandTarget,
@@ -840,6 +883,9 @@ pub(super) fn move_target_to_mark(
             return move_window_to_mark_workspace(state, source, None)
         }
         Ok(MarkDestination::Floating(workspace)) => {
+            if let Some(outcome) = move_tiling_to_floating_mark(state, source, destination) {
+                return outcome;
+            }
             return move_window_to_mark_workspace(state, source, Some(workspace));
         }
         Ok(MarkDestination::Tiling(destination)) => destination,

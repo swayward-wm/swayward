@@ -196,6 +196,45 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Moves tiling container `node` onto the floating view `anchor`, which
+    /// may be on another workspace. Sway detaches the container and inserts it
+    /// into the anchor's floating list right after the anchor
+    /// (`container_move_to_container`, sway/commands/move.c:243-261).
+    pub fn move_tiling_node_to_floating_window(
+        &mut self,
+        source_workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+        anchor: &W::Id,
+    ) -> Result<(), String> {
+        let no_node = || "No matching node.".to_owned();
+        let target_workspace = self.window_workspace_id(anchor).ok_or_else(no_node)?;
+        let anchor_slot = floating_tree::StackSlot::Window(anchor.clone());
+        let same_workspace = source_workspace == target_workspace;
+        let workspace = self.workspace_mut(source_workspace).ok_or_else(no_node)?;
+        let moved = workspace
+            .float_tiling_node_for_mark(node, same_workspace.then_some(&anchor_slot))
+            .ok_or_else(no_node)?;
+        if same_workspace {
+            return Ok(());
+        }
+        let window = match &moved {
+            floating_tree::StackSlot::Window(window) => window.clone(),
+            floating_tree::StackSlot::Tree(root) => workspace
+                .floating()
+                .tree_window_ids(*root)
+                .and_then(|windows| windows.into_iter().next())
+                .ok_or_else(no_node)?,
+        };
+        self.move_window_to_workspace_id(&window, target_workspace)?;
+        let target = self.workspace_mut(target_workspace).ok_or_else(no_node)?;
+        let moved = match target.floating_tree_root_for_window(&window) {
+            Some(root) => floating_tree::StackSlot::Tree(root),
+            None => floating_tree::StackSlot::Window(window),
+        };
+        target.restack_floating_above(&moved, &anchor_slot);
+        Ok(())
+    }
+
     pub fn tiling_target_for_window(
         &self,
         window: &W::Id,

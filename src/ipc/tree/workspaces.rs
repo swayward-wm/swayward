@@ -380,6 +380,21 @@ fn order_focus(
         .collect::<std::collections::HashMap<_, _>>();
     let floating_focus = floating_nodes.iter().rev().map(|node| node.id);
     if workspace.floating_is_active() {
+        // The focused floating container heads the seat stack even when it
+        // is not on top, as after a move onto a floating mark stacks it
+        // below another view (`seat_set_focus`, sway/input/seat.c).
+        let active = workspace
+            .active_window()
+            .map(|window| window_id(window.id()));
+        let mut floating_focus = floating_focus.collect::<Vec<_>>();
+        if let Some(index) = floating_nodes
+            .iter()
+            .rev()
+            .position(|node| active.is_some_and(|active| node_holds(node, active)))
+        {
+            let id = floating_focus.remove(index);
+            floating_focus.insert(0, id);
+        }
         focus.splice(0..0, floating_focus);
     } else {
         focus.extend(floating_focus);
@@ -404,6 +419,10 @@ fn order_focus(
     tail.sort_unstable();
     focus.retain(|id| !never_focused.contains(id));
     focus.extend(tail);
+}
+
+fn node_holds(node: &Node, id: i64) -> bool {
+    node.id == id || node.nodes.iter().any(|child| node_holds(child, id))
 }
 
 fn order_by_recency(

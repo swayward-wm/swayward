@@ -650,6 +650,81 @@ impl<W: LayoutElement> Workspace<W> {
         true
     }
 
+    /// Floats tiling container `node` for a move onto a floating mark and
+    /// returns its floating root. With `anchor`, the root is stacked directly
+    /// above that floating root, where `container_add_sibling` puts it in
+    /// `workspace->floating` (`container_move_to_container`,
+    /// sway/commands/move.c:243-261; sway/tree/container.c:1410-1423).
+    ///
+    /// Focus follows `cmd_move_container` (sway/commands/move.c:598-608): a
+    /// focused container hands focus to the old parent's focus-inactive
+    /// child, else to the workspace's, which is the moved container itself.
+    pub fn float_tiling_node_for_mark(
+        &mut self,
+        node: NodeId,
+        anchor: Option<&StackSlot<W::Id>>,
+    ) -> Option<StackSlot<W::Id>> {
+        if !self.tiling.contains(node) {
+            return None;
+        }
+        let floating_was_active = self.floating_is_active;
+        let floating_focus = self
+            .floating
+            .active_window()
+            .map(|window| window.id().clone());
+        let tiling_focus = self.tiling.focus();
+        let focus = (!floating_was_active.get())
+            .then_some(tiling_focus)
+            .flatten();
+        let focus_in_moved = focus.is_some_and(|focus| self.tiling.contains_node(node, focus));
+        let sibling_focus = (focus == Some(node))
+            .then(|| self.tiling.parent_of_node(node))
+            .flatten()
+            .filter(|parent| !self.tiling.is_root(*parent))
+            .and_then(|parent| self.tiling.focus_inactive_in_excluding(parent, node));
+
+        let moved = match self.tiling.window_for_node(node).map(|w| w.id().clone()) {
+            Some(window) => {
+                self.toggle_window_floating(Some(&window));
+                if !self.floating.window_is_floating_root(&window) {
+                    return None;
+                }
+                StackSlot::Window(window)
+            }
+            None => StackSlot::Tree(self.set_container_floating(node, true)?),
+        };
+        if let Some(anchor) = anchor {
+            self.floating.restack_above(&moved, anchor);
+        }
+
+        if let Some(sibling) = sibling_focus {
+            self.tiling.set_focus(sibling);
+            self.floating_is_active = FloatingActive::No;
+        } else if focus_in_moved {
+            if let StackSlot::Window(window) = &moved {
+                self.floating.activate_window_without_raising(window);
+            }
+            self.floating_is_active = FloatingActive::Yes;
+        } else {
+            if let Some(focus) = tiling_focus.filter(|focus| self.tiling.contains(*focus)) {
+                self.tiling.set_focus(focus);
+            }
+            if let Some(window) = floating_focus {
+                self.floating.activate_window_without_raising(&window);
+            }
+            self.floating_is_active = if self.tiling.is_empty() {
+                FloatingActive::Yes
+            } else {
+                floating_was_active
+            };
+        }
+        Some(moved)
+    }
+
+    pub fn restack_floating_above(&mut self, moved: &StackSlot<W::Id>, anchor: &StackSlot<W::Id>) {
+        self.floating.restack_above(moved, anchor);
+    }
+
     pub fn floating_tree_root_for_window(&self, window: &W::Id) -> Option<NodeId> {
         self.floating.tree_root_for_window(window)
     }
