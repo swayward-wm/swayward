@@ -183,7 +183,7 @@ fn focus_next_sibling_stops_at_container_while_bare_next_descends() {
     let nested = t.nodes[&third].parent.unwrap();
 
     t.set_focus(first);
-    assert!(t.focus_next_prev_sibling(true));
+    assert!(t.focus_next_prev_sibling(true, true));
     assert_eq!(t.focus(), Some(nested));
 
     t.set_focus(first);

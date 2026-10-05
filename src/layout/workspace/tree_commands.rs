@@ -176,8 +176,19 @@ impl<W: LayoutElement> Workspace<W> {
             .flatten()
     }
 
-    pub fn focus_next_prev_sibling(&mut self, next: bool) -> bool {
-        !self.floating_is_active.get() && self.tiling.focus_next_prev_sibling(next)
+    pub fn focus_next_prev_sibling(&mut self, next: bool, allow_wrap: bool) -> bool {
+        !self.floating_is_active.get() && self.tiling.focus_next_prev_sibling(next, allow_wrap)
+    }
+
+    /// The tiling direction of `focus next|prev`; `None` on the floating layer, which never
+    /// leaves the workspace (sway/commands/focus.c:457-460).
+    pub fn tiling_next_prev_direction(
+        &self,
+        next: bool,
+    ) -> Option<crate::layout::tiling_tree::Direction> {
+        (!self.floating_is_active.get())
+            .then(|| self.tiling.next_prev_direction(next))
+            .flatten()
     }
 
     pub fn focus_child(&mut self) -> bool {

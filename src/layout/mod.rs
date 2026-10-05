@@ -2272,9 +2272,13 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
-    pub fn focus_next_prev_sibling(&mut self, next: bool) -> bool {
+    pub fn focus_next_prev_sibling(&mut self, next: bool, allow_wrap: bool) -> bool {
         self.active_workspace_mut()
-            .is_some_and(|workspace| workspace.focus_next_prev_sibling(next))
+            .is_some_and(|workspace| workspace.focus_next_prev_sibling(next, allow_wrap))
+    }
+
+    pub fn tiling_next_prev_direction(&self, next: bool) -> Option<tiling_tree::Direction> {
+        self.active_workspace()?.tiling_next_prev_direction(next)
     }
 
     pub fn focused_tiling_node(&self) -> Option<tiling_tree::NodeId> {

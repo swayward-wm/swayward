@@ -90,16 +90,10 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
             focus::child(state);
             Ok(None)
         }
-        Command::FocusNext => super::handled(focus::next_or_prev(state, true)),
-        Command::FocusPrev => super::handled(focus::next_or_prev(state, false)),
-        Command::FocusNextSibling => {
-            focus::next_prev_sibling(state, true);
-            Ok(None)
-        }
-        Command::FocusPrevSibling => {
-            focus::next_prev_sibling(state, false);
-            Ok(None)
-        }
+        Command::FocusNext => Ok(focus::next_or_prev(state, true)),
+        Command::FocusPrev => Ok(focus::next_or_prev(state, false)),
+        Command::FocusNextSibling => Ok(focus::next_prev_sibling(state, true)),
+        Command::FocusPrevSibling => Ok(focus::next_prev_sibling(state, false)),
         Command::FocusFloating => focus::mode(state, true),
         Command::FocusTiling => focus::mode(state, false),
         Command::FocusModeToggle => focus::mode_toggle(state),

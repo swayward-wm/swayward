@@ -729,6 +729,54 @@ fn workspace_next_and_prev_cross_outputs() {
     );
 }
 
+/// Oracle: focus_next_crosses_outputs. `focus next|prev [sibling]` is `focus <direction>` with
+/// the direction from the parent layout (sway/commands/focus.c:17-58, 424-433), so at the
+/// workspace edge it focuses the adjacent output before taking the `focus_wrapping yes` wrap
+/// candidate (`node_get_in_direction_tiling`, sway/commands/focus.c:207-223).
+#[test]
+fn focus_next_and_prev_cross_outputs_before_wrapping() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1920, 1080));
+    let first_output = f.niri_output(1).name();
+    let second_output = f.niri_output(2).name();
+    let client = f.add_client();
+    let map = |f: &mut Fixture| {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    };
+    let active_output = |f: &mut Fixture| f.swayward().layout.active_output().unwrap().name();
+
+    run(&mut f, "workspace 2");
+    map(&mut f);
+    run(&mut f, &format!("workspace 2 output {second_output}"));
+    run(&mut f, "workspace 1");
+    run(&mut f, &format!("workspace 1 output {first_output}"));
+    map(&mut f);
+    map(&mut f);
+    assert_eq!(active_output(&mut f), first_output);
+
+    for (command, output) in [
+        ("focus next", &second_output),
+        ("focus prev", &first_output),
+        ("focus next sibling", &second_output),
+        ("focus prev sibling", &first_output),
+    ] {
+        run(&mut f, command);
+        assert_eq!(&active_output(&mut f), output, "{command}");
+    }
+}
+
 /// Oracle: move_wrap_keeps_new_wrapper_at_focus_tail. When `move left` wraps
 /// the workspace children (`workspace_wrap_children`,
 /// sway/commands/move.c:336), the wrapper is never focused, because a

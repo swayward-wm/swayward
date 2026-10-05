@@ -314,7 +314,10 @@ impl<W: LayoutElement> TilingTree<W> {
         focus.and_then(|focus| self.tile(focus).map(|tile| tile.window().id().clone()))
     }
 
-    pub fn focus_next_prev_sibling(&mut self, next: bool) -> bool {
+    /// `focus next|prev [sibling]`, where `allow_wrap` is false while sway still has another
+    /// output to try before its wrap candidate (`node_get_in_direction_tiling`,
+    /// sway/commands/focus.c:138-224).
+    pub fn focus_next_prev_sibling(&mut self, next: bool, allow_wrap: bool) -> bool {
         let Some(focus) = self.focus else {
             return false;
         };
@@ -353,7 +356,8 @@ impl<W: LayoutElement> TilingTree<W> {
                     self.set_focus_id(target);
                     return true;
                 }
-                if self.options.layout.focus_wrapping != swayward_config::FocusWrapping::No
+                if allow_wrap
+                    && self.options.layout.focus_wrapping != swayward_config::FocusWrapping::No
                     && children.len() > 1
                     && wrap.is_none()
                 {
@@ -363,13 +367,15 @@ impl<W: LayoutElement> TilingTree<W> {
                         children.last().copied()
                     };
                     if self.options.layout.focus_wrapping == swayward_config::FocusWrapping::Force {
-                        self.set_focus_id(wrap);
-                        return true;
+                        break;
                     }
                 }
             }
             current = parent;
         }
+        // Even `sibling` descends into a wrap candidate (`seat_get_focus_inactive_view`,
+        // sway/commands/focus.c:186-189, 217-221).
+        let wrap = wrap.and_then(|id| self.focused_leaf_in(id));
         if wrap.is_some() {
             self.set_focus_id(wrap);
         }
@@ -377,24 +383,28 @@ impl<W: LayoutElement> TilingTree<W> {
     }
 
     pub fn focus_next_or_prev(&mut self, next: bool) -> bool {
-        let Some(parent) = self
+        self.next_prev_direction(next)
+            .is_some_and(|direction| self.focus_direction(direction))
+    }
+
+    /// The direction `focus next|prev` takes from the focused container's parent layout, or
+    /// `None` with the workspace itself focused (`get_direction_from_next_prev`,
+    /// sway/commands/focus.c:17-58).
+    pub fn next_prev_direction(&self, next: bool) -> Option<Direction> {
+        let parent = self
             .focus
             .and_then(|focus| self.nodes.get(&focus))
-            .and_then(|node| node.parent)
+            .and_then(|node| node.parent)?;
+        let &TreeNode::Split { layout, .. } = self.nodes.get(&parent).map(|node| &node.value)?
         else {
-            return false;
+            return None;
         };
-        let Some(&TreeNode::Split { layout, .. }) = self.nodes.get(&parent).map(|node| &node.value)
-        else {
-            return false;
-        };
-        let direction = match (next, layout) {
+        Some(match (next, layout) {
             (false, Layout::SplitH | Layout::Tabbed) => Direction::Left,
             (true, Layout::SplitH | Layout::Tabbed) => Direction::Right,
             (false, Layout::SplitV | Layout::Stacked) => Direction::Up,
             (true, Layout::SplitV | Layout::Stacked) => Direction::Down,
-        };
-        self.focus_direction(direction)
+        })
     }
 
     pub fn focus_direction(&mut self, dir: Direction) -> bool {

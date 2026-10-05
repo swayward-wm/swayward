@@ -5,6 +5,28 @@ use super::{failure, output_target_by_name_or_direction, CommandTarget, Directio
 use crate::swayward::State;
 
 pub(super) fn direction(state: &mut State, direction: Direction) -> Option<Action> {
+    directional(state, direction, |layout, local_wrap| {
+        match (direction, local_wrap) {
+            (Direction::Left, true) => layout.focus_left(),
+            (Direction::Right, true) => layout.focus_right(),
+            (Direction::Up, true) => layout.focus_up(),
+            (Direction::Down, true) => layout.focus_down(),
+            (Direction::Left, false) => layout.focus_left_without_wrap(),
+            (Direction::Right, false) => layout.focus_right_without_wrap(),
+            (Direction::Up, false) => layout.focus_up_without_wrap(),
+            (Direction::Down, false) => layout.focus_down_without_wrap(),
+        }
+    })
+}
+
+/// sway's `focus <direction>` with `local` as the in-workspace step. It falls through to the
+/// output in that direction before it takes a plain `focus_wrapping yes` wrap candidate
+/// (`node_get_in_direction_tiling`, sway/commands/focus.c:207-223).
+fn directional(
+    state: &mut State,
+    direction: Direction,
+    local: impl FnOnce(&mut crate::layout::Layout<crate::window::Mapped>, bool) -> bool,
+) -> Option<Action> {
     let action = match direction {
         Direction::Left => Action::FocusColumnOrMonitorLeft,
         Direction::Right => Action::FocusColumnOrMonitorRight,
@@ -37,16 +59,7 @@ pub(super) fn direction(state: &mut State, direction: Direction) -> Option<Actio
         .layout
         .active_workspace()
         .is_some_and(|workspace| workspace.is_workspace_focused());
-    let changed = match (direction, local_wrap) {
-        (Direction::Left, true) => state.swayward.layout.focus_left(),
-        (Direction::Right, true) => state.swayward.layout.focus_right(),
-        (Direction::Up, true) => state.swayward.layout.focus_up(),
-        (Direction::Down, true) => state.swayward.layout.focus_down(),
-        (Direction::Left, false) => state.swayward.layout.focus_left_without_wrap(),
-        (Direction::Right, false) => state.swayward.layout.focus_right_without_wrap(),
-        (Direction::Up, false) => state.swayward.layout.focus_up_without_wrap(),
-        (Direction::Down, false) => state.swayward.layout.focus_down_without_wrap(),
-    };
+    let changed = local(&mut state.swayward.layout, local_wrap);
     if changed {
         state.swayward.queue_redraw_all();
         None
@@ -78,17 +91,43 @@ pub(super) fn child(state: &mut State) {
     state.swayward.queue_redraw_all();
 }
 
-pub(super) fn next_prev_sibling(state: &mut State, next: bool) {
-    if state.swayward.layout.focus_next_prev_sibling(next) {
-        state.swayward.queue_redraw_all();
-    }
+/// The tiling direction of `focus next|prev`, from the focused container's parent layout
+/// (`get_direction_from_next_prev`, sway/commands/focus.c:17-58).
+fn next_prev_direction(state: &State, next: bool) -> Option<Direction> {
+    use crate::layout::tiling_tree::Direction as TreeDirection;
+    Some(
+        match state.swayward.layout.tiling_next_prev_direction(next)? {
+            TreeDirection::Left => Direction::Left,
+            TreeDirection::Right => Direction::Right,
+            TreeDirection::Up => Direction::Up,
+            TreeDirection::Down => Direction::Down,
+        },
+    )
 }
 
-pub(super) fn next_or_prev(state: &mut State, next: bool) -> Result<(), CommandOutcome> {
-    // Sway answers success whether or not focus moved (sway/commands/focus.c:434-475).
+/// `focus next|prev sibling`: `focus <direction>` that stops at the sibling container instead
+/// of descending into it, and still crosses to the next output at the workspace edge
+/// (sway/commands/focus.c:194-196, 207-213). A floating window ignores `sibling` and moves
+/// among floaters (sway/commands/focus.c:457-460).
+pub(super) fn next_prev_sibling(state: &mut State, next: bool) -> Option<Action> {
+    let Some(direction) = next_prev_direction(state, next) else {
+        return next_or_prev(state, next);
+    };
+    directional(state, direction, |layout, local_wrap| {
+        layout.focus_next_prev_sibling(next, local_wrap)
+    })
+}
+
+/// `focus next|prev`. A tiling container moves like `focus <direction>`, crossing outputs; a
+/// floating one moves among floaters. Sway answers success whether or not focus moved
+/// (sway/commands/focus.c:434-475).
+pub(super) fn next_or_prev(state: &mut State, next: bool) -> Option<Action> {
+    if let Some(direction) = next_prev_direction(state, next) {
+        return self::direction(state, direction);
+    }
     state.swayward.layout.focus_next_or_prev(next);
     state.swayward.queue_redraw_all();
-    Ok(())
+    None
 }
 
 /// `focus floating|tiling` (`focus_mode`, sway/commands/focus.c:262-307).
