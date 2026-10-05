@@ -600,3 +600,41 @@ fn targeted_floating_toggle_does_not_rerun_map_time_rules() {
         );
     }
 }
+
+/// Oracle: differential_seed_1030 (also 1157, 1187). Sway focuses a new view
+/// only when it maps into the focused workspace (should_focus,
+/// sway/sway/tree/view.c:712-715), so a window assigned to another workspace
+/// leaves the empty focused workspace current even with a launch token.
+#[test]
+fn runtime_assign_to_another_workspace_keeps_the_empty_current_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        r#"assign [app_id="fixture-diff-4"] workspace 2"#,
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+    // `exec` hands the client a launch token, which it activates before mapping.
+    let (token, _) = f.swayward().activation_state.create_external_token(None);
+    let token = token.to_string();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixture-diff-4".into());
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    f.client(client).activate(token, &surface);
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let swayward = f.swayward();
+    let active = swayward.layout.active_workspace().unwrap();
+    assert_eq!(active.sway_name().as_deref(), Some("1"));
+    assert!(swayward.layout.focus().is_none());
+    let (_, target) = swayward.layout.find_workspace_by_name("2").unwrap();
+    assert_eq!(target.windows().count(), 1);
+}
