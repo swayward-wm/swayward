@@ -238,6 +238,9 @@ impl<W: LayoutElement> TilingTree<W> {
         animate: bool,
     ) {
         self.unarranged_wrappers.clear();
+        if self.fullscreen_node().is_none() {
+            self.wrapper_arranged_boxes.clear();
+        }
         // Forget a stale representation once the tree changed, so a mutation that later
         // restores the same shape does not bring it back.
         if self

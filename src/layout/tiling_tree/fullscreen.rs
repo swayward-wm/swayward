@@ -157,6 +157,7 @@ impl<W: LayoutElement> TilingTree<W> {
     pub fn arrange_workspace(&mut self) {
         let Some(id) = self.fullscreen_node() else {
             self.unarranged_wrappers.clear();
+            self.wrapper_arranged_boxes.clear();
             return;
         };
         if self.fullscreen_mode(id) == Some(FullscreenMode::Global) {
@@ -195,12 +196,55 @@ impl<W: LayoutElement> TilingTree<W> {
             return;
         }
         self.fullscreen_rearranged = false;
-        let mut boxes = HashMap::new();
-        let mut stack: Vec<(NodeId, Rectangle<f64, Logical>)> = self
+        let wrappers: Vec<NodeId> = self
             .fullscreen_layout_wrappers
             .iter()
+            .copied()
             .filter(|id| self.nodes.contains_key(id))
-            .map(|id| (*id, Rectangle::default()))
+            .collect();
+        self.wrapper_arranged_boxes = self.empty_box_layout(wrappers);
+    }
+
+    /// The fullscreen view's parent, when it is a pending fullscreen layout
+    /// wrapper: a container sway never arranged, so its box is still empty.
+    pub fn fullscreen_view_pending_wrapper(&self, window: &W::Id) -> Option<NodeId> {
+        let id = self.node_for_window(window)?;
+        if self.fullscreen_node() != Some(id) {
+            return None;
+        }
+        self.nodes
+            .get(&id)
+            .and_then(|node| node.parent)
+            .filter(|parent| self.fullscreen_layout_wrappers.contains(parent))
+    }
+
+    /// Sway's `arrange_container(wrapper)` on a wrapper whose box is still
+    /// empty, after the fullscreen view left it for the scratchpad
+    /// (`root_scratchpad_add_container`, sway/tree/root.c:128-140). The
+    /// wrapper reports its empty box and its subtree the boxes laid out in
+    /// it, until the next relayout of this tree (see `unarranged_wrappers`).
+    pub fn arrange_wrapper_at_empty_box(&mut self, wrapper: NodeId) {
+        if self.fullscreen_node().is_some()
+            || !matches!(
+                self.nodes.get(&wrapper).map(|node| &node.value),
+                Some(TreeNode::Split { children, .. }) if !children.is_empty()
+            )
+        {
+            return;
+        }
+        let mut boxes = self.empty_box_layout(vec![wrapper]);
+        boxes.remove(&wrapper);
+        self.wrapper_arranged_boxes = boxes;
+        self.unarranged_wrappers.insert(wrapper);
+    }
+
+    /// The pending boxes `arrange_children` gives the subtrees of `roots`,
+    /// each laid out from an empty box.
+    fn empty_box_layout(&self, roots: Vec<NodeId>) -> HashMap<NodeId, Rectangle<f64, Logical>> {
+        let mut boxes = HashMap::new();
+        let mut stack: Vec<(NodeId, Rectangle<f64, Logical>)> = roots
+            .into_iter()
+            .map(|id| (id, Rectangle::default()))
             .collect();
         while let Some((id, rect)) = stack.pop() {
             boxes.insert(id, rect);
@@ -231,7 +275,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 ));
             }
         }
-        self.wrapper_arranged_boxes = boxes;
+        boxes
     }
 
     pub fn mark_fullscreen_arrived(&mut self) {

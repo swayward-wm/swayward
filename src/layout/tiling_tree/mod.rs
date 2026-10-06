@@ -502,7 +502,9 @@ pub struct TilingTree<W: LayoutElement> {
     /// after a view mapped into it: `arrange_container(wrapper)`
     /// (sway/tree/view.c:931-940) laid the subtree out inside the wrapper's
     /// never-arranged empty box. Sway keeps them until the next arrange of
-    /// the subtree, which under fullscreen never comes.
+    /// the subtree, which under fullscreen never comes. Without fullscreen
+    /// they are the subtree of an `unarranged_wrappers` entry the fullscreen
+    /// view left for the scratchpad, kept until the next relayout.
     wrapper_arranged_boxes: HashMap<NodeId, Rectangle<f64, Logical>>,
     /// Workspace wrappers a failed move created (`workspace_wrap_children`
     /// before the destination lookup fails, sway/commands/move.c:430-436 and

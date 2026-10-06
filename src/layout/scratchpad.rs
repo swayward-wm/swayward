@@ -50,7 +50,9 @@ impl<W: LayoutElement> Layout<W> {
         }
         let automatic_maximum = self.output_layout_size();
         let mut floating_working_area = None;
+        let mut empty_parent = None;
         if let Some(workspace) = self.workspaces_mut().find(|ws| ws.has_window(&window)) {
+            empty_parent = workspace.tiling().fullscreen_view_pending_wrapper(&window);
             workspace.prepare_tiled_window_for_scratchpad(&window, automatic_maximum);
             if workspace.fullscreen_contains_window(&window) {
                 workspace.set_fullscreen(&window, false);
@@ -66,6 +68,15 @@ impl<W: LayoutElement> Layout<W> {
         // CSD view (root_scratchpad_add_container, sway/tree/root.c:114-118).
         removed.tile.set_sway_csd_floating(true);
         removed.floating_working_area = floating_working_area;
+        // Sway then arranges the old parent (sway/tree/root.c:128-140); a
+        // wrapper the fullscreen view left was never arranged, so its box is
+        // still empty.
+        if let Some((workspace, wrapper)) = source_workspace
+            .and_then(|id| self.workspace_mut(id))
+            .zip(empty_parent)
+        {
+            workspace.tiling_mut().arrange_wrapper_at_empty_box(wrapper);
+        }
         if !self.scratchpad_windows.contains(&window) {
             self.scratchpad_windows.push(window);
         }

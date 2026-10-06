@@ -709,9 +709,11 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
     /// and `ipc_json_describe_node`, sway/ipc-json.c:543-580 and 816-825).
     fn unarranged(&self, id: NodeId) -> Option<UnarrangedIpc> {
         let tree = self.tree;
-        let fullscreen = self.fullscreen?;
         let parent = tree.nodes.get(&id)?.parent?;
-        if id == fullscreen && tree.fullscreen_rearranged && self.in_pending_wrapper.contains(&id) {
+        if self.fullscreen == Some(id)
+            && tree.fullscreen_rearranged
+            && self.in_pending_wrapper.contains(&id)
+        {
             // `arrange_workspace` puts the fullscreen container back at the
             // output box (sway/tree/arrange.c:310-316).
             return Some(UnarrangedIpc {
@@ -723,7 +725,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             });
         }
         if let Some(sway_box) = self.arranged_wrapper_box(id) {
-            if id == fullscreen {
+            if self.fullscreen == Some(id) {
                 return Some(UnarrangedIpc {
                     rect: sway_box,
                     deco_rect: Rectangle::default(),
@@ -741,6 +743,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             ipc.absolute = true;
             return Some(ipc);
         }
+        let fullscreen = self.fullscreen?;
         if id == fullscreen || !self.is_strip(parent) {
             return None;
         }
@@ -788,10 +791,10 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
     }
 
     /// The pending box sway's `arrange_container(wrapper)` gave `id`, when
-    /// `id` is at or below a pending `layout` wrapper a view was mapped into
-    /// (see `TilingTree::wrapper_arranged_boxes`).
+    /// `id` is at or below a pending `layout` wrapper a view was mapped into,
+    /// or below one the fullscreen view left for the scratchpad (see
+    /// `TilingTree::wrapper_arranged_boxes`).
     fn arranged_wrapper_box(&self, id: NodeId) -> Option<Rectangle<f64, Logical>> {
-        self.fullscreen?;
         self.tree.wrapper_arranged_boxes.get(&id).copied()
     }
 

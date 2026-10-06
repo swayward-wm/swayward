@@ -978,6 +978,35 @@ fn view_mapped_into_layout_wrapper_under_fullscreen_arranges_it_at_an_empty_box(
     assert_eq!(rect(hidden, "rect"), [0, titlebar, 0, -titlebar]);
 }
 
+// differential seed 17202 step 5 (sway-1.12): `layout toggle` under
+// fullscreen wraps the workspace children without arranging the wrapper, so
+// it keeps calloc's empty box. `move scratchpad` on the fullscreen view then
+// arranges only its old parent (sway/tree/root.c:128-140), laying the
+// remaining view out in that empty box: the wrapper reports percent 0 and
+// the view omits percent (sway/ipc-json.c:744-755).
+#[test]
+fn move_scratchpad_from_fullscreen_arranges_the_unarranged_wrapper_empty() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    map_app(&mut f, client, "hidden");
+    assert!(crate::command::execute(f.niri_state(), "layout toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["percent"], 0.0, "{workspace}");
+    assert_eq!(rect(wrapper, "rect"), [0, 0, 0, 0], "{workspace}");
+    assert_eq!(wrapper["nodes"][0]["id"], hidden["id"], "{workspace}");
+    assert_eq!(hidden["percent"], serde_json::Value::Null, "{hidden}");
+    let bar = hidden["deco_rect"]["height"].as_i64().unwrap();
+    assert_eq!(rect(hidden, "rect"), [0, bar, 0, -bar], "{hidden}");
+}
+
 // differential seed 2576 step 4 (sway-1.12): `layout stacking` under
 // fullscreen wraps the workspace without arranging the siblings, so the
 // tiled view keeps its 640 px tiled box but GET_TREE subtracts both stacked
