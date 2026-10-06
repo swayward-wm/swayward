@@ -1498,7 +1498,12 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn toggle_window_floating(&mut self, id: Option<&W::Id>) {
         let active_id = self.active_window().map(|win| win.id().clone());
-        let target_is_active = id.is_none_or(|id| Some(id) == active_id.as_ref());
+        // With the workspace itself focused no view is the seat focus, so the change keeps
+        // the workspace focused (`set_focus = focus == container`,
+        // sway/tree/container.c:946-949).
+        let workspace_focused = self.is_workspace_focused();
+        let target_is_active =
+            !workspace_focused && id.is_none_or(|id| Some(id) == active_id.as_ref());
         let Some(id) = id.cloned().or(active_id) else {
             return;
         };
@@ -1536,6 +1541,14 @@ impl<W: LayoutElement> Workspace<W> {
         } else {
             let rank = self.tiling.focus_rank_for_window(&id);
             let parent = self.tiling.non_root_parent_for_window(&id);
+            // A fullscreen floating view only passes through the tiling tree; sway keeps it in
+            // `ws->floating`, so leaving fullscreen moves no focus
+            // (`container_fullscreen_disable`, sway/tree/container.c:1246-1272).
+            let was_floating = self.tiling.is_pending_fullscreen(&id)
+                && self
+                    .tiling
+                    .tiles()
+                    .any(|tile| tile.window().id() == &id && tile.restore_to_floating);
             let mut tile = if parent.is_some() {
                 self.tiling.remove_tile_without_transaction(&id).unwrap()
             } else {
@@ -1543,8 +1556,8 @@ impl<W: LayoutElement> Workspace<W> {
             };
             // Floating the focused view raises its old parent to the tiling layer's
             // focus-inactive node (`container_set_floating`, sway/tree/container.c:969-973).
-            if let Some(parent) =
-                parent.filter(|parent| target_is_active && self.tiling.contains(*parent))
+            if let Some(parent) = parent
+                .filter(|parent| target_is_active && !was_floating && self.tiling.contains(*parent))
             {
                 self.tiling.set_focus(parent);
             }
@@ -1581,6 +1594,8 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.add_tile(tile, target_is_active);
             if target_is_active {
                 self.floating_is_active = FloatingActive::Yes;
+            } else if workspace_focused && self.tiling.is_empty() {
+                self.floating_is_active = FloatingActive::NoButRaised;
             }
         }
 

@@ -14,30 +14,55 @@ impl<W: LayoutElement> TilingTree<W> {
                 return;
             }
             let Some(parent) = parent else { return };
-            if self.focus == Some(id) {
+            let refocus = self.focus == Some(id);
+            if refocus {
                 self.set_focus_id(Some(parent));
             }
             self.remove_node(id);
             self.remove_child(parent, id);
+            if refocus {
+                self.focus_view_after_reap(parent);
+            }
             self.raise_view_after_reap(parent);
             id = parent;
+        }
+    }
+
+    /// Destroying the focused container moves focus to the most recent view under its
+    /// parent, walking up to the workspace when none is left there
+    /// (`handle_seat_node_destroy`, sway/input/seat.c:263-315). The seat refuses a view a
+    /// fullscreen container hides (sway/input/seat.c:1148-1151), so then focus stays put.
+    fn focus_view_after_reap(&mut self, parent: NodeId) {
+        let Some(view) = self.recent_view_from(parent) else {
+            return;
+        };
+        if self
+            .fullscreen_node()
+            .is_some_and(|fullscreen| !self.contains_node(fullscreen, view))
+        {
+            return;
+        }
+        self.set_focus_id(Some(view));
+    }
+
+    /// The most recent view under `parent`, else under each ancestor in turn.
+    fn recent_view_from(&self, mut parent: NodeId) -> Option<NodeId> {
+        loop {
+            if let Some(view) = self.focus_history.iter().copied().find(|candidate| {
+                self.tile(*candidate).is_some() && self.contains_node(parent, *candidate)
+            }) {
+                return Some(view);
+            }
+            parent = self.nodes.get(&parent).and_then(|node| node.parent)?;
         }
     }
 
     /// Sway's seat-node destroy handler raises the most recent view under the reaped
     /// container's parent into the focus stack below the current focus
     /// (`handle_seat_node_destroy`, sway/input/seat.c:273-323).
-    fn raise_view_after_reap(&mut self, mut parent: NodeId) {
-        let view = loop {
-            if let Some(view) = self.focus_history.iter().copied().find(|candidate| {
-                self.tile(*candidate).is_some() && self.contains_node(parent, *candidate)
-            }) {
-                break view;
-            }
-            match self.nodes.get(&parent).and_then(|node| node.parent) {
-                Some(next) => parent = next,
-                None => return,
-            }
+    fn raise_view_after_reap(&mut self, parent: NodeId) {
+        let Some(view) = self.recent_view_from(parent) else {
+            return;
         };
         if Some(view) == self.focus {
             return;
