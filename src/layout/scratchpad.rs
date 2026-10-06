@@ -40,9 +40,7 @@ impl<W: LayoutElement> Layout<W> {
                 removed
             };
             for id in removed.window_ids() {
-                if !self.scratchpad_windows.contains(id) {
-                    self.scratchpad_windows.push(id.clone());
-                }
+                self.push_scratchpad_window(id.clone());
             }
             self.scratchpad_trees.push_back(removed);
             self.clean_up_removed_window_workspace(source_workspace);
@@ -77,9 +75,7 @@ impl<W: LayoutElement> Layout<W> {
         {
             workspace.tiling_mut().arrange_wrapper_at_empty_box(wrapper);
         }
-        if !self.scratchpad_windows.contains(&window) {
-            self.scratchpad_windows.push(window);
-        }
+        self.push_scratchpad_window(window);
         self.scratchpad.push_back(removed);
         if let Some(source_workspace) = source_workspace {
             self.clean_up_removed_window_workspace(source_workspace);
@@ -129,9 +125,16 @@ impl<W: LayoutElement> Layout<W> {
                     .position(|removed| removed.contains_window(window))
             })
             .or_else(|| {
-                (window.is_none() && shown.is_none() && self.scratchpad.is_empty())
-                    .then_some(0)
-                    .filter(|_| !self.scratchpad_trees.is_empty())
+                // With nothing shown, sway takes the bottom of the scratchpad
+                // list (`root->scratchpad->items[0]`,
+                // sway/commands/scratchpad.c:64-71).
+                if window.is_some() || shown.is_some() {
+                    return None;
+                }
+                let first = self.scratchpad_windows.first()?;
+                self.scratchpad_trees
+                    .iter()
+                    .position(|removed| removed.contains_window(first))
             });
         if let Some(index) = target_tree {
             let active_workspace = self.prepare_active_workspace_for_scratchpad_show()?;
@@ -147,10 +150,11 @@ impl<W: LayoutElement> Layout<W> {
                 let on_active_workspace = self
                     .active_workspace()
                     .is_some_and(|workspace| workspace.has_window(window));
-                self.move_to_scratchpad(Some(window));
                 if on_active_workspace {
+                    self.move_to_scratchpad(Some(window));
                     return None;
                 }
+                self.hide_scratchpad_keeping_order(window);
                 target_index = self
                     .scratchpad
                     .iter()
@@ -161,7 +165,7 @@ impl<W: LayoutElement> Layout<W> {
                 self.move_to_scratchpad(Some(&shown));
                 return None;
             }
-            self.move_to_scratchpad(Some(&shown));
+            self.hide_scratchpad_keeping_order(&shown);
             if let Some(index) = self
                 .scratchpad_trees
                 .iter()
@@ -176,10 +180,35 @@ impl<W: LayoutElement> Layout<W> {
                 .position(|removed| removed.tile.window().id() == &shown);
         }
 
-        let index = target_index.unwrap_or(0);
+        let index = target_index.unwrap_or_else(|| {
+            self.scratchpad_windows
+                .first()
+                .and_then(|first| {
+                    self.scratchpad
+                        .iter()
+                        .position(|removed| removed.tile.window().id() == first)
+                })
+                .unwrap_or(0)
+        });
         self.scratchpad.get(index)?;
         let active_workspace = self.prepare_active_workspace_for_scratchpad_show()?;
         self.show_scratchpad_tile(index, active_workspace)
+    }
+
+    /// Hides a visible scratchpad window on the way to showing it elsewhere.
+    /// Sway's `root_scratchpad_show` moves it directly and leaves the
+    /// scratchpad order alone (sway/tree/root.c:157-204), unlike a hide.
+    fn hide_scratchpad_keeping_order(&mut self, window: &W::Id) {
+        let order = self.scratchpad_windows.clone();
+        self.move_to_scratchpad(Some(window));
+        let added = self
+            .scratchpad_windows
+            .iter()
+            .filter(|id| !order.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.scratchpad_windows = order;
+        self.scratchpad_windows.extend(added);
     }
 
     /// Clears fullscreen on the active workspace and any global fullscreen
@@ -281,6 +310,21 @@ impl<W: LayoutElement> Layout<W> {
                 .into_iter()
                 .filter_map(move |(node, _)| Some((node, window?)))
         })
+    }
+
+    /// Appends `window` to the scratchpad order, or moves it to the end if it
+    /// is already there. Sway appends a new scratchpad container and moves a
+    /// hidden one to the end (`root_scratchpad_add_container`,
+    /// `root_scratchpad_hide`, sway/tree/root.c:123,227).
+    fn push_scratchpad_window(&mut self, window: W::Id) {
+        self.scratchpad_windows.retain(|id| id != &window);
+        self.scratchpad_windows.push(window);
+    }
+
+    /// Every scratchpad window, shown or hidden, in sway's `root->scratchpad`
+    /// order.
+    pub fn scratchpad_order(&self) -> &[W::Id] {
+        &self.scratchpad_windows
     }
 
     pub fn scratchpad_is_empty(&self) -> bool {

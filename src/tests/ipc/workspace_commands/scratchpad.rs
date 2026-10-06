@@ -1069,3 +1069,37 @@ fn wrapping_a_tall_workspace_leaves_it_splith() {
         );
     }
 }
+
+// differential seed 30071 (v3): sway lists hidden scratchpad containers in
+// `root->scratchpad` order (sway/ipc-json.c:476-482), so a floating split
+// hidden after a bare window comes after it, and `scratchpad show` takes the
+// bottom of that list (sway/commands/scratchpad.c:64-71).
+#[test]
+fn hidden_scratchpad_split_follows_the_bare_window_hidden_before_it() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "first");
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    map_test_window(&mut f, client, "second");
+    for command in ["floating enable", "splitv", "move scratchpad"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+
+    let tree = get_tree(&mut f);
+    let scratch = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] == "__i3")
+        .unwrap();
+    let hidden = scratch["nodes"][0]["floating_nodes"].as_array().unwrap();
+    assert_eq!(hidden.len(), 2, "{hidden:?}");
+    assert_eq!(hidden[0]["app_id"], "first");
+    assert_eq!(hidden[1]["layout"], "splitv");
+    assert_eq!(hidden[1]["nodes"][0]["app_id"], "second");
+
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    let tree = get_tree(&mut f);
+    assert!(find_json_node_with_app_id(&tree, "first").unwrap()["visible"] == true);
+}
