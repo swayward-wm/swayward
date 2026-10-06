@@ -24,6 +24,22 @@ impl<W: LayoutElement> TilingTree<W> {
         // Writing each slot works for a shared parent too: the two indices simply trade nodes.
         self.replace_child(first_parent, first_index, second);
         self.replace_child(second_parent, second_index, first);
+        // Sway's `swap_places` trades both fractions, so each keeps its slot's
+        // (sway/tree/container.c:1719-1743).
+        for parent in [first_parent, second_parent] {
+            if let Some(meta) = self.split_meta_mut(parent) {
+                for (id, _) in meta.latent_shares.iter_mut() {
+                    if *id == first {
+                        *id = second;
+                    } else if *id == second {
+                        *id = first;
+                    }
+                }
+            }
+            if first_parent == second_parent {
+                break;
+            }
+        }
         for (id, parent) in [(first, second_parent), (second, first_parent)] {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.parent = Some(parent);
@@ -789,6 +805,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 }
             }
         }
+        self.rename_latent_share(parent, sibling, wrapper);
         self.nodes
             .get_mut(&sibling)
             .expect("invariant: a sibling child remains in the arena while it is wrapped")
@@ -839,10 +856,20 @@ impl<W: LayoutElement> TilingTree<W> {
         );
         // The root's metadata belongs to the workspace and stays with it; the container that
         // takes over the root's children starts fresh.
-        let root_meta = match &mut old_value {
+        let mut root_meta = match &mut old_value {
             TreeNode::Split { meta, .. } => std::mem::take(meta),
             TreeNode::Leaf { .. } => SplitMeta::default(),
         };
+        // The children keep both fractions in the new container.
+        if let TreeNode::Split {
+            layout: old_layout,
+            meta,
+            ..
+        } = &mut old_value
+        {
+            meta.fraction_axis = root_meta.fraction_axis.take().or(Some(*old_layout));
+            meta.latent_shares = std::mem::take(&mut root_meta.latent_shares);
+        }
         let old = self.alloc(Node {
             parent: Some(self.root),
             value: old_value,

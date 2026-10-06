@@ -13,6 +13,13 @@ pub struct SplitMeta {
     /// A `title_format` other than the default `%title`.
     pub title_format: Option<String>,
     pub sticky: bool,
+    /// The linear axis `percents` holds shares along, once known.
+    pub fraction_axis: Option<super::Layout>,
+    /// Each child's share along the other linear axis. Sway keeps a width and
+    /// a height fraction on every container and lays a split out with the one
+    /// along its axis (`apply_horiz_layout`/`apply_vert_layout`,
+    /// sway/tree/arrange.c:15-170), so the other survives an axis change.
+    pub latent_shares: Vec<(NodeId, f64)>,
 }
 
 #[derive(Debug)]

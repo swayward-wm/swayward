@@ -1566,3 +1566,44 @@ fn resize_set_ppt_converts_against_the_nearest_axis_ancestor() {
         .collect();
     assert_eq!(percents, [0.75, 0.25], "{tree}");
 }
+
+// Differential family diff-fam-v3-resize-set-ppt-latent-axis, v3 seed 22;
+// oracle row resize_set_ppt_latent_axis_layout_change. Sway keeps a width and
+// a height fraction on every container and lays a split out with the one
+// along its axis (`apply_horiz_layout`/`apply_vert_layout`,
+// sway/tree/arrange.c:15-170). In a horizontal split, `resize set height`
+// finds no vertical ancestor and sets no fraction (sway/commands/resize.c:
+// 49-63), so `layout splitv` gives both children the even default, and
+// `layout splith` brings the width shares back.
+#[test]
+fn layout_change_uses_the_shares_kept_for_the_new_axis() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "first");
+    map_app(&mut f, client, "second");
+    let percents = |f: &mut Fixture| -> Vec<f64> {
+        let tree = tree_json(f);
+        ["first", "second"]
+            .map(|app_id| {
+                find_json_node_with_app_id(&tree, app_id).unwrap()["percent"]
+                    .as_f64()
+                    .unwrap()
+            })
+            .to_vec()
+    };
+
+    for (command, expected) in [
+        ("resize set width 30 ppt height 40 ppt", [0.7, 0.3]),
+        ("layout splitv", [0.5, 0.5]),
+        ("resize set height 25 ppt", [0.75, 0.25]),
+        ("layout splith", [0.7, 0.3]),
+        ("layout splitv", [0.75, 0.25]),
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        assert_eq!(percents(&mut f), expected, "after {command}");
+    }
+}

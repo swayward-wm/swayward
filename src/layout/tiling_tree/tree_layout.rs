@@ -16,13 +16,7 @@ impl<W: LayoutElement> TilingTree<W> {
             };
             let old_layout = *old_layout;
             let wrapper = self.wrap_root_children(old_layout);
-            if let Some(TreeNode::Split {
-                layout: root_layout,
-                ..
-            }) = self.nodes.get_mut(&id).map(|node| &mut node.value)
-            {
-                *root_layout = layout;
-            }
+            self.change_split_layout(id, layout);
             self.stale_root_representation = Some((old_layout, self.representation_shape()));
             self.set_focus_id(Some(wrapper));
             self.request_window_sizes();
@@ -55,15 +49,7 @@ impl<W: LayoutElement> TilingTree<W> {
                     )
                 });
         if let Some(parent) = singleton_split_parent {
-            if let Some(Node {
-                value: TreeNode::Split {
-                    layout: current, ..
-                },
-                ..
-            }) = self.nodes.get_mut(&parent)
-            {
-                *current = layout;
-            }
+            self.change_split_layout(parent, layout);
         } else {
             self.wrap_node(id, layout);
         }
@@ -79,27 +65,11 @@ impl<W: LayoutElement> TilingTree<W> {
         };
         let siblings = self.split_len(parent).unwrap_or_default();
         if id == self.root {
-            if let Some(Node {
-                value: TreeNode::Split {
-                    layout: current, ..
-                },
-                ..
-            }) = self.nodes.get_mut(&id)
-            {
-                *current = layout;
-            }
+            self.change_split_layout(id, layout);
         } else if siblings <= 1 && parent != self.root {
             self.wrap_node(id, layout);
         } else if siblings <= 1 {
-            if let Some(Node {
-                value: TreeNode::Split {
-                    layout: current, ..
-                },
-                ..
-            }) = self.nodes.get_mut(&parent)
-            {
-                *current = layout;
-            }
+            self.change_split_layout(parent, layout);
         } else {
             self.wrap_node(id, layout);
         }
@@ -121,7 +91,7 @@ impl<W: LayoutElement> TilingTree<W> {
             if matches!(*current, Layout::SplitH | Layout::SplitV) && *current != layout {
                 meta.previous_layout = Some(*current);
             }
-            *current = layout;
+            self.change_split_layout(id, layout);
             self.compact_tree();
             self.request_window_sizes();
         } else {
@@ -264,6 +234,7 @@ impl<W: LayoutElement> TilingTree<W> {
         let slot = children.iter_mut().find(|child| **child == parent)?;
         *slot = id;
         self.nodes.get_mut(&id)?.parent = Some(grandparent);
+        self.rename_latent_share(grandparent, parent, id);
         if let Some(fullscreen) = self
             .pending_modes
             .get(&parent)
@@ -530,6 +501,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 }
             }
         }
+        self.rename_latent_share(parent, id, wrapper);
         if let Some(node) = self.nodes.get_mut(&id) {
             node.parent = Some(wrapper);
         }
@@ -608,22 +580,36 @@ impl<W: LayoutElement> TilingTree<W> {
             return self.root;
         }
         let Some(TreeNode::Split {
-            children, percents, ..
+            layout: root_layout,
+            children,
+            percents,
+            meta: root_meta,
         }) = self.nodes.get_mut(&self.root).map(|node| &mut node.value)
         else {
             return self.root;
         };
+        let root_layout = *root_layout;
         let children = std::mem::take(children);
         let percents = std::mem::take(percents);
+        // `workspace_wrap_children` moves the children, with both of their
+        // fractions, into a container of the workspace layout, which the
+        // caller may then change (sway/tree/workspace.c:898-910).
+        let meta = SplitMeta {
+            fraction_axis: root_meta.fraction_axis.or(Some(root_layout)),
+            latent_shares: std::mem::take(&mut root_meta.latent_shares),
+            ..SplitMeta::default()
+        };
+        root_meta.fraction_axis = None;
         let wrapper = self.alloc(Node {
             parent: Some(self.root),
             value: TreeNode::Split {
-                layout,
+                layout: root_layout,
                 children: children.clone(),
                 percents,
-                meta: SplitMeta::default(),
+                meta,
             },
         });
+        self.change_split_layout(wrapper, layout);
         self.ipc_stale_nodes.insert(wrapper);
         for child in children {
             if let Some(node) = self.nodes.get_mut(&child) {
@@ -678,7 +664,7 @@ impl<W: LayoutElement> TilingTree<W> {
             if matches!(*current, Layout::SplitH | Layout::SplitV) && changed {
                 meta.previous_layout = Some(*current);
             }
-            *current = layout;
+            self.change_split_layout(id, layout);
             if changed {
                 // A changed layout ends with `arrange_root` under a global
                 // fullscreen container and `arrange_workspace` otherwise

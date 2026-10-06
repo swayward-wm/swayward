@@ -167,16 +167,114 @@ impl<W: LayoutElement> TilingTree<W> {
             .parent = Some(parent);
     }
 
+    /// Sets a split's layout, carrying its children's shares across an axis
+    /// change (see [`Self::sync_fraction_axis`]).
+    pub(super) fn change_split_layout(&mut self, id: NodeId, layout: Layout) {
+        if let Some(Node {
+            value:
+                TreeNode::Split {
+                    layout: current,
+                    meta,
+                    ..
+                },
+            ..
+        }) = self.nodes.get_mut(&id)
+        {
+            if meta.fraction_axis.is_none() && matches!(*current, Layout::SplitH | Layout::SplitV) {
+                meta.fraction_axis = Some(*current);
+            }
+            *current = layout;
+        }
+        self.sync_fraction_axis(id);
+    }
+
+    /// Sway keeps a width and a height fraction on every container and lays
+    /// a split out with the one along its axis; a child with no fraction on
+    /// that axis gets the average of its siblings' (`apply_horiz_layout`/
+    /// `apply_vert_layout`, sway/tree/arrange.c:15-52 and 100-137). When the
+    /// split's linear axis changed, this parks the shares of the old axis and
+    /// brings back those of the new one.
+    pub(super) fn sync_fraction_axis(&mut self, id: NodeId) {
+        let Some(Node {
+            value:
+                TreeNode::Split {
+                    layout,
+                    children,
+                    percents,
+                    meta,
+                },
+            ..
+        }) = self.nodes.get_mut(&id)
+        else {
+            return;
+        };
+        if !matches!(*layout, Layout::SplitH | Layout::SplitV) {
+            return;
+        }
+        let axis = *layout;
+        if meta.fraction_axis.is_some_and(|old| old != axis) {
+            let latent = std::mem::take(&mut meta.latent_shares);
+            let mut shares: Vec<f64> = children
+                .iter()
+                .map(|child| {
+                    latent
+                        .iter()
+                        .find(|(id, _)| id == child)
+                        .map_or(0., |(_, share)| *share)
+                })
+                .collect();
+            let (known, total) = shares
+                .iter()
+                .filter(|share| **share > 0.)
+                .fold((0usize, 0.), |(count, sum), share| (count + 1, sum + share));
+            let fresh = if known == 0 { 1. } else { total / known as f64 };
+            for share in shares.iter_mut().filter(|share| **share <= 0.) {
+                *share = fresh;
+            }
+            let sum: f64 = shares.iter().sum();
+            if sum > 0. && sum.is_finite() {
+                for share in shares.iter_mut() {
+                    *share /= sum;
+                }
+                meta.latent_shares = children
+                    .iter()
+                    .copied()
+                    .zip(percents.iter().copied())
+                    .collect();
+                *percents = shares;
+            }
+        }
+        meta.fraction_axis = Some(axis);
+    }
+
+    /// Renames `old` to `new` in `parent`'s parked shares: sway's
+    /// `container_replace` and `container_split` give the replacement both
+    /// fractions (sway/tree/container.c:1485-1490 and 1545-1546).
+    pub(super) fn rename_latent_share(&mut self, parent: NodeId, old: NodeId, new: NodeId) {
+        if let Some(meta) = self.split_meta_mut(parent) {
+            for (id, _) in meta.latent_shares.iter_mut() {
+                if *id == old {
+                    *id = new;
+                }
+            }
+        }
+    }
+
     pub(super) fn remove_child(&mut self, parent: NodeId, child: NodeId) {
         let Some(Node {
-            value: TreeNode::Split {
-                children, percents, ..
-            },
+            value:
+                TreeNode::Split {
+                    children,
+                    percents,
+                    meta,
+                    ..
+                },
             ..
         }) = self.nodes.get_mut(&parent)
         else {
             return;
         };
+        meta.latent_shares.retain(|(id, _)| *id != child);
         if let Some(index) = children.iter().position(|id| *id == child) {
             children.remove(index);
             percents.remove(index);

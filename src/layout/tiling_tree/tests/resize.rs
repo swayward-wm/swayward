@@ -425,11 +425,15 @@ fn tiled_presets_cycle_from_the_current_size_in_both_directions() {
     t.toggle_window_width(Some(&1), false);
     assert_eq!(t.geometry(first).unwrap().size.w, 900.);
 
+    // The width shares do not carry over to the vertical axis: sway keeps a
+    // separate height fraction, unset here, so both start at half
+    // (sway/tree/arrange.c:100-137).
     t.set_layout(t.root, Layout::SplitV);
-    t.toggle_window_height(Some(&1), true);
-    assert_eq!(t.geometry(first).unwrap().size.h, 225.);
-    t.toggle_window_height(Some(&1), true);
     assert_eq!(t.geometry(first).unwrap().size.h, 450.);
-    t.toggle_window_height(Some(&1), false);
+    t.toggle_window_height(Some(&1), true);
+    assert_eq!(t.geometry(first).unwrap().size.h, 675.);
+    t.toggle_window_height(Some(&1), true);
     assert_eq!(t.geometry(first).unwrap().size.h, 225.);
+    t.toggle_window_height(Some(&1), false);
+    assert_eq!(t.geometry(first).unwrap().size.h, 675.);
 }

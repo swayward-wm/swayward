@@ -118,6 +118,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 .get_mut(&child)
                 .expect("invariant: a split's only child is present in the arena")
                 .parent = Some(parent);
+            self.rename_latent_share(parent, id, child);
             if let Some(fullscreen) = self.pending_modes.get(&id).and_then(|mode| mode.fullscreen) {
                 self.set_pending_fullscreen(child, Some(fullscreen));
             }
@@ -250,8 +251,23 @@ impl<W: LayoutElement> TilingTree<W> {
         if self.focus == Some(id) || self.focus == Some(child) {
             self.set_focus_id(Some(replacement));
         }
+        self.adopt_latent_shares(parent, id, child);
         self.remove_node(id);
         self.remove_node(child);
+    }
+
+    /// A squash moves `child`'s children, with both of their fractions, into
+    /// `parent`, whose split runs along `child`'s axis (`container_squash`,
+    /// sway/tree/container.c:1686-1716).
+    fn adopt_latent_shares(&mut self, parent: NodeId, id: NodeId, child: NodeId) {
+        let latent = self
+            .split_meta_mut(child)
+            .map(|meta| std::mem::take(&mut meta.latent_shares))
+            .unwrap_or_default();
+        if let Some(meta) = self.split_meta_mut(parent) {
+            meta.latent_shares.retain(|(entry, _)| *entry != id);
+            meta.latent_shares.extend(latent);
+        }
     }
 
     /// Sway's `workspace_squash`, run only by directional moves
@@ -373,6 +389,7 @@ impl<W: LayoutElement> TilingTree<W> {
         if self.focus == Some(id) || self.focus == Some(child) {
             self.set_focus_id(Some(moved.last().map_or(parent, |(first, _)| *first)));
         }
+        self.adopt_latent_shares(parent, id, child);
         self.remove_node(id);
         self.remove_node(child);
         moved.len() as isize - 1
