@@ -37,7 +37,6 @@ struct AssignContext<'a, W: LayoutElement> {
     gaps_to_edge: bool,
     hide_edge_borders: HideEdgeBorders,
     smart_borders: SmartBorders,
-    only_visible_view: bool,
     draw_uncovered_top_border: bool,
 }
 
@@ -87,7 +86,6 @@ pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry
         gaps_to_edge: input.gaps_to_edge,
         hide_edge_borders: input.hide_edge_borders,
         smart_borders: input.smart_borders,
-        only_visible_view: input.visible_leaves.len() == 1,
         draw_uncovered_top_border: input.draw_uncovered_top_border,
     };
     let mut result = Geometry::default();
@@ -294,7 +292,7 @@ fn assign_leaf<W: LayoutElement>(
     } = assignment;
     let titlebar_height = context.titlebar_height;
     let fullscreen = context.fullscreen;
-    let edges = border_edges(context, rect);
+    let edges = border_edges(context, id, rect);
     result.border_edges.insert(id, edges);
     // Keep one outer box for rendering, hit testing, movement, sizing, and IPC. Sway's
     // arrange_container() likewise derives the content and each border from the container
@@ -351,11 +349,12 @@ fn assign_leaf<W: LayoutElement>(
 }
 
 /// The border edges a leaf draws. `hide_edge_borders` drops the edges that touch the
-/// workspace's outer edge on the chosen axes, and `smart_borders` drops every edge when only
-/// one view is visible (with `no_gaps`, only when gaps do not reach the edge), as sway's
-/// view_autoconfigure does (sway/tree/view.c:377-401).
+/// workspace's outer edge on the chosen axes, and `smart_borders` drops every edge when the
+/// view is the only visible one (with `no_gaps`, only when gaps do not reach the edge), as
+/// sway's view_autoconfigure does (sway/tree/view.c:377-401).
 fn border_edges<W: LayoutElement>(
     context: &AssignContext<'_, W>,
+    id: NodeId,
     rect: Rectangle<f64, Logical>,
 ) -> ResizeEdge {
     let workspace_area = context.workspace_area;
@@ -382,10 +381,32 @@ fn border_edges<W: LayoutElement>(
     }
     let smart = context.smart_borders == SmartBorders::On
         || context.smart_borders == SmartBorders::NoGaps && !context.gaps_to_edge;
-    if smart && context.only_visible_view {
+    if smart && is_only_visible(context.nodes, id) {
         edges = ResizeEdge::empty();
     }
     edges
+}
+
+/// Whether no ancestor of `id` lays it out beside a sibling: every split above it is either
+/// tabbed/stacked or has a single child. Like sway's view_is_only_visible
+/// (sway/tree/view.c:327-342) this reads the tree, not the screen, so a view under a
+/// fullscreen container still counts the siblings that fullscreen hides.
+fn is_only_visible<W: LayoutElement>(nodes: &HashMap<NodeId, Node<W>>, id: NodeId) -> bool {
+    let mut current = id;
+    while let Some(parent) = nodes.get(&current).and_then(|node| node.parent) {
+        if let Some(TreeNode::Split {
+            layout: Layout::SplitH | Layout::SplitV,
+            children,
+            ..
+        }) = nodes.get(&parent).map(|node| &node.value)
+        {
+            if children.len() > 1 {
+                return false;
+            }
+        }
+        current = parent;
+    }
+    true
 }
 
 /// The part of a tab or stack child's top border that the parent's strip does not cover.

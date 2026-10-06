@@ -1151,3 +1151,66 @@ fn a_tiled_csd_window_moved_to_the_scratchpad_reports_csd() {
     f.double_roundtrip(client);
     assert_eq!(node(&mut f)["border"], "normal");
 }
+
+/// Differential seeds 16254 and 14873: after `split toggle` moves fullscreen onto a new
+/// parent, the view keeps its borders under `smart_borders on`, because sway's
+/// view_is_only_visible counts tree siblings, not what fullscreen leaves on screen
+/// (sway/tree/view.c:327-342), and the fullscreen pass does not touch the child.
+#[test]
+fn smart_borders_count_siblings_hidden_by_fullscreen() {
+    let config = swayward_config::Config::parse_mem(
+        r#"layout {
+            gaps 0
+            smart-borders "on"
+        }
+        window-rule { sway-border "pixel"; sway-border-width 7; }"#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (800, 600));
+    let client = f.add_client();
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    let tree = |f: &mut Fixture, command: &str| {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        f.double_roundtrip(client);
+        let swayward = f.swayward();
+        swayward.layout.update_render_elements(None);
+        serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap()
+    };
+    // The fullscreen view itself fills the output with no border, as in sway's
+    // view_autoconfigure fullscreen branch (sway/tree/view.c:356-368).
+    let fullscreen = tree(&mut f, "fullscreen toggle");
+    let leaf = &fullscreen["nodes"][1]["nodes"][0]["nodes"][1];
+    assert_eq!(leaf["fullscreen_mode"], 1, "{leaf}");
+    assert_eq!(
+        leaf["window_rect"],
+        serde_json::json!({ "x": 0, "y": 0, "width": 800, "height": 600 }),
+        "{leaf}"
+    );
+    let tree = tree(&mut f, "split toggle");
+    let split = &tree["nodes"][1]["nodes"][0]["nodes"][1];
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    let view = &split["nodes"][0];
+    assert_eq!(view["fullscreen_mode"], 0, "{view}");
+    assert_eq!(
+        view["window_rect"],
+        serde_json::json!({ "x": 7, "y": 7, "width": 786, "height": 586 }),
+        "{view}"
+    );
+}
