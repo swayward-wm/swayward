@@ -588,6 +588,9 @@ impl State {
             let _ = crate::command::execute(self, &targeted);
         }
         crate::command::run_for_window(self, mapped_id);
+        self.swayward
+            .layout
+            .raise_focus_into_fresh_wrappers(&window);
     }
 
     fn commit_auxiliary_surface(&mut self, surface: &WlSurface, root_surface: &WlSurface) {

@@ -227,6 +227,26 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// Re-raise the focused node and its ancestors when an ancestor is a
+    /// fresh wrapper. Sway runs a mapped view's criteria before it focuses
+    /// the view (`view_map`, sway/tree/view.c:943-956), so a container a
+    /// `for_window` command wrapped the view in is raised with it.
+    pub fn raise_focus_into_fresh_wrappers(&mut self, window: &W::Id) {
+        let Some(focus) = self
+            .focus
+            .filter(|focus| self.node_for_window(window) == Some(*focus))
+        else {
+            return;
+        };
+        if self
+            .ipc_stale_nodes
+            .iter()
+            .any(|wrapper| self.contains_node(*wrapper, focus))
+        {
+            self.set_focus_id(Some(focus));
+        }
+    }
+
     pub fn contains(&self, id: NodeId) -> bool {
         self.nodes.contains_key(&id)
     }

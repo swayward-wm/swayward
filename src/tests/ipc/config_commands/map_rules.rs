@@ -638,3 +638,70 @@ fn runtime_assign_to_another_workspace_keeps_the_empty_current_workspace() {
     let (_, target) = swayward.layout.find_workspace_by_name("2").unwrap();
     assert_eq!(target.windows().count(), 1);
 }
+
+#[test]
+fn for_window_layout_wraps_the_workspace_children_instead_of_changing_the_workspace() {
+    // `for_window [...] layout tabbed` runs with the new window as the
+    // handler container, so sway keeps the workspace layout and wraps its
+    // children in a tabbed container (sway/commands/layout.c:178-183).
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    assert!(
+        crate::command::execute(f.niri_state(), r#"for_window [app_id="tab"] layout tabbed"#)[0]
+            .success
+    );
+    let client = f.add_client();
+    map_test_window(&mut f, client, "tab");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["representation"], "H[T[tab]]");
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["type"], "con");
+    assert_eq!(wrapper["layout"], "tabbed");
+    assert_eq!(wrapper["nodes"][0]["app_id"], "tab");
+    assert_eq!(wrapper["nodes"][0]["focused"], true);
+}
+
+#[test]
+fn for_window_layout_wrapper_is_raised_with_the_mapped_view() {
+    // Sway runs a mapped view's criteria before focusing it (`view_map`,
+    // sway/tree/view.c:943-956), so the wrapper `layout tabbed` creates is
+    // raised with the view and leads the workspace focus list ahead of an
+    // older floating window.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "float");
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    map_test_window(&mut f, client, "tile");
+    assert!(
+        crate::command::execute(f.niri_state(), r#"for_window [app_id="tab"] layout tabbed"#)[0]
+            .success
+    );
+    map_test_window(&mut f, client, "tab");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["layout"], "tabbed");
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([wrapper["id"], workspace["floating_nodes"][0]["id"]])
+    );
+}

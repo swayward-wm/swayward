@@ -197,16 +197,21 @@ fn criteria_layout_applies_to_every_matched_windows_container() {
         }
     }
 
-    for (command, expected) in [
-        ("layout tabbed", TreeLayout::Tabbed),
-        ("layout default", TreeLayout::SplitH),
-        ("layout toggle all", TreeLayout::SplitV),
+    // Each matched view is the handler container, so sway keeps each
+    // workspace's layout and wraps its children in a container with the new
+    // layout (sway/commands/layout.c:134-149,178-183). The fresh wrapper has
+    // no previous split, so `layout default` is invalid syntax
+    // (sway/commands/layout.c:106-108,165-167).
+    for (command, wrapper_layout, success) in [
+        ("layout tabbed", TreeLayout::Tabbed, true),
+        ("layout default", TreeLayout::Tabbed, false),
+        ("layout toggle all", TreeLayout::SplitH, true),
     ] {
         let outcome = crate::command::execute(
             f.niri_state(),
             &format!("[app_id=matched-layout] {command}"),
         );
-        assert!(outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(outcome[0].success, success, "{command}: {outcome:?}");
         for workspace in ["one", "two"] {
             let tree = f
                 .swayward()
@@ -216,16 +221,17 @@ fn criteria_layout_applies_to_every_matched_windows_container() {
                 .unwrap()
                 .2
                 .ipc_tiling_tree();
-            assert!(
-                matches!(
-                    tree,
-                    IpcNode::Split {
-                        layout,
-                        ..
-                    } if layout == expected
-                ),
-                "{command}: {workspace}"
-            );
+            let IpcNode::Split {
+                layout, children, ..
+            } = tree
+            else {
+                panic!("{command}: {workspace}: workspace is not a split");
+            };
+            assert_eq!(layout, TreeLayout::SplitH, "{command}: {workspace}");
+            let [IpcNode::Split { layout, .. }] = children.as_slice() else {
+                panic!("{command}: {workspace}: expected one wrapper");
+            };
+            assert_eq!(*layout, wrapper_layout, "{command}: {workspace}");
         }
     }
 }

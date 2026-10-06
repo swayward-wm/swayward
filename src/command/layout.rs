@@ -11,6 +11,8 @@ fn remap_marks(state: &mut State, remapped: Option<(WorkspaceId, Vec<(NodeId, No
     }
 }
 
+const LAYOUT_SYNTAX: &str = "Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'";
+
 fn reject_floating(state: &State) -> Result<(), CommandOutcome> {
     if state
         .swayward
@@ -30,9 +32,7 @@ fn reject_floating(state: &State) -> Result<(), CommandOutcome> {
 pub(super) fn default(state: &mut State) -> Result<(), CommandOutcome> {
     reject_floating(state)?;
     let Some(remapped) = state.swayward.layout.restore_focused_split_layout() else {
-        return Err(swayward_ipc::command::parse_error(
-            "Expected 'layout default|tabbed|stacking|splitv|splith' or 'layout toggle [split|all]' or 'layout toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...'",
-        ));
+        return Err(swayward_ipc::command::parse_error(LAYOUT_SYNTAX));
     };
     remap_marks(state, Some(remapped));
     state.swayward.queue_redraw_all();
@@ -203,10 +203,13 @@ pub(super) fn targeted(
             .layout
             .set_tiling_node_layout_exact(workspace, node, layout)
     } else {
-        state
+        let remapped = state
             .swayward
             .layout
-            .set_tiling_target_layout(workspace, node, layout)
+            .set_tiling_target_layout(workspace, node, layout);
+        let changed = remapped.is_some();
+        remap_marks(state, remapped);
+        changed
     };
     if !changed {
         return Err(failure("No matching node."));
@@ -221,13 +224,14 @@ pub(super) fn toggle_targeted(
     toggle: &LayoutToggle,
 ) -> Result<(), CommandOutcome> {
     let (workspace, node, container) = layout_target(state, target)?;
-    if !state
+    let remapped = state
         .swayward
         .layout
-        .toggle_tiling_target_layout(workspace, node, toggle, container)
-    {
+        .toggle_tiling_target_layout(workspace, node, toggle, container);
+    if remapped.is_none() {
         return Err(failure("No matching node."));
     }
+    remap_marks(state, remapped);
     state.swayward.queue_redraw_all();
     Ok(())
 }
@@ -237,12 +241,16 @@ pub(super) fn default_targeted(
     target: CommandTarget,
 ) -> Result<(), CommandOutcome> {
     let (workspace, node, container) = layout_target(state, target)?;
-    if !state
+    let Some((restored, remapped)) = state
         .swayward
         .layout
         .restore_tiling_target_layout(workspace, node, container)
-    {
+    else {
         return Err(failure("No matching node."));
+    };
+    remap_marks(state, Some(remapped));
+    if !restored {
+        return Err(swayward_ipc::command::parse_error(LAYOUT_SYNTAX));
     }
     state.swayward.queue_redraw_all();
     Ok(())

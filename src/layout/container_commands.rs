@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// Containers a layout command flattened, as `(old, new)` ids in a workspace.
+type Remapped = (WorkspaceId, Vec<(NodeId, NodeId)>);
+
 impl<W: LayoutElement> Layout<W> {
     pub fn window_border(
         &self,
@@ -252,14 +255,29 @@ impl<W: LayoutElement> Layout<W> {
         true
     }
 
+    /// See [`tiling_tree::TilingTree::raise_focus_into_fresh_wrappers`].
+    pub fn raise_focus_into_fresh_wrappers(&mut self, window: &W::Id) {
+        if let Some(workspace) = self
+            .workspaces_mut()
+            .find(|workspace| workspace.tiling().node_for_window(window).is_some())
+        {
+            workspace
+                .tiling_mut()
+                .raise_focus_into_fresh_wrappers(window);
+        }
+    }
+
     pub fn set_tiling_target_layout(
         &mut self,
         workspace_id: WorkspaceId,
         node: NodeId,
         layout: tiling_tree::Layout,
-    ) -> bool {
-        self.workspace_mut(workspace_id)
-            .is_some_and(|workspace| workspace.tiling_mut().set_target_layout(node, layout))
+    ) -> Option<(WorkspaceId, Vec<(NodeId, NodeId)>)> {
+        let remapped = self
+            .workspace_mut(workspace_id)?
+            .tiling_mut()
+            .set_target_layout(node, layout)?;
+        Some((workspace_id, remapped))
     }
 
     pub fn toggle_tiling_target_layout(
@@ -268,9 +286,11 @@ impl<W: LayoutElement> Layout<W> {
         node: NodeId,
         toggle: &swayward_ipc::command::LayoutToggle,
         container: bool,
-    ) -> bool {
-        self.workspace_mut(workspace_id)
-            .is_some_and(|workspace| workspace.toggle_tiling_target_layout(node, toggle, container))
+    ) -> Option<(WorkspaceId, Vec<(NodeId, NodeId)>)> {
+        let remapped = self
+            .workspace_mut(workspace_id)?
+            .toggle_tiling_target_layout(node, toggle, container)?;
+        Some((workspace_id, remapped))
     }
 
     pub fn restore_tiling_target_layout(
@@ -278,9 +298,11 @@ impl<W: LayoutElement> Layout<W> {
         workspace_id: WorkspaceId,
         node: NodeId,
         container: bool,
-    ) -> bool {
-        self.workspace_mut(workspace_id)
-            .is_some_and(|workspace| workspace.restore_tiling_target_layout(node, container))
+    ) -> Option<(bool, Remapped)> {
+        let (restored, remapped) = self
+            .workspace_mut(workspace_id)?
+            .restore_tiling_target_layout(node, container)?;
+        Some((restored, (workspace_id, remapped)))
     }
 
     pub fn set_tiling_node_title_format(

@@ -273,9 +273,9 @@ impl<W: LayoutElement> Workspace<W> {
         id: crate::layout::tiling_tree::NodeId,
         toggle: &swayward_ipc::command::LayoutToggle,
         container: bool,
-    ) -> bool {
+    ) -> Option<Vec<(NodeId, NodeId)>> {
         if container {
-            self.tiling.toggle_node_layout(id, toggle)
+            self.tiling.toggle_node_layout(id, toggle).then(Vec::new)
         } else {
             self.tiling.toggle_target_layout(id, toggle)
         }
@@ -285,9 +285,11 @@ impl<W: LayoutElement> Workspace<W> {
         &mut self,
         id: crate::layout::tiling_tree::NodeId,
         container: bool,
-    ) -> bool {
+    ) -> Option<(bool, Vec<(NodeId, NodeId)>)> {
         if container {
-            self.tiling.restore_node_layout(id)
+            self.tiling
+                .restore_node_layout(id)
+                .then(|| (true, Vec::new()))
         } else {
             self.tiling.restore_target_layout(id)
         }

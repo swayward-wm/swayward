@@ -184,12 +184,16 @@ impl<W: LayoutElement> TilingTree<W> {
     /// its children in a new container instead (sway/commands/layout.c:178-183).
     fn apply_focused_target_layout(&mut self, target: NodeId, layout: Layout) {
         let root_layout = self.split_layout(self.root);
-        if target == self.root
-            && self.focus.is_some_and(|focus| {
-                focus != self.root || matches!(root_layout, Some(Layout::Tabbed | Layout::Stacked))
-            })
-            && Some(layout) != root_layout
-        {
+        let container = self.focus.is_some_and(|focus| {
+            focus != self.root || matches!(root_layout, Some(Layout::Tabbed | Layout::Stacked))
+        });
+        self.apply_layout_target(target, layout, container);
+    }
+
+    /// `container` is whether sway's handler context holds a container.
+    fn apply_layout_target(&mut self, target: NodeId, layout: Layout, container: bool) {
+        let root_layout = self.split_layout(self.root);
+        if target == self.root && container && Some(layout) != root_layout {
             if !self.can_wrap_root_children() {
                 return;
             }
@@ -313,11 +317,21 @@ impl<W: LayoutElement> TilingTree<W> {
         remapped
     }
 
-    pub fn toggle_target_layout(&mut self, id: NodeId, toggle: &LayoutToggle) -> bool {
-        let Some(target) = self.nodes.get(&id).and_then(|node| node.parent) else {
-            return false;
-        };
-        self.toggle_node_layout(target, toggle)
+    /// `[criteria] layout toggle ...` on the window leaf `id`; see
+    /// [`Self::set_target_layout`].
+    pub fn toggle_target_layout(
+        &mut self,
+        id: NodeId,
+        toggle: &LayoutToggle,
+    ) -> Option<Vec<(NodeId, NodeId)>> {
+        let parent = self.nodes.get(&id)?.parent.unwrap_or(self.root);
+        let (target, remapped) = self.layout_target_from_parent(parent);
+        if let Some((target, layout)) =
+            target.and_then(|target| Some((target, self.toggled_layout(target, toggle)?)))
+        {
+            self.apply_layout_target(target, layout, true);
+        }
+        Some(remapped)
     }
 
     pub fn toggle_node_layout(&mut self, target: NodeId, toggle: &LayoutToggle) -> bool {
@@ -391,11 +405,20 @@ impl<W: LayoutElement> TilingTree<W> {
         Some(remapped)
     }
 
-    pub fn restore_target_layout(&mut self, id: NodeId) -> bool {
-        let Some(target) = self.nodes.get(&id).and_then(|node| node.parent) else {
-            return false;
+    /// `[criteria] layout default` on the window leaf `id`; see
+    /// [`Self::set_target_layout`]. The flag is false when the target has
+    /// no previous split layout, which sway rejects as invalid syntax
+    /// (sway/commands/layout.c:106-108,165-167).
+    pub fn restore_target_layout(&mut self, id: NodeId) -> Option<(bool, Vec<(NodeId, NodeId)>)> {
+        let parent = self.nodes.get(&id)?.parent.unwrap_or(self.root);
+        let (target, remapped) = self.layout_target_from_parent(parent);
+        let Some((target, layout)) =
+            target.and_then(|target| Some((target, self.previous_layout(target)?)))
+        else {
+            return Some((false, remapped));
         };
-        self.restore_node_layout(target)
+        self.apply_layout_target(target, layout, true);
+        Some((true, remapped))
     }
 
     pub fn restore_node_layout(&mut self, target: NodeId) -> bool {
@@ -607,19 +630,22 @@ impl<W: LayoutElement> TilingTree<W> {
         wrapper
     }
 
-    pub fn set_target_layout(&mut self, id: NodeId, layout: Layout) -> bool {
-        if !self.nodes.contains_key(&id) {
-            return false;
+    /// `[criteria] layout <layout>` on the window leaf `id`: sway sets the
+    /// handler context's container to the window, so the command takes the
+    /// same path as on a focused window, flattening a singleton parent and
+    /// wrapping the workspace children rather than changing the workspace
+    /// layout (sway/commands/layout.c:134-149,178-183).
+    pub fn set_target_layout(
+        &mut self,
+        id: NodeId,
+        layout: Layout,
+    ) -> Option<Vec<(NodeId, NodeId)>> {
+        let parent = self.nodes.get(&id)?.parent.unwrap_or(self.root);
+        let (target, remapped) = self.layout_target_from_parent(parent);
+        if let Some(target) = target {
+            self.apply_layout_target(target, layout, true);
         }
-        let Some(target) = self
-            .nodes
-            .get(&id)
-            .map(|node| node.parent.unwrap_or(self.root))
-        else {
-            return false;
-        };
-        self.set_layout_for_command(target, layout);
-        true
+        Some(remapped)
     }
 
     // Sway's `layout` command replaces at most one singleton parent
@@ -671,6 +697,16 @@ impl<W: LayoutElement> TilingTree<W> {
             };
             node.parent.unwrap_or(self.root)
         };
+        self.layout_target_from_parent(target)
+    }
+
+    /// The node a `layout` command on a container whose parent is `target`
+    /// changes, after flattening one singleton parent like sway
+    /// (sway/commands/layout.c:134-149).
+    fn layout_target_from_parent(
+        &mut self,
+        target: NodeId,
+    ) -> (Option<NodeId>, Vec<(NodeId, NodeId)>) {
         if target == self.root
             || self.split_len(target) != Some(1)
             || self.resident_root() == Some(target)
