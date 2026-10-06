@@ -64,8 +64,6 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) workspace_focus_history: Vec<WorkspaceId>,
     /// ID of the previously active workspace.
     pub(super) previous_workspace_id: Option<WorkspaceId>,
-    /// Sway name of the previously active workspace, retained after cleanup.
-    pub(super) previous_workspace_name: Option<String>,
     /// In-progress switch between workspaces.
     pub(super) workspace_switch: Option<WorkspaceSwitch>,
     /// Indication where an interactively-moved window is about to be placed.
@@ -365,7 +363,6 @@ impl<W: LayoutElement> Monitor<W> {
             active_workspace_idx,
             workspace_focus_history,
             previous_workspace_id: None,
-            previous_workspace_name: None,
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             insert_hint_render_loc: None,
@@ -633,7 +630,6 @@ impl<W: LayoutElement> Monitor<W> {
         if self.active_workspace_idx != idx {
             let previous = &self.workspaces[self.active_workspace_idx];
             self.previous_workspace_id = Some(previous.id());
-            self.previous_workspace_name = previous.sway_name();
         }
 
         let prev_active_idx = self.active_workspace_idx;
@@ -1322,22 +1318,6 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_focus_history.iter().copied()
     }
 
-    /// Re-read the cached back-and-forth name for `id` after a rename.
-    pub fn refresh_previous_workspace_name(&mut self, id: WorkspaceId) {
-        if self.previous_workspace_id != Some(id) {
-            return;
-        }
-        self.previous_workspace_name = self
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.id() == id)
-            .and_then(Workspace::sway_name);
-    }
-
-    pub(super) fn previous_workspace_name(&self) -> Option<&str> {
-        self.previous_workspace_name.as_deref()
-    }
-
     pub fn finish_workspace_switch(&mut self, target: Option<WorkspaceId>) {
         let Some(WorkspaceSwitch::Animation(_)) = self.workspace_switch else {
             return;
@@ -1589,11 +1569,9 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspaces.swap(self.active_workspace_idx, new_idx);
 
         let previous_workspace_id = self.previous_workspace_id;
-        let previous_workspace_name = self.previous_workspace_name.clone();
         self.activate_workspace(new_idx);
         self.workspace_switch = None;
         self.previous_workspace_id = previous_workspace_id;
-        self.previous_workspace_name = previous_workspace_name;
 
         self.clean_up_workspaces();
         // Swapping can leave a workspace with windows last, which the
@@ -1610,11 +1588,9 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspaces.swap(self.active_workspace_idx, new_idx);
 
         let previous_workspace_id = self.previous_workspace_id;
-        let previous_workspace_name = self.previous_workspace_name.clone();
         self.activate_workspace(new_idx);
         self.workspace_switch = None;
         self.previous_workspace_id = previous_workspace_id;
-        self.previous_workspace_name = previous_workspace_name;
 
         self.clean_up_workspaces();
         // Swapping can leave a workspace with windows last, which the

@@ -63,7 +63,17 @@ fn directional_move_to_output_inserts_before_destination_focus() {
     }
 
     assert!(crate::command::execute(f.niri_state(), "move right")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "focus output left, move right")[0].success);
+    // The move left the seat on the source workspace, which `focus output left` focuses
+    // itself, so a plain `move right` is refused there, as pinned sway 1.12 answers
+    // (sway/commands/move.c:683-687). Target the remaining view instead.
+    let refused = crate::command::execute(f.niri_state(), "focus output left, move right");
+    assert!(refused[0].success);
+    assert_eq!(
+        refused[1].error.as_deref(),
+        Some("Cannot move workspaces in a direction")
+    );
+    assert!(crate::command::execute(f.niri_state(), r#"[app_id="first"] move right"#)[0].success);
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
 
     let apps = f
         .swayward()

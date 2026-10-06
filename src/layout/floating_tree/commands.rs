@@ -844,6 +844,25 @@ impl<W: LayoutElement> FloatingLayout<W> {
         self.focus_directional(Direction::Left, |focus, other| focus.x - other.x, true)
     }
 
+    /// Sway's `node_get_in_direction_floating`: the nearest floater that way, never a wrap
+    /// (sway/commands/focus.c:226-258).
+    pub fn focus_direction_without_wrap(&mut self, direction: Direction) -> bool {
+        match direction {
+            Direction::Left => {
+                self.focus_directional(direction, |focus, other| focus.x - other.x, false)
+            }
+            Direction::Right => {
+                self.focus_directional(direction, |focus, other| other.x - focus.x, false)
+            }
+            Direction::Up => {
+                self.focus_directional(direction, |focus, other| focus.y - other.y, false)
+            }
+            Direction::Down => {
+                self.focus_directional(direction, |focus, other| other.y - focus.y, false)
+            }
+        }
+    }
+
     pub fn focus_right(&mut self) -> bool {
         self.focus_directional(Direction::Right, |focus, other| other.x - focus.x, true)
     }

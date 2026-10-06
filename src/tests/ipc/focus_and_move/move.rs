@@ -736,6 +736,59 @@ fn workspace_next_and_prev_cross_outputs() {
     );
 }
 
+/// Random-v3 two-output seed 40077. From the last named workspace, `workspace next` falls back
+/// to `other`, which starts as the first workspace scanned with `othern = -1`; a numbered
+/// workspace replaces it only when `wsn < othern`, so a named first workspace stays the
+/// target (sway/sway/tree/workspace.c:613-641, 672-676). `workspace prev` instead takes the
+/// greatest number (`wsn > othern`, sway/sway/tree/workspace.c:548-573, 606-608).
+#[test]
+fn workspace_next_from_the_only_named_workspace_stays_when_it_is_scanned_first() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1920, 1080));
+    let first_output = f.niri_output(1).name();
+    let second_output = f.niri_output(2).name();
+    let client = f.add_client();
+    for (workspace, output) in [("1", &first_output), ("2", &second_output)] {
+        assert!(
+            crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success
+        );
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        assert!(
+            crate::command::execute(
+                f.niri_state(),
+                &format!("workspace {workspace} output {output}")
+            )[0]
+            .success
+        );
+    }
+    assert!(crate::command::execute(f.niri_state(), "workspace 1")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "rename workspace to oracle")[0].success);
+
+    assert!(crate::command::execute(f.niri_state(), "workspace next")[0].success);
+    assert_eq!(
+        f.swayward().layout.active_workspace().unwrap().sway_name(),
+        Some("oracle".into())
+    );
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        first_output
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "workspace prev")[0].success);
+    assert_eq!(
+        f.swayward().layout.active_workspace().unwrap().sway_name(),
+        Some("2".into())
+    );
+}
+
 /// Oracle: focus_next_crosses_outputs. `focus next|prev [sibling]` is `focus <direction>` with
 /// the direction from the parent layout (sway/commands/focus.c:17-58, 424-433), so at the
 /// workspace edge it focuses the adjacent output before taking the `focus_wrapping yes` wrap
