@@ -18,6 +18,17 @@ impl<W: LayoutElement> Layout<W> {
         })
     }
 
+    /// Whether `window`'s own container is global fullscreen, which
+    /// `move container` refuses (sway/commands/move.c:438-441).
+    pub fn window_is_global_fullscreen(&self, window: &W::Id) -> bool {
+        self.workspaces().any(|(_, _, workspace)| {
+            let tiling = workspace.tiling();
+            tiling.node_for_window(window).is_some_and(|node| {
+                tiling.fullscreen_mode(node) == Some(tiling_tree::FullscreenMode::Global)
+            })
+        })
+    }
+
     pub fn focused_window_is_fullscreen_or_child(&self) -> bool {
         let Some(window) = self.focus() else {
             return false;

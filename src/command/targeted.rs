@@ -901,7 +901,10 @@ pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> 
             Candidate::Container(..) => None,
         })
     };
-    let focused_id = focused_id(state);
+    // `__focused__` compares against the focused view, so with a split or
+    // the workspace focused it matches nothing (`criteria_matches_view`,
+    // sway/sway/criteria.c:193-197, 453-465).
+    let focused_id = focused_id(state).filter(|_| focused_node(state) == FocusedNode::View);
     let focused_info = windows()
         .find(|snapshot| Some(snapshot.id) == focused_id)
         .map(|snapshot| snapshot.info(state))

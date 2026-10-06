@@ -256,11 +256,16 @@ impl<W: LayoutElement> TilingTree<W> {
             }
             InsertTarget::Focused => self.focus,
             InsertTarget::Node(id) => Some(id),
+            // A moved container lands beside the workspace's focus-inactive
+            // tiling container, or inside it when that is a split
+            // (`seat_get_focus_inactive_tiling`, sway/commands/move.c:516;
+            // move.c:241-261).
             InsertTarget::MoveDestination => {
-                if let Some(focus) = self.focus.filter(|focus| self.is_split(*focus)) {
-                    return (focus, None);
+                let target = self.focus_inactive_tiling();
+                if let Some(split) = target.filter(|target| self.is_split(*target)) {
+                    return (split, None);
                 }
-                self.focus
+                target
             }
         };
         let parent = target
