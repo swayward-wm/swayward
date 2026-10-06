@@ -224,15 +224,20 @@ fn swapping_nodes_preserves_focus_history_and_rejects_ancestry() {
     t.set_focus(first);
     let focus = t.focus();
     let history = t.window_focus_history();
-    assert!(t.set_node_fullscreen(first, Some(FullscreenMode::Workspace)));
 
     t.swap_nodes(first, third).unwrap();
     assert_eq!(t.nodes[&first].parent, Some(t.root));
     assert_eq!(t.nodes[&third].parent, Some(parent));
     assert_eq!(t.focus(), focus);
     assert_eq!(t.window_focus_history(), history);
+
+    // Fullscreen trades places with the container, and the container taking it gains focus
+    // (`container_swap`, sway/tree/container.c:1884-1889).
+    assert!(t.set_node_fullscreen(first, Some(FullscreenMode::Workspace)));
+    t.swap_nodes(first, third).unwrap();
     assert_eq!(t.fullscreen_mode(first), None);
     assert_eq!(t.fullscreen_mode(third), Some(FullscreenMode::Workspace));
+    assert_eq!(t.focus(), Some(third));
     assert_eq!(t.nodes[&parent].parent, None);
     assert_eq!(
         t.swap_nodes(first, first),

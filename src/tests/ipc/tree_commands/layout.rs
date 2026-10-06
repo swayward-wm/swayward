@@ -487,6 +487,41 @@ fn swapping_the_focused_tab_keeps_it_focused_and_visible() {
     assert_eq!(nodes[1]["visible"], false);
 }
 
+// random-v2 seed 15819 (differential): swapping a fullscreen window with its
+// sibling hands fullscreen to the sibling, and enabling it there focuses the
+// sibling (`container_swap`, sway/tree/container.c:1884-1889;
+// `container_fullscreen_workspace`, :1199-1213).
+#[test]
+fn swapping_a_fullscreen_window_focuses_the_container_that_takes_fullscreen() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "mark --add oracle")[0].success);
+    map_test_window(&mut f, client, "fixture-2");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+
+    let outcome = crate::command::execute(f.niri_state(), "swap container with mark oracle");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let parent = find_json_parent_of_app_id(&tree, "fixture-2").unwrap();
+    let nodes = parent["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["app_id"], "fixture-2");
+    assert_eq!(nodes[0]["fullscreen_mode"], 0);
+    assert_eq!(nodes[0]["focused"], false);
+    assert_eq!(nodes[1]["app_id"], "fixture-1");
+    assert_eq!(nodes[1]["fullscreen_mode"], 1);
+    assert_eq!(nodes[1]["focused"], true);
+}
+
 // random seed 260 step 5 (sway-1.12-random): a floating fullscreen window
 // hides the tiled windows beside it (`view_is_visible`,
 // sway/tree/view.c:1187-1193).

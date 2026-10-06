@@ -35,9 +35,22 @@ impl<W: LayoutElement> TilingTree<W> {
             self.set_focus_id(Some(other));
             self.set_focus_id(focus);
         }
+        self.focus_swapped_fullscreen([second, first]);
         self.animate_geometry_changes(old, None);
         self.request_window_sizes();
         Ok(())
+    }
+
+    /// Sway re-enables fullscreen on each swapped container after the swap, `con2` first,
+    /// and enabling it focuses that container (`container_swap`, sway/tree/container.c:1884-1889;
+    /// `container_fullscreen_workspace`, :1199-1213). On a workspace the seat does not focus,
+    /// sway raises it in the focus stack instead, which is the same thing inside one tree.
+    pub(super) fn focus_swapped_fullscreen(&mut self, order: [NodeId; 2]) {
+        for id in order {
+            if self.fullscreen_mode(id).is_some() {
+                self.set_focus_id(Some(id));
+            }
+        }
     }
 
     fn check_swappable(&self, first: NodeId, second: NodeId) -> Result<(), &'static str> {

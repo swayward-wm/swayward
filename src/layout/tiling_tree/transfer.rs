@@ -73,6 +73,7 @@ impl<W: LayoutElement> TilingTree<W> {
         if slot.focused || self.focus.is_none() {
             self.set_focus_id(self.focused_leaf_in(id));
         }
+        self.focus_swapped_fullscreen([id, id]);
         self.request_window_sizes();
         (id, remapped)
     }
