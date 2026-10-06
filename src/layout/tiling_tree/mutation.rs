@@ -214,9 +214,11 @@ impl<W: LayoutElement> TilingTree<W> {
             )
     }
 
-    /// Focuses a new leaf, or ranks it last behind the kept focus: sway appends every new node
-    /// to the tail of the seat's focus stack (`seat_node_from_node`, sway/input/seat.c:349) and
-    /// only a focused view moves to the head.
+    /// Focuses a new leaf, or ranks it last behind the kept focus. Sway appends every new
+    /// node to the bottom of the seat focus stack (`seat_node_from_node`,
+    /// sway/input/seat.c:327-354) and only raises it when `should_focus` holds
+    /// (sway/tree/view.c:697-731, 945-957), so an unfocused view (`no_focus`, or mapped
+    /// under fullscreen) is the least recently focused.
     fn place_new_leaf_in_focus_order(
         &mut self,
         id: NodeId,
