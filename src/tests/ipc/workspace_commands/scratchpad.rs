@@ -954,3 +954,47 @@ fn focus_next_and_prev_between_two_floaters_do_not_wrap() {
         );
     }
 }
+
+/// Differential family diff-fam-focus-sibling-floating-split (seed 15053): a view inside a
+/// floating split is not itself floating, so sway runs `focus next sibling` through
+/// `node_get_in_direction_tiling` (sway/commands/focus.c:454-460), which wraps within the split
+/// (sway/commands/focus.c:177-192, 216-221).
+#[test]
+fn focus_next_sibling_wraps_inside_a_floating_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        f.swayward().layout.focus().unwrap().id()
+    };
+    let first = map(&mut f, "first");
+    for command in ["floating toggle", "splitv"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    let second = map(&mut f, "second");
+    assert_ne!(first, second);
+
+    for (command, expected) in [
+        ("focus next sibling", first),
+        ("focus next sibling", second),
+        ("focus prev sibling", first),
+        ("focus prev sibling", second),
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(
+            f.swayward().layout.focus().unwrap().id(),
+            expected,
+            "{command}"
+        );
+    }
+}
