@@ -308,20 +308,6 @@ impl Data {
         pos
     }
 
-    fn recompute_logical_pos(&mut self) {
-        // Sway never clamps a floating window's position. container_floating_move_to
-        // translates to the requested coordinates with no bounds check
-        // (`sway/sway/tree/container.c:1127-1159`), and the drag seatop feeds it raw
-        // cursor coordinates (`sway/sway/input/seatop_move_floating.c:40`), so a window
-        // dragged off the screen edge stays there. The only bounds-aware path centers
-        // rather than clamps (`container_floating_resize_and_center`, :864-908).
-        //
-        // niri clamped here instead, keeping a Mutter-derived slice of every window
-        // on screen. That is the opposite rule, and it silently moved windows a sway
-        // client had positioned deliberately.
-        self.logical_pos = Self::scale_by_working_area(self.working_area, self.pos);
-    }
-
     /// Moves to a new working area, keeping the window at `logical_pos`.
     pub fn update_config(
         &mut self,
@@ -341,13 +327,24 @@ impl Data {
         }
 
         self.size = size;
-        self.recompute_logical_pos();
     }
 
+    /// Stores `logical_pos` exactly; `pos` is derived from it, never the reverse.
+    ///
+    /// Sway never clamps a floating window's position. container_floating_move_to
+    /// translates to the requested coordinates with no bounds check
+    /// (`sway/sway/tree/container.c:1127-1159`), and the drag seatop feeds it raw
+    /// cursor coordinates (`sway/sway/input/seatop_move_floating.c:40`), so a window
+    /// dragged off the screen edge stays there. The only bounds-aware path centers
+    /// rather than clamps (`container_floating_resize_and_center`, :864-908).
+    ///
+    /// niri clamped here instead, keeping a Mutter-derived slice of every window
+    /// on screen. That is the opposite rule, and it silently moved windows a sway
+    /// client had positioned deliberately. Round-tripping through the working-area
+    /// fraction also drifted by an ulp, so re-applying a position moved it.
     pub fn set_logical_pos(&mut self, logical_pos: Point<f64, Logical>) {
         self.pos = Self::logical_to_size_frac_in_working_area(self.working_area, logical_pos);
-
-        self.recompute_logical_pos();
+        self.logical_pos = logical_pos;
     }
 
     pub fn center(&self) -> Point<f64, Logical> {
@@ -363,11 +360,10 @@ impl Data {
         assert!(self.size.w >= 0.);
         assert!(self.size.h >= 0.);
 
-        let mut temp = *self;
-        temp.recompute_logical_pos();
         assert_eq!(
-            self.logical_pos, temp.logical_pos,
-            "cached logical pos must be up to date"
+            self.pos,
+            Self::logical_to_size_frac_in_working_area(self.working_area, self.logical_pos),
+            "working-area fraction must be up to date"
         );
     }
 }
@@ -1694,6 +1690,48 @@ mod stack_order_tests {
         assert_eq!(
             floating_stack_order(1, &[1, 0]),
             vec![Closing(1), Live(0), Closing(0)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod data_tests {
+    use smithay::utils::{Point, Rectangle, Size};
+
+    use super::Data;
+
+    #[test]
+    fn reapplying_a_logical_position_is_exact() {
+        // verify_invariants re-applies the cached position and compares exactly, so a
+        // ulp of drift through the working-area fraction failed proptest seeds at random.
+        let mut drifted = Vec::new();
+        for area_x in [0., 7., 13.5, 100.] {
+            for area_w in [1., 3., 1277., 1920.] {
+                let working_area =
+                    Rectangle::new(Point::from((area_x, 5.)), Size::from((area_w, 700.)));
+                for i in -100..100 {
+                    let pos = Point::from((f64::from(i) * 0.1, f64::from(i) * 0.3));
+                    let mut data = Data {
+                        pos: Point::default(),
+                        logical_pos: Point::default(),
+                        size: Size::from((10., 10.)),
+                        view_size: Size::from((1920., 1080.)),
+                        working_area,
+                    };
+                    data.set_logical_pos(pos);
+                    let mut again = data;
+                    again.update_config(data.view_size, working_area, data.logical_pos);
+                    if again != data || data.logical_pos != pos {
+                        drifted.push((working_area, pos));
+                    }
+                }
+            }
+        }
+        assert!(
+            drifted.is_empty(),
+            "{} drifted: {:?}",
+            drifted.len(),
+            &drifted[..drifted.len().min(3)]
         );
     }
 }
