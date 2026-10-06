@@ -266,8 +266,14 @@ fn execute_one(
             }
             return success();
         }
+        // Sway's handlers move seat focus as they run, so the focus a match leaves behind is
+        // already on the seat stack when the next match runs: after `move` refocuses the old
+        // workspace (sway/commands/move.c:598-608) that view ranks as recently focused even
+        // if the next match moves it too.
         return for_each_match(targets, |target| {
-            execute_targeted(state, &parsed.command, target)
+            let outcome = execute_targeted(state, &parsed.command, target);
+            state.update_keyboard_focus();
+            outcome
         });
     }
 

@@ -214,8 +214,11 @@ impl<W: LayoutElement> TilingTree<W> {
             )
     }
 
-    /// Focuses a new leaf, or ranks it behind the kept focus: second when merely not
-    /// activated, last when a fullscreen container blocks focus.
+    /// Focuses a new leaf, or ranks it last behind the kept focus. Sway appends every new
+    /// node to the bottom of the seat focus stack (`seat_node_from_node`,
+    /// sway/input/seat.c:327-354) and only raises it when `should_focus` holds
+    /// (sway/tree/view.c:697-731, 945-957), so an unfocused view (`no_focus`, or mapped
+    /// under fullscreen) is the least recently focused.
     fn place_new_leaf_in_focus_order(
         &mut self,
         id: NodeId,
@@ -226,12 +229,7 @@ impl<W: LayoutElement> TilingTree<W> {
         match previous_focus {
             Some(previous_focus) if !activate || focus_blocked => {
                 self.focus_history.retain(|candidate| *candidate != id);
-                if focus_blocked {
-                    self.focus_history.push(id);
-                } else {
-                    self.focus_history
-                        .insert(1.min(self.focus_history.len()), id);
-                }
+                self.focus_history.push(id);
                 self.focus = Some(previous_focus);
             }
             _ => self.set_focus_id(Some(id)),
