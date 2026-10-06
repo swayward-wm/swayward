@@ -29,6 +29,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.mapped_under_fullscreen.clear();
             self.moved_under_fullscreen.clear();
             self.unarranged_under_fullscreen.clear();
+            self.split_under_fullscreen.clear();
         }
         // tab_active also names nodes in its values: a container's shown child.
         self.tab_active.retain(|_, active| *active != id);

@@ -76,6 +76,7 @@ impl<W: LayoutElement> TilingTree<W> {
             pre_layout_ipc_rects: HashMap::new(),
             stale_fullscreen_rects: HashMap::new(),
             unarranged_under_fullscreen: HashMap::new(),
+            split_under_fullscreen: HashSet::new(),
             interactive_resize: None,
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),

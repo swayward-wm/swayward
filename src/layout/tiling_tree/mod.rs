@@ -452,6 +452,7 @@ macro_rules! side_tables {
             ("unarranged_wrappers", $($ref)+ $tree.unarranged_wrappers),
             ("stale_fullscreen_rects", $($ref)+ $tree.stale_fullscreen_rects),
             ("unarranged_under_fullscreen", $($ref)+ $tree.unarranged_under_fullscreen),
+            ("split_under_fullscreen", $($ref)+ $tree.split_under_fullscreen),
             ("tab_indicators", $($ref)+ $tree.tab_indicators),
             ("tab_active", $($ref)+ $tree.tab_active),
         ]
@@ -525,6 +526,13 @@ pub struct TilingTree<W: LayoutElement> {
     /// sway/tree/arrange.c:310-316), so the others keep these boxes, and the
     /// percent they imply, until fullscreen ends or the tree gains a child.
     unarranged_under_fullscreen: HashMap<NodeId, Rectangle<f64, Logical>>,
+    /// Containers `split` created while the workspace had a fullscreen
+    /// container outside them. `container_split` gives the new container
+    /// calloc's zero `child_total_width` and `child_total_height`, and the
+    /// workspace arrange that follows lays out only the fullscreen container
+    /// (sway/tree/container.c, sway/commands/split.c:24-29,
+    /// sway/tree/arrange.c:310-316), so its parent never sets them.
+    split_under_fullscreen: HashSet<NodeId>,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,
