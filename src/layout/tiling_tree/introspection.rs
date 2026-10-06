@@ -186,7 +186,12 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                 .copied()
                 .collect::<Vec<_>>();
             while let Some(id) = stack.pop() {
-                if !tree.nodes.contains_key(&id) || !in_pending_wrapper.insert(id) {
+                // Once the workspace is arranged, `arrange_container(fs)`
+                // gave the fullscreen container's descendants their boxes
+                // (sway/tree/arrange.c:310-316).
+                let rearranged = tree.fullscreen_rearranged
+                    && fullscreen.is_some_and(|fs| fs != id && tree.contains_node(fs, id));
+                if rearranged || !tree.nodes.contains_key(&id) || !in_pending_wrapper.insert(id) {
                     continue;
                 }
                 if let Some(TreeNode::Split { children, .. }) =
@@ -210,10 +215,12 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         self.fullscreen.is_some() && self.tree.fullscreen_layout_wrappers.contains(&id)
     }
 
-    /// A wrapper sway never arranged (see `unarranged_wrappers`): reported
-    /// with calloc's empty box, so its children omit percent.
+    /// A wrapper sway never arranged (see `unarranged_wrappers`, and a split
+    /// in `moved_under_fullscreen`): reported with calloc's empty box, so its
+    /// children omit percent.
     fn is_unarranged_wrapper(&self, id: NodeId) -> bool {
         self.tree.unarranged_wrappers.contains(&id)
+            || (self.tree.moved_under_fullscreen.contains_key(&id) && !self.is_view(id))
     }
 
     fn under_tabbed_pending_wrapper(&self, id: NodeId) -> bool {
@@ -287,10 +294,12 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             } else {
                 pending_wrapper.then_some(0.).or(percent)
             },
-            rect: if pending_wrapper || self.is_unarranged_wrapper(id) {
+            rect: if pending_wrapper || tree.unarranged_wrappers.contains(&id) {
                 Rectangle::default()
             } else if let Some(unarranged) = self.unarranged(id) {
                 unarranged.rect
+            } else if self.is_unarranged_wrapper(id) {
+                Rectangle::default()
             } else if let Some(mut pre_layout) = self
                 .in_pending_wrapper
                 .contains(&id)

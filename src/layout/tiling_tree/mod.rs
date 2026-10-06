@@ -482,6 +482,8 @@ pub struct TilingTree<W: LayoutElement> {
     /// Leaves moved into this tree while it was fullscreen. Like mapped ones
     /// they get no share of their parent's split, but they keep their border
     /// and titlebar (`container_move_to_workspace`, sway/commands/move.c:220-229).
+    /// Also holds a container `split` created around a view mapped under
+    /// fullscreen: it copies the view's empty box and is never arranged.
     moved_under_fullscreen: HashMap<NodeId, Rectangle<f64, Logical>>,
     /// The IPC focus list follows `focus_history` rather than window focus
     /// timestamps, because the seat stack was reordered without focusing a

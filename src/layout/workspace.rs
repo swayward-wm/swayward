@@ -1407,6 +1407,13 @@ impl<W: LayoutElement> Workspace<W> {
 
         if let Some(id) = self.tiling.node_for_window(window) {
             self.tiling.set_node_fullscreen(id, mode);
+            if restore_to_floating {
+                // Sway keeps a fullscreen floating view in the floating list
+                // and arranges only it (sway/tree/container.c:1186-1218,
+                // sway/tree/arrange.c:310-316), so it takes no share of the
+                // tiled split.
+                self.tiling.mark_fullscreen_arrived_and_relayout();
+            }
         }
 
         // When going from normal to fullscreen, remember if we should unfullscreen to floating.

@@ -1636,3 +1636,123 @@ fn layout_change_uses_the_shares_kept_for_the_new_axis() {
         assert_eq!(percents(&mut f), expected, "after {command}");
     }
 }
+
+#[test]
+fn split_of_a_fullscreen_view_in_a_mapped_layout_wrapper_arranges_it() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen toggle", "layout toggle split"]);
+    map_app(&mut f, client, "under");
+    run(&mut f, &["splith"]);
+
+    let tree = tree_json(&mut f);
+    let split = find_json_parent_of_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 1.0, "{view}");
+    assert_eq!(view["rect"]["width"], 1270, "{view}");
+    let under = find_json_node_with_app_id(&tree, "under").unwrap();
+    assert_eq!(under["percent"], serde_json::Value::Null, "{under}");
+    assert_eq!(under["rect"]["width"], 0, "{under}");
+}
+
+#[test]
+fn view_split_out_of_fullscreen_enters_the_scratchpad_unfullscreened() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen toggle"]);
+    map_app(&mut f, client, "under");
+    run(&mut f, &["split h", "move scratchpad"]);
+
+    let tree = tree_json(&mut f);
+    let hidden = &tree["nodes"][0]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(hidden["app_id"], "fullscreen", "{tree}");
+    assert_eq!(hidden["fullscreen_mode"], 0, "{hidden}");
+}
+
+#[test]
+fn move_to_the_current_workspace_arranges_a_fullscreen_view_in_its_layout_wrapper() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle",
+            "layout tabbed",
+            "move container to workspace next",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["fullscreen_mode"], 1, "{view}");
+    assert_eq!(view["rect"]["width"], 0, "{view}");
+    assert_eq!(view["rect"]["height"], 0, "{view}");
+}
+
+#[test]
+fn fullscreen_floating_view_leaves_the_tiled_sibling_its_share() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "floating");
+    run(&mut f, &["move scratchpad"]);
+    map_app(&mut f, client, "tiled");
+    run(&mut f, &["scratchpad show", "fullscreen enable"]);
+
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "tiled").unwrap();
+    assert_eq!(tiled["percent"], 1.0, "{tiled}");
+}
+
+#[test]
+fn for_window_split_of_a_view_mapped_under_fullscreen_keeps_the_empty_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(
+        &mut f,
+        &[
+            "fullscreen enable",
+            "for_window [app_id=\"^hidden$\"] split v",
+        ],
+    );
+    map_app(&mut f, client, "hidden");
+
+    let tree = tree_json(&mut f);
+    let wrapper = find_json_parent_of_app_id(&tree, "hidden").unwrap();
+    assert_eq!(wrapper["layout"], "splitv", "{wrapper}");
+    assert_eq!(wrapper["percent"], 0.0, "{wrapper}");
+    assert_eq!(rect(wrapper, "rect"), [0, 0, 0, 0], "{wrapper}");
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let fullscreen = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_committed_unarranged(hidden, fullscreen);
+    assert_eq!(hidden["percent"], serde_json::Value::Null, "{hidden}");
+
+    run(&mut f, &["layout tabbed"]);
+    let tree = tree_json(&mut f);
+    let wrapper = find_json_parent_of_app_id(&tree, "hidden").unwrap();
+    // Still the empty box, less the tab row `layout tabbed` puts above it
+    // under the new tabbed wrapper (sway/ipc-json.c:816-825).
+    let titlebar = wrapper["nodes"][0]["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{wrapper}");
+    assert_eq!(
+        rect(wrapper, "rect"),
+        [0, titlebar, 0, -titlebar],
+        "{wrapper}"
+    );
+
+    run(&mut f, &["fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let wrapper = find_json_parent_of_app_id(&tree, "hidden").unwrap();
+    assert_eq!(wrapper["rect"]["width"], 1270, "{wrapper}");
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    assert_eq!(hidden["percent"], 1.0, "{hidden}");
+}

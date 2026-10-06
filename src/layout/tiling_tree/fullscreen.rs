@@ -130,6 +130,15 @@ impl<W: LayoutElement> TilingTree<W> {
             .is_some_and(|focus| self.contains_node(fullscreen, focus));
         let parent = self.nodes.get(&fullscreen).and_then(|node| node.parent);
         if focused_in_fullscreen
+            && parent.is_some_and(|parent| self.fullscreen_layout_wrappers.contains(&parent))
+        {
+            // The parent is a `layout` wrapper sway never arranged, so
+            // `arrange_container(wrapper)` lays the fullscreen container out
+            // inside its empty box (sway/tree/arrange.c:184-196 and 248-261).
+            self.arrange_fullscreen_wrappers();
+            return;
+        }
+        if focused_in_fullscreen
             && parent.is_some_and(|parent| {
                 parent != self.root
                     && matches!(
@@ -166,18 +175,37 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             self.fullscreen_tile_slot = false;
             self.fullscreen_rearranged = true;
+            self.forget_wrapper_boxes_in(id);
         }
+    }
+
+    /// `arrange_container(fs)` gives the fullscreen container's descendants
+    /// new boxes (sway/tree/arrange.c:310-316), so the empty-box layout an
+    /// earlier `arrange_container(wrapper)` left them no longer applies.
+    fn forget_wrapper_boxes_in(&mut self, fullscreen: NodeId) {
+        let nodes = &self.nodes;
+        self.wrapper_arranged_boxes.retain(|id, _| {
+            let mut node = nodes.get(id).and_then(|node| node.parent);
+            while let Some(ancestor) = node {
+                if ancestor == fullscreen {
+                    return false;
+                }
+                node = nodes.get(&ancestor).and_then(|node| node.parent);
+            }
+            true
+        });
     }
 
     /// Sway's `arrange_root` reaching this tree's workspace: every fullscreen
     /// container gets the root or output box again (sway/tree/arrange.c:310-316
     /// and 340-361).
     pub fn arrange_root(&mut self) {
-        if self.fullscreen_node().is_none() {
+        let Some(id) = self.fullscreen_node() else {
             return;
-        }
+        };
         self.fullscreen_tile_slot = false;
         self.fullscreen_rearranged = true;
+        self.forget_wrapper_boxes_in(id);
     }
 
     /// Whether this tree holds a global fullscreen container
@@ -282,6 +310,13 @@ impl<W: LayoutElement> TilingTree<W> {
         if self.fullscreen_node().is_some() {
             self.fullscreen_arrived = true;
         }
+    }
+
+    /// [`Self::mark_fullscreen_arrived`], then configure the tiled views at
+    /// the shares they keep.
+    pub fn mark_fullscreen_arrived_and_relayout(&mut self) {
+        self.mark_fullscreen_arrived();
+        self.request_window_sizes();
     }
 
     /// The fullscreen container this tree shows: a global fullscreen view

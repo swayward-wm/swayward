@@ -30,7 +30,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.nodes.get(&parent).map(|node| &node.value),
             Some(TreeNode::Split { layout: current, .. }) if *current == layout
         ) {
-            self.split(target, layout);
+            self.split_node(target, layout);
         }
         let id = self.add_tile_with_activation(tile, InsertTarget::Node(target), activate);
         if edge.intersects(ResizeEdge::LEFT | ResizeEdge::TOP) {

@@ -1,7 +1,19 @@
 use super::*;
 
 impl<W: LayoutElement> TilingTree<W> {
+    /// The `split` command on `id`. `do_split` ends with `arrange_root`
+    /// under a global fullscreen container and `arrange_workspace` otherwise
+    /// (sway/commands/split.c:12-33).
     pub fn split(&mut self, id: NodeId, layout: Layout) {
+        self.split_node(id, layout);
+        if self.has_global_fullscreen() {
+            self.arrange_root();
+        } else {
+            self.arrange_workspace();
+        }
+    }
+
+    pub(super) fn split_node(&mut self, id: NodeId, layout: Layout) {
         self.interactive_resize = None;
         self.fullscreen_tile_slot = false;
         if id == self.root && self.split_len(id).is_some_and(|len| len > 0) {
@@ -51,7 +63,22 @@ impl<W: LayoutElement> TilingTree<W> {
         if let Some(parent) = singleton_split_parent {
             self.set_singleton_parent_layout(parent, layout);
         } else {
-            self.wrap_node(id, layout);
+            let mapped_under_fullscreen = self.mapped_under_fullscreen.contains(&id);
+            let wrapper = self.wrap_node(id, layout);
+            if mapped_under_fullscreen && wrapper != id {
+                // `container_split` gives the new container the view's box,
+                // calloc's empty one, and `container_add_child` marks the view
+                // dirty (sway/tree/container.c:1436-1437 and 1542-1560). The
+                // workspace arrange that follows lays out only the fullscreen
+                // container (sway/tree/arrange.c:310-316), so both keep it.
+                self.commit_mapped_under_fullscreen(id);
+                self.moved_under_fullscreen
+                    .insert(wrapper, Rectangle::default());
+            }
+            // A fullscreen view hands its mode to the new container and is
+            // configured out of fullscreen (`container_replace` and
+            // `set_fullscreen`, sway/tree/container.c:1173-1184 and 1471-1501).
+            self.request_window_sizes();
         }
     }
 
