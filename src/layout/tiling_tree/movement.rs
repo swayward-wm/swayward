@@ -277,14 +277,21 @@ impl<W: LayoutElement> TilingTree<W> {
         let wanted_layout = direction.axis();
         let boundary_root = self.resident_root().unwrap_or(self.root);
         if self.windows().nth(1).is_none() {
-            if boundary_root == self.root {
-                self.move_only_window(id, direction, wanted_layout);
-            }
-            return false;
+            // Sway's walk reorients or promotes within the workspace and
+            // reports a move, so only the workspace-level cases fall through
+            // to the next output (sway/commands/move.c:333-412).
+            return boundary_root == self.root
+                && self.move_only_window(id, direction, wanted_layout);
         }
         if self.split_len(self.root) == Some(1) && self.root_branch(id) == Some(id) {
+            // A parallel workspace sends its only child to the next output; any
+            // other layout wraps and promotes it in place, which counts as a
+            // move (sway/commands/move.c:333-344, 368-372).
+            let parallel = self
+                .root_layout()
+                .is_some_and(|layout| Self::layouts_parallel(layout, wanted_layout));
             self.set_layout_keeping_previous(self.root, wanted_layout);
-            return false;
+            return !parallel;
         }
         let backwards = direction.is_backwards();
         let mut branch = id;
@@ -462,7 +469,12 @@ impl<W: LayoutElement> TilingTree<W> {
             )
     }
 
-    fn move_only_window(&mut self, id: NodeId, direction: Direction, wanted_layout: Layout) {
+    fn move_only_window(
+        &mut self,
+        id: NodeId,
+        direction: Direction,
+        wanted_layout: Layout,
+    ) -> bool {
         if self.walk_reaches_unparallel_root(id, wanted_layout) {
             self.set_layout_keeping_previous(self.root, wanted_layout);
             // `set_layout` compacts the tree, which squashes a singleton split.
@@ -474,7 +486,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 .then_some(id)
                 .or_else(|| self.windows().next().map(|(leaf, _)| leaf))
             else {
-                return;
+                return true;
             };
             let old_parent = self.nodes.get(&id).and_then(|node| node.parent);
             if let Some(parent) = old_parent.filter(|parent| *parent != self.root) {
@@ -483,7 +495,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 self.reap_empty_from(parent);
                 self.finish_directional_move(id);
             }
-            return;
+            return true;
         }
         // A same-axis command cannot move the only window out of the
         // workspace, but sway still walks up to the first ancestor whose
@@ -494,13 +506,13 @@ impl<W: LayoutElement> TilingTree<W> {
         // already at workspace level and stays put
         // (sway/commands/move.c:387-393).
         let Some(leaf) = self.windows().next().map(|(leaf, _)| leaf) else {
-            return;
+            return false;
         };
         let Some(old_parent) = self.nodes.get(&leaf).and_then(|node| node.parent) else {
-            return;
+            return false;
         };
         if old_parent == self.root {
-            return;
+            return false;
         }
         // Sway's ancestor walk: climb while the parent's layout is not along
         // the move axis; at a parallel parent, the window itself escapes
@@ -509,18 +521,18 @@ impl<W: LayoutElement> TilingTree<W> {
         let mut current = leaf;
         let ancestor = loop {
             let Some(parent) = self.nodes.get(&current).and_then(|node| node.parent) else {
-                return;
+                return false;
             };
             let Some(&TreeNode::Split { layout, .. }) =
                 self.nodes.get(&parent).map(|node| &node.value)
             else {
-                return;
+                return false;
             };
             if !Self::layouts_parallel(layout, wanted_layout) || current == leaf {
                 if parent == self.root {
                     // Reached workspace level without a parallel ancestor:
                     // the window is already as far out as it can go.
-                    return;
+                    return false;
                 }
                 current = parent;
                 continue;
@@ -533,13 +545,13 @@ impl<W: LayoutElement> TilingTree<W> {
         {
             // Treat a singleton workspace child as workspace level, like i3
             // (sway/commands/move.c:387-393).
-            return;
+            return false;
         }
         let Some(destination) = self.nodes.get(&ancestor).and_then(|node| node.parent) else {
-            return;
+            return false;
         };
         let Some(index) = self.child_index(destination, ancestor) else {
-            return;
+            return false;
         };
         let forwards = matches!(direction, Direction::Right | Direction::Down);
         self.detach_subtree_only(leaf);
@@ -549,6 +561,7 @@ impl<W: LayoutElement> TilingTree<W> {
         self.reap_empty_from(old_parent);
         self.compact_tree();
         self.finish_directional_move(leaf);
+        true
     }
 
     fn move_into_directional_destination(

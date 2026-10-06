@@ -28,10 +28,15 @@ fn bare_directional_move_crosses_each_adjacent_output_without_wrapping() {
     f.double_roundtrip(client);
     let window_id = f.swayward().layout.focus().unwrap().id();
 
+    // A perpendicular move first reorients the workspace in place, and only
+    // the next one crosses (sway/commands/move.c:333-344, 394-412).
     for (command, expected_output) in [
         ("move right", "top-right"),
+        ("move down", "top-right"),
         ("move down", "bottom-right"),
+        ("move left", "bottom-right"),
         ("move left", "bottom-left"),
+        ("move up", "bottom-left"),
         ("move up", "top-left"),
     ] {
         let outcome = crate::command::execute(f.niri_state(), command);
@@ -901,4 +906,47 @@ fn moving_workspace_children_keeps_the_source_workspace_layout() {
     // (`workspace_unwrap_children`, sway/tree/workspace.c:912-925).
     assert_eq!(target["layout"], "splitv");
     assert_eq!(target["nodes"].as_array().unwrap().len(), 2);
+}
+
+/// The only view under a perpendicular workspace layout is wrapped and
+/// promoted in place, which counts as a move, so it does not cross outputs
+/// (sway/commands/move.c:333-344, 394-412). Oracle row: state
+/// two_output_edge_move_from_split; random-v3 seed 30017.
+#[test]
+fn directional_move_of_only_view_in_perpendicular_workspace_stays_on_output() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    let client = f.add_client();
+    map_test_window(&mut f, client, "edge");
+    let id = f.swayward().layout.focus().unwrap().id();
+    let output_of = |f: &mut Fixture| {
+        f.swayward()
+            .layout
+            .windows()
+            .find(|(_, mapped)| mapped.id() == id)
+            .unwrap()
+            .0
+            .unwrap()
+            .output_name()
+            .to_owned()
+    };
+
+    assert!(crate::command::execute(f.niri_state(), "split toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move left")[0].success);
+    assert_eq!(output_of(&mut f), "right");
+    assert_eq!(
+        f.swayward()
+            .layout
+            .active_workspace()
+            .unwrap()
+            .tiling()
+            .root_layout(),
+        Some(crate::layout::tiling_tree::Layout::SplitH)
+    );
+
+    // A parallel workspace sends its only view on to the next output.
+    assert!(crate::command::execute(f.niri_state(), "move left")[0].success);
+    assert_eq!(output_of(&mut f), "left");
 }

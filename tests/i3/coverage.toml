@@ -4960,8 +4960,25 @@ note = "Fresh measurement reaches `1..2` with no rejected commands. The first ou
 [files."516-move.t"]
 assertions = 14
 tap_plan = 14
-pass = 14
-note = "Bare directional moves first traverse the current tree, then move the focused container to the geometrically adjacent output without wrapping; all four output transitions and the nested two-window cases pass. Workspace-fullscreen windows may cross outputs, while global-fullscreen windows remain in place, matching sway's precedence and output fallback (`sway/commands/move.c:277-299,301-413,672-744`"
+pass = 11
+reason = "i3_only_semantics"
+reason_verified = true
+note = "Bare directional moves first traverse the current tree, then move the focused container to the geometrically adjacent output without wrapping (`sway/commands/move.c:277-299`). The first transition and the nested two-window cases pass. Assertions 2-4 move a lone window perpendicular to its workspace layout: i3 crosses outputs, but sway reorients the workspace in place and reports a move (`sway/commands/move.c:333-344,394-412,715-718`), so they are cited skips. Workspace-fullscreen windows may cross outputs, while global-fullscreen windows remain in place (`sway/commands/move.c:301-313`)."
+[[files."516-move.t".skip]]
+n = 2
+desc = "moved individual window to right-bottom workspace"
+reason = "A lone window under a perpendicular workspace layout does not cross outputs: sway finds no parallel parent, wraps the workspace children, reorients the workspace along the move axis and promotes the window beside the wrapper, and that counts as a move, so container_move_to_next_output is never reached. Only the next same-axis move crosses. Pinned sway 1.12 fails this assertion too (oracle i3/results/sway-1.12.toml: fail_assertions = [2, 3, 4])."
+citation = "sway/sway/commands/move.c:333-344,394-412,715-718"
+[[files."516-move.t".skip]]
+n = 3
+desc = "moved individual window to left-bottom workspace"
+reason = "A lone window under a perpendicular workspace layout does not cross outputs: sway finds no parallel parent, wraps the workspace children, reorients the workspace along the move axis and promotes the window beside the wrapper, and that counts as a move, so container_move_to_next_output is never reached. Only the next same-axis move crosses. Pinned sway 1.12 fails this assertion too (oracle i3/results/sway-1.12.toml: fail_assertions = [2, 3, 4])."
+citation = "sway/sway/commands/move.c:333-344,394-412,715-718"
+[[files."516-move.t".skip]]
+n = 4
+desc = "moved individual window to left-top workspace"
+reason = "A lone window under a perpendicular workspace layout does not cross outputs: sway finds no parallel parent, wraps the workspace children, reorients the workspace along the move axis and promotes the window beside the wrapper, and that counts as a move, so container_move_to_next_output is never reached. Only the next same-axis move crosses. Pinned sway 1.12 fails this assertion too (oracle i3/results/sway-1.12.toml: fail_assertions = [2, 3, 4])."
+citation = "sway/sway/commands/move.c:333-344,394-412,715-718"
 
 [files."517-regress-move-direction-ipc.t"]
 assertions = 6

@@ -216,7 +216,7 @@ fn emptied_initial_tree_keeps_its_pre_mode_orientation() {
 fn removing_the_last_window_resets_the_reported_layout() {
     let mut t = tree((1200., 800.), 0.);
     let window = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
-    assert!(!t.move_direction(window, Direction::Down));
+    assert!(t.move_direction(window, Direction::Down));
 
     t.remove_tile_node(window).unwrap();
     t.reset_empty_layout();
@@ -231,7 +231,7 @@ fn moving_a_single_window_sets_the_workspace_split_axis() {
     });
     let window = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
 
-    assert!(!t.move_direction(window, Direction::Right));
+    assert!(t.move_direction(window, Direction::Right));
     assert!(matches!(
         t.nodes[&t.root].value,
         TreeNode::Split {
