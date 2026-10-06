@@ -1816,3 +1816,124 @@ fn for_window_split_of_a_view_mapped_under_fullscreen_keeps_the_empty_box() {
     let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
     assert_eq!(hidden["percent"], 1.0, "{hidden}");
 }
+
+fn split_child_percents(f: &mut Fixture, commands: &[&str]) -> Vec<f64> {
+    for command in commands {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let tree = tree_json(f);
+    let mut split = &tree["nodes"][1]["nodes"][0];
+    while split["nodes"]
+        .as_array()
+        .is_some_and(|nodes| nodes.len() == 1)
+    {
+        split = &split["nodes"][0];
+    }
+    split["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|child| child["percent"].as_f64().unwrap())
+        .collect()
+}
+
+// v3 differential family diff-fam-v3-resize-or-ppt, seed 40308 step 4
+// (sway-1.12; oracle row resize_width_then_layout_flip): sway keeps a width
+// and a height fraction per container and arranges a split with the one on
+// its axis (apply_horiz_layout/apply_vert_layout, sway/tree/arrange.c:15-182).
+// A width resize leaves the height fractions unset, so after `layout toggle
+// split` wraps the children in a vertical container they split evenly.
+#[test]
+fn layout_flip_after_width_resize_uses_the_height_fractions() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "first");
+    map_test_window(&mut f, client, "second");
+    let percents = split_child_percents(
+        &mut f,
+        &["resize grow width 10 px or 5 ppt", "layout toggle split"],
+    );
+    assert_eq!(percents, [0.5, 0.5]);
+}
+
+// Same family, seed 22 step 4: the width resize lands in a horizontal
+// container whose vertical fractions were set before it flipped. Flipping it
+// back restores them (0.5/0.5), not the width fractions (0.3/0.7).
+#[test]
+fn layout_flip_back_restores_the_fractions_of_that_axis() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "first");
+    assert!(crate::command::execute(f.niri_state(), "layout splitv")[0].success);
+    map_test_window(&mut f, client, "second");
+    let percents = split_child_percents(
+        &mut f,
+        &[
+            "layout toggle",
+            "resize set width 30 ppt height 40 ppt",
+            "layout toggle splitv tabbed",
+        ],
+    );
+    assert_eq!(percents, [0.5, 0.5]);
+}
+
+// v2 differential seed 17283 step 9: `resize set width 50 ppt` among eight
+// views would take each sibling to 91 px, below MIN_SANE_W. Sway skips the
+// resize and replies success (container_resize_tiled,
+// sway/commands/resize.c:108-120; resize_set_tiled, 285-339).
+#[test]
+fn resize_set_below_the_sane_minimum_changes_nothing() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for index in 0..8 {
+        map_test_window(&mut f, client, &format!("view-{index}"));
+    }
+    let percents = split_child_percents(&mut f, &["resize set width 50 ppt"]);
+    assert_eq!(percents, [0.125; 8]);
+}
+
+// Same family, v3 seed 40228 step 20: `move down` promotes a view out of a
+// horizontal split into the vertical workspace child, keeping both its
+// fractions (sway/commands/move.c:394-412). Its width fraction (0.5 of the
+// split it left) comes back when `layout toggle split` makes the container
+// horizontal, so the siblings split 0.375/0.25/0.25/0.125, not evenly.
+#[test]
+fn promoted_view_keeps_its_width_fraction_across_a_layout_flip() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let steps = [
+        "w1",
+        "layout toggle all",
+        "w2",
+        "w3",
+        "split v",
+        "w4",
+        "layout tabbed",
+        "w5",
+        "move container to workspace next",
+        "focus parent",
+        "split h",
+        "w6",
+        "w7",
+        "move down",
+    ];
+    for step in steps {
+        if let Some(name) = step.strip_prefix('w') {
+            map_test_window(&mut f, client, name);
+        } else {
+            assert!(
+                crate::command::execute(f.niri_state(), step)[0].success,
+                "{step}"
+            );
+        }
+    }
+    let percents = split_child_percents(&mut f, &["layout toggle split"]);
+    assert_eq!(percents, [0.375, 0.25, 0.25, 0.125]);
+}

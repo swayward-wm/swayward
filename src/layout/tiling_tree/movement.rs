@@ -386,33 +386,28 @@ impl<W: LayoutElement> TilingTree<W> {
             return false;
         };
         let insert_index = if backwards { 0 } else { children.len() };
-        // Sway moves the container with its fractions and zeroes only the
-        // ancestor's (sway/commands/move.c:394-408). The fraction it keeps is
-        // on its old parent's axis, and only split layouts set one
-        // (`apply_horiz_layout`, sway/tree/arrange.c), so it counts only when
-        // that parent is a split along this axis.
-        let old_share = self
-            .nodes
-            .get(&id)
-            .and_then(|node| node.parent)
-            .and_then(
-                |old_parent| match self.nodes.get(&old_parent).map(|node| &node.value) {
-                    Some(TreeNode::Split {
-                        layout,
-                        children,
-                        percents,
-                        ..
-                    }) if *layout == wanted_layout => children
-                        .iter()
-                        .position(|child| *child == id)
-                        .and_then(|index| percents.get(index).copied()),
-                    _ => None,
-                },
-            );
+        // Sway moves the container with both its fractions and zeroes only
+        // the ancestor's (sway/commands/move.c:394-408). Only split layouts
+        // set a fraction (`apply_horiz_layout`, sway/tree/arrange.c), so the
+        // old parent's share is on its axis only when it is a split; the
+        // parked share is on the other axis.
+        let (old_share, cross_share) = self.promoted_shares(id, wanted_layout);
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
         };
         self.insert_existing_child(boundary_root, id, insert_index, boundary);
+        if let Some(share) = cross_share {
+            if let Some(Node {
+                value: TreeNode::Split { layout, meta, .. },
+                ..
+            }) = self.nodes.get_mut(&boundary_root)
+            {
+                if *layout == wanted_layout {
+                    meta.latent_shares.retain(|(child, _)| *child != id);
+                    meta.latent_shares.push((id, share));
+                }
+            }
+        }
         match old_share {
             Some(share) => {
                 self.set_child_percent(boundary_root, id, share);
@@ -424,6 +419,63 @@ impl<W: LayoutElement> TilingTree<W> {
         self.compact_tree();
         self.finish_directional_move(id);
         true
+    }
+
+    /// `id`'s fraction along `axis` and along the other linear axis in its
+    /// current parent, each `None` when sway would hold it unset.
+    fn promoted_shares(&self, id: NodeId, axis: Layout) -> (Option<f64>, Option<f64>) {
+        let Some(Node {
+            value:
+                TreeNode::Split {
+                    layout,
+                    children,
+                    percents,
+                    meta,
+                },
+            ..
+        }) = self
+            .nodes
+            .get(&id)
+            .and_then(|node| node.parent)
+            .and_then(|parent| self.nodes.get(&parent))
+        else {
+            return (None, None);
+        };
+        let latent = meta
+            .latent_shares
+            .iter()
+            .find(|(child, _)| *child == id)
+            .map(|(_, share)| *share);
+        // A tabbed or stacked parent holds its latent shares on the axis other
+        // than the one its percents were last arranged on.
+        let latent_axis = match *layout {
+            Layout::SplitH => Some(Layout::SplitV),
+            Layout::SplitV => Some(Layout::SplitH),
+            Layout::Tabbed | Layout::Stacked => meta.fraction_axis.map(|axis| match axis {
+                Layout::SplitV => Layout::SplitH,
+                _ => Layout::SplitV,
+            }),
+        };
+        let latent_on = |wanted: Layout| latent.filter(|_| latent_axis == Some(wanted));
+        let own = matches!(*layout, Layout::SplitH | Layout::SplitV)
+            .then(|| {
+                children
+                    .iter()
+                    .position(|child| *child == id)
+                    .and_then(|index| percents.get(index).copied())
+            })
+            .flatten();
+        let other = match axis {
+            Layout::SplitH => Layout::SplitV,
+            _ => Layout::SplitH,
+        };
+        if *layout == axis {
+            (own, latent_on(other))
+        } else if *layout == other {
+            (latent_on(axis), own)
+        } else {
+            (latent_on(axis), latent_on(other))
+        }
     }
 
     /// No ancestor runs along the move axis, so the root's children are wrapped and `id` becomes

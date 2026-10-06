@@ -664,16 +664,12 @@ impl<W: LayoutElement> TilingTree<W> {
                         ((parent_extent * value / 100.).trunc() - current) / available
                     }
                 };
-                // Only `resize grow|shrink` is held to the sane minimum.
-                // Sway's `resize set` skips such a change too but still
-                // replies success (resize_set_tiled,
-                // sway/commands/resize.c:285-339); swayward's `resize set`
-                // keeps its earlier behaviour and applies it.
-                let adjust = matches!(
-                    change,
-                    SizeChange::AdjustFixed(_) | SizeChange::AdjustProportion(_)
-                );
-                let changed = self.resize_across_siblings(parent_id, branch, delta, adjust);
+                // `resize set` is held to the sane minimum like `resize
+                // grow|shrink`: sway skips a change that takes any container
+                // below it (container_resize_tiled,
+                // sway/commands/resize.c:108-120) and still replies success
+                // (resize_set_tiled, sway/commands/resize.c:285-339).
+                let changed = self.resize_across_siblings(parent_id, branch, delta, true);
                 return changed && branch == id;
             }
             branch = parent_id;
