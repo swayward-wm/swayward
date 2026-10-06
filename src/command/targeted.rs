@@ -695,7 +695,12 @@ fn focused_id(state: &State) -> Option<crate::window::mapped::MappedId> {
     state.swayward.layout.focus().map(|mapped| mapped.id())
 }
 
+/// Sway's `seat_get_focused_container`: nothing when the workspace itself
+/// holds focus.
 pub(super) fn focused_con_id(state: &State) -> Option<u64> {
+    if matches!(focused_node(state), FocusedNode::Nothing) {
+        return None;
+    }
     match focused_target(state)? {
         CommandTarget::Container(_, node) => Some(crate::ipc::tree::container_id(node) as u64),
         CommandTarget::Window(window) => Some(crate::ipc::tree::window_id(window) as u64),

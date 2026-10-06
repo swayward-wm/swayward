@@ -238,7 +238,9 @@ fn execute_one(
             Ok(criteria) => retained_targets
                 .get_or_insert_with(|| matching_targets(state, &criteria))
                 .clone(),
-            Err(error) => return failure(error),
+            // Sway parses criteria per command and answers a failed parse
+            // with CMD_INVALID (`sway/sway/commands.c:236-242`).
+            Err(error) => return swayward_ipc::command::parse_error(error),
         },
         None => Vec::new(),
     };

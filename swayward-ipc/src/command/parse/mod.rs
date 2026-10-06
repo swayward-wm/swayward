@@ -150,7 +150,7 @@ fn take_criteria(text: &str) -> Result<Option<(String, &str)>, CommandOutcome> {
     }
     match criteria_end(text).and_then(|end| text.split_at_checked(end + ']'.len_utf8())) {
         Some((raw, tail)) => {
-            if let Err(error) = crate::criteria::Criteria::parse(raw, None) {
+            if let Err(error) = crate::criteria::Criteria::validate(raw) {
                 return Err(parse_error(error));
             }
             Ok(Some((raw.to_owned(), tail.trim_start())))
@@ -162,7 +162,7 @@ fn take_criteria(text: &str) -> Result<Option<(String, &str)>, CommandOutcome> {
 /// Sway's error for criteria with no closing bracket. Its parser reports a
 /// more specific token or quote error before it notices the bracket.
 fn unclosed_criteria_error(text: &str) -> String {
-    crate::criteria::Criteria::parse(&format!("{text}]"), None)
+    crate::criteria::Criteria::validate(&format!("{text}]"))
         .err()
         .unwrap_or_else(|| "No closing brace found in criteria".into())
 }

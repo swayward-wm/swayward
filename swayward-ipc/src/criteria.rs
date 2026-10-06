@@ -127,15 +127,42 @@ impl Criteria {
             .strip_prefix('[')
             .and_then(|value| value.strip_suffix(']'))
             .ok_or_else(|| "No criteria".to_owned())?;
-        let pairs = parse_pairs(body)?;
-        if pairs.is_empty() {
-            return Err("Criteria is empty".into());
-        }
         let mut criteria = Self::default();
-        for (name, value) in pairs {
+        for (name, value) in parse_pairs(body)? {
             criteria.apply_pair(&name, value.as_deref(), focused_con_id)?;
         }
+        if criteria.is_empty() {
+            return Err("Criteria is empty".into());
+        }
         Ok(criteria)
+    }
+
+    /// Check criteria syntax before the focus that `con_id=__focused__`
+    /// resolves against is known: a placeholder id stands in for the focus,
+    /// so only the execution-time parse can report it as empty.
+    pub fn validate(raw: &str) -> Result<(), String> {
+        Self::parse(raw, Some(u64::MAX)).map(drop)
+    }
+
+    /// Sway's `criteria_is_empty` (`sway/criteria.c:19-42`) tests the parsed
+    /// fields, not the tokens, so a zero `con_id` or `pid` counts as absent.
+    /// `con_id=__focused__` with nothing focused resolves to 0 and is empty.
+    fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.shell.is_none()
+            && !self.all
+            && self.app_id.is_none()
+            && self.con_mark.is_none()
+            && self.con_id.is_none_or(|id| id == 0)
+            && !self.floating
+            && !self.tiling
+            && self.urgent.is_none()
+            && self.workspace.is_none()
+            && self.pid.is_none_or(|pid| pid == 0)
+            && self.sandbox_engine.is_none()
+            && self.sandbox_app_id.is_none()
+            && self.sandbox_instance_id.is_none()
+            && self.tag.is_none()
     }
 
     fn apply_pair(
@@ -415,6 +442,19 @@ mod tests {
         let criteria = Criteria::parse("[con_id=42 app_id=doesnotmatch]", None).unwrap();
 
         assert!(!criteria.matches_container(42, &[]));
+    }
+
+    #[test]
+    fn zero_ids_leave_criteria_empty_like_sway() {
+        for raw in ["[con_id=__focused__]", "[con_id=0]", "[pid=0]"] {
+            assert_eq!(
+                Criteria::parse(raw, None).unwrap_err(),
+                "Criteria is empty",
+                "{raw}"
+            );
+        }
+        assert!(Criteria::parse("[con_id=__focused__]", Some(7)).is_ok());
+        assert!(Criteria::validate("[con_id=__focused__]").is_ok());
     }
 
     #[test]
