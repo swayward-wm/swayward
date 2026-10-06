@@ -241,6 +241,26 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating_is_active.get() && self.floating.focused_tree_root_is_fullscreen()
     }
 
+    /// Sway's `workspace_switch` focuses `seat_get_focus_inactive(ws)`: the most recent focus
+    /// entry strictly inside the workspace, so a workspace that holds focus itself after
+    /// `focus parent` hands it to the container below (sway/tree/workspace.c:731-743,
+    /// sway/input/seat.c:1357-1372).
+    pub fn focus_inactive_for_switch(&mut self) {
+        if !self.is_workspace_focused() {
+            return;
+        }
+        if self.floating_is_active == FloatingActive::NoButRaised && !self.floating.is_empty() {
+            self.floating_is_active = FloatingActive::Yes;
+        } else if let Some(target) = self.tiling.focus().and_then(|root| {
+            self.tiling
+                .focus_inactive_in(root)
+                .or_else(|| self.tiling.focused_leaf_in(root))
+        }) {
+            self.floating_is_active = FloatingActive::No;
+            self.tiling.set_focus(target);
+        }
+    }
+
     pub fn is_workspace_focused(&self) -> bool {
         !self.floating_is_active.get()
             && (self.tiling.root_is_focused()

@@ -743,7 +743,7 @@ impl<W: LayoutElement> TilingTree<W> {
         ranked.into_iter().map(|(_, _, child)| child).collect()
     }
 
-    pub(super) fn focused_leaf_in(&self, id: NodeId) -> Option<NodeId> {
+    pub(crate) fn focused_leaf_in(&self, id: NodeId) -> Option<NodeId> {
         self.focus_history
             .iter()
             .copied()

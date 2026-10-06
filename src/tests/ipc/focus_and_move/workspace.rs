@@ -507,3 +507,25 @@ fn next_on_output_from_the_only_workspace_stays_after_the_empty_one_is_destroyed
         .collect::<Vec<_>>();
     assert_eq!(names, ["3"]);
 }
+
+#[test]
+fn prev_on_output_after_focus_parent_refocuses_the_workspace_view() {
+    // `workspace_switch` focuses `seat_get_focus_inactive(ws)`, a view inside
+    // the workspace, even when the workspace itself held focus after
+    // `focus parent` and the switch wraps back onto it
+    // (sway/tree/workspace.c:731-743). Differential family
+    // v3-ws-prev-after-focus-parent, seed 40035.
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    f.add_output(2, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "target");
+    for command in ["focus parent", "workspace prev_on_output"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let target = find_json_node_with_app_id(&tree, "target").unwrap();
+    assert_eq!(target["focused"], true, "{tree}");
+}

@@ -161,6 +161,13 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// The focus half of sway's `workspace_switch` on the focused workspace.
+    pub fn focus_inactive_on_active_sway_workspace(&mut self) {
+        if let Some(workspace) = self.active_workspace_mut() {
+            workspace.focus_inactive_for_switch();
+        }
+    }
+
     /// Sway's `arrange_workspace` on the workspace holding `window`.
     pub fn arrange_sway_workspace_of(&mut self, window: &W::Id) {
         if let Some(workspace) = self
