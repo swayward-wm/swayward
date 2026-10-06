@@ -3,11 +3,53 @@
 use super::*;
 use crate::command::NO_PREVIOUS_WORKSPACE;
 
+/// Where a workspace lives: its output, if any, and its index there.
+type SeatWorkspacePosition = (Option<Output>, usize);
+
 /// Sway's `CMD_FAILURE` for `move ... to workspace back_and_forth` without
 /// history (sway/commands/move.c:465-466).
 const MOVE_NO_PREVIOUS_WORKSPACE: &str = "No workspace was previously active.";
 
 impl<W: LayoutElement> Layout<W> {
+    /// Records a change of the seat's focused workspace, as sway's `set_workspace` does on
+    /// every focus change: the workspace it leaves becomes `seat->prev_workspace_name`, on
+    /// whichever output it is (sway/input/seat.c:1098-1113).
+    pub fn sync_seat_workspace(&mut self) {
+        let Some(active) = self.active_workspace() else {
+            return;
+        };
+        let current = (active.id(), active.sway_name());
+        match &mut self.seat_workspace {
+            Some(seat) if seat.0 == current.0 => seat.1 = current.1,
+            seat => {
+                let left = seat.replace(current);
+                if let Some((id, name)) = left {
+                    let name = self.workspace(id).map(Workspace::sway_name).unwrap_or(name);
+                    self.previous_seat_workspace = Some((id, name));
+                }
+            }
+        }
+    }
+
+    /// The seat's previous workspace while it still exists, else its last name. A rename
+    /// carries over to the recorded name.
+    fn previous_seat_workspace(&self) -> Option<(Option<SeatWorkspacePosition>, String)> {
+        let (id, name) = self.previous_seat_workspace.as_ref()?;
+        let position = self.workspaces().find_map(|(monitor, index, workspace)| {
+            (workspace.id() == *id)
+                .then(|| (monitor.map(|monitor| monitor.output().clone()), index))
+        });
+        let name = self
+            .workspace(*id)
+            .and_then(Workspace::sway_name)
+            .or_else(|| name.clone())?;
+        Some((position, name))
+    }
+
+    pub(crate) fn previous_seat_workspace_name(&self) -> Option<String> {
+        self.previous_seat_workspace().map(|(_, name)| name)
+    }
+
     pub(super) fn move_activation(focus: bool) -> ActivateWindow {
         if focus {
             ActivateWindow::Smart
@@ -214,17 +256,15 @@ impl<W: LayoutElement> Layout<W> {
         match target {
             WorkspaceTarget::Current => return Ok(()),
             WorkspaceTarget::BackAndForth => {
-                let Some(monitor) = self.active_monitor() else {
-                    return Err("cannot switch workspaces without an output".into());
-                };
-                if let Some(previous) = monitor.previous_workspace_idx() {
-                    self.switch_workspace(previous);
-                    return Ok(());
-                }
-                let Some(previous_name) = monitor.previous_workspace_name().map(str::to_owned)
-                else {
+                // The previous workspace is the seat's, not the output's
+                // (sway/commands/workspace.c:215-222).
+                let Some((position, previous_name)) = self.previous_seat_workspace() else {
                     return Err(NO_PREVIOUS_WORKSPACE.into());
                 };
+                if let Some((output, index)) = position {
+                    self.activate_workspace_at(output.as_ref(), index);
+                    return Ok(());
+                }
                 return self.activate_sway_workspace(WorkspaceTarget::Name(previous_name));
             }
             WorkspaceTarget::NextOnOutput | WorkspaceTarget::PrevOnOutput => {
@@ -352,12 +392,16 @@ impl<W: LayoutElement> Layout<W> {
         if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
             if let Some(monitor) = monitors.iter_mut().find(|monitor| monitor.has_ws(id)) {
                 monitor.sort_sway_workspaces();
-                // Refresh the back-and-forth target if it names this workspace.
-                // Sway stores a workspace pointer, so a rename is transparent to
-                // it; we cache the name, which went stale and sent
-                // `workspace back_and_forth` to the old name.
-                monitor.refresh_previous_workspace_name(id);
             }
+        }
+        // Sway's seat keeps a workspace pointer, so a rename carries over to it.
+        let renamed = self.workspace(id).and_then(Workspace::sway_name);
+        for entry in [&mut self.seat_workspace, &mut self.previous_seat_workspace]
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.0 == id)
+        {
+            entry.1 = renamed.clone();
         }
         Ok(())
     }
@@ -506,9 +550,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     fn previous_workspace_position(&self) -> Option<(Option<Output>, usize)> {
-        let output = self.active_output()?.clone();
-        let monitor = self.monitor_for_output(&output)?;
-        Some((Some(output), monitor.previous_workspace_idx()?))
+        self.previous_seat_workspace()?.0
     }
 
     pub fn move_window_to_sway_workspace(
@@ -594,10 +636,8 @@ impl<W: LayoutElement> Layout<W> {
             // previous workspace's name, or refuses without history
             // (sway/commands/move.c:460-468).
             let name = self
-                .active_monitor_ref()
-                .and_then(|monitor| monitor.previous_workspace_name())
-                .ok_or(MOVE_NO_PREVIOUS_WORKSPACE)?
-                .to_owned();
+                .previous_seat_workspace_name()
+                .ok_or(MOVE_NO_PREVIOUS_WORKSPACE)?;
             self.resolve_sway_workspace_target(WorkspaceTarget::Name(name))
         } else {
             let (name, number) = sway_workspace_identity(target)?;
@@ -621,9 +661,8 @@ impl<W: LayoutElement> Layout<W> {
         if !targets_source {
             return target;
         }
-        self.active_monitor_ref()
-            .and_then(|monitor| monitor.previous_workspace_name())
-            .map(|name| crate::command::WorkspaceTarget::Name(name.to_owned()))
+        self.previous_seat_workspace_name()
+            .map(crate::command::WorkspaceTarget::Name)
             .unwrap_or(target)
     }
 

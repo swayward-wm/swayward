@@ -322,3 +322,112 @@ fn focus_stack_fresh_wrapper_ranks_behind_an_older_unfocused_view() {
     let workspace = focus_stack_workspace(&tree);
     assert_eq!(focus_order_app_ids(workspace), ["two", "con"]);
 }
+
+/// Two outputs side by side, as the differential runner lays them out.
+fn two_output_fixture() -> (Fixture, super::client::ClientId) {
+    let mut f = Fixture::new();
+    f.add_output_at(1, (1280, 720), Some((0, 0)));
+    f.add_output_at(2, (1280, 720), Some((1280, 0)));
+    let client = f.add_client();
+    (f, client)
+}
+
+fn focused_workspace_name(tree: &serde_json::Value) -> String {
+    fn walk(node: &serde_json::Value, workspace: Option<&str>) -> Option<String> {
+        let workspace = if node["type"] == "workspace" {
+            node["name"].as_str()
+        } else {
+            workspace
+        };
+        if node["focused"] == true {
+            return workspace.map(str::to_owned);
+        }
+        node["nodes"]
+            .as_array()
+            .into_iter()
+            .chain(node["floating_nodes"].as_array())
+            .flatten()
+            .find_map(|child| walk(child, workspace))
+    }
+    walk(tree, None).unwrap()
+}
+
+/// A view moved to another output without focus becomes that workspace's focus-inactive
+/// view when it was focused more recently, so switching there focuses it
+/// (sway/commands/move.c:583-608; sway/input/seat.c:1357-1372). Seeds 40110, 40160.
+#[test]
+fn focus_stack_view_moved_to_another_output_ranks_by_its_last_focus() {
+    let (mut f, client) = two_output_fixture();
+    map_test_window(&mut f, client, "one");
+    run_focus_commands(&mut f, &["focus output right"]);
+    map_test_window(&mut f, client, "two");
+    run_focus_commands(
+        &mut f,
+        &["move container to output left", "focus output left"],
+    );
+
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(find_json_node(&tree, "con", true).unwrap()["app_id"], "two");
+
+    // A floating view ranks the same way against the tiled views it joins. Seed 40283.
+    let (mut f, client) = two_output_fixture();
+    run_focus_commands(&mut f, &["focus output right"]);
+    map_test_window(&mut f, client, "two");
+    run_focus_commands(&mut f, &["focus output left"]);
+    map_test_window(&mut f, client, "one");
+    run_focus_commands(
+        &mut f,
+        &[
+            "floating enable",
+            "move container to output right",
+            "focus output right",
+        ],
+    );
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(
+        find_json_node(&tree, "floating_con", true).unwrap()["app_id"],
+        "one"
+    );
+}
+
+/// Focus crossing into an output whose workspace holds only floating views focuses the
+/// workspace, not a floater (`get_node_in_output_direction`, sway/commands/focus.c:93-135),
+/// and a floating view never crosses outputs (sway/commands/focus.c:226-258, 457-460).
+/// Seeds 40040, 40077.
+#[test]
+fn focus_stack_directional_focus_skips_floating_views_across_outputs() {
+    let (mut f, client) = two_output_fixture();
+    map_test_window(&mut f, client, "one");
+    run_focus_commands(&mut f, &["floating enable", "focus right"]);
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(
+        find_json_node(&tree, "floating_con", true).unwrap()["app_id"],
+        "one"
+    );
+
+    run_focus_commands(&mut f, &["focus output right", "focus left"]);
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(focused_workspace_name(&tree), "1");
+    assert!(find_json_node(&tree, "floating_con", true).is_none());
+}
+
+/// `workspace back_and_forth` returns to the seat's previous workspace, which may be on
+/// another output (sway/input/seat.c:1098-1113; sway/commands/workspace.c:215-222).
+/// Seeds 40039, 40067, 40318, 40474.
+#[test]
+fn focus_stack_back_and_forth_follows_the_seat_across_outputs() {
+    let (mut f, _) = two_output_fixture();
+    run_focus_commands(&mut f, &["focus output right", "workspace back_and_forth"]);
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(focused_workspace_name(&tree), "1");
+
+    // Moving the only workspace away leaves the seat on it, so there is no history yet.
+    let (mut f, _) = two_output_fixture();
+    run_focus_commands(&mut f, &["move workspace to output right"]);
+    let outcome = crate::command::execute(f.niri_state(), "workspace back_and_forth");
+    assert!(!outcome[0].success);
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("There is no previous workspace")
+    );
+}

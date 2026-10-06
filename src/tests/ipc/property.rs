@@ -545,10 +545,12 @@ fn swapping_with_a_marked_floating_container_is_rejected_safely() {
         Op::Command("swap container with mark alpha"),
     ]);
 
+    // A floating view's `focus left` stays among floaters (sway/commands/focus.c:457-460), so
+    // app-0 sits inside the marked split when it swaps. Pinned sway 1.12 answers the same.
     assert_failure(
         run.last_outcome("swap container with mark alpha"),
         "swap",
-        "Can only swap with containers and views",
+        "Cannot swap ancestor and descendant",
     );
     let tree = run.tree();
     for app_id in ["app-0", "app-1", "app-2", "app-3"] {

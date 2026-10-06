@@ -430,6 +430,12 @@ pub struct Layout<W: LayoutElement> {
     initial_workspace_names: Vec<String>,
     /// Workspace configuration used to resolve sway's ordered output assignments lazily.
     workspace_configs: Vec<WorkspaceConfig>,
+    /// The workspace the seat last focused, with its name. Sway keeps this per seat, not per
+    /// output (`set_workspace`, sway/input/seat.c:1098-1113).
+    seat_workspace: Option<(WorkspaceId, Option<String>)>,
+    /// Sway's `seat->prev_workspace_name`: the workspace the seat focused before
+    /// `seat_workspace`, on any output.
+    previous_seat_workspace: Option<(WorkspaceId, Option<String>)>,
 }
 
 #[derive(Debug)]
@@ -816,6 +822,8 @@ impl<W: LayoutElement> Layout<W> {
             options: Rc::new(options),
             initial_workspace_names: Vec::new(),
             workspace_configs: Vec::new(),
+            seat_workspace: None,
+            previous_seat_workspace: None,
         }
     }
 
@@ -856,6 +864,8 @@ impl<W: LayoutElement> Layout<W> {
             options: opts,
             initial_workspace_names,
             workspace_configs: config.workspaces.clone(),
+            seat_workspace: None,
+            previous_seat_workspace: None,
         }
     }
 
@@ -2592,20 +2602,18 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn switch_workspace_auto_back_and_forth(&mut self, idx: usize) {
-        let previous_name = {
-            let Some(monitor) = self.active_monitor() else {
-                return;
-            };
-            let idx = idx.min(monitor.workspaces.len() - 1);
-            (idx == monitor.active_workspace_idx && monitor.previous_workspace_idx().is_none())
-                .then(|| monitor.previous_workspace_name().map(str::to_owned))
-                .flatten()
+        let Some(monitor) = self.active_monitor() else {
+            return;
         };
-        if let Some(previous_name) = previous_name {
-            let _ =
-                self.activate_sway_workspace(crate::command::WorkspaceTarget::Name(previous_name));
-        } else if let Some(monitor) = self.active_monitor() {
-            monitor.switch_workspace_auto_back_and_forth(idx);
+        let idx = idx.min(monitor.workspaces.len() - 1);
+        if idx != monitor.active_workspace_idx {
+            monitor.switch_workspace(idx);
+            return;
+        }
+        // Sway returns to the seat's previous workspace, on whichever output it is
+        // (`workspace_auto_back_and_forth`, sway/tree/workspace.c:709-729).
+        if self.previous_seat_workspace_name().is_some() {
+            let _ = self.activate_sway_workspace(crate::command::WorkspaceTarget::BackAndForth);
         }
     }
 
@@ -3943,10 +3951,19 @@ impl<W: LayoutElement> Layout<W> {
             if mon.workspace_switch.is_none() {
                 monitors[mon_idx].clean_up_workspaces();
             }
+            // Sway keeps one seat-wide focus stack, so a view focused more recently than the
+            // destination's focus-inactive view becomes the destination's focus-inactive view,
+            // and a later switch there focuses it (`seat_get_focus_inactive`,
+            // sway/input/seat.c:1357-1372; sway/commands/move.c:583-608).
             if let Some(workspace_idx) = monitors[new_idx].idx_of_ws(ws_id) {
-                monitors[new_idx].workspaces[workspace_idx]
-                    .tiling_mut()
-                    .sort_focus_history_by_timestamp();
+                let workspace = &mut monitors[new_idx].workspaces[workspace_idx];
+                workspace.tiling_mut().sort_focus_history_by_timestamp();
+                if !activate.map_smart(|| false) {
+                    workspace
+                        .tiling_mut()
+                        .rank_arrived_window_by_focus_timestamp(&window);
+                    workspace.rank_arrived_floating_window(&window);
+                }
             }
         }
     }

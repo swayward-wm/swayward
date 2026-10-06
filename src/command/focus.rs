@@ -49,6 +49,32 @@ fn directional(
         }
         return None;
     }
+    // A floating root moves only among floaters, without wrapping, and never leaves its
+    // workspace (`node_get_in_direction_floating`, sway/commands/focus.c:226-258, 457-460).
+    if state
+        .swayward
+        .layout
+        .active_workspace()
+        .is_some_and(|workspace| {
+            workspace.floating_is_active() && !workspace.focused_floating_tree_child()
+        })
+    {
+        let direction = match direction {
+            Direction::Left => crate::layout::tiling_tree::Direction::Left,
+            Direction::Right => crate::layout::tiling_tree::Direction::Right,
+            Direction::Up => crate::layout::tiling_tree::Direction::Up,
+            Direction::Down => crate::layout::tiling_tree::Direction::Down,
+        };
+        if state
+            .swayward
+            .layout
+            .active_workspace_mut()
+            .is_some_and(|workspace| workspace.focus_floating_direction(direction))
+        {
+            state.swayward.queue_redraw_all();
+        }
+        return None;
+    }
     let wrapping = state.swayward.config.borrow().layout.focus_wrapping;
     let local_wrap = matches!(
         wrapping,

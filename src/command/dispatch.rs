@@ -14,6 +14,8 @@ use crate::swayward::State;
 
 pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     state.ipc_begin_workspace_transaction();
+    // Focus changes outside commands (a mapped view, a pointer) move the seat too.
+    state.swayward.layout.sync_seat_workspace();
     // Sway expands variables before dispatch, for every argument except the
     // name being defined by `set` (`sway/sway/commands.c:283-285`). This is the
     // single choke point for both IPC commands and key bindings, matching
@@ -38,6 +40,9 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
             // (`sway/sway/commands.c:288-293`).
             Err(error) => error.resolve(super::targeted::focused_node(state)),
         };
+        // Sway updates the seat's previous workspace on every focus change
+        // (sway/input/seat.c:1098-1113).
+        state.swayward.layout.sync_seat_workspace();
         let invalid = is_invalid(&outcome);
         outcomes.push(outcome);
         if invalid {

@@ -254,6 +254,35 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// Ranks a floating view that arrived without focus by when it last had focus, as sway's
+    /// single seat focus stack does: focused more recently than every view already here, it
+    /// becomes the workspace's focus-inactive node (sway/input/seat.c:1357-1372).
+    pub fn rank_arrived_floating_window(&mut self, window: &W::Id) {
+        let stamp_of = |tile: &Tile<W>| tile.window().focus_timestamp();
+        let Some(stamp) = self
+            .floating
+            .tiles()
+            .find(|tile| tile.window().id() == window)
+            .and_then(stamp_of)
+        else {
+            return;
+        };
+        let newer = self
+            .floating
+            .tiles()
+            .chain(self.tiling.tiles())
+            .filter(|tile| tile.window().id() != window)
+            .any(|tile| stamp_of(tile) >= Some(stamp));
+        if !newer && self.floating.activate_window_without_raising(window) {
+            self.floating_is_active = FloatingActive::Yes;
+        }
+    }
+
+    /// `focus <direction>` from a focused floating root (sway/commands/focus.c:457-460).
+    pub fn focus_floating_direction(&mut self, direction: Direction) -> bool {
+        self.floating_is_active.get() && self.floating.focus_direction_without_wrap(direction)
+    }
+
     pub fn focused_floating_tree_child(&self) -> bool {
         self.floating_is_active.get() && self.floating.focused_tree_child()
     }
@@ -313,6 +342,12 @@ impl<W: LayoutElement> Workspace<W> {
         direction: crate::layout::tiling_tree::Direction,
     ) -> bool {
         if self.tiling.is_empty() {
+            // With nothing tiled, sway focuses the workspace itself, never a floating view
+            // (`get_node_in_output_direction`, sway/commands/focus.c:93-135).
+            if !self.floating.is_empty() {
+                self.floating_is_active = FloatingActive::NoButRaised;
+                return true;
+            }
             return false;
         }
         self.floating_is_active = FloatingActive::No;
