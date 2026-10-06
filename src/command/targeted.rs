@@ -854,14 +854,30 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
         }
     }
     // A hidden scratchpad group has no workspace, so a match on one of its
-    // nodes targets the group through one of its windows; the scratchpad
-    // commands act on the whole group from any of them.
+    // splits targets the group through one of its windows; the scratchpad
+    // commands act on the whole group from any of them. Its views are views
+    // like any other, matched by view criteria and acted on directly
+    // (`sway/sway/tree/root.c:250-257`). They have a parent, so they are
+    // tiling (`sway/sway/tree/container.c:1041-1050`).
     for (node, window) in layout.scratchpad_tree_nodes() {
-        if let Some(mapped) = mapped_by_window.get(window) {
-            candidates.push(Candidate::Container(
+        let Some(mapped) = mapped_by_window.get(window) else {
+            continue;
+        };
+        let leaf = layout
+            .scratchpad_trees()
+            .find_map(|(tree, _)| tree.window_for_node(node).cloned())
+            .and_then(|leaf| mapped_by_window.get(&leaf).copied());
+        match leaf {
+            Some(leaf) => {
+                let snapshot = snapshots
+                    .remove(&leaf.id())
+                    .unwrap_or_else(|| WindowSnapshot::new(leaf, None, false));
+                candidates.push(Candidate::Window(snapshot));
+            }
+            None => candidates.push(Candidate::Container(
                 CommandTarget::Window(mapped.id()),
                 node,
-            ));
+            )),
         }
     }
     // Hidden scratchpad windows, then anything the walk did not reach (a

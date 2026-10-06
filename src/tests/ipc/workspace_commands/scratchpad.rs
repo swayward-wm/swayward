@@ -998,3 +998,74 @@ fn focus_next_sibling_wraps_inside_a_floating_split() {
         );
     }
 }
+
+/// Random oracle seed 15489 (differential_seed_15489): `focus parent; move
+/// scratchpad` on a workspace wraps its children and hides the wrapper
+/// (sway/commands/move.c:921-931); a criteria `kill` then matches a view
+/// inside the hidden wrapper and closes it (sway/commands/kill.c).
+#[test]
+fn criteria_kill_closes_a_view_inside_a_hidden_workspace_wrapper() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let mut surfaces = Vec::new();
+    for app_id in ["one", "two"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        surfaces.push(surface);
+    }
+    for command in ["focus parent", "move scratchpad", r#"[app_id="two"] kill"#] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    f.double_roundtrip(client);
+    let closed = surfaces
+        .iter()
+        .map(|surface| f.client(client).window(surface).close_requested)
+        .collect::<Vec<_>>();
+    assert_eq!(closed, [false, true]);
+}
+
+/// `floating enable` and `move scratchpad` on a focused workspace wrap its
+/// children and then reset the emptied workspace to splith, whatever its
+/// layout was (sway/commands/floating.c:28-32, sway/commands/move.c:929-933).
+/// Oracle: criteria_kill_in_hidden_scratchpad_wrapper.
+#[test]
+fn wrapping_a_tall_workspace_leaves_it_splith() {
+    for command in ["move scratchpad", "floating enable"] {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1080, 1920));
+        let client = f.add_client();
+        for _ in 0..2 {
+            let window = f.client(client).create_window();
+            window.commit();
+            let surface = window.surface.clone();
+            f.roundtrip(client);
+            let window = f.client(client).window(&surface);
+            window.attach_new_buffer();
+            window.ack_last_and_commit();
+            f.double_roundtrip(client);
+        }
+        let workspace_layout = |f: &mut Fixture| {
+            let tree: swayward_ipc::Node = serde_json::from_value(get_tree(f)).unwrap();
+            tree.nodes[1].nodes[0].layout
+        };
+        assert_eq!(workspace_layout(&mut f), swayward_ipc::NodeLayout::SplitV);
+        for command in ["focus parent", command] {
+            let reply = crate::command::execute(f.niri_state(), command);
+            assert!(reply[0].success, "{command}: {reply:?}");
+        }
+        assert_eq!(
+            workspace_layout(&mut f),
+            swayward_ipc::NodeLayout::SplitH,
+            "{command}"
+        );
+    }
+}
