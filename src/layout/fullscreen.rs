@@ -12,9 +12,13 @@ impl<W: LayoutElement> Layout<W> {
             .and_then(Workspace::focused_container_fullscreen_mode)
     }
 
+    /// Sway's `root->fullscreen_global` is set. A global fullscreen view a
+    /// `layout` wrap detached keeps mode 2 but no longer counts
+    /// (sway/tree/workspace.c:898-910, sway/tree/container.c:1440-1446).
     pub fn global_fullscreen_active(&self) -> bool {
         self.workspaces().any(|(_, _, workspace)| {
             workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global)
+                && !workspace.tiling().global_fullscreen_orphaned()
         })
     }
 

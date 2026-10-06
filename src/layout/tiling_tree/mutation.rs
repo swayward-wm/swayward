@@ -113,7 +113,7 @@ impl<W: LayoutElement> TilingTree<W> {
         // but only a view added directly to the workspace stays unarranged:
         // one added to a container is arranged with its siblings
         // (`arrange_container(parent)`, `sway/tree/view.c:931-940`).
-        let focus_blocked = fullscreen.is_some();
+        let focus_blocked = fullscreen.is_some() && !self.global_fullscreen_orphaned();
         // A global fullscreen container does not set `workspace->fullscreen`
         // (`container_fullscreen_global`, sway/tree/container.c), so
         // `arrange_workspace` lays the new view out with its siblings.

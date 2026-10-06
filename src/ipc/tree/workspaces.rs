@@ -183,6 +183,7 @@ fn describe_workspace(
         &mut tiled.nodes,
         &mut floating_nodes,
         state.visible,
+        !workspace.tiling().global_fullscreen_orphaned(),
     );
     let mut node = common_node(CommonNodeContext {
         id: workspace_id(workspace.id().get()),
@@ -496,16 +497,20 @@ fn order_by_recency(
 
 /// A workspace fullscreen container hides every view outside it, across the
 /// tiling and floating layers (`view_is_visible`,
-/// `sway/sway/tree/view.c:1187-1193`).
+/// `sway/sway/tree/view.c:1187-1193`). A tiling global fullscreen view a
+/// `layout` wrap orphaned hides nothing (`tiling_fullscreen_hides` false).
 fn apply_workspace_visibility(
     layout: NodeLayout,
     focus: &[i64],
     nodes: &mut [Node],
     floating_nodes: &mut [Node],
     workspace_visible: bool,
+    tiling_fullscreen_hides: bool,
 ) {
     let floating_fullscreen = floating_nodes.iter().any(contains_fullscreen);
-    let tiling_fullscreen = if floating_fullscreen {
+    let tiling_fullscreen = if !tiling_fullscreen_hides {
+        false
+    } else if floating_fullscreen {
         for node in nodes.iter_mut() {
             set_windows_visible(node, false);
         }

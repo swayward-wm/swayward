@@ -90,6 +90,7 @@ impl<W: LayoutElement> TilingTree<W> {
             _ => HashMap::new(),
         };
         self.fullscreen_tile_slot = false;
+        self.orphaned_global_fullscreen = None;
         self.fullscreen_arrived = false;
         self.wrapper_arranged_boxes.clear();
         self.fullscreen_rearranged = false;
@@ -213,6 +214,17 @@ impl<W: LayoutElement> TilingTree<W> {
     pub fn has_global_fullscreen(&self) -> bool {
         self.fullscreen_node()
             .is_some_and(|id| self.fullscreen_mode(id) == Some(FullscreenMode::Global))
+    }
+
+    /// The fullscreen node is a global one sway no longer tracks as
+    /// `root->fullscreen_global` (see `orphaned_global_fullscreen`): it keeps
+    /// mode 2 but hides nothing (`view_is_visible`, sway/tree/view.c:1195-1201)
+    /// and does not stop a new view taking focus (`should_focus`,
+    /// sway/tree/view.c:707-710).
+    pub fn global_fullscreen_orphaned(&self) -> bool {
+        self.orphaned_global_fullscreen.is_some()
+            && self.orphaned_global_fullscreen == self.fullscreen_node()
+            && self.has_global_fullscreen()
     }
 
     /// Sway's `arrange_container` on each pending fullscreen layout wrapper:

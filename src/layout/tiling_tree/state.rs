@@ -68,6 +68,7 @@ impl<W: LayoutElement> TilingTree<W> {
             moved_under_fullscreen: HashMap::new(),
             ipc_focus_follows_history: false,
             fullscreen_tile_slot: false,
+            orphaned_global_fullscreen: None,
             fullscreen_arrived: false,
             wrapper_arranged_boxes: HashMap::new(),
             unarranged_wrappers: HashSet::new(),

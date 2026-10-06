@@ -1321,6 +1321,66 @@ fn layout_wrap_under_global_fullscreen_arranges_the_wrapper() {
     assert_eq!(wrapper["nodes"][0]["percent"], 1.0, "{wrapper}");
 }
 
+// Differential family diff-fam-global-fullscreen-layout-visible, seeds 15443,
+// 15460, 15874, 16170 and 16883; oracle rows
+// global_fullscreen_layout_wrap_shows_siblings and
+// global_fullscreen_layout_wrap_new_view_focus. The layout wrap detaches the
+// global fullscreen view, which clears `root->fullscreen_global`
+// (sway/tree/workspace.c:898-910, sway/tree/container.c:1440-1446) while the
+// view keeps mode 2. With no fullscreen container left, `view_is_visible`
+// hides nothing (sway/tree/view.c:1195-1201) and `should_focus` lets a new
+// view take focus (sway/tree/view.c:707-710).
+#[test]
+fn layout_wrap_orphans_global_fullscreen_so_nothing_is_hidden() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(&mut f, &["fullscreen toggle global", "layout splitv"]);
+
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    let two = find_json_node_with_app_id(&tree, "two").unwrap();
+    assert_eq!(two["fullscreen_mode"], 2, "{two}");
+    assert_eq!(two["visible"], true, "{two}");
+    assert_eq!(one["visible"], true, "{one}");
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(&mut f, &["fullscreen toggle global", "layout stacking"]);
+    map_app(&mut f, client, "two");
+
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    let two = find_json_node_with_app_id(&tree, "two").unwrap();
+    assert_eq!(one["fullscreen_mode"], 2, "{one}");
+    assert_eq!(one["focused"], false, "{one}");
+    assert_eq!(one["visible"], false, "{one}");
+    assert_eq!(two["focused"], true, "{two}");
+    assert_eq!(two["visible"], true, "{two}");
+
+    // `workspace` refuses only while `root->fullscreen_global` is set
+    // (sway/commands/workspace.c:175-178), which the wrap cleared.
+    assert!(crate::command::execute(f.niri_state(), "workspace number 3")[0].success);
+
+    // `move container` tests the container's own mode instead
+    // (sway/commands/move.c:438-441), so the orphaned view refuses.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(&mut f, &["fullscreen toggle global", "layout toggle all"]);
+    let reply = &crate::command::execute(f.niri_state(), "move container to workspace next")[0];
+    assert!(!reply.success, "{reply:?}");
+    assert_eq!(
+        reply.error.as_deref(),
+        Some("Can't move fullscreen global container")
+    );
+}
+
 // Differential family diff-fam-fullscreen-percent, seeds 2674 and 1158. Sway gives the
 // last of three columns of 1280 the 426 px remainder (sway/tree/arrange.c:
 // 78-88), and a fullscreen child's percent is the output over that box.

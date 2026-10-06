@@ -221,6 +221,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 .filter(|_| !global)
                 .map(|_| self.compute_geometry().ipc_nodes);
             self.fullscreen_tile_slot = global;
+            self.orphaned_global_fullscreen = self.fullscreen_node().filter(|_| global);
             let wrapper = self.wrap_root_children(layout);
             if let Some(rects) = pre_layout_ipc_rects {
                 self.fullscreen_layout_wrappers.insert(wrapper);

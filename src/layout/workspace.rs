@@ -773,8 +773,12 @@ impl<W: LayoutElement> Workspace<W> {
                 } else {
                     InsertTarget::Focused
                 };
-                // Don't steal focus from an active fullscreen window.
-                let activate = activate.map_smart(|| !self.is_active_pending_fullscreen());
+                // Don't steal focus from an active fullscreen window, unless
+                // it is a global one sway no longer tracks after a `layout`
+                // wrap (`should_focus`, sway/tree/view.c:707-710).
+                let activate = activate.map_smart(|| {
+                    !self.is_active_pending_fullscreen() || self.tiling.global_fullscreen_orphaned()
+                });
 
                 // If the tile is pending maximized or fullscreen, open it in the tiling layout,
                 // where it can enter those states.

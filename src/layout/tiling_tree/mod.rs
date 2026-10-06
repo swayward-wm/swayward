@@ -493,6 +493,12 @@ pub struct TilingTree<W: LayoutElement> {
     /// `arrange_container(parent)` gives it the slot's pending box until the
     /// next workspace arrange restores the output box.
     fullscreen_tile_slot: bool,
+    /// A global fullscreen node a `layout` wrap detached. Detaching clears
+    /// `root->fullscreen_global` and reattaching does not restore it, while
+    /// the node keeps `FULLSCREEN_GLOBAL` (sway/tree/workspace.c:898-910,
+    /// sway/tree/container.c:1440-1446), so sway no longer hides or blocks
+    /// anything for it. Only meaningful while it is still the fullscreen node.
+    orphaned_global_fullscreen: Option<NodeId>,
     /// The fullscreen node arrived in this tree already fullscreen. Sway gives
     /// a moved container a zero width fraction and arranges only the
     /// fullscreen node (`container_move_to_workspace`,

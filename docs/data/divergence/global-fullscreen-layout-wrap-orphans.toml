@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs"]
+what = "let a new tiled view take focus when the active workspace's fullscreen node is a global fullscreen view that a `layout` wrap detached."
+why = "Sway's `workspace_wrap_children` detaches the view, which clears `root->fullscreen_global` without restoring it, while the view keeps mode 2 (sway/tree/workspace.c:898-910, sway/tree/container.c:1440-1446). `should_focus` then sees no fullscreen container and focuses the new view (sway/tree/view.c:707-710), and `view_is_visible` hides nothing for it (sway/tree/view.c:1195-1201). Differential family diff-fam-global-fullscreen-layout-visible."
