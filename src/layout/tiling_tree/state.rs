@@ -207,6 +207,15 @@ impl<W: LayoutElement> TilingTree<W> {
         self.empty_representation_layout = Some(layout);
     }
 
+    /// Sets an empty tree's layout without recording a `layout` command.
+    pub fn set_empty_layout(&mut self, layout: Layout) {
+        if !self.is_empty() {
+            return;
+        }
+        self.set_layout_keeping_previous(self.root, layout);
+        self.empty_representation_layout = Some(layout);
+    }
+
     pub fn preserve_empty_auto_layout(&mut self) {
         let Some(&TreeNode::Split { layout, .. }) =
             self.nodes.get(&self.root).map(|node| &node.value)

@@ -878,6 +878,11 @@ pub(super) fn move_target_to_mark(
         wrap_moved_workspace_root(state, source);
         return failure(format!("Mark '{mark}' not found"));
     };
+    if destination == source {
+        // A container moved to its own mark stays put
+        // (`container_move_to_container`, sway/commands/move.c:243-246).
+        return success();
+    }
     let destination = match resolve_mark_destination(state, destination) {
         Ok(MarkDestination::Scratchpad) => {
             return move_window_to_mark_workspace(state, source, None)
@@ -919,6 +924,17 @@ pub(super) fn move_target_to_mark(
             source
         }
     };
+    if source.0 == destination.0 && state.swayward.layout.is_tiling_root(source.0, source.1) {
+        // Sway wraps the workspace's children first, then the move is a no-op
+        // because the mark is inside the wrapper; the old workspace is still
+        // arranged (sway/commands/move.c:430-436, 243-246 and 628-635).
+        state
+            .swayward
+            .layout
+            .wrap_moved_workspace_root(source.0, source.1, false);
+        state.swayward.queue_redraw_all();
+        return success();
+    }
     let remapped = match state.swayward.layout.move_tiling_subtree_to_node(
         source.0,
         source.1,

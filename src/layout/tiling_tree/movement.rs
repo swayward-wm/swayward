@@ -153,14 +153,33 @@ impl<W: LayoutElement> TilingTree<W> {
             return true;
         }
         let old = self.compute_geometry();
+        let focus_moved = self
+            .focus
+            .is_some_and(|focus| self.contains_node(id, focus));
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
         };
         self.unarranged_under_fullscreen.clear();
         self.insert_child(parent, id, after);
-        self.reap_empty_from(old_parent);
-        self.compact_tree();
-        self.reinsert_focus_history(moved, usize::from(self.focus.is_some()));
+        if focus_moved {
+            // Moving never touches the seat stack itself. Only a moved focused
+            // container refocuses: the most recent entry under the old parent,
+            // else under the workspace, before reaping. Refocusing the current
+            // focus, or keeping a focused descendant, leaves the stack as it
+            // was (sway/commands/move.c:589-608; `seat_set_workspace_focus`,
+            // sway/input/seat.c:1131-1134).
+            let target = (self.focus == Some(id))
+                .then(|| self.transfer_focus_target(None, Some(old_parent)))
+                .flatten()
+                .filter(|(target, _)| Some(*target) != self.focus);
+            self.reap_empty_from(old_parent);
+            self.compact_tree();
+            self.resolve_transfer_focus(target);
+        } else {
+            self.reap_empty_from(old_parent);
+            self.compact_tree();
+            self.reinsert_focus_history(moved, usize::from(self.focus.is_some()));
+        }
         self.animate_geometry_changes(old, None);
         self.request_window_sizes();
         true

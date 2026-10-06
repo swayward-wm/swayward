@@ -838,8 +838,15 @@ impl<W: LayoutElement> Workspace<W> {
         if !floating {
             return self.tiling.contains(node).then_some(node);
         }
+        let whole_workspace = self.tiling.is_root(node);
         let (subtree, old_parent) = self.detach_tiling_subtree(node)?;
         self.tiling.finish_subtree_detach(old_parent);
+        if whole_workspace {
+            // Floating a focused workspace wraps its children and resets the
+            // workspace to splith (sway/commands/floating.c:29-31).
+            self.tiling
+                .set_empty_layout(crate::layout::tiling_tree::Layout::SplitH);
+        }
         let size = Size::from((
             self.working_area.size.w * 0.5,
             self.working_area.size.h * 0.75,

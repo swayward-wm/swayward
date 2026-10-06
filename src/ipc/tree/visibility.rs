@@ -33,6 +33,12 @@ pub(super) fn set_tabbed_percentages(layout: NodeLayout, children: &mut [Node], 
     let area = |rect: Rect| f64::from(rect.width) * f64::from(rect.height);
     let parent_area = area(parent_rect);
     for child in children {
+        // A wrapper sway never arranged keeps calloc's empty box, which the
+        // tree already reports, with no titlebar to subtract
+        // (sway/ipc-json.c:744-755).
+        if !child.nodes.is_empty() && child.rect.width == 0 && child.rect.height <= 0 {
+            continue;
+        }
         // Under a split each child has its own box, so its children measure
         // against that box, not the split's.
         let mut pending_rect = if offset == 0 && !child.nodes.is_empty() {

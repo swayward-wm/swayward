@@ -327,10 +327,27 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                         // Already reported as GET_TREE shows it.
                         return Some(node);
                     }
-                    inset_split_by_parent_titlebar(
-                        &mut node,
-                        tree.titlebar_height * titlebar_rows as f64,
-                    );
+                    let inset = tree.titlebar_height * titlebar_rows as f64;
+                    if self.is_unarranged_wrapper(id) {
+                        // Sway never arranged the wrapper, so each child keeps
+                        // the box the workspace strip gave it; the strip below
+                        // the wrapper's own tab bar was never applied.
+                        lift_unarranged_strip(&mut node, inset, true);
+                    }
+                    match &mut node {
+                        // GET_TREE subtracts the tab rows from the wrapper's
+                        // empty box, so its height goes negative
+                        // (sway/ipc-json.c:816-825).
+                        IpcNode::Split { rect, .. } if self.is_unarranged_wrapper(*child) => {
+                            *rect = signed_rect(
+                                rect.loc.x,
+                                rect.loc.y + inset,
+                                rect.size.w,
+                                rect.size.h - inset,
+                            );
+                        }
+                        _ => inset_split_by_parent_titlebar(&mut node, inset),
+                    }
                     Some(node)
                 })
                 .collect(),
@@ -887,6 +904,21 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                 (sway_box.size.h - rows * tree.titlebar_height - side).max(1.),
             )),
         )
+    }
+}
+
+/// Moves `node`'s subtree up by `height`, growing the top node by the same
+/// amount: the strip offset a never-arranged wrapper did not apply.
+fn lift_unarranged_strip<I>(node: &mut IpcNode<I>, height: f64, grow: bool) {
+    let (IpcNode::Split { rect, .. } | IpcNode::Leaf { rect, .. }) = node;
+    rect.loc.y -= height;
+    if grow {
+        rect.size.h += height;
+    }
+    if let IpcNode::Split { children, .. } = node {
+        for child in children {
+            lift_unarranged_strip(child, height, false);
+        }
     }
 }
 
