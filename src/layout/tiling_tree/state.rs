@@ -81,6 +81,8 @@ impl<W: LayoutElement> TilingTree<W> {
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),
             tab_active: HashMap::new(),
+            cross_percents: HashMap::new(),
+            percent_axes: HashMap::new(),
             closing_windows: Vec::new(),
             view_size,
             parent_area,

@@ -30,6 +30,14 @@ impl<W: LayoutElement> TilingTree<W> {
             }
         }
         self.swap_fullscreen_modes(first, second);
+        // `swap_places` trades both fractions (sway/tree/container.c:1718-1743).
+        let first_cross = self.cross_percents.remove(&first);
+        if let Some(cross) = self.cross_percents.remove(&second) {
+            self.cross_percents.insert(first, cross);
+        }
+        if let Some(cross) = first_cross {
+            self.cross_percents.insert(second, cross);
+        }
         if let Some(other) = raise_after_swap {
             let focus = self.focus;
             self.set_focus_id(Some(other));
@@ -350,33 +358,53 @@ impl<W: LayoutElement> TilingTree<W> {
             return false;
         };
         let insert_index = if backwards { 0 } else { children.len() };
-        // Sway moves the container with its fractions and zeroes only the
-        // ancestor's (sway/commands/move.c:394-408). The fraction it keeps is
-        // on its old parent's axis, and only split layouts set one
-        // (`apply_horiz_layout`, sway/tree/arrange.c), so it counts only when
-        // that parent is a split along this axis.
-        let old_share = self
+        // Sway moves the container with both its fractions and zeroes only
+        // the ancestor's (sway/commands/move.c:394-408). Only split layouts
+        // set a fraction (`apply_horiz_layout`, sway/tree/arrange.c), so the
+        // old parent's share is on its axis only when it is a split. The
+        // other fraction is the one the container keeps across that.
+        let old_slot = self
             .nodes
             .get(&id)
             .and_then(|node| node.parent)
             .and_then(
                 |old_parent| match self.nodes.get(&old_parent).map(|node| &node.value) {
                     Some(TreeNode::Split {
-                        layout,
+                        layout: layout @ (Layout::SplitH | Layout::SplitV),
                         children,
                         percents,
                         ..
-                    }) if *layout == wanted_layout => children
+                    }) => children
                         .iter()
                         .position(|child| *child == id)
-                        .and_then(|index| percents.get(index).copied()),
+                        .and_then(|index| percents.get(index).copied())
+                        .map(|share| (*layout, share)),
                     _ => None,
                 },
             );
+        let cross = self.cross_percents.get(&id).copied();
+        let (old_share, kept_cross) = match old_slot {
+            Some((axis, share)) if axis == wanted_layout => (Some(share), cross),
+            Some(slot) => (
+                cross
+                    .filter(|(axis, _)| *axis == wanted_layout)
+                    .map(|(_, share)| share),
+                Some(slot),
+            ),
+            None => (
+                cross
+                    .filter(|(axis, _)| *axis == wanted_layout)
+                    .map(|(_, share)| share),
+                None,
+            ),
+        };
         let Some(old_parent) = self.detach_subtree_only(id) else {
             return false;
         };
         self.insert_existing_child(boundary_root, id, insert_index, boundary);
+        if let Some(kept) = kept_cross {
+            self.cross_percents.insert(id, kept);
+        }
         match old_share {
             Some(share) => {
                 self.set_child_percent(boundary_root, id, share);
@@ -834,6 +862,12 @@ impl<W: LayoutElement> TilingTree<W> {
             parent: Some(self.root),
             value: old_value,
         });
+        // The wrapper keeps the old split's layout and fractions; the moved
+        // container's are zeroed (sway/commands/move.c:333-344).
+        if let Some(axis) = self.percent_axes.remove(&self.root) {
+            self.percent_axes.insert(old, axis);
+        }
+        self.cross_percents.remove(&id);
         // `workspace_wrap_children` creates this container without focusing
         // it, and a new node joins the tail of the seat focus stack
         // (`handle_new_node`/`seat_node_from_node`, sway/input/seat.c:327-357),

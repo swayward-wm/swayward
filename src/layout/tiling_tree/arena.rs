@@ -73,6 +73,9 @@ impl<W: LayoutElement> TilingTree<W> {
             .get_mut(&child)
             .expect("invariant: the validated inserted child remains in the arena")
             .parent = Some(parent);
+        // A new or moved container arrives with both fractions zeroed
+        // (sway/commands/move.c:135-172,228-255).
+        self.cross_percents.remove(&child);
     }
 
     /// Gives each of `fresh` (children of `parent` whose fraction sway
@@ -165,6 +168,7 @@ impl<W: LayoutElement> TilingTree<W> {
             .get_mut(&child)
             .expect("invariant: the validated inserted child remains in the arena")
             .parent = Some(parent);
+        self.cross_percents.remove(&child);
     }
 
     pub(super) fn remove_child(&mut self, parent: NodeId, child: NodeId) {

@@ -49,6 +49,12 @@ fn seed_side_table(t: &mut TilingTree<TestWindow>, name: &str, id: NodeId) {
         "last_entered_by" => {
             t.last_entered_by.insert(id, id);
         }
+        "cross_percents" => {
+            t.cross_percents.insert(id, (Layout::SplitH, 1.));
+        }
+        "percent_axes" => {
+            t.percent_axes.insert(id, Layout::SplitH);
+        }
         other => panic!("seed_side_table does not cover side table {other}"),
     }
 }

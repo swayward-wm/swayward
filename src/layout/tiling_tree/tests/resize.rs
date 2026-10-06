@@ -51,7 +51,7 @@ fn fixed_resize_entry_points_use_the_tiled_child_extent() {
 #[test]
 fn set_size_entry_points_use_parent_extent_and_all_siblings() {
     let resize = |sway| {
-        let mut t = tree((1000., 800.), 0.);
+        let mut t = tree((2000., 800.), 0.);
         t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
         let top_right = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
         t.split(top_right, Layout::SplitV);
@@ -73,9 +73,11 @@ fn set_size_entry_points_use_parent_extent_and_all_siblings() {
     for (actual, expected) in resize(false).into_iter().zip(sway) {
         assert!((actual - expected).abs() < 1e-9);
     }
-    // The 500 px column splits 167/167/166; snapped, 60 ppt makes 300, then
-    // round(100.5) = 101 and the remainder 99 (sway/commands/resize.c:126-136).
-    assert_eq!(sway, [300., 101., 99.]);
+    // The 1000 px column splits 334/333/333; snapped, 60 ppt makes 600 and
+    // each sibling gives up 133 (sway/commands/resize.c:121-136). In a 500 px
+    // column the 166 px sibling would drop to 99, below MIN_SANE_W, and sway
+    // would skip the resize (sway/commands/resize.c:108-120).
+    assert_eq!(sway, [600., 200., 200.]);
 }
 
 #[test]
@@ -355,7 +357,7 @@ fn sway_set_size_uses_the_matching_axis_branch_extent() {
 
 #[test]
 fn sway_set_percentage_uses_nearest_axis_parent_and_all_its_siblings() {
-    let mut t = tree((1001., 800.), 0.);
+    let mut t = tree((2001., 800.), 0.);
     let outer_left = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
     let nested_top = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
     t.split(nested_top, Layout::SplitV);
@@ -369,7 +371,7 @@ fn sway_set_percentage_uses_nearest_axis_parent_and_all_its_siblings() {
 
     let widths = [outer_left, nested_top, nested_middle, nested_right]
         .map(|id| t.geometry(id).unwrap().size.w);
-    assert_eq!(widths, [501., 300., 101., 99.]);
+    assert_eq!(widths, [1001., 600., 200., 200.]);
     t.check_invariants();
 }
 
@@ -425,7 +427,12 @@ fn tiled_presets_cycle_from_the_current_size_in_both_directions() {
     t.toggle_window_width(Some(&1), false);
     assert_eq!(t.geometry(first).unwrap().size.w, 900.);
 
+    // The flip arranges with the height fractions, which no resize set, so
+    // the views start even at 450 (sway/tree/arrange.c:105-137).
     t.set_layout(t.root, Layout::SplitV);
+    assert_eq!(t.geometry(first).unwrap().size.h, 450.);
+    t.toggle_window_height(Some(&1), true);
+    assert_eq!(t.geometry(first).unwrap().size.h, 675.);
     t.toggle_window_height(Some(&1), true);
     assert_eq!(t.geometry(first).unwrap().size.h, 225.);
     t.toggle_window_height(Some(&1), true);

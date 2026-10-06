@@ -5,6 +5,7 @@ mod arena;
 mod configure;
 mod depth;
 mod focus;
+mod fractions;
 mod fullscreen;
 mod geometry;
 mod introspection;
@@ -455,6 +456,8 @@ macro_rules! side_tables {
             ("split_under_fullscreen", $($ref)+ $tree.split_under_fullscreen),
             ("tab_indicators", $($ref)+ $tree.tab_indicators),
             ("tab_active", $($ref)+ $tree.tab_active),
+            ("cross_percents", $($ref)+ $tree.cross_percents),
+            ("percent_axes", $($ref)+ $tree.percent_axes),
         ]
     };
 }
@@ -537,6 +540,15 @@ pub struct TilingTree<W: LayoutElement> {
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,
     tab_active: HashMap<NodeId, NodeId>,
+    /// A child's fraction on the axis (`SplitH` for width, `SplitV` for height) its
+    /// parent's `percents` are not on. Sway keeps a `width_fraction` and a
+    /// `height_fraction` per container and arranges a split with only the one
+    /// along its axis (`apply_horiz_layout`/`apply_vert_layout`,
+    /// sway/tree/arrange.c:15-182). A missing entry is sway's unset 0.
+    cross_percents: HashMap<NodeId, (Layout, f64)>,
+    /// The axis a tabbed or stacked split's `percents` were last arranged on. Tabbed and
+    /// stacked layouts leave both fractions alone (sway/tree/arrange.c:184-212).
+    percent_axes: HashMap<NodeId, Layout>,
     closing_windows: Vec<ClosingWindow>,
     view_size: Size<f64, Logical>,
     parent_area: Rectangle<f64, Logical>,

@@ -301,6 +301,7 @@ impl<W: LayoutElement> TilingTree<W> {
             unreachable!();
         };
         *root_layout = layout;
+        self.percent_axes.remove(&self.root);
         // The root keeps any metadata the detached split does not set.
         if detached_meta.previous_layout.is_some() {
             meta.previous_layout = detached_meta.previous_layout;

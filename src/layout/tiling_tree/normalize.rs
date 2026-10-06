@@ -118,6 +118,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 .get_mut(&child)
                 .expect("invariant: a split's only child is present in the arena")
                 .parent = Some(parent);
+            self.take_over_fractions(id, child);
             if let Some(fullscreen) = self.pending_modes.get(&id).and_then(|mode| mode.fullscreen) {
                 self.set_pending_fullscreen(child, Some(fullscreen));
             }
