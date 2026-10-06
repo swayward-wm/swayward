@@ -1229,6 +1229,27 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .flatten()
     }
 
+    /// The fullscreen mode `node` holds itself in a floating group, not one
+    /// it inherits from a fullscreen ancestor.
+    pub fn node_own_fullscreen_mode(
+        &self,
+        node: NodeId,
+    ) -> Option<super::tiling_tree::FullscreenMode> {
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.tree.contains(node))
+            .and_then(|entry| entry.tree.fullscreen_mode(node))
+    }
+
+    /// The fullscreen mode `window`'s own leaf holds in a floating group.
+    pub fn window_own_fullscreen_mode(
+        &self,
+        window: &W::Id,
+    ) -> Option<super::tiling_tree::FullscreenMode> {
+        let (idx, node) = self.tree_entry_for_window(window)?;
+        self.tree_entries[idx].tree.fullscreen_mode(node)
+    }
+
     pub fn fullscreen_contains_window(&self, window: &W::Id) -> bool {
         self.tree_entry_for_window(window)
             .is_some_and(|(idx, node)| {

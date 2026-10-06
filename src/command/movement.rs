@@ -480,6 +480,9 @@ pub(super) fn move_target_to_workspace(
     preserve_empty_workspace: bool,
     auto_back_and_forth: bool,
 ) -> CommandOutcome {
+    if let Err(refused) = refuse_global_fullscreen_move(state, target) {
+        return refused;
+    }
     let focused_before = focused_view(state);
     let result = match target {
         CommandTarget::Window(target) => {
@@ -491,9 +494,6 @@ pub(super) fn move_target_to_workspace(
             let Some(window) = window else {
                 return failure("No matching node.");
             };
-            if state.swayward.layout.window_is_global_fullscreen(&window) {
-                return failure("Can't move fullscreen global container");
-            }
             if let Err(error) = state.swayward.layout.refuse_sticky_move_on_same_output(
                 &window,
                 &workspace_target,
@@ -509,15 +509,6 @@ pub(super) fn move_target_to_workspace(
                 .map(|_| ())
         }
         CommandTarget::Container(workspace, node) => {
-            if state
-                .swayward
-                .layout
-                .tiling_node_fullscreen_mode(workspace, node)
-                .flatten()
-                == Some(crate::layout::tiling_tree::FullscreenMode::Global)
-            {
-                return failure("Can't move fullscreen global container");
-            }
             let (_, remapped) = match state.swayward.layout.move_tiling_subtree_to_sway_workspace(
                 workspace,
                 node,
@@ -1089,14 +1080,6 @@ pub(super) fn to_workspace_focused(
     target: WorkspaceTarget,
     auto_back_and_forth: bool,
 ) -> super::HandlerResult {
-    if state.swayward.layout.global_fullscreen_active()
-        && state
-            .swayward
-            .layout
-            .focused_window_is_fullscreen_or_child()
-    {
-        return Err(failure("Can't move fullscreen global container"));
-    }
     let Some(focused) = super::targeted::focused_target(state) else {
         return Err(super::failure("Can't move an empty workspace"));
     };
@@ -1116,12 +1099,35 @@ pub(super) fn to_workspace_focused(
     ))
 }
 
+/// `move container|window to workspace|output|mark` refuses a container that
+/// is itself global fullscreen before it resolves the destination
+/// (sway/commands/move.c:438-441). A child of a global fullscreen split holds
+/// no mode of its own and moves.
+pub(super) fn refuse_global_fullscreen_move(
+    state: &State,
+    target: CommandTarget,
+) -> Result<(), CommandOutcome> {
+    let layout = &state.swayward.layout;
+    let mode = match target {
+        CommandTarget::Container(workspace, node) => {
+            layout.node_own_fullscreen_mode(workspace, node)
+        }
+        CommandTarget::Window(window) => super::mapped_window(state, window)
+            .and_then(|window| layout.window_own_fullscreen_mode(&window)),
+    };
+    if mode == Some(crate::layout::tiling_tree::FullscreenMode::Global) {
+        return Err(failure("Can't move fullscreen global container"));
+    }
+    Ok(())
+}
+
 pub(super) fn to_mark_focused(state: &mut State, mark: &str) -> super::HandlerResult {
     // Sway rejects an empty focused workspace before it resolves the mark
     // (sway/commands/move.c:430-434).
     let Some(source) = super::targeted::focused_target(state) else {
         return Err(failure("Can't move an empty workspace"));
     };
+    refuse_global_fullscreen_move(state, source)?;
     super::handled_outcome(move_target_to_mark(state, source, mark))
 }
 
@@ -1131,6 +1137,7 @@ pub(super) fn to_output_focused(state: &mut State, target: &OutputTarget) -> sup
     let Some(focused_target) = super::targeted::focused_target(state) else {
         return Err(failure("Can't move an empty workspace"));
     };
+    refuse_global_fullscreen_move(state, focused_target)?;
     let focused = state
         .swayward
         .layout
@@ -1177,6 +1184,7 @@ pub(super) fn to_output_targeted(
     target: CommandTarget,
     output_target_name: &OutputTarget,
 ) -> super::HandlerResult {
+    refuse_global_fullscreen_move(state, target)?;
     let CommandTarget::Window(target) = target else {
         return Err(failure("command requires a window target"));
     };

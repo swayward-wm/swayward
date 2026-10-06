@@ -319,6 +319,7 @@ fn run_targeted(
             ))
         }
         Command::MoveToMark(mark) => {
+            movement::refuse_global_fullscreen_move(state, target)?;
             super::handled_outcome(move_target_to_mark(state, target, mark))
         }
         Command::MoveWorkspaceToOutput(output) => {

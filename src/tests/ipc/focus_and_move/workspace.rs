@@ -550,6 +550,57 @@ fn global_fullscreen_refuses_every_workspace_switch() {
 }
 
 #[test]
+fn global_fullscreen_refuses_a_move_before_resolving_the_destination() {
+    // `move container to ...` refuses a global fullscreen container before it
+    // looks up the mark, workspace or output (sway/commands/move.c:438-441,
+    // 526-531). After `split v` the view is a child of the fullscreen split and
+    // holds no mode itself (`container_replace`, sway/tree/container.c:1471-1503),
+    // so it moves. Differential family move-global-fullscreen-error-precedence,
+    // random-v2 seeds 15845, 15873, 15900, 17634; oracle row
+    // move_global_fullscreen_error_precedence.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    windows_on_workspaces(&mut f, &[("1", "first"), ("1", "second")]);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle global")[0].success);
+    let refusal = || swayward_ipc::CommandOutcome {
+        success: false,
+        error: Some("Can't move fullscreen global container".into()),
+        parse_error: Some(false),
+    };
+    for command in [
+        "move container to mark oracle",
+        "move container to workspace number 3",
+        "move window to output nope",
+        "[app_id=second] move container to mark oracle",
+        "[app_id=second] move container to workspace 3",
+    ] {
+        assert_eq!(
+            crate::command::execute(f.niri_state(), command),
+            [refusal()],
+            "{command}"
+        );
+    }
+    // Another view is not the fullscreen container: its own missing mark wins.
+    assert_eq!(
+        crate::command::execute(
+            f.niri_state(),
+            "[app_id=first] move container to mark oracle"
+        ),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Mark 'oracle' not found".into()),
+            parse_error: Some(false),
+        }]
+    );
+    assert!(f.swayward().layout.global_fullscreen_active());
+
+    assert!(crate::command::execute(f.niri_state(), "split v")[0].success);
+    let outcome = crate::command::execute(f.niri_state(), "move container to workspace number 3");
+    assert!(outcome[0].success, "{outcome:?}");
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
 fn prev_on_output_after_focus_parent_refocuses_the_workspace_view() {
     // `workspace_switch` focuses `seat_get_focus_inactive(ws)`, a view inside
     // the workspace, even when the workspace itself held focus after

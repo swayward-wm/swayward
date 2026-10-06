@@ -18,23 +18,30 @@ impl<W: LayoutElement> Layout<W> {
         })
     }
 
-    /// Whether `window`'s own container is global fullscreen, which
-    /// `move container` refuses (sway/commands/move.c:438-441).
-    pub fn window_is_global_fullscreen(&self, window: &W::Id) -> bool {
-        self.workspaces().any(|(_, _, workspace)| {
-            let tiling = workspace.tiling();
-            tiling.node_for_window(window).is_some_and(|node| {
-                tiling.fullscreen_mode(node) == Some(tiling_tree::FullscreenMode::Global)
-            })
+    /// The fullscreen mode a window's own container holds, sway's
+    /// `container->pending.fullscreen_mode`. A child of a fullscreen split
+    /// holds none (`container_replace`, sway/tree/container.c:1471-1503).
+    pub fn window_own_fullscreen_mode(&self, id: &W::Id) -> Option<tiling_tree::FullscreenMode> {
+        self.workspaces().find_map(|(_, _, workspace)| {
+            match workspace.tiling().node_for_window(id) {
+                Some(node) => workspace.tiling().fullscreen_mode(node),
+                None => workspace.floating().window_own_fullscreen_mode(id),
+            }
         })
     }
 
-    pub fn focused_window_is_fullscreen_or_child(&self) -> bool {
-        let Some(window) = self.focus() else {
-            return false;
-        };
-        self.active_workspace()
-            .is_some_and(|workspace| workspace.fullscreen_contains_window(window.id()))
+    /// [`Self::window_own_fullscreen_mode`] for a split container.
+    pub fn node_own_fullscreen_mode(
+        &self,
+        workspace_id: WorkspaceId,
+        node: NodeId,
+    ) -> Option<tiling_tree::FullscreenMode> {
+        let workspace = self.workspace(workspace_id)?;
+        if workspace.tiling().contains(node) {
+            workspace.tiling().fullscreen_mode(node)
+        } else {
+            workspace.floating().node_own_fullscreen_mode(node)
+        }
     }
 
     pub fn set_focused_fullscreen_mode(&mut self, mode: Option<tiling_tree::FullscreenMode>) {
