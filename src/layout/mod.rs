@@ -3944,9 +3944,14 @@ impl<W: LayoutElement> Layout<W> {
                 monitors[mon_idx].clean_up_workspaces();
             }
             if let Some(workspace_idx) = monitors[new_idx].idx_of_ws(ws_id) {
-                monitors[new_idx].workspaces[workspace_idx]
-                    .tiling_mut()
-                    .sort_focus_history_by_timestamp();
+                let tiling = monitors[new_idx].workspaces[workspace_idx].tiling_mut();
+                tiling.sort_focus_history_by_timestamp();
+                // As on one output, a newer arrival becomes the destination's
+                // focus-inactive container (`seat_get_focus_inactive_tiling`,
+                // sway/input/seat.c:1374-1389).
+                if !activate.map_smart(|| false) {
+                    tiling.rank_arrived_window_by_focus_timestamp(&window);
+                }
             }
         }
     }

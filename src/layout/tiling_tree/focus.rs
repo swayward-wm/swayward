@@ -79,10 +79,13 @@ impl<W: LayoutElement> TilingTree<W> {
                     .is_some_and(|tile| tile.window().focus_timestamp() < Some(stamp))
             })
             .unwrap_or(self.focus_history.len());
+        self.focus_history.insert(rank, leaf);
         if rank == 0 {
-            self.set_focus_id(Some(leaf));
-        } else {
-            self.focus_history.insert(rank, leaf);
+            // The view heads the stack, but its new parent is not raised: the
+            // move attaches it without focusing it (`container_add_child`,
+            // sway/tree/container.c:1426-1438).
+            self.focus = Some(leaf);
+            self.ipc_focus_follows_history = false;
         }
     }
 
@@ -103,6 +106,34 @@ impl<W: LayoutElement> TilingTree<W> {
     /// `seat_get_focus_inactive` (sway/input/seat.c:1357-1372).
     pub fn focus_inactive_in(&self, node: NodeId) -> Option<NodeId> {
         self.focus_inactive_in_matching(node, |_| true)
+    }
+
+    /// The workspace's focus-inactive tiling container, sway's
+    /// `seat_get_focus_inactive_tiling` (sway/input/seat.c:1374-1389).
+    ///
+    /// Sway's focus stack is seat-wide, but this tree's history ranks views
+    /// that arrived by a move or swap behind its own. A view focused more
+    /// recently than the head of the history, and outside it, is therefore
+    /// above it on sway's stack.
+    pub fn focus_inactive_tiling(&self) -> Option<NodeId> {
+        let head = self
+            .focus_history
+            .iter()
+            .copied()
+            .find(|candidate| *candidate != self.root && self.nodes.contains_key(candidate))?;
+        let newest_in = |node: NodeId| {
+            self.leaf_ids_in(node)
+                .into_iter()
+                .filter_map(|leaf| Some((leaf, self.tile(leaf)?.window().focus_timestamp()?)))
+                .max_by_key(|(_, stamp)| *stamp)
+        };
+        let head_stamp = newest_in(head).map(|(_, stamp)| stamp);
+        match newest_in(self.root) {
+            Some((leaf, stamp)) if Some(stamp) > head_stamp && !self.contains_node(head, leaf) => {
+                Some(leaf)
+            }
+            _ => Some(head),
+        }
     }
 
     /// As `focus_inactive_in`, ignoring `excluded` and everything inside it: sway runs this

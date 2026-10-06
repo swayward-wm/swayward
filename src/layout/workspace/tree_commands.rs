@@ -673,12 +673,18 @@ impl<W: LayoutElement> Workspace<W> {
         {
             return false;
         }
+        // Only the focused child takes the tiling focus with it; a criteria
+        // match elsewhere leaves the seat focus alone.
+        let focused = self.floating_is_active.get()
+            && self.floating.active_window().map(|active| active.id()) == Some(window);
         let removed = self.floating.remove_tile(window, Transaction::new());
         let mut tile = removed.tile;
         tile.restore_to_floating = false;
         self.tiling
-            .add_tile_with_activation(tile, InsertTarget::Focused, true);
-        self.floating_is_active = FloatingActive::No;
+            .add_tile_with_activation(tile, InsertTarget::Focused, focused);
+        if focused {
+            self.floating_is_active = FloatingActive::No;
+        }
         true
     }
 

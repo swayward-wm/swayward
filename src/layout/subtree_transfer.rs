@@ -235,6 +235,37 @@ impl<W: LayoutElement> Layout<W> {
         Ok(())
     }
 
+    /// Sway's `move container to workspace` onto the container's own
+    /// workspace: the destination is the workspace's focus-inactive tiling
+    /// container (`seat_get_focus_inactive_tiling`, sway/commands/move.c:516),
+    /// and `container_move_to_container` puts the container after that view
+    /// or into that split (move.c:241-261). It does nothing when the
+    /// destination is the container or inside it, or when the workspace has
+    /// no focus-inactive tiling container (`container_move_to_workspace`
+    /// returns early for the same workspace, move.c:198-202).
+    pub fn move_tiling_node_to_focus_inactive(
+        &mut self,
+        workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+    ) {
+        let Some(workspace) = self.workspace_mut(workspace) else {
+            return;
+        };
+        let tiling = workspace.tiling();
+        if !tiling.contains(node) || tiling.is_root(node) {
+            return;
+        }
+        let Some(destination) = tiling.focus_inactive_tiling() else {
+            return;
+        };
+        if tiling.contains_node(node, destination) {
+            return;
+        }
+        workspace
+            .tiling_mut()
+            .move_subtree_to_node(node, destination);
+    }
+
     pub fn tiling_target_for_window(
         &self,
         window: &W::Id,
@@ -301,6 +332,7 @@ impl<W: LayoutElement> Layout<W> {
             // The wrapper survives even when the destination is the same
             // workspace.
             self.wrap_moved_workspace_root(source_workspace, node, false);
+            self.move_tiling_node_to_focus_inactive(source_workspace, node);
             return Ok((target_workspace, Vec::new()));
         }
         if empty_root {

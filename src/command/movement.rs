@@ -480,6 +480,7 @@ pub(super) fn move_target_to_workspace(
     preserve_empty_workspace: bool,
     auto_back_and_forth: bool,
 ) -> CommandOutcome {
+    let focused_before = focused_view(state);
     let result = match target {
         CommandTarget::Window(target) => {
             let window = state
@@ -490,6 +491,9 @@ pub(super) fn move_target_to_workspace(
             let Some(window) = window else {
                 return failure("No matching node.");
             };
+            if state.swayward.layout.window_is_global_fullscreen(&window) {
+                return failure("Can't move fullscreen global container");
+            }
             if let Err(error) = state.swayward.layout.refuse_sticky_move_on_same_output(
                 &window,
                 &workspace_target,
@@ -505,6 +509,15 @@ pub(super) fn move_target_to_workspace(
                 .map(|_| ())
         }
         CommandTarget::Container(workspace, node) => {
+            if state
+                .swayward
+                .layout
+                .tiling_node_fullscreen_mode(workspace, node)
+                .flatten()
+                == Some(crate::layout::tiling_tree::FullscreenMode::Global)
+            {
+                return failure("Can't move fullscreen global container");
+            }
             let (_, remapped) = match state.swayward.layout.move_tiling_subtree_to_sway_workspace(
                 workspace,
                 node,
@@ -522,8 +535,37 @@ pub(super) fn move_target_to_workspace(
     if let Err(error) = result {
         return failure(error);
     }
+    raise_refocused_view(state, focused_before);
     state.swayward.queue_redraw_all();
     success()
+}
+
+/// Sway's `seat_set_focus` puts the view that takes over focus after a move
+/// at the head of the seat-wide focus stack straight away
+/// (sway/commands/move.c:598-608), so a later match in the same criteria run
+/// that moves it lands it ahead of the others on the destination
+/// (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389).
+fn raise_refocused_view(
+    state: &mut State,
+    focused_before: Option<crate::window::mapped::MappedId>,
+) {
+    let Some(focused) = focused_view(state).filter(|focused| Some(*focused) != focused_before)
+    else {
+        return;
+    };
+    let stamp = crate::utils::get_monotonic_time();
+    state.swayward.layout.with_windows_mut(|mapped, _| {
+        if mapped.id() == focused {
+            mapped.set_focus_timestamp(stamp);
+        }
+    });
+}
+
+/// The view holding seat focus; none while a split or the workspace does.
+fn focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
+    (super::targeted::focused_node(state) == swayward_ipc::command::FocusedNode::View)
+        .then(|| state.swayward.layout.focus().map(|mapped| mapped.id()))
+        .flatten()
 }
 
 fn swap_kind_value(target: &SwapTarget) -> (&'static str, &str) {

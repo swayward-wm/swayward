@@ -679,14 +679,38 @@ impl<W: LayoutElement> Layout<W> {
             if let Some(workspace) = self.workspace_mut(target_workspace) {
                 workspace.tiling_mut().arrange_fullscreen_parent();
             }
+            // A tiled view not itself the destination moves beside it.
+            if let Some(node) = moved_window.as_ref().and_then(|window| {
+                self.workspace(target_workspace)?
+                    .tiling()
+                    .node_for_window(window)
+            }) {
+                self.move_tiling_node_to_focus_inactive(target_workspace, node);
+            }
             return Ok(());
         }
+        // A focused workspace node keeps focus when views arrive on it
+        // (`seat_set_focus(seat, focus)`, sway/commands/move.c:598-608).
+        let target_workspace_focused = !moved_window_was_focused
+            && self.active_workspace().is_some_and(|workspace| {
+                workspace.id() == target_workspace
+                    && (workspace.is_workspace_focused() || workspace.active_window().is_none())
+            });
         if target_output != source_output {
             let output =
                 target_output.ok_or_else(|| "target workspace has no output".to_owned())?;
             self.move_to_output(window, &output, Some(target_index), ActivateWindow::No);
         } else {
             self.move_to_workspace_id(window, target_workspace, ActivateWindow::No);
+        }
+        if target_workspace_focused {
+            if let Some(workspace) = self.workspace_mut(target_workspace).filter(|workspace| {
+                moved_window
+                    .as_ref()
+                    .is_some_and(|window| workspace.tiling().node_for_window(window).is_some())
+            }) {
+                workspace.tiling_mut().focus_root();
+            }
         }
         if let Some(window) = moved_window.filter(|_| moved_window_was_focused) {
             // The move may have been refused, so the target need not exist or
@@ -695,9 +719,13 @@ impl<W: LayoutElement> Layout<W> {
             // above a view moved under it (`workspace_focus_fullscreen`,
             // sway/commands/move.c:96-110), so only refocus the moved view when
             // nothing else on the destination is fullscreen.
+            // A view the move already ranked first keeps its new parent's
+            // place: attaching it raises nothing (`container_add_child`,
+            // sway/tree/container.c:1426-1438).
             if let Some(workspace) = self.workspace_mut(target_workspace).filter(|workspace| {
-                workspace.fullscreen_window().is_none()
-                    || workspace.fullscreen_contains_window(&window)
+                (workspace.fullscreen_window().is_none()
+                    || workspace.fullscreen_contains_window(&window))
+                    && workspace.active_window().map(|active| active.id()) != Some(&window)
             }) {
                 workspace.activate_window(&window);
             }
