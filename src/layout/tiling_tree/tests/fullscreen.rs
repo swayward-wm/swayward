@@ -508,3 +508,147 @@ fn fullscreen_tab_child_reports_its_area_over_the_tab_container() {
         .collect::<Vec<_>>();
     assert_eq!(percents, [Some(1.), Some(2.)]);
 }
+
+// random-v3 seed 40208 step 4 (diff-fam-v3-resize-under-ws-fullscreen): a
+// command resize of a top-level container ends in `arrange_workspace`
+// (sway/commands/resize.c:166-170), which under workspace fullscreen arranges
+// only the fullscreen container (sway/tree/arrange.c:310-316). The hidden
+// sibling's fraction changes but its box, and so its percent, does not.
+#[test]
+fn resize_under_workspace_fullscreen_leaves_sibling_boxes_unarranged() {
+    let mut t = tree((1280., 720.), 0.);
+    let first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let fullscreen = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    assert!(t.set_node_fullscreen(fullscreen, Some(FullscreenMode::Workspace)));
+
+    assert!(t.resize_node_edge_command(
+        fullscreen,
+        crate::utils::ResizeEdge::LEFT,
+        SizeChange::AdjustFixed(20),
+    ));
+
+    let percent = |t: &TilingTree<TestWindow>| {
+        let IpcNode::Split { children, .. } = t.ipc_tree() else {
+            panic!("IPC root must be a split");
+        };
+        let IpcNode::Leaf { id, percent, .. } = &children[0] else {
+            panic!("first child must be a leaf");
+        };
+        assert_eq!(*id, first);
+        *percent
+    };
+    assert_eq!(percent(&t), Some(0.5));
+
+    // The fraction did change. Sway snapped it against the fullscreen
+    // child's output-sized box (sway/commands/resize.c:126-139), so the
+    // fractions were 0.5 - 20/1280 and 1 + 20/1280, and unfullscreening
+    // normalises them: round(1280 * 0.484375 / 1.5) = 413 px.
+    assert!(t.set_node_fullscreen(fullscreen, None));
+    assert_eq!(percent(&t), Some(413. / 1280.));
+    t.check_invariants();
+}
+
+// Oracle: resize_under_workspace_fullscreen_in_wrapper. Resizing a child of a
+// container arranges that container (sway/commands/resize.c:166-170), which
+// lays the fullscreen child out in its tile slot.
+#[test]
+fn resize_inside_a_split_under_fullscreen_reports_the_tile_slot() {
+    let mut t = tree((1280., 720.), 0.);
+    t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let fullscreen = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(fullscreen, Layout::SplitV);
+    t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+    t.activate_window(&2);
+    assert!(t.set_node_fullscreen(fullscreen, Some(FullscreenMode::Workspace)));
+
+    assert!(t.resize_node_edge_command(
+        fullscreen,
+        crate::utils::ResizeEdge::BOTTOM,
+        SizeChange::AdjustFixed(20),
+    ));
+
+    let IpcNode::Split { children, .. } = t.ipc_tree() else {
+        panic!("IPC root must be a split");
+    };
+    let IpcNode::Split { children, .. } = &children[1] else {
+        panic!("second child must be the split container");
+    };
+    let IpcNode::Leaf { id, percent, .. } = &children[0] else {
+        panic!("fullscreen view must be a leaf");
+    };
+    assert_eq!(*id, fullscreen);
+    // Sway snaps against the fullscreen child's 720 px output box and its
+    // sibling's 360 px tiled box: fractions 1 + 20/720 and 0.5 - 20/720,
+    // normalised over 1.5, give round(720 * 0.6852) = 493 px.
+    assert_eq!(*percent, Some(493. / 720.));
+    t.check_invariants();
+}
+
+// random-v3 seed 40344; oracle resize_beside_tile_slot_under_workspace_fullscreen.
+// A view mapped into the fullscreen container's split arranges that split,
+// so the fullscreen container's box is its tile slot. A resize beside it
+// snaps against that slot, not the output box (sway/commands/resize.c:126-131).
+#[test]
+fn resize_beside_a_tile_slot_fullscreen_measures_the_slot() {
+    let mut t = tree((1280., 720.), 0.);
+    t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let fullscreen = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(fullscreen, Layout::SplitH);
+    assert!(t.set_node_fullscreen(fullscreen, Some(FullscreenMode::Workspace)));
+    let mapped = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+
+    t.set_window_width(Some(&3), SizeChange::AdjustProportion(-5.));
+
+    let IpcNode::Split { children, .. } = t.ipc_tree() else {
+        panic!("IPC root must be a split");
+    };
+    let IpcNode::Split { children, .. } = &children[1] else {
+        panic!("second child must be the split container");
+    };
+    let percents = children
+        .iter()
+        .map(|child| match child {
+            IpcNode::Leaf { id, percent, .. } => (*id, *percent),
+            IpcNode::Split { .. } => panic!("children must be leaves"),
+        })
+        .collect::<Vec<_>>();
+    // 5 ppt of 1280 is 64 px taken from 640: 576 and 704.
+    assert_eq!(
+        percents,
+        [
+            (fullscreen, Some(704. / 1280.)),
+            (mapped, Some(576. / 1280.))
+        ]
+    );
+    t.check_invariants();
+}
+
+// random-v3 seed 40344; oracle resize_top_level_restores_fullscreen_output_box.
+// A resize of a top-level container arranges the workspace, which puts a
+// fullscreen container reporting its tile slot back at the output box
+// (sway/commands/resize.c:166-170, sway/tree/arrange.c:310-316).
+#[test]
+fn top_level_resize_restores_the_fullscreen_output_box() {
+    let mut t = tree((1280., 720.), 0.);
+    t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let fullscreen = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split(fullscreen, Layout::SplitV);
+    assert!(t.set_node_fullscreen(fullscreen, Some(FullscreenMode::Workspace)));
+    t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
+
+    t.set_window_width(Some(&3), SizeChange::AdjustProportion(-5.));
+
+    let IpcNode::Split { children, .. } = t.ipc_tree() else {
+        panic!("IPC root must be a split");
+    };
+    let IpcNode::Split { children, .. } = &children[1] else {
+        panic!("second child must be the split container");
+    };
+    let IpcNode::Leaf { id, percent, .. } = &children[0] else {
+        panic!("fullscreen view must be a leaf");
+    };
+    assert_eq!(*id, fullscreen);
+    // The output box over the split's unarranged 640x720 box.
+    assert_eq!(*percent, Some(2.));
+    t.check_invariants();
+}

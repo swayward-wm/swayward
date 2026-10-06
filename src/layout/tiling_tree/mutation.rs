@@ -187,6 +187,13 @@ impl<W: LayoutElement> TilingTree<W> {
     /// which under workspace fullscreen arranges only the fullscreen container
     /// (sway/tree/arrange.c:310-316) and otherwise everything.
     fn forget_unarranged_after_map(&mut self, parent: NodeId, mapped_under_fullscreen: bool) {
+        if parent != self.root || !mapped_under_fullscreen {
+            let split = std::mem::take(&mut self.split_under_fullscreen);
+            self.split_under_fullscreen = split
+                .into_iter()
+                .filter(|id| *id == parent || !self.contains_node(parent, *id))
+                .collect();
+        }
         if parent != self.root {
             let unarranged = std::mem::take(&mut self.unarranged_under_fullscreen);
             self.unarranged_under_fullscreen = unarranged

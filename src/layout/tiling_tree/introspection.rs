@@ -118,7 +118,7 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// The tiled slot a fullscreen node reports after sway re-arranged its
     /// parent without re-arranging the workspace.
-    fn fullscreen_tile_slot_rect(
+    pub(super) fn fullscreen_tile_slot_rect(
         &self,
         id: NodeId,
         geometries: &geometry::Geometry<W::Id>,

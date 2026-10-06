@@ -112,6 +112,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.wrapper_arranged_boxes.clear();
             self.fullscreen_rearranged = false;
             self.unarranged_under_fullscreen.clear();
+            self.split_under_fullscreen.clear();
         }
         self.focus = self.focused_leaf_in(self.root);
         self.request_window_sizes();

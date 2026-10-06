@@ -799,6 +799,40 @@ fn tiled_resize_beside_a_view_mapped_under_fullscreen_reports_failure() {
     );
 }
 
+/// random-v3 seeds 40208, 40344, 40498 (diff-fam-v3-resize-under-ws-fullscreen;
+/// oracle rows resize_under_workspace_fullscreen_keeps_sibling_percent and
+/// resize_ppt_under_workspace_fullscreen_keeps_sibling_percent). A
+/// tiled resize ends in `arrange_workspace` (sway/commands/resize.c:166-170),
+/// which under workspace fullscreen arranges only the fullscreen container
+/// (sway/tree/arrange.c:310-316), so the hidden sibling keeps its box and its
+/// half percent.
+#[test]
+fn tiled_resize_under_workspace_fullscreen_keeps_the_sibling_percent() {
+    for command in ["resize grow left 20 px", "resize shrink width 5 ppt"] {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        for app_id in ["fs-first", "fs-second"] {
+            windows::map_window(
+                &mut f,
+                client,
+                windows::WindowSpec {
+                    app_id: Some(app_id),
+                    ..Default::default()
+                },
+            );
+        }
+        for command in ["fullscreen enable", command] {
+            let reply = crate::command::execute(f.niri_state(), command);
+            assert!(reply[0].success, "{command}: {reply:?}");
+        }
+        f.double_roundtrip(client);
+        let tree = get_tree(&mut f);
+        let first = find_json_node_with_app_id(&tree, "fs-first").unwrap();
+        assert_eq!(first["percent"], 0.5, "{command}");
+    }
+}
+
 #[test]
 fn tiled_axis_resize_with_workspace_focus_reports_no_target() {
     let mut f = Fixture::new();
@@ -1642,4 +1676,71 @@ fn moving_a_floating_split_child_to_its_own_workspace_tiles_it() {
         )]
     );
     f.swayward().layout.verify_invariants();
+}
+
+/// random-v3 seed 40490 (diff-fam-v3-resize-under-ws-fullscreen; oracle row
+/// resize_fullscreen_split_wrapper_refused). `splitv` on a fullscreen view
+/// moves fullscreen to the new container (container_replace), whose
+/// child_total_height stays 0 because the workspace arrange lays out only the
+/// fullscreen container (sway/tree/arrange.c:310-316). Sway's resize of it
+/// then changes nothing (sway/commands/resize.c:145-147), and it keeps
+/// reporting the output box over its parent's.
+#[test]
+fn resize_of_a_fullscreen_split_wrapper_changes_nothing() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    let steps = [
+        "@p1",
+        "focus output right",
+        "@p2",
+        "@p3",
+        "focus output left",
+        "sticky enable; focus output left",
+        "splitv",
+        "@p4",
+        "layout splith",
+        "layout toggle split",
+        "for_window [app_id=\"p5\"] fullscreen enable",
+        "@p5",
+        "splitv",
+        "@p6",
+        "move container to workspace oracle",
+    ];
+    for step in steps {
+        if let Some(app_id) = step.strip_prefix('@') {
+            windows::map_window(
+                &mut f,
+                client,
+                windows::WindowSpec {
+                    app_id: Some(app_id),
+                    ..Default::default()
+                },
+            );
+        } else {
+            let reply = crate::command::execute(f.niri_state(), step);
+            assert!(reply[0].success, "{step}: {reply:?}");
+        }
+    }
+    let parent_of_p6 = |tree: &serde_json::Value| {
+        fn find(node: &serde_json::Value) -> Option<serde_json::Value> {
+            let children = node["nodes"].as_array()?;
+            if children.iter().any(|child| child["app_id"] == "p6") {
+                return Some(node.clone());
+            }
+            children.iter().find_map(find)
+        }
+        find(tree).unwrap()
+    };
+    f.double_roundtrip(client);
+    let before = parent_of_p6(&get_tree(&mut f));
+    assert_eq!(before["fullscreen_mode"], 1);
+
+    let reply = crate::command::execute(f.niri_state(), "resize grow height 10 ppt");
+    assert!(!reply[0].success, "{reply:?}");
+    f.double_roundtrip(client);
+    let after = parent_of_p6(&get_tree(&mut f));
+    assert_eq!(after["percent"], before["percent"]);
+    assert_eq!(after["rect"], before["rect"]);
 }

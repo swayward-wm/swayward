@@ -541,6 +541,17 @@ impl<W: LayoutElement> TilingTree<W> {
         {
             self.set_pending_fullscreen(wrapper, Some(fullscreen));
         }
+        if self
+            .fullscreen_node()
+            .filter(|fullscreen| {
+                self.fullscreen_mode(*fullscreen) == Some(FullscreenMode::Workspace)
+            })
+            .is_some_and(|fullscreen| {
+                fullscreen == wrapper || !self.contains_node(fullscreen, parent)
+            })
+        {
+            self.split_under_fullscreen.insert(wrapper);
+        }
         wrapper
     }
 
