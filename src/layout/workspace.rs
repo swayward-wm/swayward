@@ -1420,6 +1420,13 @@ impl<W: LayoutElement> Workspace<W> {
         };
         if was_normal && !tile.window().pending_sizing_mode().is_normal() {
             tile.restore_to_floating |= restore_to_floating;
+            if restore_to_floating {
+                // Sway fullscreens the view in the floating list and arranges
+                // only it, so its tiled siblings keep their boxes
+                // (`container_fullscreen_workspace`, sway/tree/container.c;
+                // `arrange_workspace`, sway/tree/arrange.c:310-316).
+                self.tiling.mark_fullscreen_arrived();
+            }
         }
     }
 

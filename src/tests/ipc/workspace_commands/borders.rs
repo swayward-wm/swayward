@@ -1003,6 +1003,96 @@ fn view_mapped_with_the_workspace_focused_goes_beside_its_focus_inactive_child()
     assert_eq!(three["focused"], true);
 }
 
+fn workspace_tiling_names(tree: &serde_json::Value) -> Vec<String> {
+    let workspace = &tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] != "__i3")
+        .unwrap()["nodes"][0];
+    fn names(node: &serde_json::Value, out: &mut Vec<String>) {
+        for child in node["nodes"].as_array().unwrap() {
+            match child["app_id"].as_str() {
+                Some(app_id) => out.push(app_id.to_owned()),
+                None => {
+                    out.push("[".to_owned());
+                    names(child, out);
+                    out.push("]".to_owned());
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    names(workspace, &mut out);
+    out
+}
+
+#[test]
+fn view_mapped_beside_a_floating_fullscreen_view_maps_beside_the_tiling_focus() {
+    // A floating fullscreen view stays in the workspace's floating list
+    // (container_set_floating, sway/tree/container.c:951-975), so view_map
+    // maps a new view beside the focus-inactive tiling view instead
+    // (seat_get_focus_inactive_tiling, sway/tree/view.c:851-866), not beside
+    // the fullscreen view. With no tiling view it goes onto the workspace.
+    // Differential family diff-fam-map-beside-floating-fullscreen,
+    // seeds 13399 15058 16121.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_app(&mut f, client, "fs");
+    for command in ["fullscreen toggle", "floating toggle"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    f.double_roundtrip(client);
+    map_app(&mut f, client, "two");
+    map_app(&mut f, client, "three");
+    let tree = tree_json(&mut f);
+    assert_eq!(workspace_tiling_names(&tree), ["two", "three"], "{tree:#}");
+    let two = find_json_node_with_app_id(&tree, "two").unwrap();
+    let three = find_json_node_with_app_id(&tree, "three").unwrap();
+    assert_eq!(two["border"], "normal");
+    assert_eq!(three["border"], "none");
+
+    // Seed 16121: floating the view reaps its split (container_reap_empty,
+    // sway/tree/container.c:969-975), and the new view maps beside the
+    // tiling focus instead of into a split beside the fullscreen view.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    for command in ["split h", "fullscreen enable", "floating enable"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    f.double_roundtrip(client);
+    map_app(&mut f, client, "three");
+    let tree = tree_json(&mut f);
+    assert_eq!(workspace_tiling_names(&tree), ["one", "three"], "{tree:#}");
+}
+
+#[test]
+fn a_floating_fullscreen_view_takes_no_share_of_its_tiled_parent() {
+    // Seed 16770: a view floated by criteria and then fullscreened is in the
+    // floating list, so the tiled sibling keeps the whole workspace.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    assert!(
+        crate::command::execute(
+            f.niri_state(),
+            r#"for_window [app_id="float"] floating enable"#
+        )[0]
+        .success
+    );
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "float");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    f.double_roundtrip(client);
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "tiled").unwrap();
+    assert_eq!(tiled["percent"], 1.0, "{tree:#}");
+}
+
 #[test]
 fn a_tiled_csd_window_moved_to_the_scratchpad_reports_csd() {
     use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;

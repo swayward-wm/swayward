@@ -243,6 +243,17 @@ impl<W: LayoutElement> TilingTree<W> {
                 .iter()
                 .copied()
                 .find(|id| *id != self.root && self.contains_node(self.root, *id)),
+            // A floating fullscreen view is floating in sway, so the new view
+            // maps beside the focus-inactive tiling view instead, or onto the
+            // workspace when it has none (`seat_get_focus_inactive_tiling`,
+            // sway/tree/view.c:851-866).
+            InsertTarget::Focused
+                if self
+                    .focus
+                    .is_some_and(|focus| self.is_floating_fullscreen(focus)) =>
+            {
+                self.focus_inactive_tiling_leaf()
+            }
             InsertTarget::Focused => self.focus,
             InsertTarget::Node(id) => Some(id),
             InsertTarget::MoveDestination => {
@@ -258,6 +269,24 @@ impl<W: LayoutElement> TilingTree<W> {
         let after = target
             .filter(|target| self.nodes.get(target).and_then(|node| node.parent) == Some(parent));
         (parent, after)
+    }
+
+    /// A fullscreen tile that unfullscreens back to floating: sway keeps it
+    /// in the workspace's floating list (`container_set_floating`,
+    /// sway/tree/container.c:951-975).
+    pub(super) fn is_floating_fullscreen(&self, id: NodeId) -> bool {
+        self.fullscreen_mode(id).is_some()
+            && self.tile(id).is_some_and(|tile| tile.restore_to_floating)
+    }
+
+    /// The most recently focused tiling view, skipping a floating fullscreen
+    /// one (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389).
+    fn focus_inactive_tiling_leaf(&self) -> Option<NodeId> {
+        self.focus_history.iter().copied().find(|id| {
+            self.tile(*id).is_some()
+                && !self.is_floating_fullscreen(*id)
+                && self.contains_node(self.root, *id)
+        })
     }
 
     pub fn remove_tile_node(&mut self, id: NodeId) -> Option<Tile<W>> {
