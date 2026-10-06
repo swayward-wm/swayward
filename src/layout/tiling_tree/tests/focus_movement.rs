@@ -659,3 +659,54 @@ fn focus_top_skips_hidden_tabs() {
         assert_eq!(t.focus, Some(third));
     }
 }
+
+// random-v3 seeds 40347 and 40379 (family diff-fam-v3-layout-misc): with the
+// workspace itself focused there is no container, so `layout` sets the
+// workspace layout directly even when it is tabbed or stacked
+// (sway/commands/layout.c:184-188); only a focused container wraps the
+// workspace children (sway/commands/layout.c:178-183).
+#[test]
+fn layout_on_a_focused_stacked_workspace_sets_its_layout() {
+    let mut t = tree((1200., 800.), 0.);
+    let only = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    assert!(t.focus_parent());
+    assert_eq!(t.focus(), Some(t.root));
+    t.set_focused_layout(Layout::Stacked);
+    t.set_focused_layout(Layout::SplitH);
+    assert!(matches!(
+        &t.nodes[&t.root].value,
+        TreeNode::Split {
+            layout: Layout::SplitH,
+            children,
+            ..
+        } if children == &[only]
+    ));
+    t.check_invariants();
+}
+
+// random-v3 seeds 40321 and 40063 (family diff-fam-v3-layout-misc): i3 does not
+// split a singleton under an H/V parent, for a container as for a view; sway
+// sets the parent's layout instead (`container_split`,
+// sway/tree/container.c:1510-1529).
+#[test]
+fn splitting_a_lone_container_under_a_split_sets_the_parent_layout() {
+    let mut t = tree((1200., 800.), 0.);
+    let _first = t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
+    let second = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
+    t.split_focused(Layout::SplitV);
+    assert!(t.focus_parent());
+    // `split v` on the V[second] container, which has a sibling, wraps it.
+    t.split_focused(Layout::SplitV);
+    let inner = t.nodes[&second].parent.unwrap();
+    let outer = t.nodes[&inner].parent.unwrap();
+    assert_eq!(t.focus(), Some(inner));
+    // `split toggle` on the lone inner container under a V parent splits H,
+    // which changes the outer container's layout instead of wrapping again.
+    t.toggle_focused_split();
+    assert_eq!(t.nodes[&second].parent, Some(inner));
+    assert_eq!(t.nodes[&inner].parent, Some(outer));
+    assert_eq!(t.split_layout(outer), Some(Layout::SplitH));
+    assert_eq!(t.split_layout(inner), Some(Layout::SplitV));
+    assert_eq!(t.focus(), Some(inner));
+    t.check_invariants();
+}

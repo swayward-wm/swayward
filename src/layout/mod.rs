@@ -1178,6 +1178,13 @@ impl<W: LayoutElement> Layout<W> {
                         }
                     }
                 };
+                // Only a view mapped into the focused workspace may take focus
+                // (`should_focus`, sway/tree/view.c:712-715). Another output's
+                // active workspace is not focused, so its focus stays put.
+                let activate = match activate {
+                    ActivateWindow::Smart if mon_idx != *active_monitor_idx => ActivateWindow::No,
+                    activate => activate,
+                };
                 let mon = &mut monitors[mon_idx];
 
                 mon.add_window(window, target, activate, is_floating);

@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs"]
+what = "a window mapped with smart activation onto another output's workspace does not take that workspace's focus, so a window later moved there lands after the destination's previous focus."
+why = "Sway only focuses a view mapped into the focused workspace (`should_focus`, sway/tree/view.c:712-715), so an assigned view on another output joins the seat focus stack last (sway/input/seat.c:327-354). It keeps one seat-wide focus stack and inserts a moved container after `seat_get_focus_inactive_tiling` of the destination (sway/commands/move.c:515), so a window focused more recently than the destination's focus becomes that container. Swayward focused the assigned view, so the next arrival landed in the wrong slot (differential family diff-fam-v3-layout-misc, random-v3 seeds 40044, 40210, 40445, 40492)."

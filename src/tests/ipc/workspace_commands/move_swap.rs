@@ -1648,3 +1648,95 @@ fn floating_container_move_to_own_mark_is_a_successful_noop() {
     assert!(outcome[0].success, "{outcome:?}");
     assert_eq!(mark_move_workspace(&mut f), before);
 }
+
+fn workspace_apps(f: &mut Fixture, name: &str) -> Vec<String> {
+    let workspace = f
+        .swayward()
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.sway_name().as_deref() == Some(name))
+        .unwrap()
+        .2;
+    workspace
+        .tiles()
+        .filter_map(|tile| {
+            crate::utils::with_toplevel_role(tile.window().toplevel(), |role| role.app_id.clone())
+        })
+        .collect()
+}
+
+// Differential family diff-fam-v3-layout-misc (random-v3 seeds 40044, 40210,
+// 40445, 40492, two outputs): a container moved to another output's workspace
+// lands after that workspace's focus-inactive tiling container
+// (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389;
+// sway/commands/move.c:515). Sway keeps one seat-wide focus stack, so a window
+// that was focused more recently than the destination's focus, and moved there
+// without activation, becomes that container: the next arrival lands after it.
+#[test]
+fn move_to_other_output_keeps_arrival_order() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    let client = f.add_client();
+
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_window(&mut f, client, "one");
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    let right = f
+        .swayward()
+        .layout
+        .active_workspace()
+        .unwrap()
+        .sway_name()
+        .unwrap();
+    map_window(&mut f, client, "two");
+    map_window(&mut f, client, "three");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    // `three` was focused after `two`, so after crossing it is the right
+    // workspace's focus-inactive container and `four` lands after it.
+    map_window(&mut f, client, "four");
+    assert!(crate::command::execute(f.niri_state(), "move container to output right")[0].success);
+    assert_eq!(workspace_apps(&mut f, &right), ["two", "three", "four"]);
+    map_window(&mut f, client, "five");
+    assert!(crate::command::execute(f.niri_state(), "move container to output right")[0].success);
+    assert_eq!(
+        workspace_apps(&mut f, &right),
+        ["two", "three", "four", "five"]
+    );
+}
+
+// Seed 40445: a view assigned to an unfocused workspace maps without focus,
+// so sway appends it to the end of the seat focus stack (`seat_node_from_node`,
+// sway/input/seat.c:327-354). The destination's focus-inactive container is
+// still the view focused there before, and a container moved in lands after it.
+#[test]
+fn move_to_other_output_lands_after_focus_not_an_assigned_view() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    let client = f.add_client();
+
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_window(&mut f, client, "one");
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    let right = f
+        .swayward()
+        .layout
+        .active_workspace()
+        .unwrap()
+        .sway_name()
+        .unwrap();
+    map_window(&mut f, client, "two");
+    map_window(&mut f, client, "three");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    let assign = format!(r#"assign [app_id="four"] workspace {right}"#);
+    assert!(crate::command::execute(f.niri_state(), &assign)[0].success);
+    map_window(&mut f, client, "four");
+    assert_eq!(workspace_apps(&mut f, &right), ["two", "three", "four"]);
+    map_window(&mut f, client, "five");
+    assert!(crate::command::execute(f.niri_state(), "move container to output right")[0].success);
+    assert_eq!(
+        workspace_apps(&mut f, &right),
+        ["two", "three", "five", "four"]
+    );
+}

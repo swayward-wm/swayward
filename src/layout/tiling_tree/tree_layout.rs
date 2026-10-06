@@ -49,10 +49,19 @@ impl<W: LayoutElement> TilingTree<W> {
                     )
                 });
         if let Some(parent) = singleton_split_parent {
-            self.change_split_layout(parent, layout);
+            self.set_singleton_parent_layout(parent, layout);
         } else {
             self.wrap_node(id, layout);
         }
+    }
+
+    /// `container_split` on a singleton under an H/V parent sets the parent's
+    /// layout and refreshes its representation up to the workspace
+    /// (sway/tree/container.c:1519-1527), which drops a stale workspace
+    /// representation that `workspace_split` left behind.
+    fn set_singleton_parent_layout(&mut self, parent: NodeId, layout: Layout) {
+        self.change_split_layout(parent, layout);
+        self.stale_root_representation = None;
     }
 
     fn split_container(&mut self, id: NodeId, layout: Layout) {
@@ -64,12 +73,17 @@ impl<W: LayoutElement> TilingTree<W> {
             return;
         };
         let siblings = self.split_len(parent).unwrap_or_default();
+        // i3 does not split a singleton under an H/V parent: sway changes the
+        // parent's layout instead, for views and containers alike
+        // (`container_split`, sway/tree/container.c:1510-1529).
+        let split_parent = matches!(
+            self.split_layout(parent),
+            Some(Layout::SplitH | Layout::SplitV)
+        );
         if id == self.root {
             self.change_split_layout(id, layout);
-        } else if siblings <= 1 && parent != self.root {
-            self.wrap_node(id, layout);
-        } else if siblings <= 1 {
-            self.change_split_layout(parent, layout);
+        } else if siblings <= 1 && split_parent {
+            self.set_singleton_parent_layout(parent, layout);
         } else {
             self.wrap_node(id, layout);
         }
@@ -153,10 +167,9 @@ impl<W: LayoutElement> TilingTree<W> {
     /// and a container is focused, sway keeps the workspace layout and wraps
     /// its children in a new container instead (sway/commands/layout.c:178-183).
     fn apply_focused_target_layout(&mut self, target: NodeId, layout: Layout) {
-        let root_layout = self.split_layout(self.root);
-        let container = self.focus.is_some_and(|focus| {
-            focus != self.root || matches!(root_layout, Some(Layout::Tabbed | Layout::Stacked))
-        });
+        // A focused workspace is no container, whatever its layout
+        // (sway/commands/layout.c:126,184-188).
+        let container = self.focus.is_some_and(|focus| focus != self.root);
         self.apply_layout_target(target, layout, container);
     }
 
