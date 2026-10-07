@@ -188,21 +188,49 @@ pub(super) fn border(
     Ok(())
 }
 
+/// What a targeted command acts on, by stable id. The handler resolves the
+/// live container from it when it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Subject {
+    View(crate::window::mapped::MappedId),
+    Container(crate::layout::tiling_tree::NodeId),
+}
+
+impl From<CommandTarget> for Subject {
+    fn from(target: CommandTarget) -> Self {
+        match target {
+            CommandTarget::Window(id) => Subject::View(id),
+            CommandTarget::Container(_, node) => Subject::Container(node),
+        }
+    }
+}
+
+/// `floating` on a container whose toplevel ancestor is the floating group
+/// rooted at `node` or contains it, or is `node` tiled on `workspace`.
 fn set_container_floating(
     state: &mut State,
     workspace: crate::layout::workspace::WorkspaceId,
     node: crate::layout::tiling_tree::NodeId,
     mode: Toggle,
 ) -> Result<(), CommandOutcome> {
+    let layout = &state.swayward.layout;
+    let Some(is_floating) = layout
+        .workspace(workspace)
+        .filter(|ws| ws.contains_swap_node(node))
+        .map(|ws| ws.floating().tree_root_for_node(node).is_some())
+    else {
+        return Err(failure("No matching node."));
+    };
     let floating = match mode {
         Toggle::Enable => true,
         Toggle::Disable => false,
-        Toggle::Toggle => state
-            .swayward
-            .layout
-            .active_workspace()
-            .is_some_and(|workspace| workspace.tiling().contains(node)),
+        Toggle::Toggle => !is_floating,
     };
+    // `container_set_floating` returns before its window event when nothing
+    // changes (sway/tree/container.c:941-944).
+    if floating == is_floating {
+        return Ok(());
+    }
     let Some(root) = state
         .swayward
         .layout
@@ -225,24 +253,69 @@ fn set_container_floating(
     Ok(())
 }
 
+/// Sway's `floating` on a matched container (`cmd_floating`,
+/// sway/commands/floating.c:17-60), branch for branch. `subject` is resolved
+/// against the live tree here, so an earlier command of a comma list (`move
+/// scratchpad`, `scratchpad show`, a move) decides what this one sees.
 pub(super) fn floating(
     state: &mut State,
-    target: CommandTarget,
-    mode: &Toggle,
+    subject: Subject,
+    mode: Toggle,
 ) -> Result<(), CommandOutcome> {
-    if let CommandTarget::Container(workspace, node) = target {
-        set_container_floating(state, workspace, node, *mode)?;
-        return Ok(());
+    use crate::layout::ScratchpadPlace;
+
+    let layout = &state.swayward.layout;
+    let (place, live) = match subject {
+        Subject::View(id) => {
+            let window =
+                super::mapped_window(state, id).ok_or_else(|| failure("No matching node."))?;
+            (layout.window_scratchpad_place(&window), Err(window))
+        }
+        Subject::Container(node) => (layout.container_scratchpad_place(node), Ok(node)),
+    };
+    match place {
+        // `container_is_scratchpad_hidden` (floating.c:35-38): a hidden view
+        // or the root of a hidden group.
+        ScratchpadPlace::Hidden => return Err(hidden_scratchpad_floating_error()),
+        // A split or view below a hidden group's root walks up to that root
+        // (floating.c:40-46), a scratchpad container and so floating
+        // (sway/tree/container.c:1055-1064). `enable` changes nothing
+        // (container.c:941-944). `disable` and `toggle` tile a root with no
+        // workspace, which crashes sway 1.12, so swayward refuses them with
+        // the hidden-container error: there is no sway reply to match.
+        ScratchpadPlace::InHiddenGroup => {
+            return match mode {
+                Toggle::Enable => Ok(()),
+                Toggle::Disable | Toggle::Toggle => Err(hidden_scratchpad_floating_error()),
+            };
+        }
+        ScratchpadPlace::NotHidden => {}
     }
-    let window = target_window(state, target, "No matching node.")?;
-    if state.swayward.layout.is_scratchpad_hidden(&window) {
-        return Err(failure(
-            "Can't change floating on hidden scratchpad container",
-        ));
+    match live {
+        // A split: its toplevel ancestor is the floating group holding it,
+        // or itself when tiled (floating.c:40-46).
+        Ok(node) => {
+            let workspace = state
+                .swayward
+                .layout
+                .workspace_containing_node(node)
+                .ok_or_else(|| failure("No matching node."))?;
+            set_container_floating(state, workspace, node, mode)
+        }
+        // A view: the layout floats or tiles its toplevel ancestor, the
+        // floating group holding it or the view itself.
+        Err(window) => {
+            set_window_floating(state, &window, mode);
+            state.swayward.queue_redraw_all();
+            Ok(())
+        }
     }
-    set_window_floating(state, &window, *mode);
-    state.swayward.queue_redraw_all();
-    Ok(())
+}
+
+/// Sway's CMD_INVALID for `floating` on a hidden scratchpad container, so the
+/// reply sets `parse_error: true` (sway/commands/floating.c:35-38).
+fn hidden_scratchpad_floating_error() -> CommandOutcome {
+    swayward_ipc::command::parse_error("Can't change floating on hidden scratchpad container")
 }
 
 /// Sway's `floating` on one view. A fullscreen view keeps its fullscreen

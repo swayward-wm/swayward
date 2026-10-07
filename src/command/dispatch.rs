@@ -4,11 +4,11 @@ use swayward_ipc::{criteria, CommandOutcome};
 use super::settings::execute_global_setting;
 use super::targeted::{
     execute_targeted, focused_con_id, mark_focused, matching_targets, set_client_colors,
-    unmark_focused, unmark_target,
+    unmark_focused, unmark_target, Match,
 };
 use super::{
     bindings, failure, focus, gaps, layout, movement, output, rules, scratchpad, session, success,
-    window, workspace, Command, CommandTarget, ParsedCommand,
+    window, workspace, Command, ParsedCommand,
 };
 use crate::swayward::State;
 
@@ -243,7 +243,7 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
 fn execute_one(
     state: &mut State,
     parsed: ParsedCommand,
-    retained_targets: &mut Option<Vec<CommandTarget>>,
+    retained_targets: &mut Option<Vec<Match>>,
 ) -> CommandOutcome {
     let targets = match parsed.criteria.as_deref() {
         Some(raw) => match criteria::Criteria::parse(raw, focused_con_id(state)) {
@@ -275,8 +275,8 @@ fn execute_one(
             return for_each_match(targets, |_| execute_global_setting(state, option));
         }
         if let Command::Unmark(identifier) = &parsed.command {
-            for target in targets {
-                unmark_target(state, target, identifier.as_deref());
+            for found in targets {
+                unmark_target(state, found.target, identifier.as_deref());
             }
             return success();
         }
@@ -284,8 +284,17 @@ fn execute_one(
         // already on the seat stack when the next match runs: after `move` refocuses the old
         // workspace (sway/commands/move.c:598-608) that view ranks as recently focused even
         // if the next match moves it too.
-        return for_each_match(targets, |target| {
-            let outcome = execute_targeted(state, &parsed.command, target);
+        return for_each_match(targets, |found| {
+            let outcome = match &parsed.command {
+                Command::Floating(mode) => match window::floating(state, found.subject(), *mode) {
+                    Ok(()) => {
+                        state.ipc_refresh_layout();
+                        success()
+                    }
+                    Err(outcome) => outcome,
+                },
+                command => execute_targeted(state, command, found.target),
+            };
             state.update_keyboard_focus();
             outcome
         });

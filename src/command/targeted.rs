@@ -348,7 +348,7 @@ fn run_targeted(
         }
         Command::TitleFormat(format) => super::handled(window::title_format(state, target, format)),
         Command::Border(border) => super::handled(window::border(state, target, border)),
-        Command::Floating(mode) => super::handled(window::floating(state, target, mode)),
+        Command::Floating(mode) => super::handled(window::floating(state, target.into(), *mode)),
         Command::Urgent(value) => super::handled(window::urgent(state, target, value)),
         Command::Kill => super::handled(window::kill(state, target)),
         Command::ResizeSet { width, height } => {
@@ -772,6 +772,30 @@ enum Candidate {
     Container(CommandTarget, crate::layout::tiling_tree::NodeId),
 }
 
+/// A criteria match, in sway's walk order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Match {
+    pub target: CommandTarget,
+    /// The container node a container criteria matched, or `None` for a
+    /// view. A hidden scratchpad group's splits have no workspace, so their
+    /// `target` names the group through one of its windows and cannot tell
+    /// which container matched.
+    pub node: Option<crate::layout::tiling_tree::NodeId>,
+}
+
+impl Match {
+    /// What the criteria matched, by stable id, for a handler that resolves
+    /// the live container when it runs, as sway's handlers read the matched
+    /// container pointer (sway/commands.c:240-262). A comma list keeps its
+    /// matches, so an earlier command may have hidden, shown or moved it.
+    pub fn subject(&self) -> super::window::Subject {
+        match self.node {
+            Some(node) => super::window::Subject::Container(node),
+            None => self.target.into(),
+        }
+    }
+}
+
 /// Every window and container a criteria command can match, in sway's
 /// `root_for_each_container` order: per output and workspace, the tiling
 /// tree and then the floating containers, each depth first with parents
@@ -915,7 +939,7 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
 /// Sway applies a criteria command to its matches in this order
 /// (`sway/sway/criteria.c:500-512`), so a command whose effect depends on
 /// order, such as `mark` moving a mark between targets, ends as sway does.
-pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> Vec<CommandTarget> {
+pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> Vec<Match> {
     let candidates = collect_candidates(state);
     let windows = || {
         candidates.iter().filter_map(|candidate| match candidate {
@@ -943,16 +967,22 @@ pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> 
         }
         return urgent
             .first()
-            .map(|snapshot| CommandTarget::Window(snapshot.id))
+            .map(|snapshot| Match {
+                target: CommandTarget::Window(snapshot.id),
+                node: None,
+            })
             .into_iter()
             .collect();
     }
-    let mut targets = Vec::new();
+    let mut targets: Vec<Match> = Vec::new();
     for candidate in &candidates {
-        let target = match candidate {
+        let found = match candidate {
             Candidate::Window(snapshot) => criteria
                 .matches(&snapshot.info(state), &focused_info)
-                .then_some(CommandTarget::Window(snapshot.id)),
+                .then_some(Match {
+                    target: CommandTarget::Window(snapshot.id),
+                    node: None,
+                }),
             Candidate::Container(target, node) => {
                 let marks = state
                     .swayward
@@ -962,11 +992,16 @@ pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> 
                     .unwrap_or(&[]);
                 criteria
                     .matches_container(crate::ipc::tree::container_id(*node) as u64, marks)
-                    .then_some(*target)
+                    .then_some(Match {
+                        target: *target,
+                        node: Some(*node),
+                    })
             }
         };
-        if let Some(target) = target.filter(|target| !targets.contains(target)) {
-            targets.push(target);
+        if let Some(found) =
+            found.filter(|found| !targets.iter().any(|seen| seen.target == found.target))
+        {
+            targets.push(found);
         }
     }
     targets
@@ -978,7 +1013,7 @@ fn matching_ids(
 ) -> Vec<crate::window::mapped::MappedId> {
     matching_targets(state, criteria)
         .into_iter()
-        .filter_map(|target| match target {
+        .filter_map(|found| match found.target {
             CommandTarget::Window(id) => Some(id),
             CommandTarget::Container(_, _) => None,
         })

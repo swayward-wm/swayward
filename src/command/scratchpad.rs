@@ -39,6 +39,19 @@ pub(super) fn move_targeted(
     target: CommandTarget,
 ) -> Result<(), CommandOutcome> {
     let window = target_window(state, target)?;
+    // A split goes to the scratchpad whole: sway floats it first, then hides
+    // the floating container (sway/commands/move.c:935-947,
+    // sway/tree/root.c:114-123).
+    if let CommandTarget::Container(workspace, node) = target {
+        if state
+            .swayward
+            .layout
+            .set_container_floating(workspace, node, true)
+            .is_none()
+        {
+            return Err(failure("No matching node."));
+        }
+    }
     state.ipc_order_scratchpad_events(crate::ipc::server::ScratchpadEventOrder::Hide);
     state.swayward.layout.move_to_scratchpad(Some(&window));
     state.swayward.queue_redraw_all();

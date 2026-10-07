@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// A container's standing relative to the hidden scratchpad. Sway marks only
+/// the toplevel container it hides as a scratchpad container
+/// (sway/tree/root.c:98-123), so the descendants of a hidden group are not
+/// themselves hidden (`container_is_scratchpad_hidden`,
+/// sway/tree/container.c:1696-1698).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScratchpadPlace {
+    /// A hidden scratchpad container: a hidden view or a hidden group's root.
+    Hidden,
+    /// A split or view below the root of a hidden scratchpad group.
+    InHiddenGroup,
+    /// Not in the hidden scratchpad.
+    NotHidden,
+}
+
 impl<W: LayoutElement> Layout<W> {
     pub fn move_to_scratchpad(&mut self, window: Option<&W::Id>) {
         let window = window
@@ -350,6 +365,49 @@ impl<W: LayoutElement> Layout<W> {
                 .scratchpad_trees
                 .iter()
                 .any(|removed| removed.contains_window(window))
+    }
+
+    /// Where view `window` stands relative to the hidden scratchpad, read
+    /// from the live tree.
+    pub fn window_scratchpad_place(&self, window: &W::Id) -> ScratchpadPlace {
+        if self
+            .scratchpad
+            .iter()
+            .any(|removed| removed.tile.window().id() == window)
+        {
+            return ScratchpadPlace::Hidden;
+        }
+        for removed in &self.scratchpad_trees {
+            if !removed.contains_window(window) {
+                continue;
+            }
+            let tree = removed.ipc_tree();
+            let root_is_window = matches!(
+                tree.nodes().first(),
+                Some((node, tiling_tree::IpcNodeKind::Leaf))
+                    if tree.window_for_node(*node) == Some(window)
+            );
+            return if root_is_window {
+                ScratchpadPlace::Hidden
+            } else {
+                ScratchpadPlace::InHiddenGroup
+            };
+        }
+        ScratchpadPlace::NotHidden
+    }
+
+    /// Where container `node` stands relative to the hidden scratchpad, read
+    /// from the live tree.
+    pub fn container_scratchpad_place(&self, node: NodeId) -> ScratchpadPlace {
+        for removed in &self.scratchpad_trees {
+            let nodes = removed.ipc_tree().nodes();
+            match nodes.iter().position(|(id, _)| *id == node) {
+                Some(0) => return ScratchpadPlace::Hidden,
+                Some(_) => return ScratchpadPlace::InHiddenGroup,
+                None => {}
+            }
+        }
+        ScratchpadPlace::NotHidden
     }
 
     /// Returning a container to tiling removes it from the scratchpad

@@ -37,6 +37,7 @@ use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 use self::monitor::Monitor;
 pub use self::monitor::MonitorRenderElement;
+pub use self::scratchpad::ScratchpadPlace;
 use self::workspace::Workspace;
 use self::workspace_naming::{
     initial_workspace_names, sway_identity_from_name, sway_workspace_identity, sway_workspace_num,
