@@ -900,3 +900,28 @@ fn new_workspace_on_a_rotated_output_takes_the_portrait_default_layout() {
     assert_eq!(layout("2"), "splitv");
     assert_eq!(layout("3"), "splitv");
 }
+
+#[test]
+fn existing_empty_workspace_keeps_its_layout_when_the_output_rotates() {
+    // Oracle row: empty_workspace_transform_keeps_layout. Sway derives the default
+    // layout only when a workspace is created or its output enabled
+    // (sway/tree/workspace.c:219, sway/tree/output.c:178-183); rotating the output
+    // later leaves an existing empty workspace splith. Differential family
+    // diff-fam-empty-ws-transform-reorient (seeds 13812, 15410).
+    let (mut fixture, _socket) = ipc_fixture();
+    fixture.add_output(1, (1280, 720));
+
+    for command in ["workspace 2", "output * transform 90"] {
+        assert!(crate::command::execute(fixture.niri_state(), command)[0].success);
+    }
+
+    let workspaces = get_workspaces(&mut fixture);
+    let ws = workspaces
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ws| ws["name"] == "2")
+        .unwrap();
+    assert_eq!(ws["layout"], "splith");
+    assert_eq!(ws["orientation"], "horizontal");
+}

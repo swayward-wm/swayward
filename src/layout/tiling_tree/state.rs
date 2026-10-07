@@ -241,24 +241,6 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    pub(super) fn update_empty_auto_layout(&mut self, view_size: Size<f64, Logical>) {
-        let auto = swayward_config::DefaultOrientation::Auto;
-        let old_auto_layout = default_layout(auto, self.view_size);
-        let new_auto_layout = default_layout(auto, view_size);
-        if self.preserved_auto_layout.is_none()
-            && self.is_empty()
-            && self.options.layout.default_orientation == swayward_config::DefaultOrientation::Auto
-            && matches!(
-                self.nodes.get(&self.root).map(|node| &node.value),
-                Some(TreeNode::Split { layout, .. }) if *layout == old_auto_layout
-            )
-        {
-            // Following the output's axis is not a `layout` command, so it records
-            // no `prev_split_layout` for `layout default` (sway/commands/layout.c:171-189).
-            self.set_layout_keeping_previous(self.root, new_auto_layout);
-        }
-    }
-
     pub fn update_config(
         &mut self,
         view_size: Size<f64, Logical>,
@@ -273,7 +255,6 @@ impl<W: LayoutElement> TilingTree<W> {
         for indicator in self.tab_indicators.values_mut() {
             indicator.update_config(options.layout.tab_indicator);
         }
-        self.update_empty_auto_layout(view_size);
         self.view_size = view_size;
         self.parent_area = parent_area;
         self.gaps_to_edge = gaps_to_edge;

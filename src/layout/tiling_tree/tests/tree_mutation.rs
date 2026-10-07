@@ -78,36 +78,13 @@ fn configured_default_orientations_set_the_root_at_creation() {
     }
 }
 
+/// An existing empty `auto` workspace keeps its split when the output is
+/// transformed or its mode changes: sway derives the default layout only in
+/// workspace_create and output_enable (sway/tree/workspace.c:219,
+/// sway/tree/output.c:178-183), never on a later output reconfigure. Differential
+/// family diff-fam-empty-ws-transform-reorient (seeds 13812, 15410).
 #[test]
-fn empty_auto_tree_tracks_output_orientation_changes() {
-    let mut t = tree_with_options((1280., 720.), 0., |options| {
-        options.layout.default_orientation = swayward_config::DefaultOrientation::Auto;
-    });
-
-    t.update_config(
-        (720., 1280.).into(),
-        Rectangle::from_size((720., 1280.).into()),
-        false,
-        1.,
-        t.options.clone(),
-    );
-
-    assert!(matches!(
-        t.nodes[&t.root].value,
-        TreeNode::Split {
-            layout: Layout::SplitV,
-            ..
-        }
-    ));
-}
-
-/// Reorienting an empty `auto` workspace to the output's longer axis records no
-/// `prev_split_layout`: sway sets that only in the layout command and
-/// `workspace_split` (sway/commands/layout.c:171-189,
-/// sway/tree/workspace.c:1058-1063), so `layout default` still fails. Oracle row
-/// command_parser_errors.
-#[test]
-fn output_orientation_change_records_no_split_for_layout_default() {
+fn empty_auto_tree_keeps_its_split_on_output_orientation_changes() {
     let mut t = tree_with_options((1280., 720.), 0., |options| {
         options.layout.default_orientation = swayward_config::DefaultOrientation::Auto;
     });
@@ -124,7 +101,7 @@ fn output_orientation_change_records_no_split_for_layout_default() {
     assert!(matches!(
         t.nodes[&t.root].value,
         TreeNode::Split {
-            layout: Layout::SplitV,
+            layout: Layout::SplitH,
             ..
         }
     ));
