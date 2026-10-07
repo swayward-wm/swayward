@@ -925,3 +925,41 @@ fn existing_empty_workspace_keeps_its_layout_when_the_output_rotates() {
     assert_eq!(ws["layout"], "splith");
     assert_eq!(ws["orientation"], "horizontal");
 }
+
+#[test]
+fn layout_toggle_after_tabbed_on_a_rotated_output_restores_the_portrait_split() {
+    // Oracle row: layout_toggle_rotated_prev_split; differential seed 10829, where sway
+    // replies H[V[view]]. `layout tabbed` wraps the view in a new container with no
+    // `prev_split_layout`, so `layout toggle` falls back to the configured orientation, else
+    // the transformed output's longer axis: splitv (sway/commands/layout.c:29-45,171-183).
+    let (mut fixture, _socket) = ipc_fixture();
+    fixture.add_output(1, (1280, 720));
+    assert!(crate::command::execute(fixture.niri_state(), "output * transform 90")[0].success);
+    let client = fixture.add_client();
+    let window = fixture.client(client).create_window();
+    let surface = window.surface.clone();
+    window.commit();
+    fixture.roundtrip(client);
+    let window = fixture.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    fixture.double_roundtrip(client);
+
+    for command in ["layout tabbed", "layout toggle"] {
+        assert!(crate::command::execute(fixture.niri_state(), command)[0].success);
+        fixture.double_roundtrip(client);
+    }
+
+    let tree = get_tree(&mut fixture);
+    let workspace = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|output| output["nodes"].as_array().unwrap())
+        .find(|ws| ws["type"] == "workspace" && ws["name"] != "__i3_scratch")
+        .unwrap();
+    assert_eq!(workspace["layout"], "splith");
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["layout"], "splitv");
+    assert_eq!(wrapper["orientation"], "vertical");
+}
