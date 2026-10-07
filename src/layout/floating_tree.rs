@@ -1063,7 +1063,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
         })
     }
 
-    fn bump_stamp(&mut self) -> u64 {
+    pub(in crate::layout) fn bump_stamp(&mut self) -> u64 {
         self.next_stamp += 1;
         self.next_stamp
     }

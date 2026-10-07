@@ -1982,3 +1982,57 @@ fn workspace_focus_order(f: &mut Fixture) -> Vec<String> {
         })
         .collect()
 }
+
+#[test]
+fn criteria_floating_enable_with_fullscreen_keeps_match_order() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let open = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    open(&mut f, "two");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    open(&mut f, "three");
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        r#"[app_id="^(two|three)$"] floating enable"#,
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let floating = tree["nodes"][1]["nodes"][0]["floating_nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            (
+                node["app_id"].as_str().unwrap().to_owned(),
+                node["fullscreen_mode"].as_i64().unwrap(),
+                node["focused"].as_bool().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        floating,
+        [("two".to_owned(), 1, true), ("three".to_owned(), 0, false)],
+        "{}",
+        tree["nodes"][1]["nodes"][0]
+    );
+}

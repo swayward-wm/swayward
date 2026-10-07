@@ -130,6 +130,10 @@ impl<W: LayoutElement> Workspace<W> {
         if !self.tiling.is_pending_fullscreen(window) {
             return false;
         }
+        // Floating appends the container to `workspace->floating`
+        // (`workspace_add_floating`, sway/tree/workspace.c:961-972), so it
+        // takes the next floating stack slot; tiling drops the slot.
+        let stamp = self.floating.bump_stamp();
         let Some(tile) = self
             .tiling
             .tiles_mut()
@@ -137,7 +141,11 @@ impl<W: LayoutElement> Workspace<W> {
         else {
             return false;
         };
-        tile.restore_to_floating = floating.unwrap_or(!tile.restore_to_floating);
+        let was_floating = tile.restore_to_floating;
+        tile.restore_to_floating = floating.unwrap_or(!was_floating);
+        if tile.restore_to_floating != was_floating {
+            tile.floating_stamp = tile.restore_to_floating.then_some(stamp);
+        }
         // container_set_floating moves a CSD view's border either way
         // (sway/tree/container.c:955-965, 995-1003).
         tile.set_sway_csd_floating(tile.restore_to_floating);
