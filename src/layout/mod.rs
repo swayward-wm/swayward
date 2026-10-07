@@ -430,6 +430,9 @@ pub struct Layout<W: LayoutElement> {
     initial_workspace_names: Vec<String>,
     /// Workspace configuration used to resolve sway's ordered output assignments lazily.
     workspace_configs: Vec<WorkspaceConfig>,
+    /// The seat's focused workspace and its name at the last sync, for sway's
+    /// seat-wide `prev_workspace_name`.
+    seat_workspace: Option<(WorkspaceId, Option<String>)>,
 }
 
 #[derive(Debug)]
@@ -816,6 +819,7 @@ impl<W: LayoutElement> Layout<W> {
             options: Rc::new(options),
             initial_workspace_names: Vec::new(),
             workspace_configs: Vec::new(),
+            seat_workspace: None,
         }
     }
 
@@ -856,6 +860,7 @@ impl<W: LayoutElement> Layout<W> {
             options: opts,
             initial_workspace_names,
             workspace_configs: config.workspaces.clone(),
+            seat_workspace: None,
         }
     }
 

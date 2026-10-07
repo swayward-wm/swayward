@@ -171,6 +171,62 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Sway's `set_workspace` (sway/input/seat.c:1098-1113): whenever the
+    /// seat's focused workspace changes, by any path (`focus output`, a
+    /// directional focus crossing outputs, a workspace switch on another
+    /// output), the workspace it left becomes the `back_and_forth` target.
+    /// The record is seat-wide in sway; the active monitor's history stands
+    /// in for it, so it is rewritten whenever focus lands on a workspace.
+    pub fn sync_seat_workspace(&mut self) {
+        let Some(active) = self.active_workspace().map(|workspace| workspace.id()) else {
+            return;
+        };
+        let previous = self.seat_workspace.take();
+        let name = self.workspace(active).and_then(Workspace::sway_name);
+        self.seat_workspace = Some((active, name));
+        let Some((previous_id, cached_name)) = previous else {
+            return;
+        };
+        if previous_id == active {
+            return;
+        }
+        // Sway copies the name at the switch, so a workspace destroyed on
+        // the way out is still named.
+        let previous_name = self
+            .workspace(previous_id)
+            .map_or(cached_name, Workspace::sway_name);
+        if let Some(monitor) = self.active_monitor() {
+            monitor.previous_workspace_id = Some(previous_id);
+            monitor.previous_workspace_name = previous_name;
+        }
+    }
+
+    /// The focused output's `back_and_forth` record.
+    pub fn seat_back_and_forth(&self) -> (Option<WorkspaceId>, Option<String>) {
+        self.active_monitor_ref().map_or((None, None), |monitor| {
+            (
+                monitor.previous_workspace_id,
+                monitor.previous_workspace_name.clone(),
+            )
+        })
+    }
+
+    /// Restores a `back_and_forth` record saved by [`Self::seat_back_and_forth`]
+    /// onto the now-focused output and adopts the focused workspace without
+    /// recording history: `container_swap` restores `prev_workspace_name`
+    /// after its focus changes (sway/tree/container.c:1850-1869).
+    pub fn restore_seat_back_and_forth(&mut self, saved: (Option<WorkspaceId>, Option<String>)) {
+        if let Some(monitor) = self.active_monitor() {
+            (
+                monitor.previous_workspace_id,
+                monitor.previous_workspace_name,
+            ) = saved;
+        }
+        self.seat_workspace = self
+            .active_workspace()
+            .map(|workspace| (workspace.id(), workspace.sway_name()));
+    }
+
     pub fn finish_sway_workspace_switch(&mut self, target: &crate::command::WorkspaceTarget) {
         let target = self
             .workspaces()

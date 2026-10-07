@@ -25,13 +25,25 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     // (`sway/sway/commands.c:296-299`, `316-321`).
     let mut retained_targets = None;
     let mut outcomes = Vec::new();
+    // Focus may have moved since the last command (pointer, bindings).
+    state.swayward.layout.sync_seat_workspace();
     for parsed in parsed {
         let outcome = match parsed {
             Ok(parsed) => {
                 if parsed.criteria_start {
                     retained_targets = None;
                 }
-                execute_one(state, parsed, &mut retained_targets)
+                // `container_swap` saves and restores the seat's
+                // `prev_workspace_name` around its focus changes
+                // (sway/sway/tree/container.c:1850-1869).
+                let saved = matches!(parsed.command, Command::Swap(_))
+                    .then(|| state.swayward.layout.seat_back_and_forth());
+                let outcome = execute_one(state, parsed, &mut retained_targets);
+                match saved {
+                    Some(saved) => state.swayward.layout.restore_seat_back_and_forth(saved),
+                    None => state.swayward.layout.sync_seat_workspace(),
+                }
+                outcome
             }
             // Sway sets the handler context per command, after earlier
             // commands in the list have moved focus

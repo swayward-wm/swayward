@@ -491,3 +491,67 @@ fn a_split_holding_an_urgent_view_reports_urgent() {
     assert!(outcome[0].success, "{outcome:?}");
     assert_eq!(split_urgency(&mut f), [false]);
 }
+
+/// Sway records the previous workspace whenever the seat's focused workspace
+/// changes (`set_workspace`, sway/sway/input/seat.c:1098-1113), so focusing
+/// another output gives `back_and_forth` a target across outputs. Oracle
+/// scenario workspace_back_and_forth_after_focus_output.
+#[test]
+fn back_and_forth_returns_across_outputs_after_focus_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let focused = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        describe_workspaces(&swayward.layout, &swayward.global_space)
+            .into_iter()
+            .find(|workspace| workspace.focused)
+            .map(|workspace| (workspace.name, workspace.output))
+            .unwrap()
+    };
+    assert!(crate::command::execute(f.niri_state(), "focus output headless-1")[0].success);
+    let first = focused(&mut f);
+    assert!(crate::command::execute(f.niri_state(), "focus output headless-2")[0].success);
+    let second = focused(&mut f);
+    assert_ne!(first, second);
+
+    assert!(crate::command::execute(f.niri_state(), "workspace back_and_forth")[0].success);
+    assert_eq!(focused(&mut f), first);
+    assert!(crate::command::execute(f.niri_state(), "workspace back_and_forth")[0].success);
+    assert_eq!(focused(&mut f), second);
+}
+
+/// `workspace_auto_back_and_forth` bounces to the seat's previous workspace
+/// even when it sits on another output (`workspace_auto_back_and_forth`,
+/// sway/sway/tree/workspace.c:710-728, reading the seat-wide
+/// `prev_workspace_name`). Oracle scenario
+/// workspace_auto_back_and_forth_two_outputs; random-v3 seed 30154.
+#[test]
+fn auto_back_and_forth_returns_to_the_previous_workspace_on_another_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let focused = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        describe_workspaces(&swayward.layout, &swayward.global_space)
+            .into_iter()
+            .find(|workspace| workspace.focused)
+            .map(|workspace| (workspace.name, workspace.output))
+            .unwrap()
+    };
+    assert!(crate::command::execute(f.niri_state(), "focus output headless-1")[0].success);
+    let first = focused(&mut f);
+    assert_eq!(first.0, "1");
+    assert!(crate::command::execute(f.niri_state(), "workspace next")[0].success);
+    let second = focused(&mut f);
+    assert_ne!(first.1, second.1);
+    assert!(crate::command::execute(f.niri_state(), "workspace 1")[0].success);
+    assert_eq!(focused(&mut f), first);
+
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        "workspace_auto_back_and_forth yes; workspace 1",
+    );
+    assert!(outcome.iter().all(|outcome| outcome.success), "{outcome:?}");
+    assert_eq!(focused(&mut f), second);
+}
