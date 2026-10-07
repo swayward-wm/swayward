@@ -5,6 +5,11 @@ impl<W: LayoutElement> TilingTree<W> {
         self.visible_leaves().len()
     }
 
+    /// Sway's `container_titlebar_height()` in logical pixels.
+    pub fn titlebar_height(&self) -> f64 {
+        self.titlebar_height
+    }
+
     pub fn geometry(&self, id: NodeId) -> Option<Rectangle<f64, Logical>> {
         self.compute_geometry().leaf_boxes.remove(&id)
     }

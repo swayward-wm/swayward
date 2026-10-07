@@ -176,7 +176,12 @@ fn describe_workspace(
             &tiled.nodes,
         )
     });
-    set_tabbed_percentages(tiled.layout, &mut tiled.nodes, context.rect);
+    set_tabbed_percentages(
+        tiled.layout,
+        &mut tiled.nodes,
+        context.rect,
+        workspace.tiling().titlebar_height().round() as i32,
+    );
     apply_workspace_visibility(
         tiled.layout,
         &focus,

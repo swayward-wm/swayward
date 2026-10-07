@@ -12,16 +12,18 @@ pub(super) fn newest_focus_timestamp(
         .max()
 }
 
-pub(super) fn set_tabbed_percentages(layout: NodeLayout, children: &mut [Node], parent_rect: Rect) {
+pub(super) fn set_tabbed_percentages(
+    layout: NodeLayout,
+    children: &mut [Node],
+    parent_rect: Rect,
+    titlebar_height: i32,
+) {
     // Percent is computed from sway's pending container boxes, before the
-    // serializer exposes the content rectangles below nested titlebars.
-    let titlebar_height = children
-        .iter()
-        .flat_map(|child| child.nodes.iter())
-        .map(|child| child.deco_rect.height)
-        .chain(children.iter().map(|child| child.deco_rect.height))
-        .max()
-        .unwrap_or_default();
+    // serializer exposes the content rectangles below nested titlebars. A
+    // tabbed or stacked parent takes `container_titlebar_height()` rows from
+    // every non-view child whatever the borders below it
+    // (`apply_tabbed_layout`, sway/tree/arrange.c:185-212), so the height is
+    // the configured one, not one read back from a child's `deco_rect`.
     let offset = match layout {
         NodeLayout::Tabbed => titlebar_height,
         NodeLayout::Stacked => i32::try_from(children.len())
@@ -43,7 +45,7 @@ pub(super) fn set_tabbed_percentages(layout: NodeLayout, children: &mut [Node], 
         // sway/ipc-json.c:543-553): its box is the output's, and the layout
         // already reported its percent.
         if child.fullscreen_mode != 0 {
-            set_tabbed_percentages(child.layout, &mut child.nodes, child.rect);
+            set_tabbed_percentages(child.layout, &mut child.nodes, child.rect, titlebar_height);
             continue;
         }
         // Under a split each child has its own box, so its children measure
@@ -62,7 +64,12 @@ pub(super) fn set_tabbed_percentages(layout: NodeLayout, children: &mut [Node], 
                 area(pending_rect) / parent_area
             });
         }
-        set_tabbed_percentages(child.layout, &mut child.nodes, pending_rect);
+        set_tabbed_percentages(
+            child.layout,
+            &mut child.nodes,
+            pending_rect,
+            titlebar_height,
+        );
     }
 }
 

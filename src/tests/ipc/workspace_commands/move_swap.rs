@@ -1866,3 +1866,53 @@ fn a_view_mapped_after_a_tiled_floating_swap_lands_beside_the_focus_inactive_vie
         .collect::<Vec<_>>();
     assert_eq!(apps, ["three", "five", "one"]);
 }
+
+// differential family diff-fam-tabbed-split-border-none-percent (random-v2
+// seed 14815): in a tabbed wrapper holding a lone V split, `border none` on
+// the view leaves the split's box below the tab bar (`apply_tabbed_layout`,
+// sway/tree/arrange.c:185-197), so the split still reports
+// (720 - titlebar) / 720 (0.9625), not 1.0.
+#[test]
+fn a_lone_split_under_tabs_keeps_the_tab_bar_out_of_its_percent_after_border_none() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("a".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let split_percent = |f: &mut Fixture, stream: &mut UnixStream, command: &str| {
+        let outcome = query_ipc_with_payload(f, stream, MessageType::RunCommand, command);
+        assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
+        let tree = query_ipc(f, stream, MessageType::GetTree);
+        let tabbed = tree["nodes"][1]["nodes"][0]["nodes"][0].clone();
+        assert_eq!(tabbed["layout"], "tabbed", "{command}: {tabbed:#}");
+        let split = &tabbed["nodes"][0];
+        assert_eq!(split["layout"], "splitv", "{command}: {tabbed:#}");
+        // The split's rect starts below the tab bar and its own titlebar, as
+        // in sway's capture (y = 2 * 27); only the tab bar comes out of the
+        // percent.
+        let titlebar = split["rect"]["y"].as_f64().unwrap() / 2.;
+        assert!(titlebar > 0., "{command}: {tabbed:#}");
+        let percent = split["percent"].as_f64().unwrap();
+        assert!(
+            (percent - (720. - titlebar) / 720.).abs() < 1e-9,
+            "{command}: {percent} in {tabbed:#}"
+        );
+    };
+    let outcome = query_ipc_with_payload(
+        &mut f,
+        &mut stream,
+        MessageType::RunCommand,
+        "layout tabbed",
+    );
+    assert_eq!(outcome[0]["success"], true, "{outcome}");
+    split_percent(&mut f, &mut stream, "split v");
+    split_percent(&mut f, &mut stream, "border none");
+}
