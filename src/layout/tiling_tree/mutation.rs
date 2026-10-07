@@ -165,10 +165,13 @@ impl<W: LayoutElement> TilingTree<W> {
             );
         }
         self.compact_tree();
-        if maps_into_wrapper {
+        if maps_into_wrapper
+            && !fullscreen.is_some_and(|fullscreen| self.contains_node(fullscreen, parent))
+        {
             // The view maps beside the fullscreen container, inside the
             // wrapper, and `arrange_container(parent)` lays the wrapper out at
-            // its empty box (sway/tree/view.c:931-940).
+            // its empty box (sway/tree/view.c:931-940). A parent inside the
+            // fullscreen container has the box the fullscreen arrange gave it.
             self.arrange_fullscreen_wrappers();
         }
         if pending_mode.is_fullscreen() {

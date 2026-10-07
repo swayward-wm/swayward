@@ -691,6 +691,10 @@ impl<W: LayoutElement> TilingTree<W> {
     fn set_layout_for_command(&mut self, id: NodeId, layout: Layout) {
         self.interactive_resize = None;
         self.fullscreen_tile_slot = false;
+        let old = self
+            .fullscreen_node()
+            .filter(|fs| self.fullscreen_mode(*fs) == Some(FullscreenMode::Workspace))
+            .map(|_| self.compute_geometry());
         if let Some(Node {
             value:
                 TreeNode::Split {
@@ -714,6 +718,12 @@ impl<W: LayoutElement> TilingTree<W> {
                     self.arrange_root();
                 } else {
                     self.arrange_workspace();
+                }
+                if let Some(old) = old {
+                    // `arrange_workspace` lays out only the fullscreen
+                    // container (sway/tree/arrange.c:310-316), so everything
+                    // else keeps its box under the new layout.
+                    self.keep_boxes_outside_fullscreen(&old);
                 }
             }
             self.request_window_sizes();

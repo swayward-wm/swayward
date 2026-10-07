@@ -22,7 +22,24 @@ impl<W: LayoutElement> TilingTree<W> {
         let focused = self
             .focus
             .is_some_and(|focus| self.contains_node(id, focus));
+        // The swapped-in container takes the fullscreen mode at this slot
+        // (`container_swap`, sway/tree/container.c:1884-1889), and the swap's
+        // arranges reach only it (sway/commands/swap.c:93-104,
+        // sway/tree/arrange.c:310-316), so views hidden under fullscreen here
+        // stay as they were.
+        let hidden = (self.fullscreen_node() == Some(id)).then(|| {
+            (
+                self.mapped_under_fullscreen.clone(),
+                self.moved_under_fullscreen.clone(),
+            )
+        });
         let (subtree, _) = self.detach_subtree(id)?;
+        if let Some((mut mapped, mut moved)) = hidden {
+            mapped.retain(|node| self.nodes.contains_key(node));
+            moved.retain(|node, _| self.nodes.contains_key(node));
+            self.mapped_under_fullscreen = mapped;
+            self.moved_under_fullscreen = moved;
+        }
         Some((
             subtree,
             DetachedSlot {

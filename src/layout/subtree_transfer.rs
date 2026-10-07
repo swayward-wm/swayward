@@ -218,10 +218,24 @@ impl<W: LayoutElement> Layout<W> {
             let (source_ws, target_ws) =
                 Self::distinct_workspaces_mut(monitors, source_workspace, target_workspace)
                     .ok_or_else(|| "No matching node.".to_owned())?;
+            let moved_view = source_ws.tiling().window_for_node(source).map(|window| {
+                let window = window.id().clone();
+                let rect = source_ws.tiling().ipc_rect_for_window(&window);
+                (window, rect)
+            });
             let (subtree, old_parent) = source_ws
                 .detach_tiling_subtree(source)
                 .ok_or_else(|| "No matching node.".to_owned())?;
             let remapped = target_ws.attach_tiling_subtree_at(subtree, Some(target)).1;
+            if let Some((window, Some(rect))) = moved_view {
+                // `container_move_to_container` zeroes the view's size and
+                // `arrange_workspace` lays out only the destination's
+                // fullscreen container (sway/commands/move.c:248-266,
+                // sway/tree/arrange.c:310-316), as a workspace move does.
+                target_ws
+                    .tiling_mut()
+                    .mark_moved_under_fullscreen(&window, rect);
+            }
             source_ws.tiling_mut().finish_subtree_detach(old_parent);
             if monitors[source_monitor].workspace_switch.is_none() {
                 monitors[source_monitor].clean_up_workspaces();

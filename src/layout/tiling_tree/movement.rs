@@ -46,6 +46,8 @@ impl<W: LayoutElement> TilingTree<W> {
             }
         }
         self.swap_fullscreen_modes(first, second);
+        self.trade_box_with_hidden_view(first, second);
+        self.trade_box_with_hidden_view(second, first);
         if let Some(other) = raise_after_swap {
             let focus = self.focus;
             self.set_focus_id(Some(other));
@@ -55,6 +57,47 @@ impl<W: LayoutElement> TilingTree<W> {
         self.animate_geometry_changes(old, None);
         self.request_window_sizes();
         Ok(())
+    }
+
+    /// `hidden`, a view left unarranged under a fullscreen container,
+    /// swapped with `other`. `swap_places` trades their pending boxes, and
+    /// the swap's arranges reach the fullscreen container and any container
+    /// parent (sway/tree/container.c:1717-1760, sway/commands/swap.c:93-104,
+    /// sway/tree/arrange.c:310-316). So `hidden`, now inside the fullscreen
+    /// container or holding its mode, is arranged, and `other`, now a
+    /// workspace child outside it, is committed over the empty box it took.
+    fn trade_box_with_hidden_view(&mut self, hidden: NodeId, other: NodeId) {
+        let Some(fullscreen) = self.fullscreen_node() else {
+            return;
+        };
+        if !self.contains_node(fullscreen, hidden)
+            || self.mapped_under_fullscreen.contains(&other)
+            || self.moved_under_fullscreen.contains_key(&other)
+        {
+            return;
+        }
+        let hidden_box = if self.mapped_under_fullscreen.remove(&hidden) {
+            let titlebar = if self
+                .tile(other)
+                .is_some_and(Tile::has_configured_sway_titlebar)
+            {
+                self.titlebar_height
+            } else {
+                0.
+            };
+            Rectangle::new(Point::from((0., titlebar)), Size::from((0., 0.)))
+        } else if let Some(rect) = self.moved_under_fullscreen.remove(&hidden) {
+            rect
+        } else {
+            return;
+        };
+        let other_parent = self.nodes.get(&other).and_then(|node| node.parent);
+        if self.tile(other).is_some()
+            && other_parent == Some(self.root)
+            && !self.contains_node(fullscreen, other)
+        {
+            self.moved_under_fullscreen.insert(other, hidden_box);
+        }
     }
 
     /// Sway re-enables fullscreen on each swapped container after the swap, `con2` first,

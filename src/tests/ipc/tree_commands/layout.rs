@@ -1937,3 +1937,309 @@ fn promoted_view_keeps_its_width_fraction_across_a_layout_flip() {
     let percents = split_child_percents(&mut f, &["layout toggle split"]);
     assert_eq!(percents, [0.375, 0.25, 0.25, 0.125]);
 }
+
+// Differential family diff-fam-v3-fullscreen-structure-2 (random-v3).
+
+/// Seed 30461: `layout toggle split` with a view mapped under fullscreen
+/// inside the split. Sway's `arrange_workspace` lays out only the
+/// fullscreen container (sway/tree/arrange.c:310-316), and the mapped view
+/// keeps the box `arrange_container(parent)` gave it at map time
+/// (sway/tree/view.c:936-939), laid out by the old layout.
+#[test]
+fn layout_toggle_under_fullscreen_keeps_the_mapped_views_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["split v", "fullscreen enable"]);
+    map_app(&mut f, client, "under");
+    let before = rect(
+        find_json_node_with_app_id(&tree_json(&mut f), "under").unwrap(),
+        "rect",
+    );
+    run(&mut f, &["layout toggle split"]);
+
+    let tree = tree_json(&mut f);
+    let under = find_json_node_with_app_id(&tree, "under").unwrap();
+    assert_eq!(rect(under, "rect"), before, "{under}");
+}
+
+/// Seed 30468: `splith` on a fullscreen view in a tabbed wrapper hands the
+/// mode to the new split, which `arrange_workspace` gives the output box
+/// (sway/tree/container.c:1471-1501, sway/tree/arrange.c:310-316).
+#[test]
+fn split_of_a_fullscreen_tab_reports_the_split_at_the_output_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(
+        &mut f,
+        &[
+            "layout toggle tabbed stacking split",
+            "fullscreen toggle",
+            "splith",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let split = find_json_parent_of_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    assert_eq!(split["percent"], 1.0, "{split}");
+    assert_eq!(rect(split, "rect"), [0, 0, 1270, 1408], "{split}");
+}
+
+/// Seed 30475: a view moved to a mark on a fullscreen view on another
+/// workspace gets a zero box, as a workspace move does
+/// (sway/commands/move.c:248-266, sway/tree/arrange.c:310-316).
+#[test]
+fn move_to_a_mark_on_a_fullscreen_view_zeroes_the_moved_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle",
+            "mark m",
+            "move container to workspace oracle",
+        ],
+    );
+    map_app(&mut f, client, "moved");
+    run(&mut f, &["move container to mark m"]);
+
+    let tree = tree_json(&mut f);
+    let moved = find_json_node_with_app_id(&tree, "moved").unwrap();
+    assert_eq!(moved["percent"], 0.0, "{moved}");
+    assert_eq!(moved["border"], "normal", "{moved}");
+    assert_eq!(moved["rect"]["width"], 0, "{moved}");
+}
+
+/// Seed 30502: the fullscreen container swapped with a view on another
+/// workspace. Fullscreen moves to the view, and the swap's arranges reach
+/// only the fullscreen container (sway/tree/container.c:1800-1890,
+/// sway/commands/swap.c:93-104, sway/tree/arrange.c:310-316), so a view
+/// mapped under the old fullscreen container stays uncommitted.
+#[test]
+fn swap_of_the_fullscreen_container_leaves_a_view_mapped_under_it_uncommitted() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "tab");
+    map_app(&mut f, client, "away");
+    run(
+        &mut f,
+        &[
+            "mark m",
+            "move container to workspace oracle",
+            "layout tabbed",
+            "focus parent",
+            "fullscreen toggle",
+        ],
+    );
+    map_app(&mut f, client, "under");
+    run(&mut f, &["swap container with mark m"]);
+
+    let tree = tree_json(&mut f);
+    let away = find_json_node_with_app_id(&tree, "away").unwrap();
+    assert_eq!(away["fullscreen_mode"], 1, "{away}");
+    assert_uncommitted(find_json_node_with_app_id(&tree, "under").unwrap());
+}
+
+/// Seed 30568: swapping the fullscreen view with a view mapped under it.
+/// Fullscreen ends and moves to the other container, which takes the
+/// fullscreen view's output box; the old fullscreen view takes the mapped
+/// view's zero box and is not arranged (sway/tree/container.c:1800-1890).
+#[test]
+fn swap_of_a_fullscreen_view_with_a_view_mapped_under_it_trades_boxes() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    run(
+        &mut f,
+        &["for_window [app_id=\"^fullscreen$\"] fullscreen enable"],
+    );
+    map_app(&mut f, client, "fullscreen");
+    map_app(&mut f, client, "under");
+    run(
+        &mut f,
+        &["[app_id=\"^under$\"] mark m", "swap container with mark m"],
+    );
+
+    let tree = tree_json(&mut f);
+    let under = find_json_node_with_app_id(&tree, "under").unwrap();
+    assert_eq!(under["fullscreen_mode"], 1, "{under}");
+    assert_eq!(under["percent"], 1.0, "{under}");
+    assert_eq!(under["border"], "normal", "{under}");
+    let old = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(old["fullscreen_mode"], 0, "{old}");
+    assert_eq!(old["percent"], 0.0, "{old}");
+    assert_eq!(old["rect"]["width"], 0, "{old}");
+}
+
+/// Seed 30576: a view mapped fullscreen over a fullscreen view. The old view
+/// leaves fullscreen and `arrange_workspace` lays out only the new
+/// fullscreen container (sway/tree/view.c:931-935,
+/// sway/tree/arrange.c:310-316), so the old view keeps its whole box.
+#[test]
+fn view_mapped_fullscreen_over_a_fullscreen_view_leaves_it_its_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "old");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle",
+            "for_window [app_id=\"^new$\"] fullscreen enable",
+        ],
+    );
+    map_app(&mut f, client, "new");
+
+    let tree = tree_json(&mut f);
+    let old = find_json_node_with_app_id(&tree, "old").unwrap();
+    assert_eq!(old["fullscreen_mode"], 0, "{old}");
+    assert_eq!(old["percent"], 1.0, "{old}");
+    let new = find_json_node_with_app_id(&tree, "new").unwrap();
+    assert_eq!(new["fullscreen_mode"], 1, "{new}");
+}
+
+/// Seed 30576 (second capture): fullscreen moving to a view mapped
+/// fullscreen leaves a view mapped under the old fullscreen view
+/// uncommitted (sway/tree/view.c:931-935, sway/tree/arrange.c:310-316).
+#[test]
+fn view_mapped_fullscreen_keeps_an_earlier_hidden_view_uncommitted() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "old");
+    run(&mut f, &["fullscreen toggle"]);
+    map_app(&mut f, client, "hidden");
+    run(&mut f, &["for_window [app_id=\"^new$\"] fullscreen enable"]);
+    map_app(&mut f, client, "new");
+
+    let tree = tree_json(&mut f);
+    assert_uncommitted(find_json_node_with_app_id(&tree, "hidden").unwrap());
+    let old = find_json_node_with_app_id(&tree, "old").unwrap();
+    assert_eq!(old["percent"], 1.0, "{old}");
+}
+
+/// Seed 30568 (second capture): a view mapped under fullscreen swapped into
+/// the fullscreen split is arranged there; the view that left takes its
+/// empty box (sway/tree/container.c:1717-1760, sway/commands/swap.c:93-104).
+#[test]
+fn swap_into_a_fullscreen_split_arranges_the_hidden_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    run(
+        &mut f,
+        &["for_window [app_id=\"^fullscreen$\"] fullscreen enable"],
+    );
+    map_app(&mut f, client, "fullscreen");
+    map_app(&mut f, client, "hidden");
+    run(
+        &mut f,
+        &[
+            "split toggle",
+            "[app_id=\"^hidden$\"] mark m",
+            "swap container with mark m",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    assert_eq!(hidden["border"], "normal", "{hidden}");
+    assert_eq!(hidden["percent"], 1.0, "{hidden}");
+    let left = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(left["percent"], 0.0, "{left}");
+    assert_eq!(left["rect"]["width"], 0, "{left}");
+}
+
+/// Seed 30579: the fullscreen view leaving its workspace ends fullscreen
+/// there, and the workspace arrange lays out the `layout` wrapper's
+/// children again (sway/commands/move.c:628-635, sway/tree/arrange.c:317-321).
+#[test]
+fn fullscreen_view_leaving_lets_the_layout_wrapper_arrange() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    run(&mut f, &["workspace oracle"]);
+    map_app(&mut f, client, "stays");
+    map_app(&mut f, client, "leaves");
+    run(
+        &mut f,
+        &[
+            "fullscreen enable",
+            "layout toggle",
+            "move container to workspace back_and_forth",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let stays = find_json_node_with_app_id(&tree, "stays").unwrap();
+    // Not the half box it had before `layout toggle` wrapped it.
+    let titlebar = stays["deco_rect"]["height"].as_i64().unwrap();
+    assert_eq!(
+        rect(stays, "rect"),
+        [0, titlebar, 1270, 1408 - titlebar],
+        "{stays}"
+    );
+}
+
+/// Seed 30576 (third capture): `layout tabbed` under fullscreen wraps the
+/// workspace children in a container sway never arranges, and a view mapped
+/// fullscreen into it arranges only itself (sway/commands/layout.c:178-183,
+/// sway/tree/view.c:931-935, sway/tree/arrange.c:310-316). The wrapper
+/// keeps its empty box, so its children report no percent.
+#[test]
+fn view_mapped_fullscreen_into_a_layout_wrapper_leaves_it_unarranged() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "old");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle",
+            "layout tabbed",
+            "for_window [app_id=\"^new$\"] fullscreen enable",
+        ],
+    );
+    map_app(&mut f, client, "new");
+
+    let tree = tree_json(&mut f);
+    let wrapper = find_json_parent_of_app_id(&tree, "new").unwrap();
+    assert_eq!(wrapper["percent"], 0.0, "{wrapper}");
+    assert_eq!(wrapper["rect"]["width"], 0, "{wrapper}");
+    let old = find_json_node_with_app_id(&tree, "old").unwrap();
+    assert_eq!(old["percent"], serde_json::Value::Null, "{old}");
+    let new = find_json_node_with_app_id(&tree, "new").unwrap();
+    assert_eq!(new["percent"], serde_json::Value::Null, "{new}");
+    assert_eq!(rect(new, "rect"), [0, 0, 1270, 1408], "{new}");
+}
+
+/// Seed 30576 (fourth capture): a view mapped into a split that holds the
+/// fullscreen mode inside a `layout` wrapper. `arrange_container(parent)`
+/// lays the split out at the output box the fullscreen arrange gave it
+/// (sway/tree/view.c:936-939, sway/tree/arrange.c:310-316), so both
+/// children report a percent.
+#[test]
+fn view_mapped_into_a_fullscreen_split_in_a_layout_wrapper_is_arranged() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen toggle", "layout tabbed", "splitt"]);
+    map_app(&mut f, client, "new");
+
+    let tree = tree_json(&mut f);
+    let split = find_json_parent_of_app_id(&tree, "new").unwrap();
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    for app_id in ["fullscreen", "new"] {
+        let view = find_json_node_with_app_id(&tree, app_id).unwrap();
+        assert_eq!(view["percent"], 0.5, "{view}");
+    }
+}

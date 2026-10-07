@@ -39,6 +39,13 @@ pub(super) fn set_tabbed_percentages(layout: NodeLayout, children: &mut [Node], 
         if !child.nodes.is_empty() && child.rect.width == 0 && child.rect.height <= 0 {
             continue;
         }
+        // A fullscreen container has no titlebar row (`get_deco_rect`,
+        // sway/ipc-json.c:543-553): its box is the output's, and the layout
+        // already reported its percent.
+        if child.fullscreen_mode != 0 {
+            set_tabbed_percentages(child.layout, &mut child.nodes, child.rect);
+            continue;
+        }
         // Under a split each child has its own box, so its children measure
         // against that box, not the split's.
         let mut pending_rect = if offset == 0 && !child.nodes.is_empty() {

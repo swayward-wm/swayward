@@ -89,20 +89,62 @@ impl<W: LayoutElement> TilingTree<W> {
             }
             _ => HashMap::new(),
         };
+        // Fullscreen moving to an unrelated container ends with an arrange
+        // that lays out only the new one (`cmd_fullscreen` and `view_map`,
+        // sway/commands/fullscreen.c:54-55, sway/tree/view.c:931-935;
+        // sway/tree/arrange.c:310-316), so everything else, the old
+        // fullscreen container included, keeps the box it had.
+        let replaced_unrelated = matches!(
+            (current, fullscreen),
+            (Some(current), Some(FullscreenMode::Workspace))
+                if self.fullscreen_mode(current) == Some(FullscreenMode::Workspace)
+                    && !self.contains_node(current, id)
+                    && !self.contains_node(id, current)
+        );
+        let unarranged = if replaced_unrelated {
+            let geometries = self.compute_geometry();
+            geometries
+                .ipc_nodes
+                .into_iter()
+                .filter(|(node, _)| {
+                    *node != self.root
+                        && !self.contains_node(id, *node)
+                        && !self.split_excluded().contains(node)
+                        && !self.wrapper_arranged_boxes.contains_key(node)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         self.fullscreen_tile_slot = false;
         self.orphaned_global_fullscreen = None;
         self.fullscreen_arrived = false;
-        self.wrapper_arranged_boxes.clear();
-        self.fullscreen_rearranged = false;
+        if replaced_unrelated {
+            // A `layout` wrapper's subtree keeps the empty-box layout
+            // `arrange_container(wrapper)` gave it; only the new fullscreen
+            // container is arranged again.
+            self.wrapper_arranged_boxes.remove(&id);
+        } else {
+            self.wrapper_arranged_boxes.clear();
+        }
+        // The arrange that follows gives the new fullscreen container the
+        // output box, even inside a never-arranged `layout` wrapper.
+        self.fullscreen_rearranged = replaced_unrelated;
         self.stale_fullscreen_rects = stale;
-        self.unarranged_under_fullscreen.clear();
+        if replaced_unrelated {
+            // The views hidden under the old fullscreen container stay as
+            // they were; the new one is arranged.
+            self.mapped_under_fullscreen.remove(&id);
+            self.moved_under_fullscreen.remove(&id);
+        }
+        self.unarranged_under_fullscreen = unarranged;
         self.split_under_fullscreen.clear();
         for node in cleared {
             if let Some(mode) = self.pending_modes.get_mut(&node) {
                 mode.fullscreen = None;
             }
         }
-        if current.is_some() {
+        if current.is_some() && !replaced_unrelated {
             self.mapped_under_fullscreen.clear();
             self.moved_under_fullscreen.clear();
             self.fullscreen_layout_wrappers.clear();

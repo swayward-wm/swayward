@@ -30,6 +30,8 @@ impl<W: LayoutElement> TilingTree<W> {
             self.moved_under_fullscreen.clear();
             self.unarranged_under_fullscreen.clear();
             self.split_under_fullscreen.clear();
+            self.fullscreen_layout_wrappers.clear();
+            self.pre_layout_ipc_rects.clear();
         }
         // tab_active also names nodes in its values: a container's shown child.
         self.tab_active.retain(|_, active| *active != id);

@@ -406,6 +406,13 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                     })
                 })
                 .collect(),
+            // The fullscreen container lays its children out over the output
+            // box (sway/tree/arrange.c:310-316).
+            Layout::SplitH | Layout::SplitV
+                if self.fullscreen == Some(id) && self.tree.fullscreen_rearranged =>
+            {
+                self.split_percents(id, layout, children, percents)
+            }
             Layout::SplitH | Layout::SplitV if self.fullscreen.is_some() => {
                 self.pending_split_percents(id, layout, children, percents)
             }
@@ -934,8 +941,15 @@ fn lift_unarranged_strip<I>(node: &mut IpcNode<I>, height: f64, grow: bool) {
     }
 }
 
+/// A fullscreen container has no titlebar row (`get_deco_rect`,
+/// sway/ipc-json.c:543-553), so it keeps its box.
 fn inset_split_by_parent_titlebar<I>(node: &mut IpcNode<I>, height: f64) {
-    if let IpcNode::Split { rect, .. } = node {
+    if let IpcNode::Split {
+        rect,
+        fullscreen_mode: 0,
+        ..
+    } = node
+    {
         rect.loc.y += height;
         rect.size.h = (rect.size.h - height).max(0.);
     }

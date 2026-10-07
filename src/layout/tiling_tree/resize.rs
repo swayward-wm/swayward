@@ -88,6 +88,17 @@ impl<W: LayoutElement> TilingTree<W> {
         // The workspace arrange puts the fullscreen container back at the
         // output box.
         self.arrange_workspace();
+        self.keep_boxes_outside_fullscreen(old);
+    }
+
+    /// A workspace arrange under workspace fullscreen lays out only the
+    /// fullscreen container (sway/tree/arrange.c:310-316): every other node
+    /// keeps the box it had in `old`, and the percent that implies, until
+    /// the next full arrange.
+    pub(super) fn keep_boxes_outside_fullscreen(&mut self, old: &geometry::Geometry<W::Id>) {
+        let Some(fullscreen) = self.fullscreen_node() else {
+            return;
+        };
         let excluded = self.split_excluded();
         let unarranged = old
             .ipc_nodes
