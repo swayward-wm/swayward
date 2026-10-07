@@ -1119,3 +1119,39 @@ fn sticky_fullscreen_floating_view_follows_workspace_switch_like_sway() {
     assert_eq!(view["fullscreen_mode"], 1);
     assert_eq!(view["focused"], false);
 }
+
+/// Oracle row: sticky_floating_workspace_switch_kill_workspace (differential seeds 30840
+/// 30877 30980 31400 32084 32088). A sticky floater follows `workspace 3` while the seat
+/// focuses the new workspace (`sway/sway/input/seat.c:1209-1221`); `focus parent` on a
+/// workspace is a no-op (`sway/sway/commands/focus.c:339-351`) and `kill` then closes every
+/// view on the workspace, floaters included (`sway/sway/commands/kill.c:23-28`).
+#[test]
+fn kill_on_workspace_closes_sticky_floater_after_switch_like_sway() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in [
+        "floating enable",
+        "sticky enable",
+        "workspace 3",
+        "focus parent; kill",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)
+                .iter()
+                .all(|reply| reply.success),
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+    assert!(f.client(client).window(&surface).close_requested);
+}

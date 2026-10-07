@@ -967,6 +967,7 @@ impl<W: LayoutElement> Workspace<W> {
         transfer: bool,
     ) -> RemovedTile<W> {
         let mut from_floating = false;
+        let floating_root = self.floating.window_is_floating_root(id);
         let removed_focus = self.floating_is_active.get()
             && self
                 .floating
@@ -999,6 +1000,12 @@ impl<W: LayoutElement> Workspace<W> {
             removed.tile.window().output_leave(output);
         }
 
+        // Detaching a floater refreshes the workspace representation (`container_detach`,
+        // sway/tree/container.c:1461-1466), so a workspace that only ever held carried or
+        // floating views reports its empty layout from then on.
+        if floating_root || !from_floating && removed.is_floating {
+            self.tiling.restore_has_had_tile(true);
+        }
         self.update_focus_floating_tiling_after_removing(from_floating);
         // The seat refuses a floating view the closing global fullscreen container still
         // obstructs, as it does a tiled one (sway/input/seat.c:1148-1151).

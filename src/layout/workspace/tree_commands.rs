@@ -188,6 +188,9 @@ impl<W: LayoutElement> Workspace<W> {
                 window.output_leave(output);
             }
         }
+        // `container_detach` refreshes the workspace representation
+        // (sway/tree/container.c:1461-1466).
+        self.tiling.restore_has_had_tile(true);
         self.update_focus_floating_tiling_after_removing(true);
         Some(removed)
     }
@@ -784,6 +787,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// Makes the workspace node itself the focused node, without raising it in the tiling
     /// history, so a later switch here still descends to the focus-inactive view.
+    ///
+    /// Carried sticky floaters land here too: the seat still focuses the workspace
+    /// (`seat_set_workspace_focus`, sway/sway/input/seat.c:1209-1221), whether the floater
+    /// sits in the floating space or, fullscreen, in the tiling tree.
     pub(in crate::layout) fn focus_workspace_itself(&mut self) {
         if self.tiling.is_empty() {
             self.floating_is_active = if self.floating.is_empty() {
@@ -793,15 +800,6 @@ impl<W: LayoutElement> Workspace<W> {
             };
         } else {
             self.floating_is_active = FloatingActive::No;
-            self.tiling.focus_root_keeping_history();
-        }
-    }
-
-    pub(in crate::layout) fn focus_workspace_node(&mut self) {
-        self.floating_is_active = FloatingActive::No;
-        // A carried sticky fullscreen floating view lives in the tiling tree; the seat
-        // still focuses the workspace (`seat_set_workspace_focus`, sway/input/seat.c).
-        if !self.tiling.is_empty() {
             self.tiling.focus_root_keeping_history();
         }
     }

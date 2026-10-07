@@ -815,7 +815,7 @@ impl<W: LayoutElement> Monitor<W> {
             );
         }
         if target_was_empty {
-            target.focus_workspace_node();
+            target.focus_workspace_itself();
         }
     }
 
