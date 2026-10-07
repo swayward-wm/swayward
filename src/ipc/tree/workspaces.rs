@@ -281,7 +281,10 @@ fn floating_part(context: &WorkspaceNodeContext<'_>, state: &WorkspaceState) -> 
                 .filter(|(tile, _)| workspace.is_floating_for_ipc(&tile.window().window))
                 .map(|(tile, layout)| {
                     let mut node = describe_floating_window(context, tile, &layout);
-                    node.focused = active_window == Some(tile.window().id());
+                    // With the workspace itself focused no view holds the seat focus, even a
+                    // fullscreen floating view that is the tiling tree's only leaf.
+                    node.focused = active_window == Some(tile.window().id())
+                        && !workspace.is_workspace_focused();
                     (StackSlot::Window(tile.window().window.clone()), node)
                 }),
         )

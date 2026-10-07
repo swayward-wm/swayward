@@ -4,7 +4,14 @@ use super::*;
 
 impl<W: LayoutElement> Workspace<W> {
     pub fn has_non_sticky_windows(&self) -> bool {
-        !self.tiling.is_empty()
+        // A sticky fullscreen floating view sits in the tiling tree but is a sticky floater
+        // to `workspace_is_empty` (sway/sway/tree/workspace.c:752-764).
+        let only_sticky_fullscreen_floating = self.tiling.tiles().next().is_some()
+            && self
+                .tiling
+                .tiles()
+                .all(|tile| tile.is_sticky && self.is_floating_for_ipc(tile.window().id()));
+        (!self.tiling.is_empty() && !only_sticky_fullscreen_floating)
             || self.floating.tiles().any(|tile| !tile.is_sticky)
             || self
                 .floating
@@ -65,13 +72,19 @@ impl<W: LayoutElement> Workspace<W> {
         removed
     }
 
+    /// Removes the sticky floating views, including a fullscreen floating view, which
+    /// lives in the tiling tree but is in sway's `workspace->floating` list and so is
+    /// carried by `container_is_sticky` (`sway/sway/input/seat.c:1209-1221`).
     pub fn take_sticky_tiles(&mut self) -> Vec<RemovedTile<W>> {
-        let ids = self
-            .floating
+        let floating = self.floating.tiles().filter(|tile| {
+            tile.is_sticky && self.floating.window_is_floating_root(tile.window().id())
+        });
+        let fullscreen_floating = self
+            .tiling
             .tiles()
-            .filter(|tile| {
-                tile.is_sticky && self.floating.window_is_floating_root(tile.window().id())
-            })
+            .filter(|tile| tile.is_sticky && self.is_floating_for_ipc(tile.window().id()));
+        let ids = floating
+            .chain(fullscreen_floating)
             .map(|tile| tile.window().id().clone())
             .collect::<Vec<_>>();
         ids.iter()

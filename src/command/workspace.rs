@@ -27,6 +27,11 @@ pub(super) fn activate(
             .borrow()
             .input
             .workspace_auto_back_and_forth;
+    let previous = state
+        .swayward
+        .layout
+        .active_workspace()
+        .map(|workspace| workspace.id());
     let result = if auto_back_and_forth {
         state
             .swayward
@@ -40,8 +45,14 @@ pub(super) fn activate(
     }
     // `workspace_switch` focuses the workspace's focus-inactive node, even when the target is
     // the workspace already focused, then arranges it (sway/tree/workspace.c:731-743).
+    // Sway picks that node before `seat_set_focus` carries the sticky floaters over
+    // (sway/input/seat.c:1209-1221), so a workspace holding only carried sticky views
+    // keeps the focus itself.
     if let Some(workspace) = state.swayward.layout.active_workspace_mut() {
-        workspace.focus_inactive_below_workspace();
+        let switched = previous != Some(workspace.id());
+        if !switched || workspace.has_non_sticky_windows() {
+            workspace.focus_inactive_below_workspace();
+        }
     }
     state.swayward.layout.arrange_active_sway_workspace();
     state.swayward.queue_redraw_all();

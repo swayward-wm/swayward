@@ -1018,3 +1018,51 @@ fn directional_move_into_a_perpendicular_output_lands_beside_its_focus_inactive_
     assert_eq!(workspace["representation"], "H[one moved two three]");
     assert_eq!(workspace["nodes"][1]["focused"], true);
 }
+
+/// Oracle row: sticky_fullscreen_floating_workspace_switch (differential seed 30298). A
+/// sticky fullscreen floating view follows `workspace 2` (`sway/sway/input/seat.c:1209-1221`),
+/// workspace 1 is reaped, and the seat keeps focusing workspace 2 rather than the view.
+#[test]
+fn sticky_fullscreen_floating_view_follows_workspace_switch_like_sway() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in [
+        "fullscreen enable",
+        "floating enable",
+        "sticky enable",
+        "workspace 2",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    assert_eq!(workspaces.len(), 1, "{tree:#}");
+    let workspace = &workspaces[0];
+    assert_eq!(workspace["name"], "2");
+    assert_eq!(workspace["focused"], true);
+    let view = &workspace["floating_nodes"][0];
+    assert_eq!(view["sticky"], true);
+    assert_eq!(view["fullscreen_mode"], 1);
+    assert_eq!(view["focused"], false);
+}

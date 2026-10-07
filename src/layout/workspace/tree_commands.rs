@@ -658,6 +658,11 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub(in crate::layout) fn focus_workspace_node(&mut self) {
         self.floating_is_active = FloatingActive::No;
+        // A carried sticky fullscreen floating view lives in the tiling tree; the seat
+        // still focuses the workspace (`seat_set_workspace_focus`, sway/input/seat.c).
+        if !self.tiling.is_empty() {
+            self.tiling.focus_root_keeping_history();
+        }
     }
 
     /// Moves a child of a floating group into the tiling tree. Sway treats only the group root
