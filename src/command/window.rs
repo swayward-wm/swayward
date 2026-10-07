@@ -757,10 +757,22 @@ pub(super) fn resize_set_focused(
     width: Option<ResizeAmount>,
     height: Option<ResizeAmount>,
 ) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
-        return Err(swayward_ipc::command::parse_error("Cannot resize nothing"));
-    };
+    let target = focused_resize_target(state)?;
     super::handled(resize_set(state, target, width, height))
+}
+
+/// sway's handler_context.container is NULL when a workspace holds focus, so
+/// cmd_resize refuses before parsing set/grow/shrink (sway/commands/resize.c:559-562).
+fn focused_resize_target(state: &State) -> Result<CommandTarget, CommandOutcome> {
+    let workspace_focused = state
+        .swayward
+        .layout
+        .active_workspace()
+        .is_some_and(|workspace| workspace.is_workspace_focused());
+    match super::targeted::focused_target(state) {
+        Some(target) if !workspace_focused => Ok(target),
+        _ => Err(swayward_ipc::command::parse_error("Cannot resize nothing")),
+    }
 }
 
 pub(super) fn resize_focused(
@@ -770,17 +782,7 @@ pub(super) fn resize_focused(
     first: ResizeAmount,
     second: Option<ResizeAmount>,
 ) -> super::HandlerResult {
-    if state
-        .swayward
-        .layout
-        .active_workspace()
-        .is_some_and(|workspace| workspace.is_workspace_focused())
-    {
-        return Err(swayward_ipc::command::parse_error("Cannot resize nothing"));
-    }
-    let Some(target) = super::targeted::focused_target(state) else {
-        return Err(swayward_ipc::command::parse_error("Cannot resize nothing"));
-    };
+    let target = focused_resize_target(state)?;
     super::handled(resize(state, target, grow, axis, first, second))
 }
 

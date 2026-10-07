@@ -862,6 +862,39 @@ fn tiled_axis_resize_with_workspace_focus_reports_no_target() {
     );
 }
 
+/// random-v3 seeds 30187 and 30244: `resize set` with the workspace focused
+/// fails like every other resize (sway/commands/resize.c:559-562).
+#[test]
+fn resize_set_with_workspace_focus_reports_no_target() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    let before = get_tree(&mut f);
+
+    let outcome = crate::command::execute(f.niri_state(), "resize set 0 300");
+    assert_eq!(
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize nothing".into()),
+            parse_error: Some(true),
+        }]
+    );
+    f.double_roundtrip(client);
+    assert_eq!(get_tree(&mut f), before);
+}
+
 #[test]
 fn tiled_resize_that_only_changes_an_ancestor_reports_failure() {
     let mut f = Fixture::new();
