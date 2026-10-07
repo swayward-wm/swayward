@@ -1048,8 +1048,17 @@ impl<W: LayoutElement> Workspace<W> {
             return self.tiling.contains(node).then_some(node);
         }
         let whole_workspace = self.tiling.is_root(node);
+        let focused = !self.floating_is_active.get() && self.tiling.focus() == Some(node);
         let (subtree, old_parent) = self.detach_tiling_subtree(node)?;
         self.tiling.finish_subtree_detach(old_parent);
+        // Floating the focused container raises its old parent to the tiling
+        // layer's focus-inactive node (`container_set_floating`,
+        // sway/tree/container.c:969-973).
+        if let Some(parent) = old_parent.filter(|parent| {
+            focused && !self.tiling.is_root(*parent) && self.tiling.contains(*parent)
+        }) {
+            self.tiling.set_focus(parent);
+        }
         if whole_workspace {
             // Floating a focused workspace wraps its children and resets the
             // workspace to splith (sway/commands/floating.c:29-31).

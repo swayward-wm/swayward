@@ -1322,7 +1322,7 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         window: &W::Id,
         transaction: Transaction,
-        transfer: bool,
+        scratchpad: bool,
     ) -> Option<(RemovedTile<W>, Option<WorkspaceId>)> {
         if let Some(index) = self
             .scratchpad
@@ -1391,12 +1391,12 @@ impl<W: LayoutElement> Layout<W> {
                         .find(|workspace| workspace.has_window(window))
                     {
                         let source_workspace = ws.id();
-                        if !transfer && self.scratchpad_windows.contains(window) {
+                        if !scratchpad && self.scratchpad_windows.contains(window) {
                             ws.tiling_mut()
                                 .release_global_fullscreen_before_close(window);
                         }
-                        let removed = if transfer {
-                            ws.remove_tile_for_transfer(window, transaction)
+                        let removed = if scratchpad {
+                            ws.remove_tile_for_scratchpad(window, transaction)
                         } else {
                             ws.remove_tile(window, transaction)
                         };

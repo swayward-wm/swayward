@@ -809,6 +809,16 @@ impl<W: LayoutElement> Workspace<W> {
                     let has_had_tile = self.tiling.has_had_tile();
                     let keeps_workspace_focus = !activate && self.is_workspace_focused();
                     let id = tile.window().id().clone();
+                    // From a focused floating view the new view is tiled beside the
+                    // most recent view under the focus-inactive tiling container
+                    // (sway/tree/view.c:851-866).
+                    let insert = match insert {
+                        InsertTarget::Focused if self.floating_is_active.get() => self
+                            .tiling
+                            .focus_inactive_view_under_focused_split()
+                            .map_or(insert, InsertTarget::Node),
+                        _ => insert,
+                    };
                     self.tiling.add_tile_with_activation(tile, insert, activate);
                     // An unfocused view leaves a focused workspace focused, even as its first
                     // tiled view (sway/tree/view.c:944-957).
@@ -947,7 +957,7 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn remove_tile(&mut self, id: &W::Id, transaction: Transaction) -> RemovedTile<W> {
-        self.remove_tile_inner(id, transaction, false)
+        self.remove_tile_inner(id, transaction, None)
     }
 
     /// Removes a window that moves to another workspace or the scratchpad, applying sway's
@@ -957,14 +967,25 @@ impl<W: LayoutElement> Workspace<W> {
         id: &W::Id,
         transaction: Transaction,
     ) -> RemovedTile<W> {
-        self.remove_tile_inner(id, transaction, true)
+        self.remove_tile_inner(id, transaction, Some(false))
     }
 
+    /// Removes a window that moves to the scratchpad; see
+    /// [`TilingTree::remove_tile_for_scratchpad`].
+    pub fn remove_tile_for_scratchpad(
+        &mut self,
+        id: &W::Id,
+        transaction: Transaction,
+    ) -> RemovedTile<W> {
+        self.remove_tile_inner(id, transaction, Some(true))
+    }
+
+    /// `transfer` is `None` for a close, else whether the window moves to the scratchpad.
     fn remove_tile_inner(
         &mut self,
         id: &W::Id,
         transaction: Transaction,
-        transfer: bool,
+        transfer: Option<bool>,
     ) -> RemovedTile<W> {
         let mut from_floating = false;
         let floating_root = self.floating.window_is_floating_root(id);
@@ -973,7 +994,7 @@ impl<W: LayoutElement> Workspace<W> {
                 .floating
                 .active_window()
                 .is_some_and(|window| window.id() == id);
-        let keeps_workspace_focus = !transfer
+        let keeps_workspace_focus = transfer.is_none()
             && self
                 .tiling
                 .node_for_window(id)
@@ -982,10 +1003,10 @@ impl<W: LayoutElement> Workspace<W> {
             from_floating = true;
             self.floating.remove_tile(id, transaction)
         } else {
-            let tile = if transfer {
-                self.tiling.remove_tile_for_transfer(id, transaction)
-            } else {
-                self.tiling.remove_tile(id, transaction)
+            let tile = match transfer {
+                Some(true) => self.tiling.remove_tile_for_scratchpad(id, transaction),
+                Some(false) => self.tiling.remove_tile_for_transfer(id, transaction),
+                None => self.tiling.remove_tile(id, transaction),
             }
             .unwrap();
             let is_floating = tile.restore_to_floating;
@@ -1018,9 +1039,15 @@ impl<W: LayoutElement> Workspace<W> {
         // whenever the workspace has one. A `focus parent` up to the workspace
         // before the floating window was focused must not leave the tiling
         // focus on the root.
-        if removed_focus && !self.floating_is_active.get() && self.tiling.root_is_focused() {
-            self.tiling.focus_child();
-            while self.tiling.focus_child() {}
+        if removed_focus && !self.floating_is_active.get() && !keeps_workspace_focus {
+            if transfer.is_none() {
+                // Closing it focuses the workspace's most recent view, never a
+                // container (`handle_seat_node_destroy`, sway/input/seat.c:273-286).
+                self.tiling.focus_recent_view();
+            } else if self.tiling.root_is_focused() {
+                self.tiling.focus_child();
+                while self.tiling.focus_child() {}
+            }
         }
 
         removed
@@ -1595,6 +1622,13 @@ impl<W: LayoutElement> Workspace<W> {
                     .tiling
                     .tiles()
                     .any(|tile| tile.window().id() == &id && tile.restore_to_floating);
+            // A view a `for_window` rule floats while it maps was never the seat focus:
+            // sway runs criteria before it focuses the view (sway/tree/view.c:943-956),
+            // so `set_focus` is false and the old parent keeps its place.
+            let never_focused = self
+                .tiling
+                .tiles()
+                .any(|tile| tile.window().id() == &id && tile.window().focus_timestamp().is_none());
             let mut tile = if parent.is_some() {
                 self.tiling.remove_tile_without_transaction(&id).unwrap()
             } else {
@@ -1602,9 +1636,9 @@ impl<W: LayoutElement> Workspace<W> {
             };
             // Floating the focused view raises its old parent to the tiling layer's
             // focus-inactive node (`container_set_floating`, sway/tree/container.c:969-973).
-            if let Some(parent) = parent
-                .filter(|parent| target_is_active && !was_floating && self.tiling.contains(*parent))
-            {
+            if let Some(parent) = parent.filter(|parent| {
+                target_is_active && !was_floating && !never_focused && self.tiling.contains(*parent)
+            }) {
                 self.tiling.set_focus(parent);
             }
             tile.tiling_focus_rank = rank;

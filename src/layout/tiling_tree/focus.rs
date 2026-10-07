@@ -253,6 +253,27 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// The most recent view under the focused container, when that is a split
+    /// below the root: where sway maps a view while a floating view has focus
+    /// (`seat_get_focus_inactive_tiling`, then `seat_get_focus_inactive_view`,
+    /// sway/tree/view.c:851-866).
+    pub fn focus_inactive_view_under_focused_split(&self) -> Option<NodeId> {
+        self.focus
+            .filter(|focus| *focus != self.root && self.is_split(*focus))
+            .and_then(|focus| self.focused_leaf_in(focus))
+    }
+
+    /// Focuses the most recent view, or the first one when none was focused.
+    pub fn focus_recent_view(&mut self) {
+        let target = self
+            .fullscreen_node()
+            .and_then(|fullscreen| self.focused_leaf_in(fullscreen))
+            .or_else(|| self.focused_leaf_in(self.root));
+        if target.is_some() {
+            self.set_focus_id(target);
+        }
+    }
+
     /// Focuses the root without raising it in the focus history.
     pub fn focus_root_keeping_history(&mut self) {
         self.focus = Some(self.root);

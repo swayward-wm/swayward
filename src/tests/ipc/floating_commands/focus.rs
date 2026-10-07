@@ -820,3 +820,192 @@ fn focus_layer_commands_keep_fullscreen() {
         );
     }
 }
+
+/// diff-fam-v3-focus-after-kill-in-toggled-split, the family's filed minimal
+/// (oracle state row floated_by_rule_keeps_wrapper_unfocused). `layout toggle all`
+/// on a lone view wraps it in a new split. A view a `for_window` rule floats
+/// while it maps was never the seat focus (criteria run before `view_map`
+/// focuses it, sway/tree/view.c:943-956), so `container_set_floating` does not
+/// raise the old parent (sway/tree/container.c:946-949,969-973). Hiding the
+/// floater then refocuses `seat_get_focus_inactive(ws)`
+/// (sway/tree/root.c:227-229): the tiled view, not the wrapper.
+#[test]
+fn hiding_a_floater_refocuses_the_view_inside_a_fresh_wrapper() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id| {
+        crate::tests::windows::map_window(
+            f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    };
+    map(&mut f, "tiled");
+    for command in [
+        "layout toggle all",
+        r#"for_window [app_id="float"] floating enable"#,
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    map(&mut f, "float");
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let wrapper = &tree["nodes"][1]["nodes"][0]["nodes"][0];
+    assert_eq!(wrapper["focused"], false, "{wrapper:#}");
+    assert_eq!(wrapper["nodes"][0]["app_id"], "tiled");
+    assert_eq!(wrapper["nodes"][0]["focused"], true, "{wrapper:#}");
+}
+
+/// Seat focus after a view leaves, in the first-divergence shapes of
+/// diff-fam-v3-focus-after-kill-in-toggled-split (seeds 30969 31054 31514
+/// 31859 32235). Each case lists the commands and the tree path of the
+/// node sway 1.12 reports focused afterwards.
+/// - 30969: closing the focused view focuses the most recent view under its parent before any
+///   elsewhere (`handle_seat_node_destroy`, sway/input/seat.c:273-286).
+/// - 31054: floating a focused container raises its old parent (`container_set_floating`,
+///   sway/tree/container.c:969-973), so hiding the floater refocuses that split
+///   (sway/tree/root.c:227-229).
+/// - 31514, 31859: closing the focused floater focuses the workspace's most recent view, never a
+///   container (sway/input/seat.c:273-286).
+/// - 31054 later: a view mapped while a floating view has focus is tiled beside the most recent
+///   view under the focus-inactive split (sway/tree/view.c:851-866).
+/// - 32235 later: the new view mapped beside the focused split, so hiding it focuses
+///   `seat_get_focus_inactive(ws)`, which is that split (sway/tree/view.c:849-882,
+///   sway/tree/root.c:128-140).
+/// - 32235: hiding a tiled view reaps its emptied parent first, which raises the view below it, so
+///   the view is refocused, not the grandparent (sway/tree/root.c:114-140,
+///   sway/input/seat.c:273-323).
+#[test]
+fn focus_after_a_view_leaves_matches_sway() {
+    let cases: &[(&str, &[&str], &[usize])] = &[
+        (
+            "30969",
+            &[
+                "map 6",
+                r#"for_window [app_id="7"] split v"#,
+                "map 7",
+                r#"no_focus [app_id="8"]"#,
+                "map 8",
+                "kill",
+            ],
+            &[1, 0],
+        ),
+        (
+            "31054",
+            &[
+                "map 1",
+                "map 2",
+                "layout toggle split",
+                "split toggle",
+                "focus parent; floating toggle",
+                "move scratchpad",
+            ],
+            &[0],
+        ),
+        (
+            "31514",
+            &[
+                "map 2",
+                "layout toggle splitv tabbed",
+                "map 7",
+                "floating enable",
+                "kill",
+            ],
+            &[0, 0],
+        ),
+        (
+            "31859",
+            &[
+                "map 1",
+                "map 2",
+                "splitv",
+                "map 5",
+                "floating enable",
+                "kill",
+            ],
+            &[1, 0],
+        ),
+        (
+            "32235",
+            &[
+                "map 4",
+                "focus parent; split v",
+                "map 5",
+                "layout toggle all",
+                "focus prev",
+                "move scratchpad",
+            ],
+            &[0, 0],
+        ),
+        (
+            "31054 later",
+            &[
+                "map 1",
+                "map 2",
+                "layout toggle split",
+                "split toggle",
+                "focus parent; floating toggle",
+                "map 7",
+            ],
+            &[0, 1],
+        ),
+        (
+            "32235 later",
+            &["map 4", "focus parent; split v", "map 5", "move scratchpad"],
+            &[0],
+        ),
+    ];
+    for (seed, steps, focused_path) in cases {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        for step in *steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+                continue;
+            }
+            for outcome in crate::command::execute(f.niri_state(), step) {
+                assert!(outcome.success, "{seed} {step}: {outcome:?}");
+            }
+            f.double_roundtrip(client);
+            let closed = f
+                .client(client)
+                .state
+                .windows
+                .iter()
+                .filter(|window| window.close_requested)
+                .map(|window| window.surface.clone())
+                .collect::<Vec<_>>();
+            for surface in closed {
+                let window = f.client(client).window(&surface);
+                window.close_requested = false;
+                window.attach_null();
+                window.commit();
+            }
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        let mut node = workspace;
+        for index in *focused_path {
+            node = &node["nodes"][*index];
+        }
+        assert_eq!(node["focused"], true, "{seed}: {workspace:#}");
+    }
+}

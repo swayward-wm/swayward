@@ -375,6 +375,12 @@ impl<W: LayoutElement> TilingTree<W> {
             self.unarranged_under_fullscreen.extend(unarranged);
         }
         let removed_global = self.close_keeps_workspace_focus(id);
+        let mut ancestors = Vec::new();
+        let mut ancestor = self.nodes.get(&id).and_then(|node| node.parent);
+        while let Some(parent) = ancestor {
+            ancestors.push(parent);
+            ancestor = self.nodes.get(&parent).and_then(|node| node.parent);
+        }
         let node = self.remove_node(id)?;
         if removed_fullscreen {
             self.mapped_under_fullscreen.clear();
@@ -403,11 +409,19 @@ impl<W: LayoutElement> TilingTree<W> {
             // See `close_keeps_workspace_focus`.
             self.set_focus_id(Some(self.root));
         } else if self.focus == Some(id) {
-            self.set_focus_id(
-                self.fullscreen_node()
-                    .and_then(|fullscreen| self.focused_leaf_in(fullscreen))
-                    .or_else(|| self.focused_leaf_in(self.root)),
-            );
+            // The seat focuses the most recent view under the closed view's
+            // parent, walking up to the workspace (`handle_seat_node_destroy`,
+            // sway/input/seat.c:273-286).
+            let target = self
+                .fullscreen_node()
+                .and_then(|fullscreen| self.focused_leaf_in(fullscreen))
+                .or_else(|| {
+                    ancestors
+                        .iter()
+                        .filter(|ancestor| self.nodes.contains_key(ancestor))
+                        .find_map(|ancestor| self.focused_leaf_in(*ancestor))
+                });
+            self.set_focus_id(target);
         }
         self.animate_geometry_changes(old_geometries, None);
         Some(*tile)
@@ -415,8 +429,8 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// Removes a window that is being transferred elsewhere rather than closed. Sway refocuses
     /// the most recent focus entry under the old parent, which is a container when that
-    /// container was focused on its own (sway/commands/move.c:598-608;
-    /// sway/tree/root.c:128-140). Closing uses the view-only rule in `remove_tile`.
+    /// container was focused on its own (sway/commands/move.c:598-608). Closing uses the
+    /// view-only rule in `remove_tile`.
     pub fn remove_tile_for_transfer(
         &mut self,
         window: &W::Id,
@@ -431,6 +445,41 @@ impl<W: LayoutElement> TilingTree<W> {
         let tile = self.remove_tile(window, transaction)?;
         if self.focus.is_some() {
             self.resolve_transfer_focus(target);
+        }
+        Some(tile)
+    }
+
+    /// Removes a window that moves to the scratchpad. Sway floats a tiled view first,
+    /// raising its old parent and then the view (`container_set_floating`,
+    /// sway/tree/container.c:969-973), and the hide then focuses
+    /// `seat_get_focus_inactive(old_parent)`, else `seat_get_focus_inactive(ws)`
+    /// (sway/tree/root.c:128-140). Neither returns the node it searches, so a surviving
+    /// parent hands focus to its most recent other entry. A parent the float reaps
+    /// instead raises the most recent view under its own parent
+    /// (sway/input/seat.c:273-323), which `remove_tile` has already focused.
+    pub fn remove_tile_for_scratchpad(
+        &mut self,
+        window: &W::Id,
+        transaction: Transaction,
+    ) -> Option<Tile<W>> {
+        let id = self.node_for_window(window)?;
+        let refocus = self.focus == Some(id) && self.fullscreen_node().is_none();
+        let old_parent = self
+            .nodes
+            .get(&id)
+            .and_then(|n| n.parent)
+            .filter(|parent| *parent != self.root);
+        let target = refocus
+            .then(|| match old_parent {
+                Some(parent) => self.focus_inactive_in_excluding(parent, id),
+                None => self.focus_inactive_in_excluding(self.root, id),
+            })
+            .flatten();
+        let tile = self.remove_tile(window, transaction)?;
+        if let Some(target) = target.filter(|target| self.nodes.contains_key(target)) {
+            if self.focus.is_some() {
+                self.set_focus_id(Some(target));
+            }
         }
         Some(tile)
     }
