@@ -487,6 +487,54 @@ fn swapping_the_focused_tab_keeps_it_focused_and_visible() {
     assert_eq!(nodes[1]["visible"], false);
 }
 
+// random-v3 seed 30021 (differential, two outputs): the focused window on the
+// right output swaps into the left output's tabbed container. Sway's seat
+// focus stack is seat-wide, so the arrival, focused more recently than the
+// tab beside it, becomes the tabbed container's visible child
+// (`swap_places`/`swap_focus`, sway/tree/container.c:1717-1797;
+// `view_is_visible`, sway/tree/view.c:1180-1193).
+#[test]
+fn swapping_across_outputs_into_a_tabbed_parent_shows_the_recently_focused_arrival() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    f.niri_state().update_keyboard_focus();
+    map_test_window(&mut f, client, "fixture-4");
+    for command in ["focus output left", "mark m", "layout tabbed"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        f.niri_state().update_keyboard_focus();
+    }
+    map_test_window(&mut f, client, "fixture-6");
+    assert!(crate::command::execute(f.niri_state(), "focus right")[0].success);
+    f.niri_state().update_keyboard_focus();
+
+    let outcome = crate::command::execute(f.niri_state(), "swap container with mark m");
+    assert!(outcome[0].success, "{outcome:?}");
+    f.niri_state().update_keyboard_focus();
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let parent = find_json_parent_of_app_id(&tree, "fixture-4").unwrap();
+    assert_eq!(parent["layout"], "tabbed");
+    let nodes = parent["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["app_id"], "fixture-4");
+    assert_eq!(nodes[0]["visible"], true);
+    assert_eq!(nodes[1]["app_id"], "fixture-6");
+    assert_eq!(nodes[1]["visible"], false);
+    let moved = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(moved["focused"], true);
+    assert_eq!(moved["visible"], true);
+}
+
 // random-v2 seed 15819 (differential): swapping a fullscreen window with its
 // sibling hands fullscreen to the sibling, and enabling it there focuses the
 // sibling (`container_swap`, sway/tree/container.c:1884-1889;

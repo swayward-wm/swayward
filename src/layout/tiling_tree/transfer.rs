@@ -86,7 +86,17 @@ impl<W: LayoutElement> TilingTree<W> {
             .get_mut(&id)
             .expect("invariant: a freshly inserted detached node remains in the arena")
             .parent = Some(slot.parent);
+        let arrived = subtree.focus_history.clone();
         self.reinsert_focus_history(subtree.focus_history, slot.focus_rank);
+        if !slot.focused {
+            // Sway's focus stack is seat-wide, so a swapped-in view keeps its own place on it
+            // rather than the departing container's: a view focused more recently than the
+            // tabs beside it becomes the visible tab (`swap_places`, sway/tree/container.c:
+            // 1717-1763; `view_is_visible`, sway/tree/view.c:1180-1193).
+            for window in arrived.iter().rev() {
+                self.rank_arrived_window_by_focus_timestamp(window);
+            }
+        }
         if slot.focused || self.focus.is_none() {
             self.set_focus_id(self.focused_leaf_in(id));
         }
