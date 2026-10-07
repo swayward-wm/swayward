@@ -4175,14 +4175,20 @@ impl<W: LayoutElement> Layout<W> {
         if source_was_active {
             // Detaching cancels the workspace animation. Select its settled fallback before
             // reaping so an empty workspace that the interrupted switch left active can go.
+            // Sway shows the output's most recently focused remaining workspace
+            // (`output_get_active_workspace` reads the seat's focus-inactive child,
+            // sway/sway/desktop/output.c:76-86), not its neighbour by index.
+            let monitor = &monitors[current_idx];
             monitors[current_idx].active_workspace_idx = source_replacement
-                .and_then(|id| monitors[current_idx].idx_of_ws(id))
+                .and_then(|id| monitor.idx_of_ws(id))
                 .or_else(|| {
-                    monitors[current_idx]
-                        .workspaces
+                    monitor
+                        .workspace_focus_history
                         .iter()
-                        .rposition(Workspace::must_be_kept)
+                        .filter_map(|id| monitor.idx_of_ws(*id))
+                        .find(|idx| monitor.workspaces[*idx].must_be_kept())
                 })
+                .or_else(|| monitor.workspaces.iter().rposition(Workspace::must_be_kept))
                 .unwrap_or(0);
         }
         monitors[current_idx].reap_empty_workspaces();

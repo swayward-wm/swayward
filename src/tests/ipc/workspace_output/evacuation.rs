@@ -545,3 +545,33 @@ fn floating_group_children_keep_their_rects_under_fullscreen_output_moves() {
     assert_eq!(floater_rect(&after), (bx + 200, by + 300));
     assert_eq!(child_rect(&after), child_rect(&before));
 }
+
+#[test]
+fn moving_the_active_workspace_away_shows_the_most_recently_focused_one() {
+    // Oracle state scenario move_workspace_back_shows_recent_workspace: sway's
+    // source output shows its seat focus-inactive workspace afterwards
+    // (`output_get_active_workspace`, sway/sway/desktop/output.c:76-86).
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (1270, 1408), Some((0, 0)));
+    f.add_named_output_at("right".into(), (1270, 1408), Some((1270, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    map_test_window(&mut f, client, "on-two");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_test_window(&mut f, client, "on-one");
+    for command in [
+        "move workspace to output right",
+        "workspace oracle",
+        "move workspace to output left",
+    ] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+
+    let right = f
+        .swayward()
+        .layout
+        .monitors()
+        .find(|monitor| monitor.output_name() == "right")
+        .unwrap();
+    assert_eq!(right.active_workspace_ref().number(), Some(1));
+}
