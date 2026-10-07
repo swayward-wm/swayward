@@ -36,6 +36,9 @@ fn seed_side_table(t: &mut TilingTree<TestWindow>, name: &str, id: NodeId) {
             t.unarranged_under_fullscreen
                 .insert(id, Rectangle::default());
         }
+        "split_under_fullscreen" => {
+            t.split_under_fullscreen.insert(id);
+        }
         "tab_indicators" => {
             t.tab_indicators
                 .insert(id, TabIndicator::new(t.options.layout.tab_indicator));

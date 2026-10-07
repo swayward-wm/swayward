@@ -540,6 +540,36 @@ fn urgent_command_marks_the_focused_view_when_its_parent_is_focused() {
     assert!(test_window_is_urgent(&mut f, "second"));
 }
 
+/// After `focus parent` reaches the workspace, the view still holds keyboard
+/// focus, but sway's seat focus is the workspace. A criteria `focus` back to
+/// the view is a seat focus change, and it clears the urgency that
+/// `urgent enable` set meanwhile (`seat_set_workspace_focus`,
+/// sway/sway/input/seat.c:1223-1240). Differential seed 30488 (random-v3).
+#[test]
+fn criteria_focus_from_a_focused_workspace_clears_the_views_urgency() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("only".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "focus parent; [app_id=only] urgent enable");
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    assert!(test_window_is_urgent(&mut f, "only"));
+
+    let outcome = crate::command::execute(f.niri_state(), "[urgent=latest] focus");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(!test_window_is_urgent(&mut f, "only"));
+}
+
 #[test]
 fn scratchpad_show_remaps_floating_center_between_asymmetric_outputs() {
     let mut f = Fixture::new();
@@ -799,6 +829,40 @@ fn tiled_resize_beside_a_view_mapped_under_fullscreen_reports_failure() {
     );
 }
 
+/// random-v3 seeds 40208, 40344, 40498 (diff-fam-v3-resize-under-ws-fullscreen;
+/// oracle rows resize_under_workspace_fullscreen_keeps_sibling_percent and
+/// resize_ppt_under_workspace_fullscreen_keeps_sibling_percent). A
+/// tiled resize ends in `arrange_workspace` (sway/commands/resize.c:166-170),
+/// which under workspace fullscreen arranges only the fullscreen container
+/// (sway/tree/arrange.c:310-316), so the hidden sibling keeps its box and its
+/// half percent.
+#[test]
+fn tiled_resize_under_workspace_fullscreen_keeps_the_sibling_percent() {
+    for command in ["resize grow left 20 px", "resize shrink width 5 ppt"] {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        for app_id in ["fs-first", "fs-second"] {
+            windows::map_window(
+                &mut f,
+                client,
+                windows::WindowSpec {
+                    app_id: Some(app_id),
+                    ..Default::default()
+                },
+            );
+        }
+        for command in ["fullscreen enable", command] {
+            let reply = crate::command::execute(f.niri_state(), command);
+            assert!(reply[0].success, "{command}: {reply:?}");
+        }
+        f.double_roundtrip(client);
+        let tree = get_tree(&mut f);
+        let first = find_json_node_with_app_id(&tree, "fs-first").unwrap();
+        assert_eq!(first["percent"], 0.5, "{command}");
+    }
+}
+
 #[test]
 fn tiled_axis_resize_with_workspace_focus_reports_no_target() {
     let mut f = Fixture::new();
@@ -826,6 +890,39 @@ fn tiled_axis_resize_with_workspace_focus_reports_no_target() {
             parse_error: Some(true),
         }]
     );
+}
+
+/// random-v3 seeds 30187 and 30244: `resize set` with the workspace focused
+/// fails like every other resize (sway/commands/resize.c:559-562).
+#[test]
+fn resize_set_with_workspace_focus_reports_no_target() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    let before = get_tree(&mut f);
+
+    let outcome = crate::command::execute(f.niri_state(), "resize set 0 300");
+    assert_eq!(
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize nothing".into()),
+            parse_error: Some(true),
+        }]
+    );
+    f.double_roundtrip(client);
+    assert_eq!(get_tree(&mut f), before);
 }
 
 #[test]
@@ -1588,4 +1685,125 @@ fn error_precedence_matches_sway() {
         crate::command::execute(f.niri_state(), "urgent enable"),
         [refusal("No current container", false)]
     );
+}
+
+#[test]
+fn moving_the_only_view_of_a_floating_split_moves_it_tiled() {
+    // Differential family floating-split-move-tiles (random-v2 seeds 11567, 16435; oracle row
+    // floating_split_only_child_workspace_move): after `floating enable; splitv` the view is a
+    // child of the floating split, not floating (`container_is_floating`,
+    // sway/tree/container.c:1041-1049), so it moves as a tiled container and the emptied split
+    // is reaped (sway/commands/move.c:198-235,609-611).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "only");
+    for command in ["floating enable", "splitv", "move container to workspace 2"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    assert_eq!(
+        workspace_shapes(&mut f),
+        [
+            ("1".to_owned(), vec![], vec![]),
+            ("2".to_owned(), vec!["only".to_owned()], vec![]),
+        ]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
+fn moving_a_floating_split_child_to_its_own_workspace_tiles_it() {
+    // Seed 16435: `move container to workspace next` with one workspace resolves to the
+    // current one; the destination is its focused tiling view, and the non-floating child is
+    // added beside it (`container_move_to_container`, sway/commands/move.c:241-261).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "first");
+    map_app(&mut f, client, "second");
+    for command in [
+        "floating enable",
+        "split h",
+        "move container to workspace next",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    assert_eq!(
+        workspace_shapes(&mut f),
+        [(
+            "1".to_owned(),
+            vec!["first".to_owned(), "second".to_owned()],
+            vec![]
+        )]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+/// random-v3 seed 40490 (diff-fam-v3-resize-under-ws-fullscreen; oracle row
+/// resize_fullscreen_split_wrapper_refused). `splitv` on a fullscreen view
+/// moves fullscreen to the new container (container_replace), whose
+/// child_total_height stays 0 because the workspace arrange lays out only the
+/// fullscreen container (sway/tree/arrange.c:310-316). Sway's resize of it
+/// then changes nothing (sway/commands/resize.c:145-147), and it keeps
+/// reporting the output box over its parent's.
+#[test]
+fn resize_of_a_fullscreen_split_wrapper_changes_nothing() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    let steps = [
+        "@p1",
+        "focus output right",
+        "@p2",
+        "@p3",
+        "focus output left",
+        "sticky enable; focus output left",
+        "splitv",
+        "@p4",
+        "layout splith",
+        "layout toggle split",
+        "for_window [app_id=\"p5\"] fullscreen enable",
+        "@p5",
+        "splitv",
+        "@p6",
+        "move container to workspace oracle",
+    ];
+    for step in steps {
+        if let Some(app_id) = step.strip_prefix('@') {
+            windows::map_window(
+                &mut f,
+                client,
+                windows::WindowSpec {
+                    app_id: Some(app_id),
+                    ..Default::default()
+                },
+            );
+        } else {
+            let reply = crate::command::execute(f.niri_state(), step);
+            assert!(reply[0].success, "{step}: {reply:?}");
+        }
+    }
+    let parent_of_p6 = |tree: &serde_json::Value| {
+        fn find(node: &serde_json::Value) -> Option<serde_json::Value> {
+            let children = node["nodes"].as_array()?;
+            if children.iter().any(|child| child["app_id"] == "p6") {
+                return Some(node.clone());
+            }
+            children.iter().find_map(find)
+        }
+        find(tree).unwrap()
+    };
+    f.double_roundtrip(client);
+    let before = parent_of_p6(&get_tree(&mut f));
+    assert_eq!(before["fullscreen_mode"], 1);
+
+    let reply = crate::command::execute(f.niri_state(), "resize grow height 10 ppt");
+    assert!(!reply[0].success, "{reply:?}");
+    f.double_roundtrip(client);
+    let after = parent_of_p6(&get_tree(&mut f));
+    assert_eq!(after["percent"], before["percent"]);
+    assert_eq!(after["rect"], before["rect"]);
 }

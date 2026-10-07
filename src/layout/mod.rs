@@ -430,6 +430,12 @@ pub struct Layout<W: LayoutElement> {
     initial_workspace_names: Vec<String>,
     /// Workspace configuration used to resolve sway's ordered output assignments lazily.
     workspace_configs: Vec<WorkspaceConfig>,
+    /// The workspace the seat last focused, with its name. Sway keeps this per seat, not per
+    /// output (`set_workspace`, sway/input/seat.c:1098-1113).
+    seat_workspace: Option<(WorkspaceId, Option<String>)>,
+    /// Sway's `seat->prev_workspace_name`: the workspace the seat focused before
+    /// `seat_workspace`, on any output.
+    previous_seat_workspace: Option<(WorkspaceId, Option<String>)>,
 }
 
 #[derive(Debug)]
@@ -816,6 +822,8 @@ impl<W: LayoutElement> Layout<W> {
             options: Rc::new(options),
             initial_workspace_names: Vec::new(),
             workspace_configs: Vec::new(),
+            seat_workspace: None,
+            previous_seat_workspace: None,
         }
     }
 
@@ -856,6 +864,8 @@ impl<W: LayoutElement> Layout<W> {
             options: opts,
             initial_workspace_names,
             workspace_configs: config.workspaces.clone(),
+            seat_workspace: None,
+            previous_seat_workspace: None,
         }
     }
 
@@ -1178,9 +1188,17 @@ impl<W: LayoutElement> Layout<W> {
                         }
                     }
                 };
+                // Only a view mapped into the focused workspace may take focus
+                // (`should_focus`, sway/tree/view.c:712-715). Another output's
+                // active workspace is not focused, so its focus stays put.
+                let activate = match activate {
+                    ActivateWindow::Smart if mon_idx != *active_monitor_idx => ActivateWindow::No,
+                    activate => activate,
+                };
                 let mon = &mut monitors[mon_idx];
 
                 mon.add_window(window, target, activate, is_floating);
+                mark_mapped_into_tiling(mon.workspaces.iter_mut(), &id);
 
                 if activate.map_smart(|| false) {
                     *active_monitor_idx = mon_idx;
@@ -1265,6 +1283,7 @@ impl<W: LayoutElement> Layout<W> {
                         is_floating,
                     },
                 );
+                mark_mapped_into_tiling(std::iter::once(&mut *ws), &id);
 
                 // Set the default height for scrolling windows.
                 if !is_floating {
@@ -2272,9 +2291,13 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
-    pub fn focus_next_prev_sibling(&mut self, next: bool) -> bool {
+    pub fn focus_next_prev_sibling(&mut self, next: bool, allow_wrap: bool) -> bool {
         self.active_workspace_mut()
-            .is_some_and(|workspace| workspace.focus_next_prev_sibling(next))
+            .is_some_and(|workspace| workspace.focus_next_prev_sibling(next, allow_wrap))
+    }
+
+    pub fn tiling_next_prev_direction(&self, next: bool) -> Option<tiling_tree::Direction> {
+        self.active_workspace()?.tiling_next_prev_direction(next)
     }
 
     pub fn focused_tiling_node(&self) -> Option<tiling_tree::NodeId> {
@@ -2588,20 +2611,18 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn switch_workspace_auto_back_and_forth(&mut self, idx: usize) {
-        let previous_name = {
-            let Some(monitor) = self.active_monitor() else {
-                return;
-            };
-            let idx = idx.min(monitor.workspaces.len() - 1);
-            (idx == monitor.active_workspace_idx && monitor.previous_workspace_idx().is_none())
-                .then(|| monitor.previous_workspace_name().map(str::to_owned))
-                .flatten()
+        let Some(monitor) = self.active_monitor() else {
+            return;
         };
-        if let Some(previous_name) = previous_name {
-            let _ =
-                self.activate_sway_workspace(crate::command::WorkspaceTarget::Name(previous_name));
-        } else if let Some(monitor) = self.active_monitor() {
-            monitor.switch_workspace_auto_back_and_forth(idx);
+        let idx = idx.min(monitor.workspaces.len() - 1);
+        if idx != monitor.active_workspace_idx {
+            monitor.switch_workspace(idx);
+            return;
+        }
+        // Sway returns to the seat's previous workspace, on whichever output it is
+        // (`workspace_auto_back_and_forth`, sway/tree/workspace.c:709-729).
+        if self.previous_seat_workspace_name().is_some() {
+            let _ = self.activate_sway_workspace(crate::command::WorkspaceTarget::BackAndForth);
         }
     }
 
@@ -3939,10 +3960,19 @@ impl<W: LayoutElement> Layout<W> {
             if mon.workspace_switch.is_none() {
                 monitors[mon_idx].clean_up_workspaces();
             }
+            // Sway keeps one seat-wide focus stack, so a view focused more recently than the
+            // destination's focus-inactive view becomes the destination's focus-inactive view,
+            // and a later switch there focuses it (`seat_get_focus_inactive`,
+            // sway/input/seat.c:1357-1372; sway/commands/move.c:583-608).
             if let Some(workspace_idx) = monitors[new_idx].idx_of_ws(ws_id) {
-                monitors[new_idx].workspaces[workspace_idx]
-                    .tiling_mut()
-                    .sort_focus_history_by_timestamp();
+                let workspace = &mut monitors[new_idx].workspaces[workspace_idx];
+                workspace.tiling_mut().sort_focus_history_by_timestamp();
+                if !activate.map_smart(|| false) {
+                    workspace
+                        .tiling_mut()
+                        .rank_arrived_window_by_focus_timestamp(&window);
+                    workspace.rank_arrived_floating_window(&window);
+                }
             }
         }
     }
@@ -3954,17 +3984,33 @@ impl<W: LayoutElement> Layout<W> {
         direction: tiling_tree::Direction,
         activate: ActivateWindow,
     ) {
+        // The move leaves the seat's focus alone (`container_move_in_direction`,
+        // sway/commands/move.c:277-298, 715-744). Focusing the view raised its workspace right
+        // below it (`seat_set_focus`, sway/input/seat.c:1178-1190), so when it was the source
+        // workspace's focus, the workspace node becomes that workspace's focus-inactive node.
+        let source = self.workspaces().find_map(|(_, _, workspace)| {
+            (workspace.has_window(window)
+                && workspace.active_window().map(|active| active.id()) == Some(window))
+            .then(|| workspace.id())
+        });
         self.move_to_output(Some(window), output, None, activate);
-        // Sway inserts right/down moves at the leading edge of a parallel
-        // destination (`sway/commands/move.c:168-193`). The generic transfer
-        // inserts after the destination focus, so move the new leaf across it.
-        let opposite = match direction {
-            tiling_tree::Direction::Right => Some(tiling_tree::Direction::Left),
-            tiling_tree::Direction::Down => Some(tiling_tree::Direction::Up),
-            tiling_tree::Direction::Left | tiling_tree::Direction::Up => None,
-        };
-        if let Some(direction) = opposite {
-            self.move_window_in_direction(window, direction, 10.);
+        if let Some(source) =
+            source.filter(|source| self.window_workspace_id(window) != Some(*source))
+        {
+            if let Some(workspace) = self.workspace_mut(source) {
+                workspace.focus_workspace_itself();
+            }
+        }
+        // The generic transfer inserts after the destination focus; sway
+        // places a directional arrival by edge or by the focus-inactive
+        // container (sway/commands/move.c:168-196).
+        if let Some(workspace) = self
+            .workspaces_mut()
+            .find(|workspace| workspace.tiling().node_for_window(window).is_some())
+        {
+            workspace
+                .tiling_mut()
+                .place_arrival_from_direction(window, direction);
         }
     }
 
@@ -5697,5 +5743,18 @@ fn compute_overview_zoom(options: &Options, overview_progress: Option<f64>) -> f
         (1. - p * (1. - zoom)).max(0.0001)
     } else {
         1.
+    }
+}
+
+/// Sway maps every view into the tiling layer before floating it, so the
+/// workspace representation is refreshed even for a view that floats at once
+/// (`view_map` and `workspace_add_tiling`, sway/tree/view.c:895-902,
+/// sway/tree/workspace.c:939-958).
+fn mark_mapped_into_tiling<'a, W: LayoutElement + 'a>(
+    mut workspaces: impl Iterator<Item = &'a mut Workspace<W>>,
+    window: &W::Id,
+) {
+    if let Some(workspace) = workspaces.find(|workspace| workspace.has_window(window)) {
+        workspace.tiling_mut().restore_has_had_tile(true);
     }
 }

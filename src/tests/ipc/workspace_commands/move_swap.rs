@@ -63,7 +63,17 @@ fn directional_move_to_output_inserts_before_destination_focus() {
     }
 
     assert!(crate::command::execute(f.niri_state(), "move right")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "focus output left, move right")[0].success);
+    // The move left the seat on the source workspace, which `focus output left` focuses
+    // itself, so a plain `move right` is refused there, as pinned sway 1.12 answers
+    // (sway/commands/move.c:683-687). Target the remaining view instead.
+    let refused = crate::command::execute(f.niri_state(), "focus output left, move right");
+    assert!(refused[0].success);
+    assert_eq!(
+        refused[1].error.as_deref(),
+        Some("Cannot move workspaces in a direction")
+    );
+    assert!(crate::command::execute(f.niri_state(), r#"[app_id="first"] move right"#)[0].success);
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
 
     let apps = f
         .swayward()
@@ -537,6 +547,23 @@ fn failed_workspace_move_to_missing_mark_or_output_still_wraps_children() {
         assert_eq!(wrapper["percent"], 0.0, "{command}");
         assert_eq!(wrapper["rect"]["width"], 0, "{command}");
         assert!(wrapper["nodes"][0]["percent"].is_null(), "{command}");
+
+        // `workspace X` runs `arrange_workspace`, which gives the wrapper its box
+        // (sway/tree/workspace.c:741, sway/tree/arrange.c:317-321).
+        let name = workspace["name"].as_str().unwrap().to_owned();
+        let switch = format!("workspace --no-auto-back-and-forth {name}");
+        assert!(crate::command::execute(f.niri_state(), &switch)[0].success);
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let wrapper = &tree["nodes"][1]["nodes"][0]["nodes"][0];
+        assert_eq!(wrapper["percent"], 1.0, "{command}");
+        assert_eq!(wrapper["nodes"][0]["percent"], 1.0, "{command}");
     }
 }
 
@@ -1423,4 +1450,469 @@ fn move_to_workspace_back_and_forth_recreates_a_reaped_previous_workspace() {
         .find(|workspace| workspace["name"] == "alpha")
         .expect("previous workspace recreated");
     assert!(find_json_node_with_app_id(workspace, "moved").is_some());
+}
+
+// Differential family diff-fam-v3-move-to-mark-focus (random-v3 seeds 40058,
+// 40239, 40373). Moving a container never raises it in the seat stack; only
+// a moved focused container refocuses the most recent entry under its old
+// parent, else the workspace, and refocusing the current focus is a no-op
+// (sway/commands/move.c:589-608; sway/input/seat.c:1131-1134). Oracle rows
+// move_to_mark_in_split_focuses_moved_first and
+// move_to_mark_from_split_focuses_old_sibling.
+fn mark_move_workspace(f: &mut Fixture) -> serde_json::Value {
+    f.niri_state().refresh_and_flush_clients();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    tree["nodes"][1]["nodes"][0].clone()
+}
+
+fn focus_apps(container: &serde_json::Value) -> Vec<String> {
+    let children = container["nodes"].as_array().unwrap();
+    container["focus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            let child = children.iter().find(|child| child["id"] == *id).unwrap();
+            child["app_id"].as_str().unwrap_or("split").to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn move_to_mark_in_split_keeps_the_moved_view_first_in_focus() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_window(&mut f, client, "mtm-1");
+    map_window(&mut f, client, "mtm-2");
+    for command in ["split v", "mark m", r#"[app_id="^mtm-1$"] focus"#] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    let outcome = crate::command::execute(f.niri_state(), "move container to mark m");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let workspace = mark_move_workspace(&mut f);
+    let split = &workspace["nodes"][0];
+    assert_eq!(
+        workspace["representation"], "H[V[mtm-2 mtm-1]]",
+        "{workspace}"
+    );
+    assert_eq!(split["nodes"][1]["focused"], true);
+    assert_eq!(focus_apps(split), ["mtm-1", "mtm-2"]);
+}
+
+#[test]
+fn move_to_mark_from_split_focuses_the_old_sibling() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_window(&mut f, client, "mtm-1");
+    assert!(crate::command::execute(f.niri_state(), "mark m")[0].success);
+    map_window(&mut f, client, "mtm-2");
+    assert!(crate::command::execute(f.niri_state(), "split v")[0].success);
+    map_window(&mut f, client, "mtm-3");
+    let outcome = crate::command::execute(f.niri_state(), "move container to mark m");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let workspace = mark_move_workspace(&mut f);
+    assert_eq!(
+        workspace["representation"], "H[mtm-1 mtm-3 V[mtm-2]]",
+        "{workspace}"
+    );
+    assert_eq!(
+        workspace["nodes"][2]["nodes"][0]["focused"], true,
+        "{workspace}"
+    );
+    assert_eq!(workspace["nodes"][1]["focused"], false);
+    assert_eq!(focus_apps(&workspace), ["split", "mtm-3", "mtm-1"]);
+}
+
+// Seed 40373: a failed move wraps a tabbed workspace's children without
+// arranging, so the wrapper reports calloc's empty box and percent 0 even
+// under a tabbed workspace (sway/commands/move.c:430-436,
+// sway/ipc-json.c:744-755). Oracle row
+// tabbed_workspace_move_to_missing_mark_wraps_unarranged.
+#[test]
+fn failed_move_wraps_tabbed_workspace_children_unarranged() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_window(&mut f, client, "mtm-1");
+    for command in ["focus parent", "layout tabbed"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    let outcome = crate::command::execute(f.niri_state(), "move container to mark m");
+    assert!(!outcome[0].success, "{outcome:?}");
+
+    let workspace = mark_move_workspace(&mut f);
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["layout"], "tabbed", "{workspace}");
+    assert_eq!(wrapper["percent"], 0.0, "{wrapper}");
+    assert_eq!(wrapper["rect"]["width"], 0);
+    assert!(wrapper["nodes"][0]["percent"].is_null(), "{wrapper}");
+    // GET_TREE takes the tab bar from the wrapper's empty box, and the view
+    // keeps the box the tabbed workspace gave it (sway/ipc-json.c:816-825).
+    let view = &wrapper["nodes"][0];
+    let tab = view["deco_rect"]["height"].as_i64().unwrap();
+    assert!(tab > 0, "{view}");
+    assert_eq!(wrapper["rect"]["y"], tab, "{wrapper}");
+    assert_eq!(wrapper["rect"]["height"], -tab, "{wrapper}");
+    assert_eq!(view["rect"]["y"], tab, "{view}");
+    assert_eq!(view["rect"]["height"], 720 - tab, "{view}");
+}
+
+// Seed 40373: moving a focused workspace to a mark on one of its own views
+// wraps the children, then does nothing because the mark is inside the
+// wrapper; sway still arranges the workspace, so the wrapper reports its
+// tabbed share (sway/commands/move.c:430-436, 243-246 and 628-635). Oracle
+// row workspace_move_to_own_mark_wraps_children.
+#[test]
+fn workspace_move_to_own_mark_wraps_children_arranged() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_window(&mut f, client, "mtm-1");
+    assert!(crate::command::execute(f.niri_state(), "mark m")[0].success);
+    map_window(&mut f, client, "mtm-2");
+    for command in ["focus parent", "layout tabbed"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    let outcome = crate::command::execute(f.niri_state(), "move container to mark m");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let workspace = mark_move_workspace(&mut f);
+    assert_eq!(
+        workspace["representation"], "T[T[mtm-1 mtm-2]]",
+        "{workspace}"
+    );
+    let wrapper = &workspace["nodes"][0];
+    let percent = wrapper["percent"].as_f64().unwrap();
+    assert!(percent > 0.9 && percent < 1., "{wrapper}");
+    assert!(wrapper["rect"]["height"].as_i64().unwrap() > 0, "{wrapper}");
+}
+
+// Seed 40058: after a tiled view moves onto a floating mark, the workspace
+// focus list keeps the seat stack's recency across layers behind the moved
+// view, so a tiled view focused after the marked floating one stays ahead of
+// it (sway/input/seat.c, `focus_inactive_children_iterator`,
+// sway/ipc-json.c). Oracle row move_to_floating_mark_keeps_seat_recency.
+#[test]
+fn move_to_floating_mark_keeps_seat_recency_across_layers() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_window(&mut f, client, "mtm-1");
+    for command in ["floating enable", "mark m"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    map_window(&mut f, client, "mtm-2");
+    map_window(&mut f, client, "mtm-3");
+    let outcome = crate::command::execute(f.niri_state(), "move container to mark m");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let workspace = mark_move_workspace(&mut f);
+    let all = workspace["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(workspace["floating_nodes"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    let focus = workspace["focus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            all.iter().find(|node| node["id"] == *id).unwrap()["app_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(focus, ["mtm-3", "mtm-2", "mtm-1"], "{workspace}");
+}
+
+// Seed 40058: a floating container moved to its own mark stays put and
+// succeeds (`container_move_to_container`, sway/commands/move.c:243-246).
+// Oracle row floating_container_move_to_own_mark_is_noop.
+#[test]
+fn floating_container_move_to_own_mark_is_a_successful_noop() {
+    let mut f = Fixture::new();
+    // Portrait, so the workspace starts splitv and floating it resets the
+    // workspace to splith (sway/commands/floating.c:29-31).
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_window(&mut f, client, "mtm-1");
+    for command in ["focus parent", "floating enable", "mark m"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    let before = mark_move_workspace(&mut f);
+    assert_eq!(before["representation"], "H[]", "{before}");
+    let outcome = crate::command::execute(f.niri_state(), "move container to mark m");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(mark_move_workspace(&mut f), before);
+}
+
+fn workspace_apps(f: &mut Fixture, name: &str) -> Vec<String> {
+    let workspace = f
+        .swayward()
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.sway_name().as_deref() == Some(name))
+        .unwrap()
+        .2;
+    workspace
+        .tiles()
+        .filter_map(|tile| {
+            crate::utils::with_toplevel_role(tile.window().toplevel(), |role| role.app_id.clone())
+        })
+        .collect()
+}
+
+// Differential family diff-fam-v3-layout-misc (random-v3 seeds 40044, 40210,
+// 40445, 40492, two outputs): a container moved to another output's workspace
+// lands after that workspace's focus-inactive tiling container
+// (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389;
+// sway/commands/move.c:515). Sway keeps one seat-wide focus stack, so a window
+// that was focused more recently than the destination's focus, and moved there
+// without activation, becomes that container: the next arrival lands after it.
+#[test]
+fn move_to_other_output_keeps_arrival_order() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    let client = f.add_client();
+
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_window(&mut f, client, "one");
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    let right = f
+        .swayward()
+        .layout
+        .active_workspace()
+        .unwrap()
+        .sway_name()
+        .unwrap();
+    map_window(&mut f, client, "two");
+    map_window(&mut f, client, "three");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    // `three` was focused after `two`, so after crossing it is the right
+    // workspace's focus-inactive container and `four` lands after it.
+    map_window(&mut f, client, "four");
+    assert!(crate::command::execute(f.niri_state(), "move container to output right")[0].success);
+    assert_eq!(workspace_apps(&mut f, &right), ["two", "three", "four"]);
+    map_window(&mut f, client, "five");
+    assert!(crate::command::execute(f.niri_state(), "move container to output right")[0].success);
+    assert_eq!(
+        workspace_apps(&mut f, &right),
+        ["two", "three", "four", "five"]
+    );
+}
+
+// Seed 40445: a view assigned to an unfocused workspace maps without focus,
+// so sway appends it to the end of the seat focus stack (`seat_node_from_node`,
+// sway/input/seat.c:327-354). The destination's focus-inactive container is
+// still the view focused there before, and a container moved in lands after it.
+#[test]
+fn move_to_other_output_lands_after_focus_not_an_assigned_view() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    let client = f.add_client();
+
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_window(&mut f, client, "one");
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    let right = f
+        .swayward()
+        .layout
+        .active_workspace()
+        .unwrap()
+        .sway_name()
+        .unwrap();
+    map_window(&mut f, client, "two");
+    map_window(&mut f, client, "three");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    let assign = format!(r#"assign [app_id="four"] workspace {right}"#);
+    assert!(crate::command::execute(f.niri_state(), &assign)[0].success);
+    map_window(&mut f, client, "four");
+    assert_eq!(workspace_apps(&mut f, &right), ["two", "three", "four"]);
+    map_window(&mut f, client, "five");
+    assert!(crate::command::execute(f.niri_state(), "move container to output right")[0].success);
+    assert_eq!(
+        workspace_apps(&mut f, &right),
+        ["two", "three", "five", "four"]
+    );
+}
+
+/// `swap_floating_with_tiled_mark` in the oracle: sway swaps a floating view
+/// and a tiled one, each taking the other's place, and focus follows the
+/// container that had it (`swap_places`, `swap_focus`,
+/// sway/tree/container.c:1718-1798). Differential seed 11697.
+#[test]
+fn swap_trades_places_between_a_floating_and_a_tiled_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for app_id in ["one", "two", "three"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        if app_id == "one" {
+            assert!(crate::command::execute(f.niri_state(), "mark tiled")[0].success);
+        }
+    }
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+
+    let app_id = |window: &crate::window::Mapped| {
+        crate::utils::with_toplevel_role(window.toplevel(), |role| role.app_id.clone()).unwrap()
+    };
+    let state = |f: &mut Fixture| {
+        let layout = &f.swayward().layout;
+        let workspace = layout.active_workspace().unwrap();
+        let tiled = workspace
+            .tiling()
+            .tiles()
+            .map(|tile| app_id(tile.window()))
+            .collect::<Vec<_>>();
+        let floating = workspace
+            .floating()
+            .tiles()
+            .map(|tile| app_id(tile.window()))
+            .collect::<Vec<_>>();
+        (tiled, floating, app_id(layout.focus().unwrap()))
+    };
+
+    let outcome = crate::command::execute(f.niri_state(), "swap container with mark tiled");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(
+        state(&mut f),
+        (
+            vec!["three".into(), "two".into()],
+            vec!["one".into()],
+            "three".into()
+        )
+    );
+
+    assert!(crate::command::execute(f.niri_state(), r#"[app_id="^two$"] focus"#)[0].success);
+    let outcome = crate::command::execute(f.niri_state(), "swap container with mark tiled");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(
+        state(&mut f),
+        (
+            vec!["three".into(), "one".into()],
+            vec!["two".into()],
+            "two".into()
+        )
+    );
+    assert_eq!(f.swayward().marks_by_window.values().flatten().count(), 1);
+}
+
+/// `swap_tiled_with_floating_mark_maps_beside_focus_inactive` in the oracle:
+/// when the focused tiled view swaps with a floating mark, it floats with
+/// focus, and the next view maps beside the most recent tiled view rather
+/// than the view that swapped in (`seat_get_focus_inactive_tiling`,
+/// sway/tree/view.c:851-866). Differential seed 17577.
+#[test]
+fn a_view_mapped_after_a_tiled_floating_swap_lands_beside_the_focus_inactive_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let open = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, command: &str| {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    };
+    open(&mut f, "one");
+    run(&mut f, "mark --add floater");
+    run(&mut f, "floating enable");
+    open(&mut f, "three");
+    open(&mut f, "four");
+    run(&mut f, "swap container with mark floater");
+    open(&mut f, "five");
+
+    let apps = f
+        .swayward()
+        .layout
+        .active_workspace()
+        .unwrap()
+        .tiling()
+        .tiles()
+        .filter_map(|tile| {
+            crate::utils::with_toplevel_role(tile.window().toplevel(), |role| role.app_id.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(apps, ["three", "five", "one"]);
+}
+
+// differential family diff-fam-tabbed-split-border-none-percent (random-v2
+// seed 14815): in a tabbed wrapper holding a lone V split, `border none` on
+// the view leaves the split's box below the tab bar (`apply_tabbed_layout`,
+// sway/tree/arrange.c:185-197), so the split still reports
+// (720 - titlebar) / 720 (0.9625), not 1.0.
+#[test]
+fn a_lone_split_under_tabs_keeps_the_tab_bar_out_of_its_percent_after_border_none() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("a".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let split_percent = |f: &mut Fixture, stream: &mut UnixStream, command: &str| {
+        let outcome = query_ipc_with_payload(f, stream, MessageType::RunCommand, command);
+        assert_eq!(outcome[0]["success"], true, "{command}: {outcome}");
+        let tree = query_ipc(f, stream, MessageType::GetTree);
+        let tabbed = tree["nodes"][1]["nodes"][0]["nodes"][0].clone();
+        assert_eq!(tabbed["layout"], "tabbed", "{command}: {tabbed:#}");
+        let split = &tabbed["nodes"][0];
+        assert_eq!(split["layout"], "splitv", "{command}: {tabbed:#}");
+        // The split's rect starts below the tab bar and its own titlebar, as
+        // in sway's capture (y = 2 * 27); only the tab bar comes out of the
+        // percent.
+        let titlebar = split["rect"]["y"].as_f64().unwrap() / 2.;
+        assert!(titlebar > 0., "{command}: {tabbed:#}");
+        let percent = split["percent"].as_f64().unwrap();
+        assert!(
+            (percent - (720. - titlebar) / 720.).abs() < 1e-9,
+            "{command}: {percent} in {tabbed:#}"
+        );
+    };
+    let outcome = query_ipc_with_payload(
+        &mut f,
+        &mut stream,
+        MessageType::RunCommand,
+        "layout tabbed",
+    );
+    assert_eq!(outcome[0]["success"], true, "{outcome}");
+    split_percent(&mut f, &mut stream, "split v");
+    split_percent(&mut f, &mut stream, "border none");
 }

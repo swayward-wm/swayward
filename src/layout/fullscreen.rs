@@ -12,18 +12,40 @@ impl<W: LayoutElement> Layout<W> {
             .and_then(Workspace::focused_container_fullscreen_mode)
     }
 
+    /// Sway's `root->fullscreen_global` is set. A global fullscreen view a
+    /// `layout` wrap detached keeps mode 2 but no longer counts
+    /// (sway/tree/workspace.c:898-910, sway/tree/container.c:1440-1446).
     pub fn global_fullscreen_active(&self) -> bool {
         self.workspaces().any(|(_, _, workspace)| {
             workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global)
+                && !workspace.tiling().global_fullscreen_orphaned()
         })
     }
 
-    pub fn focused_window_is_fullscreen_or_child(&self) -> bool {
-        let Some(window) = self.focus() else {
-            return false;
-        };
-        self.active_workspace()
-            .is_some_and(|workspace| workspace.fullscreen_contains_window(window.id()))
+    /// The fullscreen mode a window's own container holds, sway's
+    /// `container->pending.fullscreen_mode`. A child of a fullscreen split
+    /// holds none (`container_replace`, sway/tree/container.c:1471-1503).
+    pub fn window_own_fullscreen_mode(&self, id: &W::Id) -> Option<tiling_tree::FullscreenMode> {
+        self.workspaces().find_map(|(_, _, workspace)| {
+            match workspace.tiling().node_for_window(id) {
+                Some(node) => workspace.tiling().fullscreen_mode(node),
+                None => workspace.floating().window_own_fullscreen_mode(id),
+            }
+        })
+    }
+
+    /// [`Self::window_own_fullscreen_mode`] for a split container.
+    pub fn node_own_fullscreen_mode(
+        &self,
+        workspace_id: WorkspaceId,
+        node: NodeId,
+    ) -> Option<tiling_tree::FullscreenMode> {
+        let workspace = self.workspace(workspace_id)?;
+        if workspace.tiling().contains(node) {
+            workspace.tiling().fullscreen_mode(node)
+        } else {
+            workspace.floating().node_own_fullscreen_mode(node)
+        }
     }
 
     pub fn set_focused_fullscreen_mode(&mut self, mode: Option<tiling_tree::FullscreenMode>) {

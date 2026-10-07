@@ -91,7 +91,7 @@ impl<W: LayoutElement> Workspace<W> {
             if self.floating.tree_root_for_window(&window).is_some() {
                 return self.floating.set_focused_fullscreen(mode);
             }
-            self.set_fullscreen(&window, mode.is_some());
+            self.set_fullscreen_mode(&window, mode);
             return true;
         }
         // With the workspace itself focused there is no container, and sway's
@@ -138,6 +138,9 @@ impl<W: LayoutElement> Workspace<W> {
             return false;
         };
         tile.restore_to_floating = floating.unwrap_or(!tile.restore_to_floating);
+        // container_set_floating moves a CSD view's border either way
+        // (sway/tree/container.c:955-965, 995-1003).
+        tile.set_sway_csd_floating(tile.restore_to_floating);
         true
     }
 

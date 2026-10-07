@@ -507,3 +507,117 @@ fn next_on_output_from_the_only_workspace_stays_after_the_empty_one_is_destroyed
         .collect::<Vec<_>>();
     assert_eq!(names, ["3"]);
 }
+
+#[test]
+fn global_fullscreen_refuses_every_workspace_switch() {
+    // sway/sway/commands/workspace.c:175-178 runs before any target is
+    // resolved, so `back_and_forth` without history fails the same way.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle global")[0].success);
+    let before = f.swayward().layout.active_workspace().unwrap().id();
+
+    for command in [
+        "workspace next",
+        "workspace prev",
+        "workspace next_on_output",
+        "workspace back_and_forth",
+        "workspace oracle",
+        "workspace number 4",
+        "workspace current",
+    ] {
+        assert_eq!(
+            crate::command::execute(f.niri_state(), command),
+            [swayward_ipc::CommandOutcome {
+                success: false,
+                error: Some("Can't switch workspaces while fullscreen global".into()),
+                parse_error: Some(false),
+            }],
+            "{command}"
+        );
+    }
+    assert_eq!(f.swayward().layout.active_workspace().unwrap().id(), before);
+    assert!(f.swayward().layout.global_fullscreen_active());
+}
+
+#[test]
+fn global_fullscreen_refuses_a_move_before_resolving_the_destination() {
+    // `move container to ...` refuses a global fullscreen container before it
+    // looks up the mark, workspace or output (sway/commands/move.c:438-441,
+    // 526-531). After `split v` the view is a child of the fullscreen split and
+    // holds no mode itself (`container_replace`, sway/tree/container.c:1471-1503),
+    // so it moves. Differential family move-global-fullscreen-error-precedence,
+    // random-v2 seeds 15845, 15873, 15900, 17634; oracle row
+    // move_global_fullscreen_error_precedence.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    windows_on_workspaces(&mut f, &[("1", "first"), ("1", "second")]);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle global")[0].success);
+    let refusal = || swayward_ipc::CommandOutcome {
+        success: false,
+        error: Some("Can't move fullscreen global container".into()),
+        parse_error: Some(false),
+    };
+    for command in [
+        "move container to mark oracle",
+        "move container to workspace number 3",
+        "move window to output nope",
+        "[app_id=second] move container to mark oracle",
+        "[app_id=second] move container to workspace 3",
+    ] {
+        assert_eq!(
+            crate::command::execute(f.niri_state(), command),
+            [refusal()],
+            "{command}"
+        );
+    }
+    // Another view is not the fullscreen container: its own missing mark wins.
+    assert_eq!(
+        crate::command::execute(
+            f.niri_state(),
+            "[app_id=first] move container to mark oracle"
+        ),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Mark 'oracle' not found".into()),
+            parse_error: Some(false),
+        }]
+    );
+    assert!(f.swayward().layout.global_fullscreen_active());
+
+    assert!(crate::command::execute(f.niri_state(), "split v")[0].success);
+    let outcome = crate::command::execute(f.niri_state(), "move container to workspace number 3");
+    assert!(outcome[0].success, "{outcome:?}");
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
+fn prev_on_output_after_focus_parent_refocuses_the_workspace_view() {
+    // `workspace_switch` focuses `seat_get_focus_inactive(ws)`, a view inside
+    // the workspace, even when the workspace itself held focus after
+    // `focus parent` and the switch wraps back onto it
+    // (sway/tree/workspace.c:731-743). Differential family
+    // v3-ws-prev-after-focus-parent, seed 40035.
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    f.add_output(2, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "target");
+    for command in ["focus parent", "workspace prev_on_output"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let target = find_json_node_with_app_id(&tree, "target").unwrap();
+    assert_eq!(target["focused"], true, "{tree}");
+}

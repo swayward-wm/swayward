@@ -2,11 +2,15 @@ use super::*;
 
 impl<W: LayoutElement> TilingTree<W> {
     pub fn resize_adjacent(&mut self, first: NodeId, second: NodeId, delta: f64) -> bool {
-        let old = self.compute_geometry();
-        if !self.adjacent_fits_min_sane(&old.ipc_nodes, first, second, delta) {
+        if self.never_arranged_in_parent(first) {
             return false;
         }
-        let snapped = self.snap_shares_to_pixels(&old.ipc_nodes, first);
+        let old = self.compute_geometry();
+        let boxes = self.resize_boxes(&old);
+        if !self.adjacent_fits_min_sane(&boxes, first, second, delta) {
+            return false;
+        }
+        let snapped = self.snap_shares_to_pixels(&boxes, first);
         let changed = self.resize_adjacent_inner(first, second, delta);
         if !changed {
             if let Some((parent, percents)) = snapped {
@@ -14,10 +18,100 @@ impl<W: LayoutElement> TilingTree<W> {
             }
         }
         if changed {
+            self.arrange_after_resize(&old, first);
             self.interactive_resize = None;
             self.animate_geometry_changes(old, None);
         }
         changed
+    }
+
+    /// A container mapped, moved or split under workspace fullscreen was
+    /// never laid out by its parent, so its `child_total_width` and
+    /// `child_total_height` are still 0 and sway's resize returns before
+    /// changing anything (`container_resize_tiled`,
+    /// sway/commands/resize.c:121-123 and 145-147).
+    fn never_arranged_in_parent(&self, id: NodeId) -> bool {
+        self.split_under_fullscreen.contains(&id) || self.split_excluded().contains(&id)
+    }
+
+    /// The boxes sway's resize code reads: the IPC boxes, except that a
+    /// fullscreen container sway last arranged in its tile slot measures that
+    /// slot, not the output (`container_resize_tiled` compares
+    /// `pending.width`, sway/commands/resize.c:113-131).
+    fn resize_boxes(
+        &self,
+        geometry: &geometry::Geometry<W::Id>,
+    ) -> HashMap<NodeId, Rectangle<f64, Logical>> {
+        let mut boxes = geometry.ipc_nodes.clone();
+        if let Some((id, slot)) = self
+            .fullscreen_node()
+            .and_then(|id| Some((id, self.fullscreen_tile_slot_rect(id, geometry)?)))
+        {
+            boxes.insert(id, slot);
+        }
+        boxes
+    }
+
+    /// The arrange that ends a command resize (`container_resize_tiled`,
+    /// sway/commands/resize.c:166-170). A nested container arranges its
+    /// parent, which lays out every descendant, so a fullscreen container
+    /// below it reports its tile slot. A top-level container arranges the
+    /// workspace, which under workspace fullscreen arranges only the
+    /// fullscreen container, at the output box (sway/tree/arrange.c:310-316):
+    /// everything outside it keeps the box it had, and the percent that
+    /// implies, until the next full arrange.
+    fn arrange_after_resize(&mut self, old: &geometry::Geometry<W::Id>, resized: NodeId) {
+        let Some(fullscreen) = self
+            .fullscreen_node()
+            .filter(|id| self.fullscreen_mode(*id) == Some(FullscreenMode::Workspace))
+        else {
+            return;
+        };
+        let Some(parent) = self.nodes.get(&resized).and_then(|node| node.parent) else {
+            return;
+        };
+        if parent != self.root {
+            if self.contains_node(parent, fullscreen) {
+                self.fullscreen_tile_slot = true;
+            }
+            let arranged: Vec<_> = self
+                .split_under_fullscreen
+                .iter()
+                .copied()
+                .filter(|id| self.contains_node(parent, *id))
+                .collect();
+            for id in arranged {
+                self.split_under_fullscreen.remove(&id);
+            }
+            return;
+        }
+        // The workspace arrange puts the fullscreen container back at the
+        // output box.
+        self.arrange_workspace();
+        self.keep_boxes_outside_fullscreen(old);
+    }
+
+    /// A workspace arrange under workspace fullscreen lays out only the
+    /// fullscreen container (sway/tree/arrange.c:310-316): every other node
+    /// keeps the box it had in `old`, and the percent that implies, until
+    /// the next full arrange.
+    pub(super) fn keep_boxes_outside_fullscreen(&mut self, old: &geometry::Geometry<W::Id>) {
+        let Some(fullscreen) = self.fullscreen_node() else {
+            return;
+        };
+        let excluded = self.split_excluded();
+        let unarranged = old
+            .ipc_nodes
+            .iter()
+            .filter(|(node, _)| {
+                **node != self.root
+                    && !excluded.contains(*node)
+                    && !self.contains_node(fullscreen, **node)
+                    && !self.unarranged_under_fullscreen.contains_key(*node)
+            })
+            .map(|(node, rect)| (*node, *rect))
+            .collect::<Vec<_>>();
+        self.unarranged_under_fullscreen.extend(unarranged);
     }
 
     /// Sway refuses a command resize that would take either neighbour below
@@ -176,7 +270,12 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(tile) = self.tile_mut(id) else {
             return false;
         };
-        if tile.set_sway_border(style, width, false).is_err() {
+        // A fullscreen floating view stays in `ws->floating` in sway, so
+        // `border csd` stores B_CSD on it (set_border,
+        // sway/commands/border.c:25-27).
+        let floating =
+            tile.restore_to_floating && tile.window().pending_sizing_mode().is_fullscreen();
+        if tile.set_sway_border(style, width, floating).is_err() {
             return false;
         }
         self.request_window_sizes();
@@ -218,12 +317,29 @@ impl<W: LayoutElement> TilingTree<W> {
             Layout::SplitV
         };
         let before = edge.intersects(ResizeEdge::LEFT | ResizeEdge::TOP);
-        let ipc_nodes = self.compute_geometry().ipc_nodes;
+        let ipc_nodes = self.resize_boxes(&self.compute_geometry());
         let Some((first, second, _, _, axis_size, _)) =
             self.resize_boundary(&ipc_nodes, id, layout, before)
         else {
             return false;
         };
+        // Sway snaps each fraction to `pending.width / child_total_width` and
+        // later normalises them (sway/commands/resize.c:126-139,
+        // sway/tree/arrange.c:48-52), so a px amount is a share of the
+        // children's summed boxes. Under fullscreen that sum includes the
+        // fullscreen child's output-sized box and exceeds the parent extent.
+        let axis_size = self
+            .nodes
+            .get(&first)
+            .and_then(|node| node.parent)
+            .and_then(|parent| match &self.nodes.get(&parent)?.value {
+                TreeNode::Split { children, .. } => children
+                    .iter()
+                    .map(|child| ipc_nodes.get(child).map(|rect| axis_extent(layout, rect)))
+                    .sum::<Option<f64>>(),
+                TreeNode::Leaf { .. } => None,
+            })
+            .unwrap_or(axis_size);
         let delta = match change {
             SizeChange::AdjustFixed(value) => f64::from(value) / axis_size.max(1.),
             SizeChange::AdjustProportion(value) => {
@@ -502,6 +618,23 @@ impl<W: LayoutElement> TilingTree<W> {
         } else {
             Layout::SplitV
         };
+        // Sway converts ppt against the nearest ancestor with the axis layout,
+        // whatever its child count, else the workspace (resize_set_tiled and
+        // resize_adjust_tiled, sway/commands/resize.c:249-270,297-305).
+        let ppt_base = {
+            let mut ancestor = self.nodes.get(&id).and_then(|node| node.parent);
+            while let Some(ancestor_id) = ancestor {
+                match self.nodes.get(&ancestor_id) {
+                    Some(Node {
+                        value: TreeNode::Split { layout, .. },
+                        ..
+                    }) if *layout == wanted => break,
+                    Some(node) => ancestor = node.parent,
+                    None => return false,
+                }
+            }
+            ancestor.unwrap_or(self.root)
+        };
         let mut branch = id;
         let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
         while let Some(parent_id) = parent {
@@ -515,7 +648,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 return false;
             };
             if *layout == wanted && children.len() > 1 {
-                let geometries = self.compute_geometry();
+                let boxes = self.resize_boxes(&self.compute_geometry());
                 let extent = |rect: &Rectangle<f64, Logical>| {
                     if width {
                         rect.size.w
@@ -523,10 +656,10 @@ impl<W: LayoutElement> TilingTree<W> {
                         rect.size.h
                     }
                 };
-                let Some(parent_extent) = geometries.ipc_nodes.get(&parent_id).map(extent) else {
+                let Some(parent_extent) = boxes.get(&ppt_base).map(extent) else {
                     return false;
                 };
-                let child_extent = |child| geometries.ipc_nodes.get(child).map(extent);
+                let child_extent = |child| boxes.get(child).map(extent);
                 let Some(current) = child_extent(&branch) else {
                     return false;
                 };
@@ -547,16 +680,12 @@ impl<W: LayoutElement> TilingTree<W> {
                         ((parent_extent * value / 100.).trunc() - current) / available
                     }
                 };
-                // Only `resize grow|shrink` is held to the sane minimum.
-                // Sway's `resize set` skips such a change too but still
-                // replies success (resize_set_tiled,
-                // sway/commands/resize.c:285-339); swayward's `resize set`
-                // keeps its earlier behaviour and applies it.
-                let adjust = matches!(
-                    change,
-                    SizeChange::AdjustFixed(_) | SizeChange::AdjustProportion(_)
-                );
-                let changed = self.resize_across_siblings(parent_id, branch, delta, adjust);
+                // `resize set` is held to the sane minimum like `resize
+                // grow|shrink`: sway skips a change that takes any container
+                // below it (container_resize_tiled,
+                // sway/commands/resize.c:108-120) and still replies success
+                // (resize_set_tiled, sway/commands/resize.c:285-339).
+                let changed = self.resize_across_siblings(parent_id, branch, delta, true);
                 return changed && branch == id;
             }
             branch = parent_id;
@@ -575,10 +704,11 @@ impl<W: LayoutElement> TilingTree<W> {
         delta: f64,
         check_min_sane: bool,
     ) -> bool {
-        if !delta.is_finite() {
+        if !delta.is_finite() || self.never_arranged_in_parent(target) {
             return false;
         }
         let old = self.compute_geometry();
+        let boxes = self.resize_boxes(&old);
         let Some(Node {
             value:
                 TreeNode::Split {
@@ -613,11 +743,7 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         let Some(available) = children
             .iter()
-            .map(|child| {
-                old.ipc_nodes
-                    .get(child)
-                    .map(|rect| axis_extent(*layout, rect))
-            })
+            .map(|child| boxes.get(child).map(|rect| axis_extent(*layout, rect)))
             .sum::<Option<f64>>()
         else {
             return false;
@@ -629,10 +755,10 @@ impl<W: LayoutElement> TilingTree<W> {
                 (*child, -(compensation * available).ceil())
             }
         });
-        if check_min_sane && !fits_min_sane(&old.ipc_nodes, *layout, changes) {
+        if check_min_sane && !fits_min_sane(&boxes, *layout, changes) {
             return false;
         }
-        let snapped = self.snap_shares_to_pixels(&old.ipc_nodes, target);
+        let snapped = self.snap_shares_to_pixels(&boxes, target);
         let Some(Node {
             value: TreeNode::Split { percents, .. },
             ..
@@ -662,6 +788,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 -compensation
             };
         }
+        self.arrange_after_resize(&old, target);
         self.interactive_resize = None;
         self.request_window_sizes();
         self.animate_geometry_changes(old, None);

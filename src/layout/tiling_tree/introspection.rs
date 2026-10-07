@@ -5,6 +5,11 @@ impl<W: LayoutElement> TilingTree<W> {
         self.visible_leaves().len()
     }
 
+    /// Sway's `container_titlebar_height()` in logical pixels.
+    pub fn titlebar_height(&self) -> f64 {
+        self.titlebar_height
+    }
+
     pub fn geometry(&self, id: NodeId) -> Option<Rectangle<f64, Logical>> {
         self.compute_geometry().leaf_boxes.remove(&id)
     }
@@ -118,7 +123,7 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// The tiled slot a fullscreen node reports after sway re-arranged its
     /// parent without re-arranging the workspace.
-    fn fullscreen_tile_slot_rect(
+    pub(super) fn fullscreen_tile_slot_rect(
         &self,
         id: NodeId,
         geometries: &geometry::Geometry<W::Id>,
@@ -186,7 +191,12 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                 .copied()
                 .collect::<Vec<_>>();
             while let Some(id) = stack.pop() {
-                if !tree.nodes.contains_key(&id) || !in_pending_wrapper.insert(id) {
+                // Once the workspace is arranged, `arrange_container(fs)`
+                // gave the fullscreen container's descendants their boxes
+                // (sway/tree/arrange.c:310-316).
+                let rearranged = tree.fullscreen_rearranged
+                    && fullscreen.is_some_and(|fs| fs != id && tree.contains_node(fs, id));
+                if rearranged || !tree.nodes.contains_key(&id) || !in_pending_wrapper.insert(id) {
                     continue;
                 }
                 if let Some(TreeNode::Split { children, .. }) =
@@ -210,10 +220,12 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
         self.fullscreen.is_some() && self.tree.fullscreen_layout_wrappers.contains(&id)
     }
 
-    /// A wrapper sway never arranged (see `unarranged_wrappers`): reported
-    /// with calloc's empty box, so its children omit percent.
+    /// A wrapper sway never arranged (see `unarranged_wrappers`, and a split
+    /// in `moved_under_fullscreen`): reported with calloc's empty box, so its
+    /// children omit percent.
     fn is_unarranged_wrapper(&self, id: NodeId) -> bool {
         self.tree.unarranged_wrappers.contains(&id)
+            || (self.tree.moved_under_fullscreen.contains_key(&id) && !self.is_view(id))
     }
 
     fn under_tabbed_pending_wrapper(&self, id: NodeId) -> bool {
@@ -287,10 +299,12 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             } else {
                 pending_wrapper.then_some(0.).or(percent)
             },
-            rect: if pending_wrapper || self.is_unarranged_wrapper(id) {
+            rect: if pending_wrapper || tree.unarranged_wrappers.contains(&id) {
                 Rectangle::default()
             } else if let Some(unarranged) = self.unarranged(id) {
                 unarranged.rect
+            } else if self.is_unarranged_wrapper(id) {
+                Rectangle::default()
             } else if let Some(mut pre_layout) = self
                 .in_pending_wrapper
                 .contains(&id)
@@ -327,10 +341,27 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                         // Already reported as GET_TREE shows it.
                         return Some(node);
                     }
-                    inset_split_by_parent_titlebar(
-                        &mut node,
-                        tree.titlebar_height * titlebar_rows as f64,
-                    );
+                    let inset = tree.titlebar_height * titlebar_rows as f64;
+                    if self.is_unarranged_wrapper(id) {
+                        // Sway never arranged the wrapper, so each child keeps
+                        // the box the workspace strip gave it; the strip below
+                        // the wrapper's own tab bar was never applied.
+                        lift_unarranged_strip(&mut node, inset, true);
+                    }
+                    match &mut node {
+                        // GET_TREE subtracts the tab rows from the wrapper's
+                        // empty box, so its height goes negative
+                        // (sway/ipc-json.c:816-825).
+                        IpcNode::Split { rect, .. } if self.is_unarranged_wrapper(*child) => {
+                            *rect = signed_rect(
+                                rect.loc.x,
+                                rect.loc.y + inset,
+                                rect.size.w,
+                                rect.size.h - inset,
+                            );
+                        }
+                        _ => inset_split_by_parent_titlebar(&mut node, inset),
+                    }
                     Some(node)
                 })
                 .collect(),
@@ -380,6 +411,13 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
                     })
                 })
                 .collect(),
+            // The fullscreen container lays its children out over the output
+            // box (sway/tree/arrange.c:310-316).
+            Layout::SplitH | Layout::SplitV
+                if self.fullscreen == Some(id) && self.tree.fullscreen_rearranged =>
+            {
+                self.split_percents(id, layout, children, percents)
+            }
             Layout::SplitH | Layout::SplitV if self.fullscreen.is_some() => {
                 self.pending_split_percents(id, layout, children, percents)
             }
@@ -692,9 +730,11 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
     /// and `ipc_json_describe_node`, sway/ipc-json.c:543-580 and 816-825).
     fn unarranged(&self, id: NodeId) -> Option<UnarrangedIpc> {
         let tree = self.tree;
-        let fullscreen = self.fullscreen?;
         let parent = tree.nodes.get(&id)?.parent?;
-        if id == fullscreen && tree.fullscreen_rearranged && self.in_pending_wrapper.contains(&id) {
+        if self.fullscreen == Some(id)
+            && tree.fullscreen_rearranged
+            && self.in_pending_wrapper.contains(&id)
+        {
             // `arrange_workspace` puts the fullscreen container back at the
             // output box (sway/tree/arrange.c:310-316).
             return Some(UnarrangedIpc {
@@ -706,7 +746,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             });
         }
         if let Some(sway_box) = self.arranged_wrapper_box(id) {
-            if id == fullscreen {
+            if self.fullscreen == Some(id) {
                 return Some(UnarrangedIpc {
                     rect: sway_box,
                     deco_rect: Rectangle::default(),
@@ -724,6 +764,7 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             ipc.absolute = true;
             return Some(ipc);
         }
+        let fullscreen = self.fullscreen?;
         if id == fullscreen || !self.is_strip(parent) {
             return None;
         }
@@ -771,10 +812,10 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
     }
 
     /// The pending box sway's `arrange_container(wrapper)` gave `id`, when
-    /// `id` is at or below a pending `layout` wrapper a view was mapped into
-    /// (see `TilingTree::wrapper_arranged_boxes`).
+    /// `id` is at or below a pending `layout` wrapper a view was mapped into,
+    /// or below one the fullscreen view left for the scratchpad (see
+    /// `TilingTree::wrapper_arranged_boxes`).
     fn arranged_wrapper_box(&self, id: NodeId) -> Option<Rectangle<f64, Logical>> {
-        self.fullscreen?;
         self.tree.wrapper_arranged_boxes.get(&id).copied()
     }
 
@@ -890,8 +931,30 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
     }
 }
 
+/// Moves `node`'s subtree up by `height`, growing the top node by the same
+/// amount: the strip offset a never-arranged wrapper did not apply.
+fn lift_unarranged_strip<I>(node: &mut IpcNode<I>, height: f64, grow: bool) {
+    let (IpcNode::Split { rect, .. } | IpcNode::Leaf { rect, .. }) = node;
+    rect.loc.y -= height;
+    if grow {
+        rect.size.h += height;
+    }
+    if let IpcNode::Split { children, .. } = node {
+        for child in children {
+            lift_unarranged_strip(child, height, false);
+        }
+    }
+}
+
+/// A fullscreen container has no titlebar row (`get_deco_rect`,
+/// sway/ipc-json.c:543-553), so it keeps its box.
 fn inset_split_by_parent_titlebar<I>(node: &mut IpcNode<I>, height: f64) {
-    if let IpcNode::Split { rect, .. } = node {
+    if let IpcNode::Split {
+        rect,
+        fullscreen_mode: 0,
+        ..
+    } = node
+    {
         rect.loc.y += height;
         rect.size.h = (rect.size.h - height).max(0.);
     }

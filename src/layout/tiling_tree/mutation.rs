@@ -30,7 +30,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.nodes.get(&parent).map(|node| &node.value),
             Some(TreeNode::Split { layout: current, .. }) if *current == layout
         ) {
-            self.split(target, layout);
+            self.split_node(target, layout);
         }
         let id = self.add_tile_with_activation(tile, InsertTarget::Node(target), activate);
         if edge.intersects(ResizeEdge::LEFT | ResizeEdge::TOP) {
@@ -113,7 +113,7 @@ impl<W: LayoutElement> TilingTree<W> {
         // but only a view added directly to the workspace stays unarranged:
         // one added to a container is arranged with its siblings
         // (`arrange_container(parent)`, `sway/tree/view.c:931-940`).
-        let focus_blocked = fullscreen.is_some();
+        let focus_blocked = fullscreen.is_some() && !self.global_fullscreen_orphaned();
         // A global fullscreen container does not set `workspace->fullscreen`
         // (`container_fullscreen_global`, sway/tree/container.c), so
         // `arrange_workspace` lays the new view out with its siblings.
@@ -165,10 +165,13 @@ impl<W: LayoutElement> TilingTree<W> {
             );
         }
         self.compact_tree();
-        if maps_into_wrapper {
+        if maps_into_wrapper
+            && !fullscreen.is_some_and(|fullscreen| self.contains_node(fullscreen, parent))
+        {
             // The view maps beside the fullscreen container, inside the
             // wrapper, and `arrange_container(parent)` lays the wrapper out at
-            // its empty box (sway/tree/view.c:931-940).
+            // its empty box (sway/tree/view.c:931-940). A parent inside the
+            // fullscreen container has the box the fullscreen arrange gave it.
             self.arrange_fullscreen_wrappers();
         }
         if pending_mode.is_fullscreen() {
@@ -187,6 +190,13 @@ impl<W: LayoutElement> TilingTree<W> {
     /// which under workspace fullscreen arranges only the fullscreen container
     /// (sway/tree/arrange.c:310-316) and otherwise everything.
     fn forget_unarranged_after_map(&mut self, parent: NodeId, mapped_under_fullscreen: bool) {
+        if parent != self.root || !mapped_under_fullscreen {
+            let split = std::mem::take(&mut self.split_under_fullscreen);
+            self.split_under_fullscreen = split
+                .into_iter()
+                .filter(|id| *id == parent || !self.contains_node(parent, *id))
+                .collect();
+        }
         if parent != self.root {
             let unarranged = std::mem::take(&mut self.unarranged_under_fullscreen);
             self.unarranged_under_fullscreen = unarranged
@@ -214,8 +224,11 @@ impl<W: LayoutElement> TilingTree<W> {
             )
     }
 
-    /// Focuses a new leaf, or ranks it behind the kept focus: second when merely not
-    /// activated, last when a fullscreen container blocks focus.
+    /// Focuses a new leaf, or ranks it last behind the kept focus. Sway appends every new
+    /// node to the bottom of the seat focus stack (`seat_node_from_node`,
+    /// sway/input/seat.c:327-354) and only raises it when `should_focus` holds
+    /// (sway/tree/view.c:697-731, 945-957), so an unfocused view (`no_focus`, or mapped
+    /// under fullscreen) is the least recently focused.
     fn place_new_leaf_in_focus_order(
         &mut self,
         id: NodeId,
@@ -226,12 +239,7 @@ impl<W: LayoutElement> TilingTree<W> {
         match previous_focus {
             Some(previous_focus) if !activate || focus_blocked => {
                 self.focus_history.retain(|candidate| *candidate != id);
-                if focus_blocked {
-                    self.focus_history.push(id);
-                } else {
-                    self.focus_history
-                        .insert(1.min(self.focus_history.len()), id);
-                }
+                self.focus_history.push(id);
                 self.focus = Some(previous_focus);
             }
             _ => self.set_focus_id(Some(id)),
@@ -247,13 +255,29 @@ impl<W: LayoutElement> TilingTree<W> {
                 .iter()
                 .copied()
                 .find(|id| *id != self.root && self.contains_node(self.root, *id)),
+            // A floating fullscreen view is floating in sway, so the new view
+            // maps beside the focus-inactive tiling view instead, or onto the
+            // workspace when it has none (`seat_get_focus_inactive_tiling`,
+            // sway/tree/view.c:851-866).
+            InsertTarget::Focused
+                if self
+                    .focus
+                    .is_some_and(|focus| self.is_floating_fullscreen(focus)) =>
+            {
+                self.focus_inactive_tiling_leaf()
+            }
             InsertTarget::Focused => self.focus,
             InsertTarget::Node(id) => Some(id),
+            // A moved container lands beside the workspace's focus-inactive
+            // tiling container, or inside it when that is a split
+            // (`seat_get_focus_inactive_tiling`, sway/commands/move.c:516;
+            // move.c:241-261).
             InsertTarget::MoveDestination => {
-                if let Some(focus) = self.focus.filter(|focus| self.is_split(*focus)) {
-                    return (focus, None);
+                let target = self.focus_inactive_tiling();
+                if let Some(split) = target.filter(|target| self.is_split(*target)) {
+                    return (split, None);
                 }
-                self.focus
+                target
             }
         };
         let parent = target
@@ -262,6 +286,27 @@ impl<W: LayoutElement> TilingTree<W> {
         let after = target
             .filter(|target| self.nodes.get(target).and_then(|node| node.parent) == Some(parent));
         (parent, after)
+    }
+
+    /// A fullscreen tile that unfullscreens back to floating: sway keeps it
+    /// in the workspace's floating list (`container_set_floating`,
+    /// sway/tree/container.c:951-975). A view inside a floating group has a
+    /// parent, so it is not floating itself (`container_is_floating`,
+    /// sway/tree/container.c), and a view maps beside it.
+    pub(super) fn is_floating_fullscreen(&self, id: NodeId) -> bool {
+        !self.resident_root
+            && self.fullscreen_mode(id).is_some()
+            && self.tile(id).is_some_and(|tile| tile.restore_to_floating)
+    }
+
+    /// The most recently focused tiling view, skipping a floating fullscreen
+    /// one (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389).
+    fn focus_inactive_tiling_leaf(&self) -> Option<NodeId> {
+        self.focus_history.iter().copied().find(|id| {
+            self.tile(*id).is_some()
+                && !self.is_floating_fullscreen(*id)
+                && self.contains_node(self.root, *id)
+        })
     }
 
     pub fn remove_tile_node(&mut self, id: NodeId) -> Option<Tile<W>> {
@@ -291,6 +336,9 @@ impl<W: LayoutElement> TilingTree<W> {
                 .collect::<Vec<_>>();
             self.unarranged_under_fullscreen.extend(unarranged);
         }
+        let removed_global = removed_fullscreen
+            && self.fullscreen_mode(id) == Some(FullscreenMode::Global)
+            && self.focus == Some(id);
         let node = self.remove_node(id)?;
         if removed_fullscreen {
             self.mapped_under_fullscreen.clear();
@@ -315,6 +363,11 @@ impl<W: LayoutElement> TilingTree<W> {
             self.empty_representation_layout = Some(layout);
             self.pending_modes.clear();
             self.set_focus_id(None);
+        } else if removed_global {
+            // Sway emits the destroy signal while the view is still global fullscreen
+            // (sway/tree/container.c:488-501), so the seat refuses every sibling it obstructs
+            // and focus stays on the workspace (sway/input/seat.c:1148-1151).
+            self.set_focus_id(Some(self.root));
         } else if self.focus == Some(id) {
             self.set_focus_id(
                 self.fullscreen_node()

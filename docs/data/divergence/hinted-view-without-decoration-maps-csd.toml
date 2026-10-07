@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/handlers/compositor.rs", "src/handlers/xdg_shell/decorations.rs", "src/layout/mod.rs", "src/layout/tile.rs", "src/layout/workspace.rs", "src/layout/workspace/fullscreen.rs"]
+what = "a view that did not negotiate server-side decorations maps as using CSD, so a floating one reports border csd and a tiled one stores csd once floated, and a fullscreen floating CSD view keeps csd while it is parked in the tiling tree; mapping a view that floats at once still gives the workspace a representation. The requested xdg-decoration mode is recorded per surface, and test clients that stand in for foot or X11 windows ask for server-side decorations."
+why = "Sway passes csd to view_map unless the client requested server-side decorations (handle_map, sway/sway/desktop/xdg_shell.c:484-500), and view_map adds every view to the tiling layer before floating it (sway/sway/tree/view.c:895-917). Differential family diff-fam-v3-hinted-csd-border; oracle row hinted_view_without_decoration_maps_csd."

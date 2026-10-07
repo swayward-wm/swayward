@@ -14,7 +14,7 @@ fn get_tree_reports_sway_default_floating_rules() {
         ("fixed-height-zero-width", (0, 200), (0, 200), false),
         ("fixed-both", (300, 200), (300, 200), true),
     ] {
-        let window = f.client(client).create_window();
+        let window = f.client(client).create_ssd_window();
         window.xdg_toplevel.set_app_id(name.into());
         window.set_min_size(min_size.0, min_size.1);
         window.set_max_size(max_size.0, max_size.1);
@@ -51,7 +51,7 @@ fn get_tree_reports_sway_default_floating_rules() {
         );
     }
 
-    let parent = f.client(client).create_window();
+    let parent = f.client(client).create_ssd_window();
     parent.xdg_toplevel.set_app_id("parent".into());
     let parent_surface = parent.surface.clone();
     let parent_toplevel = parent.xdg_toplevel.clone();
@@ -62,7 +62,7 @@ fn get_tree_reports_sway_default_floating_rules() {
     parent.ack_last_and_commit();
     f.double_roundtrip(client);
 
-    let dialog = f.client(client).create_window();
+    let dialog = f.client(client).create_ssd_window();
     dialog.xdg_toplevel.set_app_id("dialog".into());
     dialog.set_parent(Some(&parent_toplevel));
     let dialog_surface = dialog.surface.clone();
@@ -92,7 +92,7 @@ fn one_window_schema_fixture() -> (Fixture, std::path::PathBuf, super::client::C
     f.add_output(1, (1270, 1408));
     assert!(crate::command::execute(f.niri_state(), "split vertical")[0].success);
     let id = f.add_client();
-    let window = f.client(id).create_window();
+    let window = f.client(id).create_ssd_window();
     window.xdg_toplevel.set_app_id("fixture-1".into());
     window.set_title("fixture-1");
     window.set_size(696, 491);
@@ -108,7 +108,7 @@ fn one_window_schema_fixture() -> (Fixture, std::path::PathBuf, super::client::C
 }
 
 fn add_schema_floating_window(f: &mut Fixture, id: super::client::ClientId) {
-    let window = f.client(id).create_window();
+    let window = f.client(id).create_ssd_window();
     window.xdg_toplevel.set_app_id("fixture-2".into());
     window.set_title("fixture-2");
     window.set_size(696, 491);

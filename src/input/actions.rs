@@ -107,6 +107,14 @@ impl State {
             touch.cancel(self);
         }
 
+        // Native bindings move the seat as commands do: sway's `set_workspace` records the
+        // previous workspace on every focus change (sway/input/seat.c:1098-1113).
+        self.swayward.layout.sync_seat_workspace();
+        self.do_action_unsynced(action);
+        self.swayward.layout.sync_seat_workspace();
+    }
+
+    fn do_action_unsynced(&mut self, action: Action) {
         let action = self.do_session_action(action);
         let action = action.and_then(|action| self.do_screenshot_action(action));
         let action = action.and_then(|action| self.do_window_action(action));

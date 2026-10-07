@@ -212,6 +212,19 @@ fn scratch_output(
                 node
             }),
     );
+    // Sway lists hidden containers in `root->scratchpad` order, where a
+    // container hidden last comes last (sway/ipc-json.c:476-482).
+    let order = layout
+        .scratchpad_order()
+        .iter()
+        .filter_map(|window| {
+            layout
+                .scratchpad_windows()
+                .find(|mapped| mapped.window == *window)
+                .map(|mapped| window_id(mapped.id()))
+        })
+        .collect::<Vec<_>>();
+    floating_nodes.sort_by_key(|node| order.iter().position(|id| contains_id(node, *id)));
     let focus = floating_nodes.iter().rev().map(|node| node.id).collect();
     let mut workspace = common_node(CommonNodeContext {
         id: SCRATCH_WORKSPACE_ID,

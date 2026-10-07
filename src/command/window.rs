@@ -685,6 +685,16 @@ pub(super) fn border_focused(state: &mut State, border: &Border) -> super::Handl
 }
 
 pub(super) fn floating_focused(state: &mut State, mode: Toggle) -> super::HandlerResult {
+    // Disabling floating on the wrapper leaves it tiled; enabling floats the whole tree, which
+    // `set_container_floating` already does for a focused root.
+    if mode == Toggle::Disable {
+        if let Some(workspace) = state.swayward.layout.active_workspace_mut() {
+            if workspace.wrap_and_focus_workspace_children().is_some() {
+                state.swayward.queue_redraw_all();
+                return Ok(None);
+            }
+        }
+    }
     if let Some(CommandTarget::Container(workspace, node)) = super::targeted::focused_target(state)
     {
         set_container_floating(state, workspace, node, mode)?;
@@ -747,10 +757,22 @@ pub(super) fn resize_set_focused(
     width: Option<ResizeAmount>,
     height: Option<ResizeAmount>,
 ) -> super::HandlerResult {
-    let Some(target) = super::targeted::focused_target(state) else {
-        return Err(swayward_ipc::command::parse_error("Cannot resize nothing"));
-    };
+    let target = focused_resize_target(state)?;
     super::handled(resize_set(state, target, width, height))
+}
+
+/// sway's handler_context.container is NULL when a workspace holds focus, so
+/// cmd_resize refuses before parsing set/grow/shrink (sway/commands/resize.c:559-562).
+fn focused_resize_target(state: &State) -> Result<CommandTarget, CommandOutcome> {
+    let workspace_focused = state
+        .swayward
+        .layout
+        .active_workspace()
+        .is_some_and(|workspace| workspace.is_workspace_focused());
+    match super::targeted::focused_target(state) {
+        Some(target) if !workspace_focused => Ok(target),
+        _ => Err(swayward_ipc::command::parse_error("Cannot resize nothing")),
+    }
 }
 
 pub(super) fn resize_focused(
@@ -760,17 +782,7 @@ pub(super) fn resize_focused(
     first: ResizeAmount,
     second: Option<ResizeAmount>,
 ) -> super::HandlerResult {
-    if state
-        .swayward
-        .layout
-        .active_workspace()
-        .is_some_and(|workspace| workspace.is_workspace_focused())
-    {
-        return Err(swayward_ipc::command::parse_error("Cannot resize nothing"));
-    }
-    let Some(target) = super::targeted::focused_target(state) else {
-        return Err(swayward_ipc::command::parse_error("Cannot resize nothing"));
-    };
+    let target = focused_resize_target(state)?;
     super::handled(resize(state, target, grow, axis, first, second))
 }
 

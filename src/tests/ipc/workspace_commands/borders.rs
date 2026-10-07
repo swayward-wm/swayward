@@ -308,7 +308,7 @@ fn tiled_and_floating_default_borders_remain_independent_in_get_tree() {
     f.add_output(1, (800, 600));
     let client = f.add_client();
     for app_id in ["tiled", "floating"] {
-        let window = f.client(client).create_window();
+        let window = f.client(client).create_ssd_window();
         window.xdg_toplevel.set_app_id(app_id.into());
         window.commit();
         let surface = window.surface.clone();
@@ -395,7 +395,7 @@ fn default_floating_border_changes_only_windows_mapped_after_the_command() {
                     .success
             );
         }
-        let window = f.client(client).create_window();
+        let window = f.client(client).create_ssd_window();
         window.xdg_toplevel.set_app_id(app_id.into());
         window.commit();
         let surface = window.surface.clone();
@@ -430,7 +430,7 @@ fn edge_border_modes_apply_to_workspace_edges_and_visible_view_count() {
         f.add_output(1, (800, 600));
         let client = f.add_client();
         for _ in 0..windows {
-            let window = f.client(client).create_window();
+            let window = f.client(client).create_ssd_window();
             window.commit();
             let surface = window.surface.clone();
             f.roundtrip(client);
@@ -576,7 +576,7 @@ fn configured_border_width_matches_rendering_and_tree_for_tiled_and_floating_win
     let mut f = Fixture::with_config(config);
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
-    let window = f.client(client).create_window();
+    let window = f.client(client).create_ssd_window();
     window.commit();
     let surface = window.surface.clone();
     f.roundtrip(client);
@@ -1003,6 +1003,96 @@ fn view_mapped_with_the_workspace_focused_goes_beside_its_focus_inactive_child()
     assert_eq!(three["focused"], true);
 }
 
+fn workspace_tiling_names(tree: &serde_json::Value) -> Vec<String> {
+    let workspace = &tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] != "__i3")
+        .unwrap()["nodes"][0];
+    fn names(node: &serde_json::Value, out: &mut Vec<String>) {
+        for child in node["nodes"].as_array().unwrap() {
+            match child["app_id"].as_str() {
+                Some(app_id) => out.push(app_id.to_owned()),
+                None => {
+                    out.push("[".to_owned());
+                    names(child, out);
+                    out.push("]".to_owned());
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    names(workspace, &mut out);
+    out
+}
+
+#[test]
+fn view_mapped_beside_a_floating_fullscreen_view_maps_beside_the_tiling_focus() {
+    // A floating fullscreen view stays in the workspace's floating list
+    // (container_set_floating, sway/tree/container.c:951-975), so view_map
+    // maps a new view beside the focus-inactive tiling view instead
+    // (seat_get_focus_inactive_tiling, sway/tree/view.c:851-866), not beside
+    // the fullscreen view. With no tiling view it goes onto the workspace.
+    // Differential family diff-fam-map-beside-floating-fullscreen,
+    // seeds 13399 15058 16121.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_app(&mut f, client, "fs");
+    for command in ["fullscreen toggle", "floating toggle"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    f.double_roundtrip(client);
+    map_app(&mut f, client, "two");
+    map_app(&mut f, client, "three");
+    let tree = tree_json(&mut f);
+    assert_eq!(workspace_tiling_names(&tree), ["two", "three"], "{tree:#}");
+    let two = find_json_node_with_app_id(&tree, "two").unwrap();
+    let three = find_json_node_with_app_id(&tree, "three").unwrap();
+    assert_eq!(two["border"], "normal");
+    assert_eq!(three["border"], "none");
+
+    // Seed 16121: floating the view reaps its split (container_reap_empty,
+    // sway/tree/container.c:969-975), and the new view maps beside the
+    // tiling focus instead of into a split beside the fullscreen view.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    for command in ["split h", "fullscreen enable", "floating enable"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    f.double_roundtrip(client);
+    map_app(&mut f, client, "three");
+    let tree = tree_json(&mut f);
+    assert_eq!(workspace_tiling_names(&tree), ["one", "three"], "{tree:#}");
+}
+
+#[test]
+fn a_floating_fullscreen_view_takes_no_share_of_its_tiled_parent() {
+    // Seed 16770: a view floated by criteria and then fullscreened is in the
+    // floating list, so the tiled sibling keeps the whole workspace.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    assert!(
+        crate::command::execute(
+            f.niri_state(),
+            r#"for_window [app_id="float"] floating enable"#
+        )[0]
+        .success
+    );
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "float");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    f.double_roundtrip(client);
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "tiled").unwrap();
+    assert_eq!(tiled["percent"], 1.0, "{tree:#}");
+}
+
 #[test]
 fn a_tiled_csd_window_moved_to_the_scratchpad_reports_csd() {
     use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
@@ -1060,4 +1150,242 @@ fn a_tiled_csd_window_moved_to_the_scratchpad_reports_csd() {
     assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
     f.double_roundtrip(client);
     assert_eq!(node(&mut f)["border"], "normal");
+}
+
+/// Differential seeds 16254 and 14873: after `split toggle` moves fullscreen onto a new
+/// parent, the view keeps its borders under `smart_borders on`, because sway's
+/// view_is_only_visible counts tree siblings, not what fullscreen leaves on screen
+/// (sway/tree/view.c:327-342), and the fullscreen pass does not touch the child.
+#[test]
+fn smart_borders_count_siblings_hidden_by_fullscreen() {
+    let config = swayward_config::Config::parse_mem(
+        r#"layout {
+            gaps 0
+            smart-borders "on"
+        }
+        window-rule { sway-border "pixel"; sway-border-width 7; }"#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (800, 600));
+    let client = f.add_client();
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    let tree = |f: &mut Fixture, command: &str| {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        f.double_roundtrip(client);
+        let swayward = f.swayward();
+        swayward.layout.update_render_elements(None);
+        serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap()
+    };
+    // The fullscreen view itself fills the output with no border, as in sway's
+    // view_autoconfigure fullscreen branch (sway/tree/view.c:356-368).
+    let fullscreen = tree(&mut f, "fullscreen toggle");
+    let leaf = &fullscreen["nodes"][1]["nodes"][0]["nodes"][1];
+    assert_eq!(leaf["fullscreen_mode"], 1, "{leaf}");
+    assert_eq!(
+        leaf["window_rect"],
+        serde_json::json!({ "x": 0, "y": 0, "width": 800, "height": 600 }),
+        "{leaf}"
+    );
+    let tree = tree(&mut f, "split toggle");
+    let split = &tree["nodes"][1]["nodes"][0]["nodes"][1];
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    let view = &split["nodes"][0];
+    assert_eq!(view["fullscreen_mode"], 0, "{view}");
+    assert_eq!(
+        view["window_rect"],
+        serde_json::json!({ "x": 7, "y": 7, "width": 786, "height": 586 }),
+        "{view}"
+    );
+}
+
+#[test]
+fn a_view_without_server_decorations_maps_using_csd() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // Sway maps an xdg view as using CSD unless it negotiated server-side
+    // decorations (handle_map, sway/desktop/xdg_shell.c:484-500). A view that
+    // floats at map stores `csd` (container_set_floating,
+    // sway/tree/container.c:955-965); a tiled one keeps `normal` and stores
+    // `csd` once floated. Mapping into the tiling layer first also gives the
+    // workspace a representation (sway/tree/view.c:895-902).
+    // Differential family diff-fam-v3-hinted-csd-border, seeds 3 and 21;
+    // oracle row hinted_view_without_decoration_maps_csd.
+    let config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; }"#,
+    )
+    .unwrap();
+    let (mut f, _) = ipc_fixture_with_config(config);
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id: &str, hints: Option<(i32, i32)>, mode: Option<Mode>| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        if let Some((width, height)) = hints {
+            window.set_min_size(width, height);
+            window.set_max_size(width, height);
+        }
+        if let Some(mode) = mode {
+            f.client(client).decorate_last_window(mode);
+        }
+        let window = f.client(client).state.windows.last_mut().unwrap();
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+
+    map(&mut f, "fixed", Some((400, 300)), None);
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["floating_nodes"][0]["border"], "csd");
+    assert_eq!(workspace["representation"], "H[]", "{workspace:#}");
+    // A fullscreen floating view stays floating in sway and keeps `csd`
+    // (seed 3).
+    for command in ["fullscreen toggle global", "fullscreen toggle"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        let tree = get_tree(&mut f);
+        let fixed = find_json_node_with_app_id(&tree, "fixed").unwrap();
+        assert_eq!(fixed["border"], "csd", "{command}");
+    }
+
+    map(
+        &mut f,
+        "fixed-ssd",
+        Some((300, 200)),
+        Some(Mode::ServerSide),
+    );
+    map(
+        &mut f,
+        "fixed-csd",
+        Some((300, 200)),
+        Some(Mode::ClientSide),
+    );
+    map(&mut f, "tiled", None, None);
+    let tree = get_tree(&mut f);
+    let border = |app_id| find_json_node_with_app_id(&tree, app_id).unwrap()["border"].clone();
+    assert_eq!(border("fixed-ssd"), "normal");
+    assert_eq!(border("fixed-csd"), "csd");
+    assert_eq!(border("tiled"), "normal");
+
+    assert!(
+        crate::command::execute(f.niri_state(), r#"[app_id="tiled"] floating enable"#)[0].success
+    );
+    let tree = get_tree(&mut f);
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "tiled").unwrap()["border"],
+        "csd"
+    );
+    assert!(
+        crate::command::execute(f.niri_state(), r#"[app_id="tiled"] floating disable"#)[0].success
+    );
+    let tree = get_tree(&mut f);
+    assert_eq!(
+        find_json_node_with_app_id(&tree, "tiled").unwrap()["border"],
+        "normal"
+    );
+}
+
+#[test]
+fn a_recreated_decoration_object_forgets_the_old_requested_mode() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // Sway reads the requested mode from the view's current decoration
+    // object (handle_map, sway/desktop/xdg_shell.c:484-490), and wlroots
+    // starts a fresh object at requested_mode NONE. A client-side request on
+    // a destroyed object therefore no longer marks the view as using CSD.
+    let config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; }"#,
+    )
+    .unwrap();
+    let (mut f, _) = ipc_fixture_with_config(config);
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixed".into());
+    window.set_min_size(400, 300);
+    window.set_max_size(400, 300);
+    f.client(client).decorate_last_window(Mode::ClientSide);
+    f.roundtrip(client);
+
+    let state = &mut f.client(client).state;
+    let window = state.windows.last_mut().unwrap();
+    window.xdg_decoration.take().unwrap().destroy();
+    let manager = state.xdg_decoration_manager.as_ref().unwrap();
+    window.xdg_decoration =
+        Some(manager.get_toplevel_decoration(&window.xdg_toplevel, &state.qh, ()));
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(
+        workspace["floating_nodes"][0]["border"], "normal",
+        "{workspace:#}"
+    );
+}
+
+#[test]
+fn a_csd_view_floated_then_fullscreened_keeps_csd() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // A fullscreen floating view stays in `ws->floating` in sway, so a view
+    // using CSD keeps the B_CSD that container_set_floating stored
+    // (sway/tree/container.c:955-959; set_border, sway/commands/border.c:15-31).
+    // Differential family diff-fam-csd-floating-fullscreen, seeds 10251,
+    // 14299 and 14654.
+    let sequences: [&[&str]; 3] = [
+        &["border csd", "floating enable", "fullscreen enable"],
+        &["fullscreen enable", "border toggle", "floating enable"],
+        &["fullscreen toggle", "floating toggle", "border csd"],
+    ];
+    for commands in sequences {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1920, 1080));
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id("view".into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.client(client).decorate_last_window(Mode::ServerSide);
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+
+        for command in commands {
+            let outcome = crate::command::execute(f.niri_state(), command);
+            assert!(outcome[0].success, "{command}: {outcome:?}");
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let view = find_json_node_with_app_id(&tree, "view").unwrap();
+        assert_eq!(view["border"], "csd", "{commands:?}: {view:#}");
+        assert_eq!(view["type"], "floating_con", "{commands:?}");
+    }
 }

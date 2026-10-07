@@ -28,10 +28,17 @@ fn bare_directional_move_crosses_each_adjacent_output_without_wrapping() {
     f.double_roundtrip(client);
     let window_id = f.swayward().layout.focus().unwrap().id();
 
+    // A perpendicular move first reorients the workspace in place, and only
+    // the next one crosses (sway/commands/move.c:333-344, 394-412). Arriving
+    // on an empty workspace leaves its layout alone (`workspace_add_tiling`,
+    // sway/commands/move.c:183-189), so `move left` from the horizontal
+    // bottom-right workspace crosses at once.
     for (command, expected_output) in [
         ("move right", "top-right"),
+        ("move down", "top-right"),
         ("move down", "bottom-right"),
         ("move left", "bottom-left"),
+        ("move up", "bottom-left"),
         ("move up", "top-left"),
     ] {
         let outcome = crate::command::execute(f.niri_state(), command);
@@ -729,6 +736,107 @@ fn workspace_next_and_prev_cross_outputs() {
     );
 }
 
+/// Random-v3 two-output seed 40077. From the last named workspace, `workspace next` falls back
+/// to `other`, which starts as the first workspace scanned with `othern = -1`; a numbered
+/// workspace replaces it only when `wsn < othern`, so a named first workspace stays the
+/// target (sway/sway/tree/workspace.c:613-641, 672-676). `workspace prev` instead takes the
+/// greatest number (`wsn > othern`, sway/sway/tree/workspace.c:548-573, 606-608).
+#[test]
+fn workspace_next_from_the_only_named_workspace_stays_when_it_is_scanned_first() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1920, 1080));
+    let first_output = f.niri_output(1).name();
+    let second_output = f.niri_output(2).name();
+    let client = f.add_client();
+    for (workspace, output) in [("1", &first_output), ("2", &second_output)] {
+        assert!(
+            crate::command::execute(f.niri_state(), &format!("workspace {workspace}"))[0].success
+        );
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        assert!(
+            crate::command::execute(
+                f.niri_state(),
+                &format!("workspace {workspace} output {output}")
+            )[0]
+            .success
+        );
+    }
+    assert!(crate::command::execute(f.niri_state(), "workspace 1")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "rename workspace to oracle")[0].success);
+
+    assert!(crate::command::execute(f.niri_state(), "workspace next")[0].success);
+    assert_eq!(
+        f.swayward().layout.active_workspace().unwrap().sway_name(),
+        Some("oracle".into())
+    );
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        first_output
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "workspace prev")[0].success);
+    assert_eq!(
+        f.swayward().layout.active_workspace().unwrap().sway_name(),
+        Some("2".into())
+    );
+}
+
+/// Oracle: focus_next_crosses_outputs. `focus next|prev [sibling]` is `focus <direction>` with
+/// the direction from the parent layout (sway/commands/focus.c:17-58, 424-433), so at the
+/// workspace edge it focuses the adjacent output before taking the `focus_wrapping yes` wrap
+/// candidate (`node_get_in_direction_tiling`, sway/commands/focus.c:207-223).
+#[test]
+fn focus_next_and_prev_cross_outputs_before_wrapping() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1920, 1080));
+    let first_output = f.niri_output(1).name();
+    let second_output = f.niri_output(2).name();
+    let client = f.add_client();
+    let map = |f: &mut Fixture| {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    };
+    let active_output = |f: &mut Fixture| f.swayward().layout.active_output().unwrap().name();
+
+    run(&mut f, "workspace 2");
+    map(&mut f);
+    run(&mut f, &format!("workspace 2 output {second_output}"));
+    run(&mut f, "workspace 1");
+    run(&mut f, &format!("workspace 1 output {first_output}"));
+    map(&mut f);
+    map(&mut f);
+    assert_eq!(active_output(&mut f), first_output);
+
+    for (command, output) in [
+        ("focus next", &second_output),
+        ("focus prev", &first_output),
+        ("focus next sibling", &second_output),
+        ("focus prev sibling", &first_output),
+    ] {
+        run(&mut f, command);
+        assert_eq!(&active_output(&mut f), output, "{command}");
+    }
+}
+
 /// Oracle: move_wrap_keeps_new_wrapper_at_focus_tail. When `move left` wraps
 /// the workspace children (`workspace_wrap_children`,
 /// sway/commands/move.c:336), the wrapper is never focused, because a
@@ -770,4 +878,244 @@ fn directional_move_wrapper_stays_behind_focused_floating_window() {
         workspace.focus,
         [workspace.floating_nodes[0].id, workspace.nodes[0].id]
     );
+}
+
+/// Sway's `output_get_in_direction` (sway/tree/output.c:316-331) does not
+/// wrap, and a workspace-fullscreen view only considers outputs
+/// (sway/commands/move.c:303-312). Oracle row: state two_output_edge_move.
+#[test]
+fn directional_move_at_output_edge_does_not_wrap_and_fullscreen_crosses() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    let client = f.add_client();
+    map_test_window(&mut f, client, "edge");
+    let id = f.swayward().layout.focus().unwrap().id();
+    let output_of = |f: &mut Fixture| {
+        f.swayward()
+            .layout
+            .windows()
+            .find(|(_, mapped)| mapped.id() == id)
+            .unwrap()
+            .0
+            .unwrap()
+            .output_name()
+            .to_owned()
+    };
+
+    assert!(crate::command::execute(f.niri_state(), "move left")[0].success);
+    assert_eq!(output_of(&mut f), "left");
+
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move right")[0].success);
+    assert_eq!(output_of(&mut f), "right");
+    let window = f
+        .swayward()
+        .layout
+        .windows()
+        .find(|(_, mapped)| mapped.id() == id)
+        .unwrap()
+        .1
+        .window
+        .clone();
+    assert_eq!(
+        f.swayward().layout.fullscreen_mode(&window),
+        Some(crate::layout::tiling_tree::FullscreenMode::Workspace)
+    );
+}
+
+#[test]
+fn moving_workspace_children_keeps_the_source_workspace_layout() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let map = |f: &mut Fixture| {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    };
+    run(&mut f, "splitv");
+    map(&mut f);
+    map(&mut f);
+    run(&mut f, "focus parent");
+    run(&mut f, "move container to workspace 2");
+
+    let tree = get_tree(&mut f);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let source = workspaces.iter().find(|ws| ws["name"] == "1").unwrap();
+    assert_eq!(source["layout"], "splitv");
+    assert_eq!(source["orientation"], "vertical");
+    assert_eq!(source["representation"], "V[]");
+    let target = workspaces.iter().find(|ws| ws["name"] == "2").unwrap();
+    // An empty target unwraps the container and takes its layout
+    // (`workspace_unwrap_children`, sway/tree/workspace.c:912-925).
+    assert_eq!(target["layout"], "splitv");
+    assert_eq!(target["nodes"].as_array().unwrap().len(), 2);
+}
+
+/// The only view under a perpendicular workspace layout is wrapped and
+/// promoted in place, which counts as a move, so it does not cross outputs
+/// (sway/commands/move.c:333-344, 394-412). Oracle row: state
+/// two_output_edge_move_from_split; random-v3 seed 30017.
+#[test]
+fn directional_move_of_only_view_in_perpendicular_workspace_stays_on_output() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    let client = f.add_client();
+    map_test_window(&mut f, client, "edge");
+    let id = f.swayward().layout.focus().unwrap().id();
+    let output_of = |f: &mut Fixture| {
+        f.swayward()
+            .layout
+            .windows()
+            .find(|(_, mapped)| mapped.id() == id)
+            .unwrap()
+            .0
+            .unwrap()
+            .output_name()
+            .to_owned()
+    };
+
+    assert!(crate::command::execute(f.niri_state(), "split toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move left")[0].success);
+    assert_eq!(output_of(&mut f), "right");
+    assert_eq!(
+        f.swayward()
+            .layout
+            .active_workspace()
+            .unwrap()
+            .tiling()
+            .root_layout(),
+        Some(crate::layout::tiling_tree::Layout::SplitH)
+    );
+
+    // A parallel workspace sends its only view on to the next output.
+    assert!(crate::command::execute(f.niri_state(), "move left")[0].success);
+    assert_eq!(output_of(&mut f), "left");
+}
+
+/// `move right` into a horizontal workspace on the next output lands the view
+/// at its leading edge and keeps it focused
+/// (`container_move_to_workspace_from_direction`, sway/commands/move.c:168-181).
+/// Family diff-fam-v3-cross-output-insert-order, v3 seeds 30037 and 30442.
+#[test]
+fn directional_move_into_a_parallel_output_lands_at_its_leading_edge() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_test_window(&mut f, client, "one");
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    map_test_window(&mut f, client, "two");
+    map_test_window(&mut f, client, "three");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+
+    assert!(crate::command::execute(f.niri_state(), "move right")[0].success);
+
+    let tree = focus_stack_tree(&mut f);
+    let output = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] == "right")
+        .unwrap();
+    let workspace = &output["nodes"][0];
+    assert_eq!(workspace["representation"], "H[one two three]");
+    assert_eq!(workspace["nodes"][0]["focused"], true);
+}
+
+/// `move down` into a horizontal workspace on the output below descends to
+/// the workspace's focus-inactive view and lands before it
+/// (sway/commands/move.c:183-195, 124-131).
+#[test]
+fn directional_move_into_a_perpendicular_output_lands_beside_its_focus_inactive_child() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("top".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("bottom".into(), (800, 600), Some((0, 600)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output bottom")[0].success);
+    map_test_window(&mut f, client, "one");
+    map_test_window(&mut f, client, "two");
+    map_test_window(&mut f, client, "three");
+    assert!(crate::command::execute(f.niri_state(), "focus left")[0].success);
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "focus output top")[0].success);
+    map_test_window(&mut f, client, "moved");
+
+    // The first move reorients the top workspace in place
+    // (sway/commands/move.c:333-344); the second crosses.
+    assert!(crate::command::execute(f.niri_state(), "move down")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move down")[0].success);
+
+    let tree = focus_stack_tree(&mut f);
+    let output = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] == "bottom")
+        .unwrap();
+    let workspace = &output["nodes"][0];
+    assert_eq!(workspace["representation"], "H[one moved two three]");
+    assert_eq!(workspace["nodes"][1]["focused"], true);
+}
+
+/// Oracle row: sticky_fullscreen_floating_workspace_switch (differential seed 30298). A
+/// sticky fullscreen floating view follows `workspace 2` (`sway/sway/input/seat.c:1209-1221`),
+/// workspace 1 is reaped, and the seat keeps focusing workspace 2 rather than the view.
+#[test]
+fn sticky_fullscreen_floating_view_follows_workspace_switch_like_sway() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in [
+        "fullscreen enable",
+        "floating enable",
+        "sticky enable",
+        "workspace 2",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    assert_eq!(workspaces.len(), 1, "{tree:#}");
+    let workspace = &workspaces[0];
+    assert_eq!(workspace["name"], "2");
+    assert_eq!(workspace["focused"], true);
+    let view = &workspace["floating_nodes"][0];
+    assert_eq!(view["sticky"], true);
+    assert_eq!(view["fullscreen_mode"], 1);
+    assert_eq!(view["focused"], false);
 }

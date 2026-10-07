@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/handlers/compositor.rs"]
+what = "after running a mapped window's for_window commands, the map handler re-raises the focused new view when a command wrapped it in a fresh container, so that wrapper heads the workspace focus list."
+why = "sway runs criteria before it focuses the mapped view (view_map, sway/tree/view.c:943-956), so a wrapper that 'for_window ... layout tabbed' creates is raised with the view; oracle state scenario for_window_layout_wraps_workspace, random-v3 seed 40059."

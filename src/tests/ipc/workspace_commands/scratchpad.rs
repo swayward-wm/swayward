@@ -954,3 +954,152 @@ fn focus_next_and_prev_between_two_floaters_do_not_wrap() {
         );
     }
 }
+
+/// Differential family diff-fam-focus-sibling-floating-split (seed 15053): a view inside a
+/// floating split is not itself floating, so sway runs `focus next sibling` through
+/// `node_get_in_direction_tiling` (sway/commands/focus.c:454-460), which wraps within the split
+/// (sway/commands/focus.c:177-192, 216-221).
+#[test]
+fn focus_next_sibling_wraps_inside_a_floating_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        f.swayward().layout.focus().unwrap().id()
+    };
+    let first = map(&mut f, "first");
+    for command in ["floating toggle", "splitv"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    let second = map(&mut f, "second");
+    assert_ne!(first, second);
+
+    for (command, expected) in [
+        ("focus next sibling", first),
+        ("focus next sibling", second),
+        ("focus prev sibling", first),
+        ("focus prev sibling", second),
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(
+            f.swayward().layout.focus().unwrap().id(),
+            expected,
+            "{command}"
+        );
+    }
+}
+
+/// Random oracle seed 15489 (differential_seed_15489): `focus parent; move
+/// scratchpad` on a workspace wraps its children and hides the wrapper
+/// (sway/commands/move.c:921-931); a criteria `kill` then matches a view
+/// inside the hidden wrapper and closes it (sway/commands/kill.c).
+#[test]
+fn criteria_kill_closes_a_view_inside_a_hidden_workspace_wrapper() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let mut surfaces = Vec::new();
+    for app_id in ["one", "two"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        surfaces.push(surface);
+    }
+    for command in ["focus parent", "move scratchpad", r#"[app_id="two"] kill"#] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    f.double_roundtrip(client);
+    let closed = surfaces
+        .iter()
+        .map(|surface| f.client(client).window(surface).close_requested)
+        .collect::<Vec<_>>();
+    assert_eq!(closed, [false, true]);
+}
+
+/// `floating enable` and `move scratchpad` on a focused workspace wrap its
+/// children and then reset the emptied workspace to splith, whatever its
+/// layout was (sway/commands/floating.c:28-32, sway/commands/move.c:929-933).
+/// Oracle: criteria_kill_in_hidden_scratchpad_wrapper.
+#[test]
+fn wrapping_a_tall_workspace_leaves_it_splith() {
+    for command in ["move scratchpad", "floating enable"] {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1080, 1920));
+        let client = f.add_client();
+        for _ in 0..2 {
+            let window = f.client(client).create_window();
+            window.commit();
+            let surface = window.surface.clone();
+            f.roundtrip(client);
+            let window = f.client(client).window(&surface);
+            window.attach_new_buffer();
+            window.ack_last_and_commit();
+            f.double_roundtrip(client);
+        }
+        let workspace_layout = |f: &mut Fixture| {
+            let tree: swayward_ipc::Node = serde_json::from_value(get_tree(f)).unwrap();
+            tree.nodes[1].nodes[0].layout
+        };
+        assert_eq!(workspace_layout(&mut f), swayward_ipc::NodeLayout::SplitV);
+        for command in ["focus parent", command] {
+            let reply = crate::command::execute(f.niri_state(), command);
+            assert!(reply[0].success, "{command}: {reply:?}");
+        }
+        assert_eq!(
+            workspace_layout(&mut f),
+            swayward_ipc::NodeLayout::SplitH,
+            "{command}"
+        );
+    }
+}
+
+// differential seed 30071 (v3): sway lists hidden scratchpad containers in
+// `root->scratchpad` order (sway/ipc-json.c:476-482), so a floating split
+// hidden after a bare window comes after it, and `scratchpad show` takes the
+// bottom of that list (sway/commands/scratchpad.c:64-71).
+#[test]
+fn hidden_scratchpad_split_follows_the_bare_window_hidden_before_it() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "first");
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    map_test_window(&mut f, client, "second");
+    for command in ["floating enable", "splitv", "move scratchpad"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+
+    let tree = get_tree(&mut f);
+    let scratch = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] == "__i3")
+        .unwrap();
+    let hidden = scratch["nodes"][0]["floating_nodes"].as_array().unwrap();
+    assert_eq!(hidden.len(), 2, "{hidden:?}");
+    assert_eq!(hidden[0]["app_id"], "first");
+    assert_eq!(hidden[1]["layout"], "splitv");
+    assert_eq!(hidden[1]["nodes"][0]["app_id"], "second");
+
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    let tree = get_tree(&mut f);
+    assert!(find_json_node_with_app_id(&tree, "first").unwrap()["visible"] == true);
+}

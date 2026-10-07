@@ -22,7 +22,24 @@ impl<W: LayoutElement> TilingTree<W> {
         let focused = self
             .focus
             .is_some_and(|focus| self.contains_node(id, focus));
+        // The swapped-in container takes the fullscreen mode at this slot
+        // (`container_swap`, sway/tree/container.c:1884-1889), and the swap's
+        // arranges reach only it (sway/commands/swap.c:93-104,
+        // sway/tree/arrange.c:310-316), so views hidden under fullscreen here
+        // stay as they were.
+        let hidden = (self.fullscreen_node() == Some(id)).then(|| {
+            (
+                self.mapped_under_fullscreen.clone(),
+                self.moved_under_fullscreen.clone(),
+            )
+        });
         let (subtree, _) = self.detach_subtree(id)?;
+        if let Some((mut mapped, mut moved)) = hidden {
+            mapped.retain(|node| self.nodes.contains_key(node));
+            moved.retain(|node, _| self.nodes.contains_key(node));
+            self.mapped_under_fullscreen = mapped;
+            self.moved_under_fullscreen = moved;
+        }
         Some((
             subtree,
             DetachedSlot {
@@ -69,10 +86,21 @@ impl<W: LayoutElement> TilingTree<W> {
             .get_mut(&id)
             .expect("invariant: a freshly inserted detached node remains in the arena")
             .parent = Some(slot.parent);
+        let arrived = subtree.focus_history.clone();
         self.reinsert_focus_history(subtree.focus_history, slot.focus_rank);
+        if !slot.focused {
+            // Sway's focus stack is seat-wide, so a swapped-in view keeps its own place on it
+            // rather than the departing container's: a view focused more recently than the
+            // tabs beside it becomes the visible tab (`swap_places`, sway/tree/container.c:
+            // 1717-1763; `view_is_visible`, sway/tree/view.c:1180-1193).
+            for window in arrived.iter().rev() {
+                self.rank_arrived_window_by_focus_timestamp(window);
+            }
+        }
         if slot.focused || self.focus.is_none() {
             self.set_focus_id(self.focused_leaf_in(id));
         }
+        self.focus_swapped_fullscreen([id, id]);
         self.request_window_sizes();
         (id, remapped)
     }
@@ -112,6 +140,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.wrapper_arranged_boxes.clear();
             self.fullscreen_rearranged = false;
             self.unarranged_under_fullscreen.clear();
+            self.split_under_fullscreen.clear();
         }
         self.focus = self.focused_leaf_in(self.root);
         self.request_window_sizes();
@@ -129,6 +158,10 @@ impl<W: LayoutElement> TilingTree<W> {
     /// Detaches the root's contents as a new split, leaving an empty root behind.
     fn take_root_as_detached(&mut self) -> Option<DetachedNode<W>> {
         let id = self.root;
+        // `workspace_wrap_children` gives the new container a copy of the
+        // workspace layout and leaves `ws->layout` alone, so the emptied
+        // workspace keeps reporting it (sway/tree/workspace.c:898-910).
+        let root_layout = self.split_layout(id)?;
         let TreeNode::Split {
             layout,
             children,
@@ -137,7 +170,7 @@ impl<W: LayoutElement> TilingTree<W> {
         } = std::mem::replace(
             &mut self.nodes.get_mut(&id)?.value,
             TreeNode::Split {
-                layout: Layout::SplitH,
+                layout: root_layout,
                 children: Vec::new(),
                 percents: Vec::new(),
                 meta: SplitMeta::default(),
@@ -146,7 +179,7 @@ impl<W: LayoutElement> TilingTree<W> {
         else {
             return None;
         };
-        self.empty_representation_layout = Some(Layout::SplitH);
+        self.empty_representation_layout = Some(root_layout);
         let children = children
             .into_iter()
             .map(|child| self.take_detached_node(child))
@@ -304,6 +337,8 @@ impl<W: LayoutElement> TilingTree<W> {
             meta.title_format = detached_meta.title_format;
         }
         meta.sticky |= detached_meta.sticky;
+        meta.fraction_axis = detached_meta.fraction_axis;
+        meta.latent_shares = detached_meta.latent_shares;
         if let Some(mode) = pending_mode {
             self.pending_modes.insert(self.root, mode);
         }
@@ -319,6 +354,7 @@ impl<W: LayoutElement> TilingTree<W> {
         };
         *percents = detached_percents;
         *children = ids;
+        self.remap_latent_shares(self.root, remapped);
         self.has_had_tile = true;
         self.restore_transferred_focus(focus_history);
         self.request_window_sizes();
@@ -485,9 +521,17 @@ impl<W: LayoutElement> TilingTree<W> {
             unreachable!();
         };
         *slot = children;
+        self.remap_latent_shares(id, remapped);
         if let Some(mode) = pending_mode {
             self.pending_modes.insert(id, mode);
         }
         id
+    }
+
+    /// Follows the children a reattach gave new IDs.
+    fn remap_latent_shares(&mut self, id: NodeId, remapped: &[(NodeId, NodeId)]) {
+        for &(old, new) in remapped {
+            self.rename_latent_share(id, old, new);
+        }
     }
 }

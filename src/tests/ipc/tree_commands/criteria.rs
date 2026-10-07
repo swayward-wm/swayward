@@ -99,6 +99,39 @@ fn split_none_flattens_only_a_singleton_parent_and_preserves_focus() {
     workspace.verify_invariants(None);
 }
 
+/// diff-fam-v3-split-none: sway's `container_flatten` keeps climbing while each
+/// ancestor has one child (sway/tree/container.c:526-538), so `split none`
+/// under a stacked wrapper removes both the split and the stacked wrapper.
+#[test]
+fn split_none_flattens_every_singleton_ancestor() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "only");
+
+    for command in ["layout stacking", "splith", "split none"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let parent = find_json_parent_of_app_id(&tree, "only").unwrap();
+    assert_eq!(parent["type"], "workspace");
+    assert_eq!(parent["representation"], "H[only]");
+    swayward
+        .layout
+        .active_workspace()
+        .unwrap()
+        .verify_invariants(None);
+}
+
 #[test]
 fn criteria_split_none_flattens_the_matched_singleton_parent() {
     let mut f = Fixture::new();
@@ -197,16 +230,21 @@ fn criteria_layout_applies_to_every_matched_windows_container() {
         }
     }
 
-    for (command, expected) in [
-        ("layout tabbed", TreeLayout::Tabbed),
-        ("layout default", TreeLayout::SplitH),
-        ("layout toggle all", TreeLayout::SplitV),
+    // Each matched view is the handler container, so sway keeps each
+    // workspace's layout and wraps its children in a container with the new
+    // layout (sway/commands/layout.c:134-149,178-183). The fresh wrapper has
+    // no previous split, so `layout default` is invalid syntax
+    // (sway/commands/layout.c:106-108,165-167).
+    for (command, wrapper_layout, success) in [
+        ("layout tabbed", TreeLayout::Tabbed, true),
+        ("layout default", TreeLayout::Tabbed, false),
+        ("layout toggle all", TreeLayout::SplitH, true),
     ] {
         let outcome = crate::command::execute(
             f.niri_state(),
             &format!("[app_id=matched-layout] {command}"),
         );
-        assert!(outcome[0].success, "{command}: {outcome:?}");
+        assert_eq!(outcome[0].success, success, "{command}: {outcome:?}");
         for workspace in ["one", "two"] {
             let tree = f
                 .swayward()
@@ -216,16 +254,17 @@ fn criteria_layout_applies_to_every_matched_windows_container() {
                 .unwrap()
                 .2
                 .ipc_tiling_tree();
-            assert!(
-                matches!(
-                    tree,
-                    IpcNode::Split {
-                        layout,
-                        ..
-                    } if layout == expected
-                ),
-                "{command}: {workspace}"
-            );
+            let IpcNode::Split {
+                layout, children, ..
+            } = tree
+            else {
+                panic!("{command}: {workspace}: workspace is not a split");
+            };
+            assert_eq!(layout, TreeLayout::SplitH, "{command}: {workspace}");
+            let [IpcNode::Split { layout, .. }] = children.as_slice() else {
+                panic!("{command}: {workspace}: expected one wrapper");
+            };
+            assert_eq!(*layout, wrapper_layout, "{command}: {workspace}");
         }
     }
 }

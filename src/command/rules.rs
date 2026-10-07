@@ -1,11 +1,14 @@
 use swayward_ipc::criteria;
 
 use super::targeted::focused_con_id;
-use super::{failure, HandlerResult};
+use super::HandlerResult;
 use crate::swayward::State;
 
 fn parse(state: &State, raw: &str) -> Result<criteria::Criteria, swayward_ipc::CommandOutcome> {
-    criteria::Criteria::parse(raw, focused_con_id(state)).map_err(failure)
+    // The rule handlers answer a failed criteria parse with CMD_INVALID
+    // (`sway/sway/commands/for_window.c:15-20`).
+    criteria::Criteria::parse(raw, focused_con_id(state))
+        .map_err(swayward_ipc::command::parse_error)
 }
 
 pub(super) fn assign(

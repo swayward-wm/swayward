@@ -16,6 +16,7 @@ use swayward_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 
 use super::floating_tree::{
     apply_position_change, FloatingLayout, FloatingLayoutRenderElement, RemovedFloatingTree,
+    StackSlot,
 };
 use super::shadow::Shadow;
 use super::tile::{Tile, TileRenderSnapshot};
@@ -605,7 +606,11 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.active_window()
         } else {
-            self.tiling.active_window()
+            // With the workspace itself focused sway's seat focuses no view, so a view that
+            // never had focus does not receive keyboard focus (sway/tree/view.c:944-957).
+            self.tiling
+                .active_window()
+                .filter(|window| !self.is_workspace_focused() || window.focus_timestamp().is_some())
         }
     }
 
@@ -768,8 +773,12 @@ impl<W: LayoutElement> Workspace<W> {
                 } else {
                     InsertTarget::Focused
                 };
-                // Don't steal focus from an active fullscreen window.
-                let activate = activate.map_smart(|| !self.is_active_pending_fullscreen());
+                // Don't steal focus from an active fullscreen window, unless
+                // it is a global one sway no longer tracks after a `layout`
+                // wrap (`should_focus`, sway/tree/view.c:707-710).
+                let activate = activate.map_smart(|| {
+                    !self.is_active_pending_fullscreen() || self.tiling.global_fullscreen_orphaned()
+                });
 
                 // If the tile is pending maximized or fullscreen, open it in the tiling layout,
                 // where it can enter those states.
@@ -798,9 +807,17 @@ impl<W: LayoutElement> Workspace<W> {
                     }
                     // A fullscreen floating view stays floating in sway.
                     let has_had_tile = self.tiling.has_had_tile();
+                    let keeps_workspace_focus = !activate && self.is_workspace_focused();
+                    let id = tile.window().id().clone();
                     self.tiling.add_tile_with_activation(tile, insert, activate);
+                    // An unfocused view leaves a focused workspace focused, even as its first
+                    // tiled view (sway/tree/view.c:944-957).
+                    if keeps_workspace_focus {
+                        self.tiling.focus_root_keeping_history();
+                    }
                     if is_floating {
                         self.tiling.restore_has_had_tile(has_had_tile);
+                        self.keep_floating_csd(&id);
                     }
 
                     if activate {
@@ -1326,12 +1343,23 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) {
+        self.set_fullscreen_mode(
+            window,
+            is_fullscreen.then_some(crate::layout::tiling_tree::FullscreenMode::Workspace),
+        );
+    }
+
+    /// `set_fullscreen` with sway's mode: `fullscreen global` on a floating
+    /// view sets `FULLSCREEN_GLOBAL` (sway/commands/fullscreen.c:47-52).
+    pub fn set_fullscreen_mode(
+        &mut self,
+        window: &W::Id,
+        mode: Option<crate::layout::tiling_tree::FullscreenMode>,
+    ) {
+        let is_fullscreen = mode.is_some();
         let mut restore_to_floating = false;
         if self.floating.tree_root_for_window(window).is_some() {
-            self.floating.set_window_fullscreen(
-                window,
-                is_fullscreen.then_some(crate::layout::tiling_tree::FullscreenMode::Workspace),
-            );
+            self.floating.set_window_fullscreen(window, mode);
             return;
         }
         if self.floating.has_window(window) {
@@ -1381,7 +1409,16 @@ impl<W: LayoutElement> Workspace<W> {
         };
         let was_normal = tile.window().pending_sizing_mode().is_normal();
 
-        self.tiling.set_fullscreen(window, is_fullscreen);
+        if let Some(id) = self.tiling.node_for_window(window) {
+            self.tiling.set_node_fullscreen(id, mode);
+            if restore_to_floating {
+                // Sway keeps a fullscreen floating view in the floating list
+                // and arranges only it (sway/tree/container.c:1186-1218,
+                // sway/tree/arrange.c:310-316), so it takes no share of the
+                // tiled split.
+                self.tiling.mark_fullscreen_arrived_and_relayout();
+            }
+        }
 
         // When going from normal to fullscreen, remember if we should unfullscreen to floating.
         // A tile that arrived from another workspace already carries that answer
@@ -1396,6 +1433,29 @@ impl<W: LayoutElement> Workspace<W> {
         };
         if was_normal && !tile.window().pending_sizing_mode().is_normal() {
             tile.restore_to_floating |= restore_to_floating;
+            if restore_to_floating {
+                // Sway fullscreens the view in the floating list and arranges
+                // only it, so its tiled siblings keep their boxes
+                // (`container_fullscreen_workspace`, sway/tree/container.c;
+                // `arrange_workspace`, sway/tree/arrange.c:310-316).
+                self.tiling.mark_fullscreen_arrived();
+            }
+        }
+        if restore_to_floating {
+            self.keep_floating_csd(window);
+        }
+    }
+
+    /// A fullscreen floating view stays in `ws->floating` in sway, so a CSD
+    /// view keeps its stored `csd` border while swayward parks it in the
+    /// tiling tree (container_set_floating, sway/tree/container.c:955-965).
+    fn keep_floating_csd(&mut self, window: &W::Id) {
+        if let Some(tile) = self
+            .tiling
+            .tiles_mut()
+            .find(|tile| tile.window().id() == window)
+        {
+            tile.set_sway_csd_floating(true);
         }
     }
 
@@ -1467,7 +1527,12 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn toggle_window_floating(&mut self, id: Option<&W::Id>) {
         let active_id = self.active_window().map(|win| win.id().clone());
-        let target_is_active = id.is_none_or(|id| Some(id) == active_id.as_ref());
+        // With the workspace itself focused no view is the seat focus, so the change keeps
+        // the workspace focused (`set_focus = focus == container`,
+        // sway/tree/container.c:946-949).
+        let workspace_focused = self.is_workspace_focused();
+        let target_is_active =
+            !workspace_focused && id.is_none_or(|id| Some(id) == active_id.as_ref());
         let Some(id) = id.cloned().or(active_id) else {
             return;
         };
@@ -1505,11 +1570,26 @@ impl<W: LayoutElement> Workspace<W> {
         } else {
             let rank = self.tiling.focus_rank_for_window(&id);
             let parent = self.tiling.non_root_parent_for_window(&id);
+            // A fullscreen floating view only passes through the tiling tree; sway keeps it in
+            // `ws->floating`, so leaving fullscreen moves no focus
+            // (`container_fullscreen_disable`, sway/tree/container.c:1246-1272).
+            let was_floating = self.tiling.is_pending_fullscreen(&id)
+                && self
+                    .tiling
+                    .tiles()
+                    .any(|tile| tile.window().id() == &id && tile.restore_to_floating);
             let mut tile = if parent.is_some() {
                 self.tiling.remove_tile_without_transaction(&id).unwrap()
             } else {
                 self.tiling.remove_tile(&id, Transaction::new()).unwrap()
             };
+            // Floating the focused view raises its old parent to the tiling layer's
+            // focus-inactive node (`container_set_floating`, sway/tree/container.c:969-973).
+            if let Some(parent) = parent
+                .filter(|parent| target_is_active && !was_floating && self.tiling.contains(*parent))
+            {
+                self.tiling.set_focus(parent);
+            }
             tile.tiling_focus_rank = rank;
             tile.tiling_parent = parent;
             tile.stop_move_animations();
@@ -1543,6 +1623,8 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.add_tile(tile, target_is_active);
             if target_is_active {
                 self.floating_is_active = FloatingActive::Yes;
+            } else if workspace_focused && self.tiling.is_empty() {
+                self.floating_is_active = FloatingActive::NoButRaised;
             }
         }
 

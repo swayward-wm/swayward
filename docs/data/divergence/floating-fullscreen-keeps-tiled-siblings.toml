@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs"]
+what = "mark a view fullscreened out of the floating layer as arrived fullscreen, so it takes no share of its tiled parent's split."
+why = "Sway keeps such a view in the workspace's floating list and arranges only it (container_set_floating, sway/tree/container.c:951-975; arrange_workspace, sway/tree/arrange.c:310-316), so the tiled siblings keep their boxes: a sibling that held the workspace reports percent 1 (differential family diff-fam-map-beside-floating-fullscreen, seed 16770)."

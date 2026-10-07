@@ -2,19 +2,59 @@ use swayward_config::Action;
 use swayward_ipc::CommandOutcome;
 
 use super::{failure, output_target_by_name_or_direction, CommandTarget, Direction};
+use crate::layout::LayoutElement as _;
 use crate::swayward::State;
 
 pub(super) fn direction(state: &mut State, direction: Direction) -> Option<Action> {
+    directional(state, direction, |layout, local_wrap| {
+        match (direction, local_wrap) {
+            (Direction::Left, true) => layout.focus_left(),
+            (Direction::Right, true) => layout.focus_right(),
+            (Direction::Up, true) => layout.focus_up(),
+            (Direction::Down, true) => layout.focus_down(),
+            (Direction::Left, false) => layout.focus_left_without_wrap(),
+            (Direction::Right, false) => layout.focus_right_without_wrap(),
+            (Direction::Up, false) => layout.focus_up_without_wrap(),
+            (Direction::Down, false) => layout.focus_down_without_wrap(),
+        }
+    })
+}
+
+/// sway's `focus <direction>` with `local` as the in-workspace step. It falls through to the
+/// output in that direction before it takes a plain `focus_wrapping yes` wrap candidate
+/// (`node_get_in_direction_tiling`, sway/commands/focus.c:207-223).
+fn directional(
+    state: &mut State,
+    direction: Direction,
+    local: impl FnOnce(&mut crate::layout::Layout<crate::window::Mapped>, bool) -> bool,
+) -> Option<Action> {
     let action = match direction {
         Direction::Left => Action::FocusColumnOrMonitorLeft,
         Direction::Right => Action::FocusColumnOrMonitorRight,
         Direction::Up => Action::FocusWindowOrMonitorUp,
         Direction::Down => Action::FocusWindowOrMonitorDown,
     };
+    let wrapping = state.swayward.config.borrow().layout.focus_wrapping;
+    let local_wrap = matches!(
+        wrapping,
+        swayward_config::FocusWrapping::Force | swayward_config::FocusWrapping::Workspace
+    );
     if !state.swayward.layout.global_fullscreen_active()
         && state.swayward.layout.focused_fullscreen_mode()
             == Some(crate::layout::tiling_tree::FullscreenMode::Workspace)
     {
+        // sway walks up from the focused view first, so a child of a fullscreen split moves
+        // among its siblings; only reaching the fullscreen container goes to the output
+        // (`node_get_in_direction_tiling`, sway/commands/focus.c:143-155).
+        let floating = state
+            .swayward
+            .layout
+            .active_workspace()
+            .is_some_and(|workspace| workspace.floating_is_active());
+        if !floating && local(&mut state.swayward.layout, local_wrap) {
+            state.swayward.queue_redraw_all();
+            return None;
+        }
         let output = match direction {
             Direction::Left => state.swayward.adjacent_output_left(),
             Direction::Right => state.swayward.adjacent_output_right(),
@@ -27,26 +67,38 @@ pub(super) fn direction(state: &mut State, direction: Direction) -> Option<Actio
         }
         return None;
     }
-    let wrapping = state.swayward.config.borrow().layout.focus_wrapping;
-    let local_wrap = matches!(
-        wrapping,
-        swayward_config::FocusWrapping::Force | swayward_config::FocusWrapping::Workspace
-    );
+    // A floating root moves only among floaters, without wrapping, and never leaves its
+    // workspace (`node_get_in_direction_floating`, sway/commands/focus.c:226-258, 457-460).
+    if state
+        .swayward
+        .layout
+        .active_workspace()
+        .is_some_and(|workspace| {
+            workspace.floating_is_active() && !workspace.focused_floating_tree_child()
+        })
+    {
+        let direction = match direction {
+            Direction::Left => crate::layout::tiling_tree::Direction::Left,
+            Direction::Right => crate::layout::tiling_tree::Direction::Right,
+            Direction::Up => crate::layout::tiling_tree::Direction::Up,
+            Direction::Down => crate::layout::tiling_tree::Direction::Down,
+        };
+        if state
+            .swayward
+            .layout
+            .active_workspace_mut()
+            .is_some_and(|workspace| workspace.focus_floating_direction(direction))
+        {
+            state.swayward.queue_redraw_all();
+        }
+        return None;
+    }
     let workspace_focused = state
         .swayward
         .layout
         .active_workspace()
         .is_some_and(|workspace| workspace.is_workspace_focused());
-    let changed = match (direction, local_wrap) {
-        (Direction::Left, true) => state.swayward.layout.focus_left(),
-        (Direction::Right, true) => state.swayward.layout.focus_right(),
-        (Direction::Up, true) => state.swayward.layout.focus_up(),
-        (Direction::Down, true) => state.swayward.layout.focus_down(),
-        (Direction::Left, false) => state.swayward.layout.focus_left_without_wrap(),
-        (Direction::Right, false) => state.swayward.layout.focus_right_without_wrap(),
-        (Direction::Up, false) => state.swayward.layout.focus_up_without_wrap(),
-        (Direction::Down, false) => state.swayward.layout.focus_down_without_wrap(),
-    };
+    let changed = local(&mut state.swayward.layout, local_wrap);
     if changed {
         state.swayward.queue_redraw_all();
         None
@@ -74,21 +126,81 @@ pub(super) fn parent(state: &mut State) {
 }
 
 pub(super) fn child(state: &mut State) {
+    let before = seat_focused_view(state);
     state.swayward.layout.focus_child();
+    refocus_clears_urgency(state, before);
     state.swayward.queue_redraw_all();
 }
 
-pub(super) fn next_prev_sibling(state: &mut State, next: bool) {
-    if state.swayward.layout.focus_next_prev_sibling(next) {
-        state.swayward.queue_redraw_all();
+/// The view holding sway's seat focus: none while a split or the workspace
+/// itself is focused, even though the keyboard stays on a view.
+fn seat_focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
+    match super::targeted::focused_node(state) {
+        swayward_ipc::command::FocusedNode::View => match super::targeted::focused_target(state)? {
+            CommandTarget::Window(id) => Some(id),
+            CommandTarget::Container(..) => None,
+        },
+        _ => None,
     }
 }
 
-pub(super) fn next_or_prev(state: &mut State, next: bool) -> Result<(), CommandOutcome> {
-    // Sway answers success whether or not focus moved (sway/commands/focus.c:434-475).
+/// Seat focus moved onto the keyboard-focused view from its parent or
+/// workspace. No keyboard focus change follows, so clear its urgency here
+/// as sway's seat focus change does (sway/sway/input/seat.c:1223-1240).
+fn refocus_clears_urgency(state: &mut State, before: Option<crate::window::mapped::MappedId>) {
+    let Some(after) = seat_focused_view(state) else {
+        return;
+    };
+    let keyboard = state.swayward.keyboard_focus.surface().cloned();
+    let holds_keyboard = keyboard.is_some_and(|surface| {
+        state
+            .swayward
+            .layout
+            .windows()
+            .any(|(_, mapped)| mapped.id() == after && mapped.is_wl_surface(&surface))
+    });
+    if before != Some(after) && holds_keyboard {
+        state.swayward.seat_refocus_clears_urgency(after);
+    }
+}
+
+/// The tiling direction of `focus next|prev`, from the focused container's parent layout
+/// (`get_direction_from_next_prev`, sway/commands/focus.c:17-58).
+fn next_prev_direction(state: &State, next: bool) -> Option<Direction> {
+    use crate::layout::tiling_tree::Direction as TreeDirection;
+    Some(
+        match state.swayward.layout.tiling_next_prev_direction(next)? {
+            TreeDirection::Left => Direction::Left,
+            TreeDirection::Right => Direction::Right,
+            TreeDirection::Up => Direction::Up,
+            TreeDirection::Down => Direction::Down,
+        },
+    )
+}
+
+/// `focus next|prev sibling`: `focus <direction>` that stops at the sibling container instead
+/// of descending into it, and still crosses to the next output at the workspace edge
+/// (sway/commands/focus.c:194-196, 207-213). A floating window ignores `sibling` and moves
+/// among floaters (sway/commands/focus.c:457-460).
+pub(super) fn next_prev_sibling(state: &mut State, next: bool) -> Option<Action> {
+    let Some(direction) = next_prev_direction(state, next) else {
+        return next_or_prev(state, next);
+    };
+    directional(state, direction, |layout, local_wrap| {
+        layout.focus_next_prev_sibling(next, local_wrap)
+    })
+}
+
+/// `focus next|prev`. A tiling container moves like `focus <direction>`, crossing outputs; a
+/// floating one moves among floaters. Sway answers success whether or not focus moved
+/// (sway/commands/focus.c:434-475).
+pub(super) fn next_or_prev(state: &mut State, next: bool) -> Option<Action> {
+    if let Some(direction) = next_prev_direction(state, next) {
+        return self::direction(state, direction);
+    }
     state.swayward.layout.focus_next_or_prev(next);
     state.swayward.queue_redraw_all();
-    Ok(())
+    None
 }
 
 /// `focus floating|tiling` (`focus_mode`, sway/commands/focus.c:262-307).
@@ -157,7 +269,20 @@ pub(super) fn targeted(state: &mut State, target: CommandTarget) -> Result<(), C
                     state.swayward.layout.workspaces().any(|(_, _, workspace)| {
                         workspace.floating_tree_root_for_window(&window).is_some()
                     });
+                let before = seat_focused_view(state);
                 state.swayward.layout.activate_window(&window);
+                refocus_clears_urgency(state, before);
+                // Each criteria match takes seat focus in turn (sway/commands.c:305-326), so
+                // stamp it now: the keyboard focus update after the command only sees the last.
+                if let Some(mapped) = state
+                    .swayward
+                    .layout
+                    .workspaces_mut()
+                    .flat_map(|workspace| workspace.windows_mut())
+                    .find(|mapped| mapped.id() == target)
+                {
+                    mapped.set_focus_timestamp(crate::utils::get_monotonic_time());
+                }
                 if in_floating_group {
                     state.ipc_refresh_layout();
                     state.ipc_emit_window_change(

@@ -68,6 +68,7 @@ impl<W: LayoutElement> TilingTree<W> {
             moved_under_fullscreen: HashMap::new(),
             ipc_focus_follows_history: false,
             fullscreen_tile_slot: false,
+            orphaned_global_fullscreen: None,
             fullscreen_arrived: false,
             wrapper_arranged_boxes: HashMap::new(),
             unarranged_wrappers: HashSet::new(),
@@ -76,6 +77,7 @@ impl<W: LayoutElement> TilingTree<W> {
             pre_layout_ipc_rects: HashMap::new(),
             stale_fullscreen_rects: HashMap::new(),
             unarranged_under_fullscreen: HashMap::new(),
+            split_under_fullscreen: HashSet::new(),
             interactive_resize: None,
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),
@@ -206,6 +208,15 @@ impl<W: LayoutElement> TilingTree<W> {
         self.empty_representation_layout = Some(layout);
     }
 
+    /// Sets an empty tree's layout without recording a `layout` command.
+    pub fn set_empty_layout(&mut self, layout: Layout) {
+        if !self.is_empty() {
+            return;
+        }
+        self.set_layout_keeping_previous(self.root, layout);
+        self.empty_representation_layout = Some(layout);
+    }
+
     pub fn preserve_empty_auto_layout(&mut self) {
         let Some(&TreeNode::Split { layout, .. }) =
             self.nodes.get(&self.root).map(|node| &node.value)
@@ -230,24 +241,6 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
-    pub(super) fn update_empty_auto_layout(&mut self, view_size: Size<f64, Logical>) {
-        let auto = swayward_config::DefaultOrientation::Auto;
-        let old_auto_layout = default_layout(auto, self.view_size);
-        let new_auto_layout = default_layout(auto, view_size);
-        if self.preserved_auto_layout.is_none()
-            && self.is_empty()
-            && self.options.layout.default_orientation == swayward_config::DefaultOrientation::Auto
-            && matches!(
-                self.nodes.get(&self.root).map(|node| &node.value),
-                Some(TreeNode::Split { layout, .. }) if *layout == old_auto_layout
-            )
-        {
-            // Following the output's axis is not a `layout` command, so it records
-            // no `prev_split_layout` for `layout default` (sway/commands/layout.c:171-189).
-            self.set_layout_keeping_previous(self.root, new_auto_layout);
-        }
-    }
-
     pub fn update_config(
         &mut self,
         view_size: Size<f64, Logical>,
@@ -262,7 +255,6 @@ impl<W: LayoutElement> TilingTree<W> {
         for indicator in self.tab_indicators.values_mut() {
             indicator.update_config(options.layout.tab_indicator);
         }
-        self.update_empty_auto_layout(view_size);
         self.view_size = view_size;
         self.parent_area = parent_area;
         self.gaps_to_edge = gaps_to_edge;

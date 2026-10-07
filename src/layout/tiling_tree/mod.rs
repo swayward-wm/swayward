@@ -202,6 +202,30 @@ impl<I> IpcNode<I> {
 }
 
 impl<W: LayoutElement> DetachedSubtree<W> {
+    /// A lone view, as a floating view is when it swaps into a tiled slot.
+    pub fn from_tile(tile: Tile<W>) -> Self {
+        let window = tile.window().id().clone();
+        Self {
+            node: DetachedNode::Leaf {
+                old_id: NodeId(NODE_ID_COUNTER.next()),
+                tile: Box::new(tile),
+                pending_mode: None,
+                mapped_under_fullscreen: false,
+            },
+            focus_history: vec![window],
+            root_focused: false,
+            wrapped_workspace: false,
+        }
+    }
+
+    /// The view of a single-leaf subtree, or the subtree back for a container.
+    pub fn into_tile(self) -> Result<Tile<W>, Box<Self>> {
+        match self.node {
+            DetachedNode::Leaf { tile, .. } => Ok(*tile),
+            node => Err(Box::new(Self { node, ..self })),
+        }
+    }
+
     pub fn for_each_window(&self, mut f: impl FnMut(&W)) {
         self.node.for_each_window(&mut f);
     }
@@ -394,6 +418,13 @@ pub(super) enum DecorationLayer {
 
 static NODE_ID_COUNTER: IdCounter = IdCounter::new();
 
+/// A position in creation order shared with container ids. Sway appends every new node to the
+/// tail of the seat focus stack (`seat_node_from_node`, sway/input/seat.c:349), so a view that
+/// was never focused and a wrapper the tree created without focusing it rank there by this.
+pub(crate) fn next_seat_stack_seq() -> u64 {
+    NODE_ID_COUNTER.next()
+}
+
 /// A collection keyed by node id that must forget a node when it leaves the arena.
 trait SideTable {
     fn ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_>;
@@ -445,6 +476,7 @@ macro_rules! side_tables {
             ("unarranged_wrappers", $($ref)+ $tree.unarranged_wrappers),
             ("stale_fullscreen_rects", $($ref)+ $tree.stale_fullscreen_rects),
             ("unarranged_under_fullscreen", $($ref)+ $tree.unarranged_under_fullscreen),
+            ("split_under_fullscreen", $($ref)+ $tree.split_under_fullscreen),
             ("tab_indicators", $($ref)+ $tree.tab_indicators),
             ("tab_active", $($ref)+ $tree.tab_active),
         ]
@@ -474,6 +506,8 @@ pub struct TilingTree<W: LayoutElement> {
     /// Leaves moved into this tree while it was fullscreen. Like mapped ones
     /// they get no share of their parent's split, but they keep their border
     /// and titlebar (`container_move_to_workspace`, sway/commands/move.c:220-229).
+    /// Also holds a container `split` created around a view mapped under
+    /// fullscreen: it copies the view's empty box and is never arranged.
     moved_under_fullscreen: HashMap<NodeId, Rectangle<f64, Logical>>,
     /// The IPC focus list follows `focus_history` rather than window focus
     /// timestamps, because the seat stack was reordered without focusing a
@@ -483,6 +517,12 @@ pub struct TilingTree<W: LayoutElement> {
     /// `arrange_container(parent)` gives it the slot's pending box until the
     /// next workspace arrange restores the output box.
     fullscreen_tile_slot: bool,
+    /// A global fullscreen node a `layout` wrap detached. Detaching clears
+    /// `root->fullscreen_global` and reattaching does not restore it, while
+    /// the node keeps `FULLSCREEN_GLOBAL` (sway/tree/workspace.c:898-910,
+    /// sway/tree/container.c:1440-1446), so sway no longer hides or blocks
+    /// anything for it. Only meaningful while it is still the fullscreen node.
+    orphaned_global_fullscreen: Option<NodeId>,
     /// The fullscreen node arrived in this tree already fullscreen. Sway gives
     /// a moved container a zero width fraction and arranges only the
     /// fullscreen node (`container_move_to_workspace`,
@@ -494,7 +534,9 @@ pub struct TilingTree<W: LayoutElement> {
     /// after a view mapped into it: `arrange_container(wrapper)`
     /// (sway/tree/view.c:931-940) laid the subtree out inside the wrapper's
     /// never-arranged empty box. Sway keeps them until the next arrange of
-    /// the subtree, which under fullscreen never comes.
+    /// the subtree, which under fullscreen never comes. Without fullscreen
+    /// they are the subtree of an `unarranged_wrappers` entry the fullscreen
+    /// view left for the scratchpad, kept until the next relayout.
     wrapper_arranged_boxes: HashMap<NodeId, Rectangle<f64, Logical>>,
     /// Workspace wrappers a failed move created (`workspace_wrap_children`
     /// before the destination lookup fails, sway/commands/move.c:430-436 and
@@ -518,6 +560,13 @@ pub struct TilingTree<W: LayoutElement> {
     /// sway/tree/arrange.c:310-316), so the others keep these boxes, and the
     /// percent they imply, until fullscreen ends or the tree gains a child.
     unarranged_under_fullscreen: HashMap<NodeId, Rectangle<f64, Logical>>,
+    /// Containers `split` created while the workspace had a fullscreen
+    /// container outside them. `container_split` gives the new container
+    /// calloc's zero `child_total_width` and `child_total_height`, and the
+    /// workspace arrange that follows lays out only the fullscreen container
+    /// (sway/tree/container.c, sway/commands/split.c:24-29,
+    /// sway/tree/arrange.c:310-316), so its parent never sets them.
+    split_under_fullscreen: HashSet<NodeId>,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,

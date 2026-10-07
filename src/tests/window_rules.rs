@@ -170,7 +170,7 @@ window-rule {
     f.add_output(1, (1280, 720));
     let client = f.add_client();
 
-    let window = f.client(client).create_window();
+    let window = f.client(client).create_ssd_window();
     window.xdg_toplevel.set_app_id("floating".into());
     window.commit();
     let surface = window.surface.clone();

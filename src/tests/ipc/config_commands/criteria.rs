@@ -213,6 +213,39 @@ fn criteria_with_no_matches_returns_sway_failure() {
     );
 }
 
+// differential v3 seeds 40013 40025 40042 40049 40060 40126 40152 40191
+// 40226 40268 40356 40358: with nothing focused, `con_id=__focused__`
+// resolves to 0, and sway tests the parsed fields for emptiness, so the
+// criteria are empty and the command is CMD_INVALID
+// (`sway/sway/criteria.c:19-42`, `658-662`, `858-860`).
+#[test]
+fn focused_con_id_criteria_with_no_focused_container_are_empty() {
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+
+    let empty = swayward_ipc::CommandOutcome {
+        success: false,
+        error: Some("Criteria is empty".into()),
+        parse_error: Some(true),
+    };
+    assert_eq!(
+        crate::command::execute(fixture.niri_state(), "[con_id=__focused__] mark --add z"),
+        std::slice::from_ref(&empty)
+    );
+
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "one");
+    assert!(
+        crate::command::execute(fixture.niri_state(), "[con_id=__focused__] mark --add z")[0]
+            .success
+    );
+    assert!(crate::command::execute(fixture.niri_state(), "focus parent")[0].success);
+    assert_eq!(
+        crate::command::execute(fixture.niri_state(), "[con_id=__focused__] mark --add y"),
+        [empty]
+    );
+}
+
 // differential seeds 1277 1360 1403 1534 1539 1604 1673 1856 1987: with
 // criteria, `border` runs once per match, so no match is `No matching node.`
 // rather than the handler's no-view error (`sway/sway/commands.c:301-303`).

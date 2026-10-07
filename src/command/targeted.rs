@@ -5,11 +5,11 @@ use swayward_ipc::{criteria, CommandOutcome};
 
 use super::movement::{
     move_position, move_target_to_mark, move_target_to_workspace, move_tiling_subtree_to_output,
-    move_workspace_to_output, output_target,
+    move_workspace_to_output,
 };
 use super::{
     execute, failure, focus, layout, movement, scratchpad, success, window, ClientColorClass,
-    Command, CommandTarget, Direction, OutputTarget,
+    Command, CommandTarget, Direction,
 };
 use crate::swayward::State;
 use crate::window::mapped::ShortcutsInhibitPolicy;
@@ -61,9 +61,31 @@ fn move_target_to_adjacent_output(
             (reference, window)
         }
     };
-    let destination = OutputTarget::Direction(direction);
-    let reference_point = state.swayward.layout.window_center(&window);
-    if let Ok(output) = output_target(state, &destination, reference, reference_point) {
+    // Sway's `container_move_to_next_output` asks `output_get_in_direction`
+    // for the output adjacent to the reference output's centre and stops at
+    // the layout edge (sway/commands/move.c:277-298, sway/tree/output.c:316-331).
+    let Some(reference) = reference else {
+        return;
+    };
+    let Some(reference_point) = state
+        .swayward
+        .global_space
+        .output_geometry(reference)
+        .map(crate::utils::center)
+    else {
+        return;
+    };
+    let (horizontal, positive) = match direction {
+        Direction::Left => (true, false),
+        Direction::Right => (true, true),
+        Direction::Up => (false, false),
+        Direction::Down => (false, true),
+    };
+    if let Some(output) =
+        state
+            .swayward
+            .adjacent_output(reference, reference_point, horizontal, positive)
+    {
         match target {
             CommandTarget::Window(_) => state.swayward.layout.move_window_to_output_from_direction(
                 &window,
@@ -152,7 +174,15 @@ fn move_focused_direction(
             Direction::Down => state.swayward.layout.move_down(),
         },
     };
-    if !moved && state.swayward.layout.focused_fullscreen_mode().is_none() {
+    // A workspace-fullscreen container only considers outputs; anything
+    // inside a fullscreen ancestor stays put (sway/commands/move.c:303-312,
+    // 326-330).
+    let layout = &state.swayward.layout;
+    if !moved
+        && (layout.focused_fullscreen_mode().is_none()
+            || layout.focused_container_fullscreen_mode()
+                == Some(crate::layout::tiling_tree::FullscreenMode::Workspace))
+    {
         move_target_to_adjacent_output(state, target, direction, activate);
     }
     moved
@@ -289,6 +319,7 @@ fn run_targeted(
             ))
         }
         Command::MoveToMark(mark) => {
+            movement::refuse_global_fullscreen_move(state, target)?;
             super::handled_outcome(move_target_to_mark(state, target, mark))
         }
         Command::MoveWorkspaceToOutput(output) => {
@@ -665,7 +696,12 @@ fn focused_id(state: &State) -> Option<crate::window::mapped::MappedId> {
     state.swayward.layout.focus().map(|mapped| mapped.id())
 }
 
+/// Sway's `seat_get_focused_container`: nothing when the workspace itself
+/// holds focus.
 pub(super) fn focused_con_id(state: &State) -> Option<u64> {
+    if matches!(focused_node(state), FocusedNode::Nothing) {
+        return None;
+    }
     match focused_target(state)? {
         CommandTarget::Container(_, node) => Some(crate::ipc::tree::container_id(node) as u64),
         CommandTarget::Window(window) => Some(crate::ipc::tree::window_id(window) as u64),
@@ -819,14 +855,30 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
         }
     }
     // A hidden scratchpad group has no workspace, so a match on one of its
-    // nodes targets the group through one of its windows; the scratchpad
-    // commands act on the whole group from any of them.
+    // splits targets the group through one of its windows; the scratchpad
+    // commands act on the whole group from any of them. Its views are views
+    // like any other, matched by view criteria and acted on directly
+    // (`sway/sway/tree/root.c:250-257`). They have a parent, so they are
+    // tiling (`sway/sway/tree/container.c:1041-1050`).
     for (node, window) in layout.scratchpad_tree_nodes() {
-        if let Some(mapped) = mapped_by_window.get(window) {
-            candidates.push(Candidate::Container(
+        let Some(mapped) = mapped_by_window.get(window) else {
+            continue;
+        };
+        let leaf = layout
+            .scratchpad_trees()
+            .find_map(|(tree, _)| tree.window_for_node(node).cloned())
+            .and_then(|leaf| mapped_by_window.get(&leaf).copied());
+        match leaf {
+            Some(leaf) => {
+                let snapshot = snapshots
+                    .remove(&leaf.id())
+                    .unwrap_or_else(|| WindowSnapshot::new(leaf, None, false));
+                candidates.push(Candidate::Window(snapshot));
+            }
+            None => candidates.push(Candidate::Container(
                 CommandTarget::Window(mapped.id()),
                 node,
-            ));
+            )),
         }
     }
     // Hidden scratchpad windows, then anything the walk did not reach (a
@@ -871,7 +923,10 @@ pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> 
             Candidate::Container(..) => None,
         })
     };
-    let focused_id = focused_id(state);
+    // `__focused__` compares against the focused view, so with a split or
+    // the workspace focused it matches nothing (`criteria_matches_view`,
+    // sway/sway/criteria.c:193-197, 453-465).
+    let focused_id = focused_id(state).filter(|_| focused_node(state) == FocusedNode::View);
     let focused_info = windows()
         .find(|snapshot| Some(snapshot.id) == focused_id)
         .map(|snapshot| snapshot.info(state))

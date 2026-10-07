@@ -30,6 +30,19 @@ impl Swayward {
         self.urgency_timers.insert(id, token);
     }
 
+    /// Seat focus reached a view that already held keyboard focus, as after
+    /// `focus parent` then `focus child` or a criteria `focus`. Sway clears
+    /// its urgency on that seat focus change, on the same workspace, unless a
+    /// timer is pending (`seat_set_workspace_focus`,
+    /// sway/sway/input/seat.c:1223-1240); keyboard focus did not move, so
+    /// `focus_clears_urgency` never ran.
+    pub fn seat_refocus_clears_urgency(&mut self, id: MappedId) {
+        if self.urgency_timers.contains_key(&id) {
+            return;
+        }
+        self.clear_window_urgency(id);
+    }
+
     fn clear_window_urgency(&mut self, id: MappedId) {
         self.layout.with_windows_mut(|mapped, _| {
             if mapped.id() == id {

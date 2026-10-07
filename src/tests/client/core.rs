@@ -424,6 +424,16 @@ impl Client {
         self.state.create_window()
     }
 
+    /// A window that asks for server-side decorations before its first
+    /// commit, as foot does. Sway maps a client that binds no decoration
+    /// protocol as using client-side decorations, and a floating one reports
+    /// border `csd` (sway/desktop/xdg_shell.c:484-500).
+    pub fn create_ssd_window(&mut self) -> &mut Window {
+        self.create_window();
+        self.decorate_last_window(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+        self.state.windows.last_mut().unwrap()
+    }
+
     pub fn decorate_last_window(&mut self, mode: zxdg_toplevel_decoration_v1::Mode) {
         let state = &mut self.state;
         let manager = state.xdg_decoration_manager.as_ref().unwrap();

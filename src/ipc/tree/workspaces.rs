@@ -176,13 +176,19 @@ fn describe_workspace(
             &tiled.nodes,
         )
     });
-    set_tabbed_percentages(tiled.layout, &mut tiled.nodes, context.rect);
+    set_tabbed_percentages(
+        tiled.layout,
+        &mut tiled.nodes,
+        context.rect,
+        workspace.tiling().titlebar_height().round() as i32,
+    );
     apply_workspace_visibility(
         tiled.layout,
         &focus,
         &mut tiled.nodes,
         &mut floating_nodes,
         state.visible,
+        !workspace.tiling().global_fullscreen_orphaned(),
     );
     let mut node = common_node(CommonNodeContext {
         id: workspace_id(workspace.id().get()),
@@ -280,7 +286,10 @@ fn floating_part(context: &WorkspaceNodeContext<'_>, state: &WorkspaceState) -> 
                 .filter(|(tile, _)| workspace.is_floating_for_ipc(&tile.window().window))
                 .map(|(tile, layout)| {
                     let mut node = describe_floating_window(context, tile, &layout);
-                    node.focused = active_window == Some(tile.window().id());
+                    // With the workspace itself focused no view holds the seat focus, even a
+                    // fullscreen floating view that is the tiling tree's only leaf.
+                    node.focused = active_window == Some(tile.window().id())
+                        && !workspace.is_workspace_focused();
                     (StackSlot::Window(tile.window().window.clone()), node)
                 }),
         )
@@ -359,11 +368,15 @@ fn describe_floating_window(
         offset_rect(rect, context.output_origin)
     });
     node.sticky = workspace.is_window_sticky(&tile.window().window);
+    // A fullscreen floating view keeps the mode it was given, global or
+    // workspace (sway/commands/fullscreen.c:47-52, sway/ipc-json.c:619).
+    if let Some(mode) = workspace.fullscreen_mode_for_window(&tile.window().window) {
+        node.fullscreen_mode = mode as i32;
+    }
     node
 }
 
-/// Merge floating ids into the tiled focus list, then order it most recent
-/// first unless the floating layer is active.
+/// Merge floating ids into the tiled focus list, then order it most recent first.
 fn order_focus(
     workspace: &crate::layout::workspace::Workspace<Mapped>,
     focus: &mut Vec<i64>,
@@ -379,31 +392,54 @@ fn order_focus(
         })
         .collect::<std::collections::HashMap<_, _>>();
     let floating_focus = floating_nodes.iter().rev().map(|node| node.id);
+    focus.extend(floating_focus);
+    // With a floating container focused, every entry follows the focus stack, which the
+    // recency sort reproduces (`focus_inactive_children_iterator`, sway/ipc-json.c:786-807).
+    if workspace.floating_is_active() || !workspace.tiling().ipc_focus_follows_history() {
+        order_by_recency(workspace, focus, nodes, floating_nodes, &focus_timestamps);
+    }
     if workspace.floating_is_active() {
-        focus.splice(0..0, floating_focus);
-    } else {
-        focus.extend(floating_focus);
-        if !workspace.tiling().ipc_focus_follows_history() {
-            order_by_recency(workspace, focus, nodes, floating_nodes, &focus_timestamps);
+        // The focused floating container heads the seat stack even when it
+        // is not on top, as after a move onto a floating mark stacks it
+        // below another view (`seat_set_focus`, sway/input/seat.c).
+        let active = workspace
+            .active_window()
+            .map(|window| window_id(window.id()));
+        let index = floating_nodes
+            .iter()
+            .find(|node| active.is_some_and(|active| node_holds(node, active)))
+            .and_then(|node| focus.iter().position(|entry| *entry == node.id));
+        if let Some(index) = index {
+            let id = focus[index];
+            focus.remove(index);
+            focus.insert(0, id);
         }
     }
-    // A view never focused, such as one mapped under a fullscreen view,
-    // joined the tail of the focus stack when it was created and has not
-    // moved (`seat_node_from_node`, sway/input/seat.c:327-349). Window ids
-    // follow creation order.
-    let never_focused = workspace
-        .windows()
-        .filter(|window| window.focus_timestamp().is_none())
-        .map(|window| window_id(window.id()))
-        .collect::<std::collections::HashSet<_>>();
-    let mut tail = focus
-        .iter()
-        .copied()
-        .filter(|id| never_focused.contains(id))
+    // A view never focused, such as one mapped under a fullscreen view, and a
+    // wrapper the tree created without focusing it joined the tail of the focus
+    // stack when they were created and have not moved (`seat_node_from_node`,
+    // sway/input/seat.c:327-349). They follow in creation order.
+    let mut tail = workspace
+        .tiles()
+        .filter(|tile| tile.window().focus_timestamp().is_none())
+        .map(|tile| (window_id(tile.window().id()), tile.seat_stack_seq()))
+        .chain(
+            workspace
+                .ipc_tiling_tree()
+                .nodes()
+                .into_iter()
+                .filter(|(id, _)| workspace.tiling().ipc_focus_is_stale(*id))
+                .map(|(id, _)| (container_id(id), id.0)),
+        )
+        .filter(|(id, _)| focus.contains(id))
         .collect::<Vec<_>>();
-    tail.sort_unstable();
-    focus.retain(|id| !never_focused.contains(id));
-    focus.extend(tail);
+    tail.sort_unstable_by_key(|(_, seq)| *seq);
+    focus.retain(|id| !tail.iter().any(|(entry, _)| entry == id));
+    focus.extend(tail.into_iter().map(|(id, _)| id));
+}
+
+fn node_holds(node: &Node, id: i64) -> bool {
+    node.id == id || node.nodes.iter().any(|child| node_holds(child, id))
 }
 
 fn order_by_recency(
@@ -469,16 +505,20 @@ fn order_by_recency(
 
 /// A workspace fullscreen container hides every view outside it, across the
 /// tiling and floating layers (`view_is_visible`,
-/// `sway/sway/tree/view.c:1187-1193`).
+/// `sway/sway/tree/view.c:1187-1193`). A tiling global fullscreen view a
+/// `layout` wrap orphaned hides nothing (`tiling_fullscreen_hides` false).
 fn apply_workspace_visibility(
     layout: NodeLayout,
     focus: &[i64],
     nodes: &mut [Node],
     floating_nodes: &mut [Node],
     workspace_visible: bool,
+    tiling_fullscreen_hides: bool,
 ) {
     let floating_fullscreen = floating_nodes.iter().any(contains_fullscreen);
-    let tiling_fullscreen = if floating_fullscreen {
+    let tiling_fullscreen = if !tiling_fullscreen_hides {
+        false
+    } else if floating_fullscreen {
         for node in nodes.iter_mut() {
             set_windows_visible(node, false);
         }

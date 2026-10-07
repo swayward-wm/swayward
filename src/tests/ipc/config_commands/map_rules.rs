@@ -364,6 +364,79 @@ fn runtime_no_focus_applies_only_to_windows_mapped_after_registration() {
     );
 }
 
+fn workspace_focus(f: &mut Fixture, name: &str) -> Vec<Value> {
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|output| output["nodes"].as_array().unwrap())
+        .find(|workspace| workspace["name"] == name)
+        .unwrap();
+    workspace["focus"].as_array().unwrap().clone()
+}
+
+/// Sway appends a new node to the bottom of the seat focus stack (`seat_node_from_node`,
+/// sway/input/seat.c:327-354) and raises it only when `should_focus` holds
+/// (sway/tree/view.c:697-731, 945-957). A `no_focus` view mapped while the workspace
+/// itself is focused therefore ranks behind the existing view, not ahead of it.
+/// Oracle row: no_focus_view_ranks_last (random-v3 seed 40262).
+#[test]
+fn no_focus_view_mapped_beside_a_focused_workspace_ranks_last() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+
+    map_test_window(&mut f, client, "first");
+    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
+    assert!(crate::command::execute(f.niri_state(), r#"no_focus [app_id="^second$"]"#)[0].success);
+    map_test_window(&mut f, client, "second");
+
+    let expected = vec![
+        rule_window_node(&mut f, "first")["id"].clone(),
+        rule_window_node(&mut f, "second")["id"].clone(),
+    ];
+    assert_eq!(workspace_focus(&mut f, "1"), expected);
+}
+
+/// Sway runs a criteria command once per match with live seat focus
+/// (sway/commands.c:305-323). Moving the focused view away refocuses the never-focused
+/// `no_focus` view left behind (sway/commands/move.c:598-608), so when the next match moves
+/// it to the same workspace it is the most recently focused view there. Oracle row:
+/// no_focus_view_ranks_last (random-v3 seed 40246).
+#[test]
+fn multi_match_move_ranks_each_refocused_view_on_the_seat_stack() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+
+    map_test_window(&mut f, client, "first");
+    f.niri_state().update_keyboard_focus();
+    assert!(crate::command::execute(f.niri_state(), r#"no_focus [app_id="^second$"]"#)[0].success);
+    map_test_window(&mut f, client, "second");
+    f.niri_state().update_keyboard_focus();
+    assert!(
+        crate::command::execute(
+            f.niri_state(),
+            "[workspace=__focused__] move container to workspace 2"
+        )[0]
+        .success
+    );
+
+    let expected = vec![
+        rule_window_node(&mut f, "second")["id"].clone(),
+        rule_window_node(&mut f, "first")["id"].clone(),
+    ];
+    assert_eq!(workspace_focus(&mut f, "2"), expected);
+}
+
 #[test]
 fn for_window_opacity_applies_when_window_maps() {
     let (mut fixture, socket) = ipc_fixture();
@@ -637,4 +710,71 @@ fn runtime_assign_to_another_workspace_keeps_the_empty_current_workspace() {
     assert!(swayward.layout.focus().is_none());
     let (_, target) = swayward.layout.find_workspace_by_name("2").unwrap();
     assert_eq!(target.windows().count(), 1);
+}
+
+#[test]
+fn for_window_layout_wraps_the_workspace_children_instead_of_changing_the_workspace() {
+    // `for_window [...] layout tabbed` runs with the new window as the
+    // handler container, so sway keeps the workspace layout and wraps its
+    // children in a tabbed container (sway/commands/layout.c:178-183).
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    assert!(
+        crate::command::execute(f.niri_state(), r#"for_window [app_id="tab"] layout tabbed"#)[0]
+            .success
+    );
+    let client = f.add_client();
+    map_test_window(&mut f, client, "tab");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["representation"], "H[T[tab]]");
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["type"], "con");
+    assert_eq!(wrapper["layout"], "tabbed");
+    assert_eq!(wrapper["nodes"][0]["app_id"], "tab");
+    assert_eq!(wrapper["nodes"][0]["focused"], true);
+}
+
+#[test]
+fn for_window_layout_wrapper_is_raised_with_the_mapped_view() {
+    // Sway runs a mapped view's criteria before focusing it (`view_map`,
+    // sway/tree/view.c:943-956), so the wrapper `layout tabbed` creates is
+    // raised with the view and leads the workspace focus list ahead of an
+    // older floating window.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "float");
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    map_test_window(&mut f, client, "tile");
+    assert!(
+        crate::command::execute(f.niri_state(), r#"for_window [app_id="tab"] layout tabbed"#)[0]
+            .success
+    );
+    map_test_window(&mut f, client, "tab");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["layout"], "tabbed");
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([wrapper["id"], workspace["floating_nodes"][0]["id"]])
+    );
 }

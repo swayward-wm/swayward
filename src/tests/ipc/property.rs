@@ -183,6 +183,7 @@ fn map_property_window(
         windows::WindowSpec {
             app_id: Some(&app_id),
             title: Some(&title),
+            server_decorations: true,
             ..Default::default()
         },
     )
@@ -498,7 +499,10 @@ fn swapping_a_marked_container_does_not_leave_multiple_fullscreen_nodes() {
         Op::Command("split horizontal"),
         Op::Command("workspace 2"),
         Op::Open(2),
-        Op::Command("move left"),
+        // Sway's directional move stops at the layout edge. This sequence
+        // once reached the other output through a wraparound `move left`.
+        Op::Command("move container to output right"),
+        Op::Command("focus output right"),
         Op::ConIdCommand(0, "fullscreen toggle"),
         Op::Command("move workspace 2"),
         Op::Command("focus parent"),
@@ -542,10 +546,12 @@ fn swapping_with_a_marked_floating_container_is_rejected_safely() {
         Op::Command("swap container with mark alpha"),
     ]);
 
+    // A floating view's `focus left` stays among floaters (sway/commands/focus.c:457-460), so
+    // app-0 sits inside the marked split when it swaps. Pinned sway 1.12 answers the same.
     assert_failure(
         run.last_outcome("swap container with mark alpha"),
         "swap",
-        "Can only swap with containers and views",
+        "Cannot swap ancestor and descendant",
     );
     let tree = run.tree();
     for app_id in ["app-0", "app-1", "app-2", "app-3"] {

@@ -480,6 +480,10 @@ pub(super) fn move_target_to_workspace(
     preserve_empty_workspace: bool,
     auto_back_and_forth: bool,
 ) -> CommandOutcome {
+    if let Err(refused) = refuse_global_fullscreen_move(state, target) {
+        return refused;
+    }
+    let focused_before = focused_view(state);
     let result = match target {
         CommandTarget::Window(target) => {
             let window = state
@@ -522,8 +526,37 @@ pub(super) fn move_target_to_workspace(
     if let Err(error) = result {
         return failure(error);
     }
+    raise_refocused_view(state, focused_before);
     state.swayward.queue_redraw_all();
     success()
+}
+
+/// Sway's `seat_set_focus` puts the view that takes over focus after a move
+/// at the head of the seat-wide focus stack straight away
+/// (sway/commands/move.c:598-608), so a later match in the same criteria run
+/// that moves it lands it ahead of the others on the destination
+/// (`seat_get_focus_inactive_tiling`, sway/input/seat.c:1374-1389).
+fn raise_refocused_view(
+    state: &mut State,
+    focused_before: Option<crate::window::mapped::MappedId>,
+) {
+    let Some(focused) = focused_view(state).filter(|focused| Some(*focused) != focused_before)
+    else {
+        return;
+    };
+    let stamp = crate::utils::get_monotonic_time();
+    state.swayward.layout.with_windows_mut(|mapped, _| {
+        if mapped.id() == focused {
+            mapped.set_focus_timestamp(stamp);
+        }
+    });
+}
+
+/// The view holding seat focus; none while a split or the workspace does.
+fn focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
+    (super::targeted::focused_node(state) == swayward_ipc::command::FocusedNode::View)
+        .then(|| state.swayward.layout.focus().map(|mapped| mapped.id()))
+        .flatten()
 }
 
 fn swap_kind_value(target: &SwapTarget) -> (&'static str, &str) {
@@ -632,6 +665,9 @@ pub(super) fn swap_target(
     if source == destination {
         return failure("Cannot swap a container with itself");
     }
+    if let Some(outcome) = swap_with_floating_window(state, source, destination, target) {
+        return outcome;
+    }
     let (source_workspace, source_node) = match resolve_swap_endpoint(state, source, true, || {
         failure("Can only swap with containers and views")
     }) {
@@ -675,6 +711,73 @@ pub(super) fn swap_target(
     }
     state.swayward.queue_redraw_all();
     success()
+}
+
+/// A standalone floating view and the workspace it floats on.
+fn floating_root_window(
+    state: &State,
+    target: CommandTarget,
+) -> Option<(
+    smithay::desktop::Window,
+    crate::layout::workspace::WorkspaceId,
+)> {
+    let CommandTarget::Window(id) = target else {
+        return None;
+    };
+    let window = super::mapped_window(state, id)?;
+    let workspace = state
+        .swayward
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.floating().window_is_floating_root(&window))?
+        .2
+        .id();
+    Some((window, workspace))
+}
+
+/// Sway swaps a floating container with a tiled one, each taking the other's
+/// place (`swap_places`, sway/tree/container.c:1718-1764). `None` when
+/// neither endpoint is a standalone floating view.
+fn swap_with_floating_window(
+    state: &mut State,
+    source: CommandTarget,
+    destination: CommandTarget,
+    target: &SwapTarget,
+) -> Option<CommandOutcome> {
+    let (floater, other, other_is_source) = match (
+        floating_root_window(state, source),
+        floating_root_window(state, destination),
+    ) {
+        (Some(floater), None) => (floater, destination, false),
+        (None, Some(floater)) => (floater, source, true),
+        _ => return None,
+    };
+    let (workspace, node) = match resolve_swap_endpoint(state, other, other_is_source, || {
+        let (kind, value) = swap_kind_value(target);
+        failure(format!("Failed to find {kind} '{value}'"))
+    }) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return Some(error),
+    };
+    if workspace != floater.1
+        || !state
+            .swayward
+            .layout
+            .workspace_contains_tiling_node(workspace, node)
+    {
+        return Some(failure("Can only swap with containers and views"));
+    }
+    let remapped = match state
+        .swayward
+        .layout
+        .swap_floating_window_with_tiling_node(&floater.0, workspace, node)
+    {
+        Ok(remapped) => remapped,
+        Err(error) => return Some(failure(error)),
+    };
+    state.swayward.remap_container_marks(remapped);
+    state.swayward.queue_redraw_all();
+    Some(success())
 }
 
 /// Swap two tiled containers on different workspaces, carrying container
@@ -826,6 +929,49 @@ fn wrap_moved_workspace_root(state: &mut State, source: CommandTarget) {
     }
 }
 
+/// A tiled container moved onto a floating view's mark becomes floating
+/// beside it (`container_move_to_container`, sway/commands/move.c:243-261).
+/// Returns `None` for the cases this does not cover: a floating source, or a
+/// mark on a floating group's child.
+fn move_tiling_to_floating_mark(
+    state: &mut State,
+    source: CommandTarget,
+    destination: CommandTarget,
+) -> Option<CommandOutcome> {
+    let CommandTarget::Window(anchor) = destination else {
+        return None;
+    };
+    let anchor = super::mapped_window(state, anchor)?;
+    let layout = &state.swayward.layout;
+    if !layout
+        .workspaces()
+        .any(|(_, _, workspace)| workspace.is_floating(&anchor))
+    {
+        return None;
+    }
+    let (workspace, node) = match source {
+        CommandTarget::Container(workspace, node) => (workspace, node),
+        CommandTarget::Window(window) => {
+            let window = super::mapped_window(state, window)?;
+            layout.tiling_target_for_window(&window)?
+        }
+    };
+    if !layout.workspace_contains_tiling_node(workspace, node)
+        || layout.is_tiling_root(workspace, node)
+    {
+        return None;
+    }
+    if let Err(error) = state
+        .swayward
+        .layout
+        .move_tiling_node_to_floating_window(workspace, node, &anchor)
+    {
+        return Some(failure(error));
+    }
+    state.swayward.queue_redraw_all();
+    Some(success())
+}
+
 pub(super) fn move_target_to_mark(
     state: &mut State,
     source: CommandTarget,
@@ -835,11 +981,19 @@ pub(super) fn move_target_to_mark(
         wrap_moved_workspace_root(state, source);
         return failure(format!("Mark '{mark}' not found"));
     };
+    if destination == source {
+        // A container moved to its own mark stays put
+        // (`container_move_to_container`, sway/commands/move.c:243-246).
+        return success();
+    }
     let destination = match resolve_mark_destination(state, destination) {
         Ok(MarkDestination::Scratchpad) => {
             return move_window_to_mark_workspace(state, source, None)
         }
         Ok(MarkDestination::Floating(workspace)) => {
+            if let Some(outcome) = move_tiling_to_floating_mark(state, source, destination) {
+                return outcome;
+            }
             return move_window_to_mark_workspace(state, source, Some(workspace));
         }
         Ok(MarkDestination::Tiling(destination)) => destination,
@@ -873,6 +1027,17 @@ pub(super) fn move_target_to_mark(
             source
         }
     };
+    if source.0 == destination.0 && state.swayward.layout.is_tiling_root(source.0, source.1) {
+        // Sway wraps the workspace's children first, then the move is a no-op
+        // because the mark is inside the wrapper; the old workspace is still
+        // arranged (sway/commands/move.c:430-436, 243-246 and 628-635).
+        state
+            .swayward
+            .layout
+            .wrap_moved_workspace_root(source.0, source.1, false);
+        state.swayward.queue_redraw_all();
+        return success();
+    }
     let remapped = match state.swayward.layout.move_tiling_subtree_to_node(
         source.0,
         source.1,
@@ -985,14 +1150,6 @@ pub(super) fn to_workspace_focused(
     target: WorkspaceTarget,
     auto_back_and_forth: bool,
 ) -> super::HandlerResult {
-    if state.swayward.layout.global_fullscreen_active()
-        && state
-            .swayward
-            .layout
-            .focused_window_is_fullscreen_or_child()
-    {
-        return Err(failure("Can't move fullscreen global container"));
-    }
     let Some(focused) = super::targeted::focused_target(state) else {
         return Err(super::failure("Can't move an empty workspace"));
     };
@@ -1012,12 +1169,35 @@ pub(super) fn to_workspace_focused(
     ))
 }
 
+/// `move container|window to workspace|output|mark` refuses a container that
+/// is itself global fullscreen before it resolves the destination
+/// (sway/commands/move.c:438-441). A child of a global fullscreen split holds
+/// no mode of its own and moves.
+pub(super) fn refuse_global_fullscreen_move(
+    state: &State,
+    target: CommandTarget,
+) -> Result<(), CommandOutcome> {
+    let layout = &state.swayward.layout;
+    let mode = match target {
+        CommandTarget::Container(workspace, node) => {
+            layout.node_own_fullscreen_mode(workspace, node)
+        }
+        CommandTarget::Window(window) => super::mapped_window(state, window)
+            .and_then(|window| layout.window_own_fullscreen_mode(&window)),
+    };
+    if mode == Some(crate::layout::tiling_tree::FullscreenMode::Global) {
+        return Err(failure("Can't move fullscreen global container"));
+    }
+    Ok(())
+}
+
 pub(super) fn to_mark_focused(state: &mut State, mark: &str) -> super::HandlerResult {
     // Sway rejects an empty focused workspace before it resolves the mark
     // (sway/commands/move.c:430-434).
     let Some(source) = super::targeted::focused_target(state) else {
         return Err(failure("Can't move an empty workspace"));
     };
+    refuse_global_fullscreen_move(state, source)?;
     super::handled_outcome(move_target_to_mark(state, source, mark))
 }
 
@@ -1027,6 +1207,7 @@ pub(super) fn to_output_focused(state: &mut State, target: &OutputTarget) -> sup
     let Some(focused_target) = super::targeted::focused_target(state) else {
         return Err(failure("Can't move an empty workspace"));
     };
+    refuse_global_fullscreen_move(state, focused_target)?;
     let focused = state
         .swayward
         .layout
@@ -1073,6 +1254,7 @@ pub(super) fn to_output_targeted(
     target: CommandTarget,
     output_target_name: &OutputTarget,
 ) -> super::HandlerResult {
+    refuse_global_fullscreen_move(state, target)?;
     let CommandTarget::Window(target) = target else {
         return Err(failure("command requires a window target"));
     };

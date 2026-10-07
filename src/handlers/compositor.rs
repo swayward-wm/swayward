@@ -493,6 +493,7 @@ impl State {
                 rules.sway_floating_border_width.or(default.width),
             )
         });
+        let client_decorations = crate::handlers::maps_with_client_decorations(toplevel);
         let mapped = {
             let config = self.swayward.config.borrow();
             Mapped::new(window, rules, hook, &config)
@@ -520,6 +521,11 @@ impl State {
                 .swayward
                 .layout
                 .set_window_border(&window, style, width);
+        }
+        if client_decorations {
+            self.swayward
+                .layout
+                .use_client_decorations_from_map(&window);
         }
 
         // The window state cannot contain Fullscreen and Maximized at once. Therefore,
@@ -588,6 +594,9 @@ impl State {
             let _ = crate::command::execute(self, &targeted);
         }
         crate::command::run_for_window(self, mapped_id);
+        self.swayward
+            .layout
+            .raise_focus_into_fresh_wrappers(&window);
     }
 
     fn commit_auxiliary_surface(&mut self, surface: &WlSurface, root_surface: &WlSurface) {

@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/floating_tree/commands.rs", "src/layout/workspace.rs", "src/layout/workspace/tree_commands.rs", "src/layout/tiling_tree/focus.rs", "src/layout/subtree_transfer.rs", "src/command/movement.rs", "src/ipc/tree/workspaces.rs"]
+what = "move container to mark onto a floating view floats the tiled container and stacks it directly above the marked view, on the marked view's workspace; FloatingLayout::restack_above reorders the shared floating stack, and GET_TREE lists the focused floating container first in the workspace focus array even when it is not on top."
+why = "Sway's container_move_to_container adds the container as the floating view's sibling, i.e. into workspace->floating right after it (sway/commands/move.c:243-261, sway/tree/container.c:1410-1423); swayward moved it to the workspace's tiling layer instead (random-v3 seeds 6, 24, 34, 70)."

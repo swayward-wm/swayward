@@ -25,13 +25,25 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     // (`sway/sway/commands.c:296-299`, `316-321`).
     let mut retained_targets = None;
     let mut outcomes = Vec::new();
+    // Focus may have moved since the last command (pointer, bindings).
+    state.swayward.layout.sync_seat_workspace();
     for parsed in parsed {
         let outcome = match parsed {
             Ok(parsed) => {
                 if parsed.criteria_start {
                     retained_targets = None;
                 }
-                execute_one(state, parsed, &mut retained_targets)
+                // `container_swap` saves and restores the seat's
+                // `prev_workspace_name` around its focus changes
+                // (sway/sway/tree/container.c:1850-1869).
+                let saved = matches!(parsed.command, Command::Swap(_))
+                    .then(|| state.swayward.layout.seat_back_and_forth());
+                let outcome = execute_one(state, parsed, &mut retained_targets);
+                match saved {
+                    Some(saved) => state.swayward.layout.restore_seat_back_and_forth(saved),
+                    None => state.swayward.layout.sync_seat_workspace(),
+                }
+                outcome
             }
             // Sway sets the handler context per command, after earlier
             // commands in the list have moved focus
@@ -90,16 +102,10 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
             focus::child(state);
             Ok(None)
         }
-        Command::FocusNext => super::handled(focus::next_or_prev(state, true)),
-        Command::FocusPrev => super::handled(focus::next_or_prev(state, false)),
-        Command::FocusNextSibling => {
-            focus::next_prev_sibling(state, true);
-            Ok(None)
-        }
-        Command::FocusPrevSibling => {
-            focus::next_prev_sibling(state, false);
-            Ok(None)
-        }
+        Command::FocusNext => Ok(focus::next_or_prev(state, true)),
+        Command::FocusPrev => Ok(focus::next_or_prev(state, false)),
+        Command::FocusNextSibling => Ok(focus::next_prev_sibling(state, true)),
+        Command::FocusPrevSibling => Ok(focus::next_prev_sibling(state, false)),
         Command::FocusFloating => focus::mode(state, true),
         Command::FocusTiling => focus::mode(state, false),
         Command::FocusModeToggle => focus::mode_toggle(state),
@@ -244,7 +250,9 @@ fn execute_one(
             Ok(criteria) => retained_targets
                 .get_or_insert_with(|| matching_targets(state, &criteria))
                 .clone(),
-            Err(error) => return failure(error),
+            // Sway parses criteria per command and answers a failed parse
+            // with CMD_INVALID (`sway/sway/commands.c:236-242`).
+            Err(error) => return swayward_ipc::command::parse_error(error),
         },
         None => Vec::new(),
     };
@@ -272,8 +280,14 @@ fn execute_one(
             }
             return success();
         }
+        // Sway's handlers move seat focus as they run, so the focus a match leaves behind is
+        // already on the seat stack when the next match runs: after `move` refocuses the old
+        // workspace (sway/commands/move.c:598-608) that view ranks as recently focused even
+        // if the next match moves it too.
         return for_each_match(targets, |target| {
-            execute_targeted(state, &parsed.command, target)
+            let outcome = execute_targeted(state, &parsed.command, target);
+            state.update_keyboard_focus();
+            outcome
         });
     }
 

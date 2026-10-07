@@ -436,7 +436,7 @@ fn directional_move_reaps_nested_wrappers_around_the_only_window() {
     t.wrap_node(inner, Layout::SplitH);
     t.set_layout(t.root, Layout::SplitV);
 
-    assert!(!t.move_direction(window, Direction::Down));
+    assert!(t.move_direction(window, Direction::Down));
 
     let tree = t.ipc_tree();
     assert!(

@@ -61,6 +61,40 @@ impl<W: LayoutElement> Layout<W> {
             .map_err(str::to_owned)
     }
 
+    /// Swaps a standalone floating view with a tiled node on the same
+    /// workspace. A scratchpad floater hands its scratchpad membership to the
+    /// view that replaces it (`container_swap`,
+    /// sway/tree/container.c:1813-1882).
+    pub fn swap_floating_window_with_tiling_node(
+        &mut self,
+        window: &W::Id,
+        workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+    ) -> Result<Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>, String> {
+        let scratchpad = self.scratchpad_windows.contains(window);
+        if scratchpad
+            && self
+                .workspace(workspace)
+                .is_some_and(|candidate| candidate.tiling().is_split(node))
+        {
+            return Err(
+                "swapping a scratchpad window with a container is not implemented yet".into(),
+            );
+        }
+        let (floated, remapped) = self
+            .workspace_mut(workspace)
+            .and_then(|candidate| candidate.swap_floating_window_with_tiling_node(window, node))
+            .ok_or_else(|| "Can only swap with containers and views".to_owned())?;
+        if let Some(floated) = floated.filter(|_| scratchpad) {
+            for id in &mut self.scratchpad_windows {
+                if id == window {
+                    *id = floated.clone();
+                }
+            }
+        }
+        Ok(remapped)
+    }
+
     pub(crate) fn swap_tiling_nodes_between_workspaces(
         &mut self,
         first_workspace: WorkspaceId,
@@ -184,16 +218,100 @@ impl<W: LayoutElement> Layout<W> {
             let (source_ws, target_ws) =
                 Self::distinct_workspaces_mut(monitors, source_workspace, target_workspace)
                     .ok_or_else(|| "No matching node.".to_owned())?;
+            let moved_view = source_ws.tiling().window_for_node(source).map(|window| {
+                let window = window.id().clone();
+                let rect = source_ws.tiling().ipc_rect_for_window(&window);
+                (window, rect)
+            });
             let (subtree, old_parent) = source_ws
                 .detach_tiling_subtree(source)
                 .ok_or_else(|| "No matching node.".to_owned())?;
             let remapped = target_ws.attach_tiling_subtree_at(subtree, Some(target)).1;
+            if let Some((window, Some(rect))) = moved_view {
+                // `container_move_to_container` zeroes the view's size and
+                // `arrange_workspace` lays out only the destination's
+                // fullscreen container (sway/commands/move.c:248-266,
+                // sway/tree/arrange.c:310-316), as a workspace move does.
+                target_ws
+                    .tiling_mut()
+                    .mark_moved_under_fullscreen(&window, rect);
+            }
             source_ws.tiling_mut().finish_subtree_detach(old_parent);
             if monitors[source_monitor].workspace_switch.is_none() {
                 monitors[source_monitor].clean_up_workspaces();
             }
             Ok(remapped)
         }
+    }
+
+    /// Moves tiling container `node` onto the floating view `anchor`, which
+    /// may be on another workspace. Sway detaches the container and inserts it
+    /// into the anchor's floating list right after the anchor
+    /// (`container_move_to_container`, sway/commands/move.c:243-261).
+    pub fn move_tiling_node_to_floating_window(
+        &mut self,
+        source_workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+        anchor: &W::Id,
+    ) -> Result<(), String> {
+        let no_node = || "No matching node.".to_owned();
+        let target_workspace = self.window_workspace_id(anchor).ok_or_else(no_node)?;
+        let anchor_slot = floating_tree::StackSlot::Window(anchor.clone());
+        let same_workspace = source_workspace == target_workspace;
+        let workspace = self.workspace_mut(source_workspace).ok_or_else(no_node)?;
+        let moved = workspace
+            .float_tiling_node_for_mark(node, same_workspace.then_some(&anchor_slot))
+            .ok_or_else(no_node)?;
+        if same_workspace {
+            return Ok(());
+        }
+        let window = match &moved {
+            floating_tree::StackSlot::Window(window) => window.clone(),
+            floating_tree::StackSlot::Tree(root) => workspace
+                .floating()
+                .tree_window_ids(*root)
+                .and_then(|windows| windows.into_iter().next())
+                .ok_or_else(no_node)?,
+        };
+        self.move_window_to_workspace_id(&window, target_workspace)?;
+        let target = self.workspace_mut(target_workspace).ok_or_else(no_node)?;
+        let moved = match target.floating_tree_root_for_window(&window) {
+            Some(root) => floating_tree::StackSlot::Tree(root),
+            None => floating_tree::StackSlot::Window(window),
+        };
+        target.restack_floating_above(&moved, &anchor_slot);
+        Ok(())
+    }
+
+    /// Sway's `move container to workspace` onto the container's own
+    /// workspace: the destination is the workspace's focus-inactive tiling
+    /// container (`seat_get_focus_inactive_tiling`, sway/commands/move.c:516),
+    /// and `container_move_to_container` puts the container after that view
+    /// or into that split (move.c:241-261). It does nothing when the
+    /// destination is the container or inside it, or when the workspace has
+    /// no focus-inactive tiling container (`container_move_to_workspace`
+    /// returns early for the same workspace, move.c:198-202).
+    pub fn move_tiling_node_to_focus_inactive(
+        &mut self,
+        workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+    ) {
+        let Some(workspace) = self.workspace_mut(workspace) else {
+            return;
+        };
+        let tiling = workspace.tiling();
+        if !tiling.contains(node) || tiling.is_root(node) {
+            return;
+        }
+        let Some(destination) = tiling.focus_inactive_tiling() else {
+            return;
+        };
+        if tiling.contains_node(node, destination) {
+            return;
+        }
+        workspace
+            .tiling_mut()
+            .move_subtree_to_node(node, destination);
     }
 
     pub fn tiling_target_for_window(
@@ -262,6 +380,7 @@ impl<W: LayoutElement> Layout<W> {
             // The wrapper survives even when the destination is the same
             // workspace.
             self.wrap_moved_workspace_root(source_workspace, node, false);
+            self.move_tiling_node_to_focus_inactive(source_workspace, node);
             return Ok((target_workspace, Vec::new()));
         }
         if empty_root {

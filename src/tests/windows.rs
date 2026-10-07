@@ -12,6 +12,8 @@ pub(super) struct WindowSpec<'a> {
     pub parent: Option<&'a XdgToplevel>,
     pub min_size: Option<(i32, i32)>,
     pub max_size: Option<(i32, i32)>,
+    /// Ask for server-side decorations, as foot does.
+    pub server_decorations: bool,
 }
 
 impl<'a> WindowSpec<'a> {
@@ -43,7 +45,11 @@ pub(super) fn map_window(
     client: ClientId,
     spec: WindowSpec<'_>,
 ) -> WlSurface {
-    let window = fixture.client(client).create_window();
+    let window = if spec.server_decorations {
+        fixture.client(client).create_ssd_window()
+    } else {
+        fixture.client(client).create_window()
+    };
     let surface = window.surface.clone();
     if let Some(app_id) = spec.app_id {
         window.xdg_toplevel.set_app_id(app_id.to_owned());
