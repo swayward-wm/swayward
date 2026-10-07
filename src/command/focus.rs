@@ -2,6 +2,7 @@ use swayward_config::Action;
 use swayward_ipc::CommandOutcome;
 
 use super::{failure, output_target_by_name_or_direction, CommandTarget, Direction};
+use crate::layout::LayoutElement as _;
 use crate::swayward::State;
 
 pub(super) fn direction(state: &mut State, direction: Direction) -> Option<Action> {
@@ -113,8 +114,42 @@ pub(super) fn parent(state: &mut State) {
 }
 
 pub(super) fn child(state: &mut State) {
+    let before = seat_focused_view(state);
     state.swayward.layout.focus_child();
+    refocus_clears_urgency(state, before);
     state.swayward.queue_redraw_all();
+}
+
+/// The view holding sway's seat focus: none while a split or the workspace
+/// itself is focused, even though the keyboard stays on a view.
+fn seat_focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
+    match super::targeted::focused_node(state) {
+        swayward_ipc::command::FocusedNode::View => match super::targeted::focused_target(state)? {
+            CommandTarget::Window(id) => Some(id),
+            CommandTarget::Container(..) => None,
+        },
+        _ => None,
+    }
+}
+
+/// Seat focus moved onto the keyboard-focused view from its parent or
+/// workspace. No keyboard focus change follows, so clear its urgency here
+/// as sway's seat focus change does (sway/sway/input/seat.c:1223-1240).
+fn refocus_clears_urgency(state: &mut State, before: Option<crate::window::mapped::MappedId>) {
+    let Some(after) = seat_focused_view(state) else {
+        return;
+    };
+    let keyboard = state.swayward.keyboard_focus.surface().cloned();
+    let holds_keyboard = keyboard.is_some_and(|surface| {
+        state
+            .swayward
+            .layout
+            .windows()
+            .any(|(_, mapped)| mapped.id() == after && mapped.is_wl_surface(&surface))
+    });
+    if before != Some(after) && holds_keyboard {
+        state.swayward.seat_refocus_clears_urgency(after);
+    }
 }
 
 /// The tiling direction of `focus next|prev`, from the focused container's parent layout
@@ -222,7 +257,9 @@ pub(super) fn targeted(state: &mut State, target: CommandTarget) -> Result<(), C
                     state.swayward.layout.workspaces().any(|(_, _, workspace)| {
                         workspace.floating_tree_root_for_window(&window).is_some()
                     });
+                let before = seat_focused_view(state);
                 state.swayward.layout.activate_window(&window);
+                refocus_clears_urgency(state, before);
                 // Each criteria match takes seat focus in turn (sway/commands.c:305-326), so
                 // stamp it now: the keyboard focus update after the command only sees the last.
                 if let Some(mapped) = state

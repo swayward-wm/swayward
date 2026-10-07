@@ -26,3 +26,8 @@ events = ["disabled_output_evacuation", "two_outputs"]
 [[target]]
 paths = ["swayward-config/", "contrib/sway-to-kdl"]
 state = ["command_coverage"]
+
+[[target]]
+paths = ["src/swayward/urgency.rs"]
+state = ["urgent_via_command"]
+events = ["urgent_via_command"]

@@ -540,6 +540,36 @@ fn urgent_command_marks_the_focused_view_when_its_parent_is_focused() {
     assert!(test_window_is_urgent(&mut f, "second"));
 }
 
+/// After `focus parent` reaches the workspace, the view still holds keyboard
+/// focus, but sway's seat focus is the workspace. A criteria `focus` back to
+/// the view is a seat focus change, and it clears the urgency that
+/// `urgent enable` set meanwhile (`seat_set_workspace_focus`,
+/// sway/sway/input/seat.c:1223-1240). Differential seed 30488 (random-v3).
+#[test]
+fn criteria_focus_from_a_focused_workspace_clears_the_views_urgency() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("only".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "focus parent; [app_id=only] urgent enable");
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    assert!(test_window_is_urgent(&mut f, "only"));
+
+    let outcome = crate::command::execute(f.niri_state(), "[urgent=latest] focus");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(!test_window_is_urgent(&mut f, "only"));
+}
+
 #[test]
 fn scratchpad_show_remaps_floating_center_between_asymmetric_outputs() {
     let mut f = Fixture::new();
