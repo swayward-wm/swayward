@@ -99,6 +99,39 @@ fn split_none_flattens_only_a_singleton_parent_and_preserves_focus() {
     workspace.verify_invariants(None);
 }
 
+/// diff-fam-v3-split-none: sway's `container_flatten` keeps climbing while each
+/// ancestor has one child (sway/tree/container.c:526-538), so `split none`
+/// under a stacked wrapper removes both the split and the stacked wrapper.
+#[test]
+fn split_none_flattens_every_singleton_ancestor() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "only");
+
+    for command in ["layout stacking", "splith", "split none"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let parent = find_json_parent_of_app_id(&tree, "only").unwrap();
+    assert_eq!(parent["type"], "workspace");
+    assert_eq!(parent["representation"], "H[only]");
+    swayward
+        .layout
+        .active_workspace()
+        .unwrap()
+        .verify_invariants(None);
+}
+
 #[test]
 fn criteria_split_none_flattens_the_matched_singleton_parent() {
     let mut f = Fixture::new();

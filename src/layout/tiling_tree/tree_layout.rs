@@ -291,6 +291,17 @@ impl<W: LayoutElement> TilingTree<W> {
         Some((parent, id))
     }
 
+    /// `split none`: sway's `container_flatten` keeps replacing single-child
+    /// ancestors with `id` until it reaches the workspace or a container with
+    /// siblings (sway/tree/container.c:526-538, sway/commands/split.c:35-50).
+    pub fn flatten_ancestors(&mut self, id: NodeId) -> Option<Vec<(NodeId, NodeId)>> {
+        let mut remapped = vec![self.flatten_parent(id)?];
+        while let Some(next) = self.flatten_parent(id) {
+            remapped.push(next);
+        }
+        Some(remapped)
+    }
+
     pub fn toggle_split(&mut self, id: NodeId) {
         let layout = self
             .nodes

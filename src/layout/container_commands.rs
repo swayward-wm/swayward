@@ -209,7 +209,7 @@ impl<W: LayoutElement> Layout<W> {
         let id = workspace.id();
         workspace
             .flatten_focused_parent()
-            .map(|remapped| (id, vec![remapped]))
+            .map(|remapped| (id, remapped))
     }
 
     pub fn flatten_tiling_node_parent(
@@ -222,8 +222,8 @@ impl<W: LayoutElement> Layout<W> {
         })?;
         workspace
             .tiling_mut()
-            .flatten_parent(node)
-            .map(|remapped| (workspace_id, vec![remapped]))
+            .flatten_ancestors(node)
+            .map(|remapped| (workspace_id, remapped))
     }
 
     pub fn split_tiling_node(

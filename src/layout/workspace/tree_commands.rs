@@ -642,11 +642,11 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn flatten_focused_parent(&mut self) -> Option<(NodeId, NodeId)> {
+    pub fn flatten_focused_parent(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
         (!self.floating_is_active.get())
             .then(|| self.tiling.focus())
             .flatten()
-            .and_then(|focus| self.tiling.flatten_parent(focus))
+            .and_then(|focus| self.tiling.flatten_ancestors(focus))
     }
 
     pub fn toggle_focused_layout(
