@@ -536,3 +536,24 @@ fn focus_stack_native_focus_workspace_auto_back_and_forth_returns() {
     }
     assert_eq!(names, ["2", "1", "2"]);
 }
+
+/// `splith` on the wrapper a workspace split left focused hits `container_split`'s singleton
+/// branch: the workspace takes the layout and its representation is rebuilt, dropping the
+/// stale one `workspace_split` left (sway/tree/container.c:1512-1527). Differential seed 30404.
+#[test]
+fn focus_stack_split_on_split_focused_workspace_refreshes_the_representation() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "one");
+    run_focus_commands(&mut f, &["split v", "focus parent", "split h"]);
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(focus_stack_workspace(&tree)["representation"], "V[V[one]]");
+
+    run_focus_commands(&mut f, &["splith"]);
+    let tree = focus_stack_tree(&mut f);
+    let workspace = focus_stack_workspace(&tree);
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["representation"], "H[V[one]]");
+    assert_eq!(workspace["nodes"][0]["focused"], true);
+}
