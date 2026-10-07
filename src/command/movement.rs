@@ -501,12 +501,41 @@ pub(super) fn move_target_to_workspace(
             ) {
                 return failure(error);
             }
+            // A floating child moved to its own workspace while that workspace has no tiling
+            // children stays put: sway's destination is the workspace itself, and
+            // `container_move_to_workspace` returns early (sway/commands/move.c:198-202).
+            if state
+                .swayward
+                .layout
+                .move_targets_own_workspace_without_tiling(
+                    &window,
+                    &workspace_target,
+                    auto_back_and_forth,
+                )
+            {
+                raise_refocused_view(state, focused_before);
+                state.swayward.queue_redraw_all();
+                return success();
+            }
+            let old_group = state.swayward.layout.floating_group_of_child(&window);
             state.swayward.layout.detach_floating_group_child(&window);
-            state
+            let moved = state
                 .swayward
                 .layout
                 .move_window_to_sway_workspace(&window, workspace_target, auto_back_and_forth)
-                .map(|_| ())
+                .map(|_| ());
+            // A focused child hands focus to its old parent's focus-inactive view
+            // (sway/commands/move.c:589-597), which stays in the floating group even when the
+            // child tiled on its own workspace.
+            if let Some((workspace, root, parent)) =
+                old_group.filter(|_| moved.is_ok() && focused_before.as_ref() == Some(&target))
+            {
+                state
+                    .swayward
+                    .layout
+                    .focus_floating_group_after_child_left(workspace, root, parent, &window);
+            }
+            moved
         }
         CommandTarget::Container(workspace, node) => {
             let (_, remapped) = match state.swayward.layout.move_tiling_subtree_to_sway_workspace(

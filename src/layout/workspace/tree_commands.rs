@@ -212,6 +212,19 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating.focus_tree_view(root);
     }
 
+    /// Focuses the focus-inactive view below `node` in floating group `root`. Returns false
+    /// when `node` is gone or holds no view.
+    pub fn focus_floating_view_in(&mut self, root: NodeId, node: NodeId) -> bool {
+        self.floating.focus_tree_view_in(root, node)
+    }
+
+    /// Hands focus to the floating layer's active window, if any.
+    pub fn activate_floating_layer(&mut self) {
+        if self.floating.active_window().is_some() {
+            self.floating_is_active = FloatingActive::Yes;
+        }
+    }
+
     pub fn remove_active_tiling_tile(&mut self) -> Option<Tile<W>> {
         if self.floating_is_active.get() {
             return None;
@@ -810,6 +823,15 @@ impl<W: LayoutElement> Workspace<W> {
         // match elsewhere leaves the seat focus alone.
         let focused = self.floating_is_active.get()
             && self.floating.active_window().map(|active| active.id()) == Some(window);
+        let stamp = self
+            .floating
+            .tiles()
+            .map(Tile::window)
+            .find(|candidate| candidate.id() == window)
+            .and_then(LayoutElement::focus_timestamp);
+        if let Some(stamp) = stamp {
+            self.floating.record_departing_focus(window, stamp);
+        }
         let removed = self.floating.remove_tile(window, Transaction::new());
         let mut tile = removed.tile;
         tile.restore_to_floating = false;

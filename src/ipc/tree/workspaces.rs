@@ -488,9 +488,23 @@ fn order_by_recency(
             Some((container_id(node), mapped.focus_timestamp()?))
         })
         .collect::<std::collections::HashMap<_, _>>();
+    // A floating group keeps its place too after a view focus entered it through leaves it.
+    let departed = workspace
+        .ipc_floating_trees()
+        .filter_map(|(root, _, _)| {
+            Some((
+                container_id(root),
+                workspace.floating_tree_entered_by_departed(root)?,
+            ))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let effective = tiled_ids
         .iter()
-        .map(|id| (*id, timestamp_of(id).max(last_entered.get(id).copied())))
+        .chain(floating_nodes.iter().map(|node| &node.id))
+        .map(|id| {
+            let entered = last_entered.get(id).max(departed.get(id)).copied();
+            (*id, timestamp_of(id).max(entered))
+        })
         .collect::<std::collections::HashMap<_, _>>();
     focus.sort_by_key(|id| {
         let timestamp = timestamp_of(id);

@@ -9,6 +9,48 @@ impl<W: LayoutElement> Layout<W> {
             .is_some_and(|workspace| workspace.detach_floating_group_child(window))
     }
 
+    /// The workspace, floating root and parent node of `window` when it is a child of a
+    /// floating group.
+    pub fn floating_group_of_child(
+        &self,
+        window: &W::Id,
+    ) -> Option<(WorkspaceId, tiling_tree::NodeId, tiling_tree::NodeId)> {
+        self.workspaces().find_map(|(_, _, workspace)| {
+            let floating = workspace.floating();
+            let root = floating.tree_root_for_window(window)?;
+            if floating.window_is_tree_root(window) {
+                return None;
+            }
+            let parent = floating.tree(root)?.parent_of_window(window)?;
+            Some((workspace.id(), root, parent))
+        })
+    }
+
+    /// After a focused child left floating group `root`, focuses the focus-inactive view of its
+    /// old parent when that parent still holds a view and the active workspace still focuses
+    /// the moved child (`seat_get_focus_inactive(old_parent)`, sway/commands/move.c:589-597).
+    /// An emptied parent has no such view, and sway falls back to the old workspace's
+    /// focus-inactive node, which is the moved child itself.
+    pub fn focus_floating_group_after_child_left(
+        &mut self,
+        workspace: WorkspaceId,
+        root: tiling_tree::NodeId,
+        parent: tiling_tree::NodeId,
+        moved: &W::Id,
+    ) {
+        if self.active_workspace().map(Workspace::id) != Some(workspace)
+            || self.focus().map(|focused| focused.id()) != Some(moved)
+        {
+            return;
+        }
+        let Some(workspace) = self.workspace_mut(workspace) else {
+            return;
+        };
+        if workspace.focus_floating_view_in(root, parent) {
+            workspace.activate_floating_layer();
+        }
+    }
+
     pub fn is_tiling_root(&self, workspace: WorkspaceId, node: tiling_tree::NodeId) -> bool {
         self.workspace(workspace)
             .is_some_and(|candidate| candidate.tiling().is_root(node))

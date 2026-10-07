@@ -44,6 +44,11 @@ impl<W: LayoutElement> Workspace<W> {
         tree
     }
 
+    /// When focus last entered floating group `root` through a view that has since left it.
+    pub fn floating_tree_entered_by_departed(&self, root: NodeId) -> Option<std::time::Duration> {
+        self.floating.tree_entered_by_departed(root)
+    }
+
     pub fn ipc_floating_trees(
         &self,
     ) -> impl Iterator<Item = (NodeId, crate::layout::tiling_tree::IpcNode<W::Id>, bool)> + '_ {

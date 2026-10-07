@@ -1807,3 +1807,178 @@ fn resize_of_a_fullscreen_split_wrapper_changes_nothing() {
     assert_eq!(after["percent"], before["percent"]);
     assert_eq!(after["rect"], before["rect"]);
 }
+
+#[test]
+fn moving_a_floated_workspace_wrapper_child_to_its_own_workspace_tiles_it() {
+    // random-v3 seed 30236 (diff-fam-v3-floating-wrapper-child-move-same-ws). `focus parent;
+    // floating toggle` on a one-view workspace floats a wrapper holding the view
+    // (workspace_wrap_children, sway/commands/floating.c). The view is a child, not floating
+    // (`container_is_floating`, sway/tree/container.c:1041-1049), so moving it to its own
+    // workspace adds it beside the focus-inactive tiling view (`container_move_to_container`,
+    // sway/commands/move.c:241-261) and the emptied wrapper is reaped (move.c:609-611).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "six");
+    let outcome = crate::command::execute(f.niri_state(), "focus parent; floating toggle");
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    map_app(&mut f, client, "nine");
+    for command in [
+        r#"[app_id="six"] focus"#,
+        "move --no-auto-back-and-forth container to workspace 1",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    assert_eq!(
+        workspace_shapes(&mut f),
+        [(
+            "1".to_owned(),
+            vec!["nine".to_owned(), "six".to_owned()],
+            vec![]
+        )]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
+fn moving_a_floated_wrapper_child_to_its_own_workspace_without_tiling_keeps_it() {
+    // random-v3 seed 30236, shrunk (diff-fam-v3-floating-wrapper-child-move-same-ws; oracle row
+    // floated_wrapper_child_move_to_empty_tiling_workspace). With no tiling view the destination
+    // is the workspace node (`seat_get_focus_inactive_tiling` is NULL,
+    // sway/input/seat.c:1374-1378), and `container_move_to_workspace` returns early for the
+    // child's own workspace (sway/commands/move.c:198-202): the wrapper keeps the view.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "six");
+    for command in [
+        "focus parent; floating toggle",
+        r#"[app_id="six"] focus"#,
+        "move --no-auto-back-and-forth container to workspace 1",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    assert_eq!(
+        workspace_shapes(&mut f),
+        [("1".to_owned(), vec![], vec!["splith[six]".to_owned()])]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+fn focused_app_id(f: &mut Fixture) -> Option<String> {
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    fn focused(node: &serde_json::Value) -> Option<String> {
+        if node["focused"] == true {
+            return Some(node["app_id"].as_str().unwrap_or("<container>").to_owned());
+        }
+        ["nodes", "floating_nodes"]
+            .iter()
+            .flat_map(|key| node[*key].as_array().into_iter().flatten())
+            .find_map(focused)
+    }
+    focused(&tree)
+}
+
+#[test]
+fn moving_a_focused_floating_group_child_to_its_own_workspace_refocuses_the_group() {
+    // random-v3 seed 30236 (diff-fam-v3-floating-wrapper-child-move-same-ws; oracle rows
+    // floated_wrapper_child_move_to_current_workspace_focus{,_split}). The child tiles beside
+    // the focus-inactive tiling view, and focus goes to the old parent's focus-inactive view
+    // (`seat_get_focus_inactive(old_parent)`, sway/commands/move.c:589-597): the sibling left in
+    // the floating group. After `split h` the old parent is the emptied split, which holds no
+    // view, so focus falls back to the workspace's focus-inactive node, the moved view.
+    for (split, focused) in [(false, "five"), (true, "six")] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        map_app(&mut f, client, "five");
+        map_app(&mut f, client, "six");
+        let outcome = crate::command::execute(f.niri_state(), "focus parent; floating toggle");
+        assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+        map_app(&mut f, client, "nine");
+        let commands = [
+            r#"[app_id="six"] focus"#,
+            "split h",
+            "move --no-auto-back-and-forth container to workspace 1",
+        ];
+        for command in commands.into_iter().filter(|c| split || *c != "split h") {
+            let outcome = crate::command::execute(f.niri_state(), command);
+            assert!(outcome[0].success, "{command}: {outcome:?}");
+        }
+        assert_eq!(
+            workspace_shapes(&mut f),
+            [(
+                "1".to_owned(),
+                vec!["nine".to_owned(), "six".to_owned()],
+                vec!["splith[five]".to_owned()]
+            )],
+            "split: {split}"
+        );
+        assert_eq!(
+            focused_app_id(&mut f).as_deref(),
+            Some(focused),
+            "split: {split}"
+        );
+        // The workspace's focus list keeps the floating group where focus last entered it,
+        // ahead of `nine` (sway's seat focus stack, sway/ipc-json.c:786-807).
+        assert_eq!(
+            workspace_focus_order(&mut f),
+            if split {
+                ["six", "splith[five]", "nine"]
+            } else {
+                ["splith[five]", "six", "nine"]
+            },
+            "split: {split}"
+        );
+        f.swayward().layout.verify_invariants();
+    }
+}
+
+fn workspace_focus_order(f: &mut Fixture) -> Vec<String> {
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let children = ["nodes", "floating_nodes"]
+        .iter()
+        .flat_map(|key| workspace[*key].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
+    workspace["focus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            let child = children.iter().find(|child| child["id"] == *id).unwrap();
+            match child["app_id"].as_str() {
+                Some(app_id) => app_id.to_owned(),
+                None => format!(
+                    "{}[{}]",
+                    child["layout"].as_str().unwrap_or_default(),
+                    child["nodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|n| n["app_id"].as_str().unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            }
+        })
+        .collect()
+}

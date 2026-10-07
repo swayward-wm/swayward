@@ -632,20 +632,7 @@ impl<W: LayoutElement> Layout<W> {
     ) -> Result<(Option<Output>, usize), String> {
         use crate::command::WorkspaceTarget;
 
-        let target_position = match target {
-            WorkspaceTarget::Current => self.active_workspace_position(),
-            WorkspaceTarget::BackAndForth => self.previous_workspace_position(),
-            WorkspaceTarget::Next | WorkspaceTarget::Prev => {
-                let next = target == WorkspaceTarget::Next;
-                self.relative_sway_workspace_position(next)
-            }
-            WorkspaceTarget::NextOnOutput | WorkspaceTarget::PrevOnOutput => {
-                let next = target == WorkspaceTarget::NextOnOutput;
-                self.relative_sway_workspace_position_on_output(next)
-            }
-            _ => self.find_sway_workspace_position(&target),
-        };
-        if let Some(position) = target_position {
+        if let Some(position) = self.existing_sway_workspace_position(&target) {
             Ok(position)
         } else if target == WorkspaceTarget::BackAndForth {
             // `move ... to workspace back_and_forth` falls back to the
@@ -660,6 +647,53 @@ impl<W: LayoutElement> Layout<W> {
             let (output, index) = self.create_sway_workspace(name, number)?;
             Ok((Some(output), index))
         }
+    }
+
+    /// The existing workspace `target` names, without creating one.
+    fn existing_sway_workspace_position(
+        &self,
+        target: &crate::command::WorkspaceTarget,
+    ) -> Option<(Option<Output>, usize)> {
+        use crate::command::WorkspaceTarget;
+
+        match target {
+            WorkspaceTarget::Current => self.active_workspace_position(),
+            WorkspaceTarget::BackAndForth => self.previous_workspace_position(),
+            WorkspaceTarget::Next | WorkspaceTarget::Prev => {
+                self.relative_sway_workspace_position(*target == WorkspaceTarget::Next)
+            }
+            WorkspaceTarget::NextOnOutput | WorkspaceTarget::PrevOnOutput => self
+                .relative_sway_workspace_position_on_output(
+                    *target == WorkspaceTarget::NextOnOutput,
+                ),
+            _ => self.find_sway_workspace_position(target),
+        }
+    }
+
+    /// Whether `move container to workspace <target>` for `window` lands on the window's own
+    /// workspace while that workspace has no tiling children. Sway's destination is then the
+    /// workspace node (`seat_get_focus_inactive_tiling` is NULL, sway/input/seat.c:1374-1378)
+    /// and `container_move_to_workspace` returns early for it (sway/commands/move.c:198-202),
+    /// so even a child of a floating container stays where it is.
+    pub fn move_targets_own_workspace_without_tiling(
+        &self,
+        window: &W::Id,
+        target: &crate::command::WorkspaceTarget,
+        auto_back_and_forth: bool,
+    ) -> bool {
+        let Some((monitor, index, source)) = self
+            .workspaces()
+            .find(|(_, _, workspace)| workspace.has_window(window))
+        else {
+            return false;
+        };
+        if !source.tiling().is_empty() {
+            return false;
+        }
+        let source_output = monitor.map(|monitor| monitor.output().clone());
+        let target =
+            self.resolve_move_workspace_target(source.id(), target.clone(), auto_back_and_forth);
+        self.existing_sway_workspace_position(&target) == Some((source_output, index))
     }
 
     pub(super) fn resolve_move_workspace_target(

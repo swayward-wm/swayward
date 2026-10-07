@@ -195,6 +195,11 @@ struct FloatingTreeEntry<W: LayoutElement> {
     /// (sway/sway/tree/container.c:818-831). Until the next arrange, the
     /// children keep the global rects they had, which GET_TREE reports.
     ipc_anchor: Option<Point<f64, Logical>>,
+    /// When focus last entered this group through a view that has since left it. Sway raises
+    /// the group on the seat's focus stack whenever focus enters a descendant
+    /// (`seat_set_raw_focus`, sway/input/seat.c), and it keeps that place after the view
+    /// leaves.
+    entered_by_departed: Option<std::time::Duration>,
 }
 
 /// A nested floating root detached for scratchpad or workspace transfer.
@@ -983,6 +988,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 pos: Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc),
                 sticky,
                 ipc_anchor: None,
+                entered_by_departed: None,
             },
         );
         (root, remapped)
@@ -1019,6 +1025,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 pos: Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc),
                 sticky: removed.sticky,
                 ipc_anchor: None,
+                entered_by_departed: None,
             },
         );
         (root, Vec::new())
@@ -1132,6 +1139,45 @@ impl<W: LayoutElement> FloatingLayout<W> {
             entry.tree.focus_inactive_leaf_of(root);
             self.active_window_id = entry.tree.active_window().map(|window| window.id().clone());
         }
+    }
+
+    /// Focuses the most recently focused view below `node` in group `root`. Returns false when
+    /// `node` is gone or holds no view.
+    pub fn focus_tree_view_in(&mut self, root: NodeId, node: NodeId) -> bool {
+        let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.root == root)
+        else {
+            return false;
+        };
+        if !entry.tree.contains(node)
+            || !entry
+                .tree
+                .windows()
+                .any(|(id, _)| entry.tree.contains_node(node, id))
+        {
+            return false;
+        }
+        entry.tree.focus_inactive_leaf_of(node);
+        self.active_window_id = entry.tree.active_window().map(|window| window.id().clone());
+        true
+    }
+
+    /// Records that focus entered the group holding `window` at `stamp`, before the view leaves
+    /// it.
+    pub fn record_departing_focus(&mut self, window: &W::Id, stamp: std::time::Duration) {
+        if let Some(entry) = self.tree_entry_with_window_mut(window) {
+            entry.entered_by_departed = entry.entered_by_departed.max(Some(stamp));
+        }
+    }
+
+    /// When focus last entered group `root` through a view that has since left it.
+    pub fn tree_entered_by_departed(&self, root: NodeId) -> Option<std::time::Duration> {
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.root == root)
+            .and_then(|entry| entry.entered_by_departed)
     }
 
     pub fn tree_rect(&self, root: NodeId) -> Option<Rectangle<f64, Logical>> {
