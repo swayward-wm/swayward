@@ -1283,6 +1283,35 @@ fn workspace_arrange_puts_a_global_fullscreen_view_in_its_tile_slot() {
     assert_eq!(view["window_rect"]["y"], 0, "{view}");
 }
 
+// Differential family diff-fam-font-arranges-root-fullscreen, seeds 15630 and
+// 17578. `font` ends in `config_update_font_height`, which arranges the root
+// when the font height changes (sway/config.c:951-958), so a global
+// fullscreen view leaves the tile slot a workspace arrange gave it.
+#[test]
+fn font_height_change_arranges_the_root_under_global_fullscreen() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "tiled");
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["fullscreen toggle global", "titlebar_padding 1"]);
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 0.5, "{view}");
+
+    // The same font height leaves the tile slot alone.
+    run(&mut f, &["font monospace 10"]);
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 0.5, "{view}");
+
+    run(&mut f, &["font monospace 14"]);
+    let tree = tree_json(&mut f);
+    let view = find_json_node_with_app_id(&tree, "fullscreen").unwrap();
+    assert_eq!(view["percent"], 1.0, "{view}");
+    assert_eq!(view["rect"]["width"], 1280, "{view}");
+}
+
 // Differential family diff-fam-fullscreen-split-global-coexist, seed 11675.
 // `split toggle` on a fullscreen view hands workspace fullscreen to the new
 // split (`container_replace`, sway/tree/container.c:1471-1501). Making the

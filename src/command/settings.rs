@@ -37,6 +37,11 @@ pub(super) fn execute_global_setting(state: &mut State, option: &LayoutOption) -
         }
     }
 
+    // `config_update_font_height` arranges the root only when the height
+    // changes (sway/config.c:951-958).
+    let previous_font_height = matches!(option, LayoutOption::TitlebarFont { .. })
+        .then(|| sway_font_height(&state.swayward.config.borrow().layout.titlebar.font));
+
     let applied = {
         let mut config = state.swayward.config.borrow_mut();
         apply_layout(&mut config.layout, option)
@@ -68,10 +73,28 @@ pub(super) fn execute_global_setting(state: &mut State, option: &LayoutOption) -
         | LayoutOption::HideEdgeBordersSmart(_) => {
             state.swayward.layout.arrange_sway_root();
         }
+        LayoutOption::TitlebarFont { font, .. } => {
+            if previous_font_height != Some(sway_font_height(font)) {
+                state.swayward.layout.arrange_sway_root();
+            }
+        }
         _ => {}
     }
     state.swayward.queue_redraw_all();
     success()
+}
+
+/// Sway's `config->font_height`: the font's ascent plus descent in whole
+/// pixels, from a context that does not round glyph positions
+/// (`get_text_metrics`, sway/common/pango.c:125-137).
+fn sway_font_height(font: &str) -> i32 {
+    use pangocairo::pango::prelude::FontMapExt;
+    use pangocairo::pango::{FontDescription, SCALE};
+
+    let context = pangocairo::FontMap::default().create_context();
+    context.set_round_glyph_positions(false);
+    let metrics = context.metrics(Some(&FontDescription::from_string(font)), None);
+    metrics.ascent() / SCALE + metrics.descent() / SCALE
 }
 
 /// One group's result: `None` when the setting belongs to another group.
