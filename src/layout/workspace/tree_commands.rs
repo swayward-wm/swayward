@@ -651,6 +651,9 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn split_focused(&mut self, layout: crate::layout::tiling_tree::Layout) {
+        if self.split_fullscreen_floating(layout) {
+            return;
+        }
         if self.floating_is_active.get() {
             self.floating.split_active(layout);
         } else {
@@ -700,9 +703,51 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// A split on a fullscreen floating view, which swayward parks in the tiling tree. Sway
+    /// wraps it in a new floating container and moves the fullscreen mode onto that container
+    /// (`container_split` and `container_replace`, sway/tree/container.c:1471-1501), so the
+    /// view leaves fullscreen back into the floating layer, is wrapped there, and the new
+    /// floating root takes the mode. Returns false when the focus is not such a view.
+    fn split_fullscreen_floating(&mut self, layout: crate::layout::tiling_tree::Layout) -> bool {
+        if self.floating_is_active.get() || !self.active_floating_is_fullscreen() {
+            return false;
+        }
+        let Some(window) = self.tiling.active_window().map(|w| w.id().clone()) else {
+            return false;
+        };
+        let mode = self
+            .tiling
+            .node_for_window(&window)
+            .and_then(|node| self.tiling.fullscreen_mode(node));
+        let hidden = self.tiling.hidden_under_fullscreen();
+        self.set_fullscreen_mode(&window, None);
+        if !self.floating.has_window(&window) {
+            return true;
+        }
+        self.tiling.keep_unarranged_for_floating_fullscreen(hidden);
+        self.floating_is_active = FloatingActive::Yes;
+        self.floating.split_active(layout);
+        if let Some(root) = self.floating.tree_root_for_window(&window) {
+            if let Some(tree) = self.floating.tree_mut(root) {
+                tree.set_node_fullscreen(root, mode);
+            }
+        }
+        true
+    }
+
     /// `split toggle` reads `container_parent_layout`, which for a floating root (no parent) is
     /// the workspace layout (sway/tree/container.c:1353-1361, sway/commands/split.c:64-71).
     pub fn toggle_focused_split(&mut self) {
+        use crate::layout::tiling_tree::Layout;
+        if self.active_floating_is_fullscreen() && !self.floating_is_active.get() {
+            let layout = if self.tiling.root_layout() == Some(Layout::SplitV) {
+                Layout::SplitH
+            } else {
+                Layout::SplitV
+            };
+            self.split_fullscreen_floating(layout);
+            return;
+        }
         if !self.floating_is_active.get() {
             self.tiling.toggle_focused_split();
             return;
@@ -711,7 +756,6 @@ impl<W: LayoutElement> Workspace<W> {
             tree.toggle_focused_split();
             return;
         }
-        use crate::layout::tiling_tree::Layout;
         let layout = if self.tiling.root_layout() == Some(Layout::SplitV) {
             Layout::SplitH
         } else {
@@ -981,11 +1025,17 @@ impl<W: LayoutElement> Workspace<W> {
             if let Some(output) = &self.output {
                 subtree.for_each_window(|window| window.output_enter(output));
             }
-            if subtree.has_fullscreen() {
+            let hidden = if subtree.has_fullscreen() {
                 self.disable_fullscreen();
-            }
+                self.tiling.take_floating_fullscreen()
+            } else {
+                None
+            };
             self.floating_is_active = FloatingActive::No;
             let (root, _) = self.tiling.attach_unfloated_subtree(subtree);
+            if let Some(hidden) = hidden {
+                self.tiling.restore_hidden_under_fullscreen(hidden);
+            }
             if root_focused {
                 self.tiling.set_focus(root);
             }

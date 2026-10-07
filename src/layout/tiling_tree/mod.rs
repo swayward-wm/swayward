@@ -291,6 +291,14 @@ pub enum IpcNode<I> {
     },
 }
 
+/// [`TilingTree::hidden_under_fullscreen`]: the views mapped and moved under a fullscreen
+/// container, and the boxes the other nodes keep.
+pub(in crate::layout) struct HiddenUnderFullscreen {
+    mapped: HashSet<NodeId>,
+    moved: HashMap<NodeId, Rectangle<f64, Logical>>,
+    boxes: HashMap<NodeId, Rectangle<f64, Logical>>,
+}
+
 /// The boxes of a leaf sway left unarranged beside a fullscreen container,
 /// as `ipc_json_describe_node` reports them (sway/ipc-json.c:543-602, 816-825).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -567,6 +575,11 @@ pub struct TilingTree<W: LayoutElement> {
     /// (sway/tree/container.c, sway/commands/split.c:24-29,
     /// sway/tree/arrange.c:310-316), so its parent never sets them.
     split_under_fullscreen: HashSet<NodeId>,
+    /// The workspace's fullscreen container left this tree for a floating one (`split` on a
+    /// fullscreen floating view). Sway arranges only that container
+    /// (sway/tree/arrange.c:310-316), so `mapped_under_fullscreen`,
+    /// `moved_under_fullscreen` and `unarranged_under_fullscreen` keep applying until it ends.
+    fullscreen_in_floating: bool,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,

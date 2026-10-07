@@ -1165,3 +1165,240 @@ fn output_rescale_keeps_floating_position_and_client_size() {
     );
     assert_eq!(rect(&mut f), (290, 87, width - 34));
 }
+
+fn run_split_wrap_commands(f: &mut Fixture, client: super::client::ClientId, commands: &[&str]) {
+    for command in commands {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+}
+
+/// Differential family floating-fullscreen-split-wrap (random-v2 seed 16849): `splith` on a
+/// fullscreen floating view wraps it in a new floating split that takes over the fullscreen
+/// mode (`container_split` and `container_replace`, sway/tree/container.c:1471-1501).
+#[test]
+fn split_wraps_a_fullscreen_floating_view_and_moves_the_mode() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &["fullscreen toggle", "floating enable", "splith"],
+    );
+
+    let tree = tree_json(&mut f);
+    let split = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(split["layout"], "splith", "{split}");
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    assert_eq!(split["border"], "none", "{split}");
+    let view = &split["nodes"][0];
+    assert_eq!(view["fullscreen_mode"], 0, "{view}");
+    assert_eq!(view["focused"], true, "{view}");
+}
+
+/// The same split with a view mapped under the fullscreen one. Sway only re-arranges the
+/// fullscreen container (sway/tree/arrange.c:310-316), so the tiled view keeps calloc's
+/// `border none`, empty box and zero percent. Oracle row:
+/// floating_fullscreen_split_wraps_over_tiled.
+#[test]
+fn split_wrap_of_a_fullscreen_floating_view_leaves_the_tiled_view_unarranged() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(&mut f, client, &["floating enable", "splith"]);
+
+    let tree = tree_json(&mut f);
+    let split = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(split["layout"], "splith", "{split}");
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    let tiled = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(tiled["border"], "none", "{tiled}");
+    assert_eq!(tiled["current_border_width"], 0, "{tiled}");
+    assert_eq!(tiled["percent"], 0.0, "{tiled}");
+    assert_eq!(tiled["rect"]["width"], 0, "{tiled}");
+    assert_eq!(tiled["rect"]["height"], 0, "{tiled}");
+
+    // Ending the fullscreen arranges the whole workspace again.
+    run_split_wrap_commands(&mut f, client, &["focus parent", "fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(tiled["percent"], 1.0, "{tiled}");
+    assert_eq!(tiled["rect"]["width"], 1280, "{tiled}");
+}
+
+/// Random-v2 seed 16849: the tiled view mapped beside the view before it went fullscreen
+/// keeps the half box it had. The split arranges only the fullscreen container
+/// (sway/tree/arrange.c:310-316), so its percent stays 0.5.
+#[test]
+fn split_wrap_of_a_fullscreen_floating_view_keeps_the_tiled_sibling_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle", "floating enable"]);
+    let tree = tree_json(&mut f);
+    let before = find_json_node_with_app_id(&tree, "fixture-1")
+        .unwrap()
+        .clone();
+    run_split_wrap_commands(&mut f, client, &["splith"]);
+
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(before["percent"], 0.5, "{before}");
+    assert_eq!(tiled["percent"], 0.5, "{tiled}");
+    assert_eq!(tiled["rect"], before["rect"], "{tree}");
+
+    run_split_wrap_commands(&mut f, client, &["focus parent", "fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(tiled["percent"], 1.0, "{tiled}");
+}
+
+/// The two hidden kinds together, as random-v3 seeds 31204 and 31633 reach them: a view
+/// mapped under the fullscreen keeps its empty box, and a tiled view keeps the box it had
+/// when the fullscreen began, whether that was half the workspace or all of it.
+#[test]
+fn split_wrap_of_a_fullscreen_floating_view_keeps_mapped_and_tiled_boxes() {
+    for (setup, split, percent) in [
+        (&["fullscreen toggle"][..], "splith", 0.5),
+        (&["floating enable", "fullscreen enable"][..], "splitt", 1.0),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1270, 1408));
+        let client = f.add_client();
+        map_app(&mut f, client, "fixture-1");
+        map_app(&mut f, client, "fixture-2");
+        run_split_wrap_commands(&mut f, client, setup);
+        map_app(&mut f, client, "fixture-3");
+        if percent == 0.5 {
+            run_split_wrap_commands(&mut f, client, &["floating enable"]);
+        }
+        run_split_wrap_commands(&mut f, client, &[split]);
+
+        let tree = tree_json(&mut f);
+        let tiled = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+        assert_eq!(tiled["percent"], percent, "{setup:?} {tiled}");
+        assert_eq!(tiled["border"], "normal", "{setup:?} {tiled}");
+        let mapped = find_json_node_with_app_id(&tree, "fixture-3").unwrap();
+        assert_eq!(mapped["percent"], 0.0, "{setup:?} {mapped}");
+        assert_eq!(mapped["border"], "none", "{setup:?} {mapped}");
+    }
+}
+
+/// Ending the floating fullscreen arranges the whole root (sway/commands/fullscreen.c:55), so
+/// the view mapped under it gets its box, border and percent at once, and keeps them through
+/// the next command. Oracle rows: rv2_unfs, rv3_unfs_focus.
+#[test]
+fn fullscreen_disable_of_a_floating_fullscreen_split_arranges_the_mapped_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "floating enable",
+            "splith",
+            "focus parent",
+            "fullscreen disable",
+        ],
+    );
+
+    let assert_arranged = |tree: &serde_json::Value| {
+        let mapped = find_json_node_with_app_id(tree, "fixture-2").unwrap();
+        assert_eq!(mapped["border"], "normal", "{mapped}");
+        assert_ne!(mapped["current_border_width"], 0, "{mapped}");
+        assert_eq!(mapped["percent"], 1.0, "{mapped}");
+        assert_eq!(mapped["rect"]["width"], 1270, "{mapped}");
+    };
+    assert_arranged(&tree_json(&mut f));
+    run_split_wrap_commands(&mut f, client, &["[app_id=fixture-2] focus"]);
+    assert_arranged(&tree_json(&mut f));
+}
+
+/// `floating disable` moves the fullscreen split back into the tiling tree, still fullscreen,
+/// and `arrange_workspace` reaches only it (sway/commands/floating.c:55,
+/// sway/tree/arrange.c:310-316). The view mapped under it stays unarranged and the tiled
+/// sibling keeps its half box. Oracle row: rv2_floatdis.
+#[test]
+fn floating_disable_of_a_fullscreen_split_leaves_the_mapped_view_unarranged() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+    map_app(&mut f, client, "fixture-3");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "floating enable",
+            "splith",
+            "focus parent",
+            "floating disable",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let mapped = find_json_node_with_app_id(&tree, "fixture-3").unwrap();
+    assert_eq!(mapped["border"], "none", "{tree}");
+    assert_eq!(mapped["current_border_width"], 0, "{mapped}");
+    assert_eq!(mapped["percent"], 0.0, "{mapped}");
+    assert_eq!(mapped["rect"]["width"], 0, "{mapped}");
+    let tiled = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(tiled["percent"], 0.5, "{tiled}");
+    assert_eq!(tiled["border"], "normal", "{tiled}");
+
+    // The tiled fullscreen split then ends like any other, arranging the whole workspace.
+    // Oracle row: rv3_floatdis_unfs.
+    run_split_wrap_commands(&mut f, client, &["fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let mapped = find_json_node_with_app_id(&tree, "fixture-3").unwrap();
+    assert_eq!(mapped["border"], "normal", "{tree}");
+    assert_ne!(mapped["current_border_width"], 0, "{mapped}");
+    assert_ne!(mapped["percent"], 0.0, "{mapped}");
+}
+
+/// After the split, a command that ends or moves the floating fullscreen leaves the tiled
+/// views arranged with their own border (sway/commands/move.c, sway/commands/fullscreen.c:55).
+/// Oracle rows: rv2_movews, rv2_splitv_twice, rv3_scratch; rv2_kill covers `kill`, which the
+/// harness client does not act on.
+#[test]
+fn ending_a_floating_fullscreen_split_arranges_the_mapped_view() {
+    for exit in [
+        &["focus parent", "move container to workspace 2"][..],
+        &["focus parent", "fullscreen toggle"][..],
+        &["focus parent", "move scratchpad"][..],
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1270, 1408));
+        let client = f.add_client();
+        map_app(&mut f, client, "fixture-1");
+        map_app(&mut f, client, "fixture-2");
+        run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+        map_app(&mut f, client, "fixture-3");
+        run_split_wrap_commands(&mut f, client, &["floating enable", "splith"]);
+        run_split_wrap_commands(&mut f, client, exit);
+
+        let tree = tree_json(&mut f);
+        for app_id in ["fixture-1", "fixture-3"] {
+            let tiled = find_json_node_with_app_id(&tree, app_id).unwrap();
+            assert_eq!(tiled["border"], "normal", "{exit:?} {tiled}");
+            assert_ne!(tiled["current_border_width"], 0, "{exit:?} {tiled}");
+            assert_eq!(tiled["percent"], 0.5, "{exit:?} {tiled}");
+        }
+    }
+}

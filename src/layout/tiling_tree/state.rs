@@ -78,6 +78,7 @@ impl<W: LayoutElement> TilingTree<W> {
             stale_fullscreen_rects: HashMap::new(),
             unarranged_under_fullscreen: HashMap::new(),
             split_under_fullscreen: HashSet::new(),
+            fullscreen_in_floating: false,
             interactive_resize: None,
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),
@@ -156,6 +157,91 @@ impl<W: LayoutElement> TilingTree<W> {
     /// (sway/tree/workspace.c:960-970).
     pub(in crate::layout) fn restore_has_had_tile(&mut self, has_had_tile: bool) {
         self.has_had_tile = has_had_tile;
+    }
+
+    /// What sway left unarranged under this tree's fullscreen container: the views mapped or
+    /// moved under it and the boxes every other node last had. For a fullscreen container
+    /// that leaves the tree for a floating one; pass it to
+    /// [`Self::keep_unarranged_for_floating_fullscreen`] once it has left.
+    pub(in crate::layout) fn hidden_under_fullscreen(&self) -> HiddenUnderFullscreen {
+        let mut boxes = HashMap::new();
+        if let Some(fullscreen) = self.fullscreen_node() {
+            let excluded = self.split_excluded();
+            boxes.extend(
+                self.compute_geometry()
+                    .ipc_nodes
+                    .into_iter()
+                    .filter(|(id, _)| {
+                        *id != self.root
+                            && !excluded.contains(id)
+                            && !self.contains_node(fullscreen, *id)
+                    }),
+            );
+            boxes.extend(self.active_stale_fullscreen_rects());
+        }
+        HiddenUnderFullscreen {
+            mapped: self.mapped_under_fullscreen.clone(),
+            moved: self.moved_under_fullscreen.clone(),
+            boxes,
+        }
+    }
+
+    /// The workspace stays fullscreen while its fullscreen container moves into a floating
+    /// tree, and the arrange that follows reaches only that container
+    /// (sway/tree/arrange.c:310-316), so the tiled nodes keep their boxes until the workspace
+    /// has no fullscreen container left ([`Self::forget_floating_fullscreen`]).
+    pub(in crate::layout) fn keep_unarranged_for_floating_fullscreen(
+        &mut self,
+        hidden: HiddenUnderFullscreen,
+    ) {
+        self.restore_hidden_under_fullscreen(hidden);
+        self.fullscreen_in_floating = true;
+    }
+
+    /// The floating fullscreen container is returning to this tree (`floating disable`). It
+    /// stays fullscreen, and `arrange_workspace` reaches only it
+    /// (sway/commands/floating.c:55, sway/tree/arrange.c:310-316), so the hidden state goes
+    /// back to the tree's own fullscreen: take it here and pass it to
+    /// [`Self::restore_hidden_under_fullscreen`] after the attach.
+    pub(in crate::layout) fn take_floating_fullscreen(&mut self) -> Option<HiddenUnderFullscreen> {
+        if !std::mem::take(&mut self.fullscreen_in_floating) {
+            return None;
+        }
+        Some(HiddenUnderFullscreen {
+            mapped: std::mem::take(&mut self.mapped_under_fullscreen),
+            moved: std::mem::take(&mut self.moved_under_fullscreen),
+            boxes: std::mem::take(&mut self.unarranged_under_fullscreen),
+        })
+    }
+
+    pub(in crate::layout) fn restore_hidden_under_fullscreen(
+        &mut self,
+        hidden: HiddenUnderFullscreen,
+    ) {
+        let HiddenUnderFullscreen {
+            mut mapped,
+            mut moved,
+            mut boxes,
+        } = hidden;
+        mapped.retain(|id| self.nodes.contains_key(id));
+        moved.retain(|id, _| self.nodes.contains_key(id));
+        boxes.retain(|id, _| self.nodes.contains_key(id));
+        self.mapped_under_fullscreen = mapped;
+        self.moved_under_fullscreen = moved;
+        self.unarranged_under_fullscreen = boxes;
+    }
+
+    /// The floating fullscreen container that took over this tree's fullscreen ended, and
+    /// `cmd_fullscreen` arranged the whole root (sway/commands/fullscreen.c:55), so every
+    /// tiled node has its box, border and percent again.
+    pub(in crate::layout) fn forget_floating_fullscreen(&mut self) {
+        if !std::mem::take(&mut self.fullscreen_in_floating) {
+            return;
+        }
+        self.mapped_under_fullscreen.clear();
+        self.moved_under_fullscreen.clear();
+        self.unarranged_under_fullscreen.clear();
+        self.request_window_sizes();
     }
 
     pub fn representation_layout(&self) -> Layout {

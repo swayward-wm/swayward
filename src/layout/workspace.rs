@@ -2071,6 +2071,11 @@ impl<W: LayoutElement> Workspace<W> {
                 self.update_config(self.base_options.clone());
             }
         }
+        // A floating split took the fullscreen mode from a view parked in the tiling tree
+        // (`split_fullscreen_floating`); once it ends, sway arranges the whole workspace.
+        if self.floating.fullscreen_window().is_none() {
+            self.tiling.forget_floating_fullscreen();
+        }
         self.tiling
             .refresh(is_active && !self.floating_is_active.get(), is_focused);
         self.floating

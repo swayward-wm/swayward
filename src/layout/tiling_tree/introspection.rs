@@ -418,7 +418,9 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
             {
                 self.split_percents(id, layout, children, percents)
             }
-            Layout::SplitH | Layout::SplitV if self.fullscreen.is_some() => {
+            Layout::SplitH | Layout::SplitV
+                if self.fullscreen.is_some() || self.tree.fullscreen_in_floating =>
+            {
                 self.pending_split_percents(id, layout, children, percents)
             }
             Layout::SplitH | Layout::SplitV => self.split_percents(id, layout, children, percents),
@@ -654,7 +656,8 @@ impl<'a, W: LayoutElement> IpcSnapshot<'a, W> {
     ) -> IpcNode<W::Id> {
         let tree = self.tree;
         let geometries = self.geometries;
-        let fallback_titlebar = self.fullscreen.is_some()
+        // A floating container that took this tree's fullscreen hides the tiled views too.
+        let fallback_titlebar = (self.fullscreen.is_some() || tree.fullscreen_in_floating)
             && tree.fullscreen_mode(id).is_none()
             && !tree.mapped_under_fullscreen.contains(&id)
             && !tree.moved_under_fullscreen.contains_key(&id)

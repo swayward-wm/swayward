@@ -97,6 +97,9 @@ impl<W: LayoutElement> TilingTree<W> {
     /// leaves the subtree, gives them their tiled boxes again.
     pub(super) fn active_stale_fullscreen_rects(&self) -> HashMap<NodeId, Rectangle<f64, Logical>> {
         let Some(fullscreen) = self.fullscreen_node() else {
+            if self.fullscreen_in_floating {
+                return self.unarranged_under_fullscreen.clone();
+            }
             return HashMap::new();
         };
         self.unarranged_under_fullscreen
