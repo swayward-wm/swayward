@@ -1348,3 +1348,44 @@ fn a_recreated_decoration_object_forgets_the_old_requested_mode() {
         "{workspace:#}"
     );
 }
+
+#[test]
+fn a_csd_view_floated_then_fullscreened_keeps_csd() {
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
+
+    // A fullscreen floating view stays in `ws->floating` in sway, so a view
+    // using CSD keeps the B_CSD that container_set_floating stored
+    // (sway/tree/container.c:955-959; set_border, sway/commands/border.c:15-31).
+    // Differential family diff-fam-csd-floating-fullscreen, seeds 10251,
+    // 14299 and 14654.
+    let sequences: [&[&str]; 3] = [
+        &["border csd", "floating enable", "fullscreen enable"],
+        &["fullscreen enable", "border toggle", "floating enable"],
+        &["fullscreen toggle", "floating toggle", "border csd"],
+    ];
+    for commands in sequences {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1920, 1080));
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id("view".into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.client(client).decorate_last_window(Mode::ServerSide);
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+
+        for command in commands {
+            let outcome = crate::command::execute(f.niri_state(), command);
+            assert!(outcome[0].success, "{command}: {outcome:?}");
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let view = find_json_node_with_app_id(&tree, "view").unwrap();
+        assert_eq!(view["border"], "csd", "{commands:?}: {view:#}");
+        assert_eq!(view["type"], "floating_con", "{commands:?}");
+    }
+}

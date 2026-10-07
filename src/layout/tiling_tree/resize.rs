@@ -270,7 +270,12 @@ impl<W: LayoutElement> TilingTree<W> {
         let Some(tile) = self.tile_mut(id) else {
             return false;
         };
-        if tile.set_sway_border(style, width, false).is_err() {
+        // A fullscreen floating view stays in `ws->floating` in sway, so
+        // `border csd` stores B_CSD on it (set_border,
+        // sway/commands/border.c:25-27).
+        let floating =
+            tile.restore_to_floating && tile.window().pending_sizing_mode().is_fullscreen();
+        if tile.set_sway_border(style, width, floating).is_err() {
             return false;
         }
         self.request_window_sizes();
