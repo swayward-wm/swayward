@@ -287,9 +287,12 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// A fullscreen tile that unfullscreens back to floating: sway keeps it
     /// in the workspace's floating list (`container_set_floating`,
-    /// sway/tree/container.c:951-975).
+    /// sway/tree/container.c:951-975). A view inside a floating group has a
+    /// parent, so it is not floating itself (`container_is_floating`,
+    /// sway/tree/container.c), and a view maps beside it.
     pub(super) fn is_floating_fullscreen(&self, id: NodeId) -> bool {
-        self.fullscreen_mode(id).is_some()
+        !self.resident_root
+            && self.fullscreen_mode(id).is_some()
             && self.tile(id).is_some_and(|tile| tile.restore_to_floating)
     }
 

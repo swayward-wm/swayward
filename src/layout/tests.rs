@@ -2344,3 +2344,26 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn floating_a_floating_fullscreen_view_beside_a_new_tiled_view_keeps_floating_active_consistent() {
+    // Proptest seed d17cdea7: a split floating view fullscreened, then a tiled
+    // view mapped beside the tiling focus, then the focus floated.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams {
+                is_floating: true,
+                ..TestWindowParams::new(1)
+            },
+        },
+        Op::SplitFocused(tiling_tree::Layout::SplitH),
+        Op::FullscreenWindow(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::ToggleWindowFloating { id: None },
+    ];
+
+    check_ops(ops);
+}
