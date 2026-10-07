@@ -1809,9 +1809,14 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn activate_window(&mut self, window: &W::Id) {
+        // A global fullscreen view sway no longer tracks as
+        // `root->fullscreen_global` obstructs nothing
+        // (`container_obstructing_fullscreen_container`,
+        // sway/tree/container.c:570-590).
         let global = self.workspaces().find_map(|(_, _, workspace)| {
-            (workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global))
-                .then(|| workspace.id())
+            (workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global)
+                && !workspace.global_fullscreen_orphaned())
+            .then(|| workspace.id())
         });
         if let Some(workspace_id) = global {
             let target_is_inside = self.workspaces().any(|(_, _, candidate)| {
@@ -1826,6 +1831,7 @@ impl<W: LayoutElement> Layout<W> {
         let obstructing = self
             .workspaces()
             .find(|(_, _, workspace)| workspace.has_window(window))
+            .filter(|(_, _, workspace)| !workspace.global_fullscreen_orphaned())
             .and_then(|(_, _, workspace)| {
                 let fullscreen = workspace.tiling().fullscreen_node()?;
                 let target = workspace

@@ -26,6 +26,13 @@ impl<W: LayoutElement> Workspace<W> {
             .or_else(|| self.floating.fullscreen_mode_for_window(window))
     }
 
+    /// The global fullscreen container here is one a detach orphaned: it
+    /// keeps mode 2, but sway's `root->fullscreen_global` is unset
+    /// (sway/tree/container.c:1440-1446), so it hides and blocks nothing.
+    pub fn global_fullscreen_orphaned(&self) -> bool {
+        self.tiling.global_fullscreen_orphaned() || self.floating.global_fullscreen_orphaned()
+    }
+
     pub fn fullscreen_contains_window(&self, window: &W::Id) -> bool {
         self.tiling.fullscreen_contains_window(window)
             || self.floating.fullscreen_contains_window(window)
@@ -148,7 +155,10 @@ impl<W: LayoutElement> Workspace<W> {
         }
         // container_set_floating moves a CSD view's border either way
         // (sway/tree/container.c:955-965, 995-1003).
-        tile.set_sway_csd_floating(tile.restore_to_floating);
+        let floating = tile.restore_to_floating;
+        tile.set_sway_csd_floating(floating);
+        self.tiling
+            .orphan_global_fullscreen_on_floating(window, floating);
         true
     }
 

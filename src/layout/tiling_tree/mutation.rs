@@ -350,7 +350,13 @@ impl<W: LayoutElement> TilingTree<W> {
             return None;
         }
         let removed_fullscreen = self.fullscreen_node() == Some(id);
-        if let Some(fullscreen) = self.fullscreen_node().filter(|_| !removed_fullscreen) {
+        // An orphaned global fullscreen view is neither `root->fullscreen_global`
+        // nor `ws->fullscreen`, so the arrange that follows lays out every
+        // tiled child (sway/tree/arrange.c:317-321).
+        if let Some(fullscreen) = self
+            .fullscreen_node()
+            .filter(|_| !removed_fullscreen && !self.global_fullscreen_orphaned())
+        {
             // Only the fullscreen container is arranged after the close; the
             // rest keep the boxes they had (sway/tree/view.c:1001-1006,
             // sway/tree/arrange.c:310-316). Views mapped under fullscreen

@@ -1067,6 +1067,10 @@ impl<W: LayoutElement> Workspace<W> {
         );
         let (root, remapped) = self.floating.add_tree(subtree, rect);
         debug_assert!(remapped.is_empty());
+        // Floating a container detaches it, which clears
+        // `root->fullscreen_global` for good (sway/tree/container.c:941-975
+        // and 1440-1446).
+        self.floating.orphan_tree_global_fullscreen(root);
         self.floating_is_active = FloatingActive::Yes;
         Some(root)
     }

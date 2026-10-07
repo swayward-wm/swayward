@@ -360,6 +360,58 @@ impl<W: LayoutElement> TilingTree<W> {
         boxes
     }
 
+    /// `floating enable|disable` on the global fullscreen node `window`.
+    /// `container_set_floating` detaches it, which clears
+    /// `root->fullscreen_global`, and neither `workspace_add_floating` nor
+    /// `container_add_sibling` restores it, while the view keeps
+    /// `FULLSCREEN_GLOBAL` (sway/tree/container.c:941-1011, 1380-1391 and
+    /// 1440-1446). `cmd_floating` then arranges the workspace like any other
+    /// (sway/commands/floating.c:53-56, sway/tree/arrange.c:317-321): a
+    /// floating view takes no share of the split, a tiled one reports its
+    /// slot.
+    pub fn orphan_global_fullscreen_on_floating(&mut self, window: &W::Id, floating: bool) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        if self.fullscreen_node() != Some(id) || !self.orphan_global_fullscreen() {
+            return;
+        }
+        self.fullscreen_arrived = floating;
+        self.fullscreen_tile_slot = !floating;
+        self.request_window_sizes();
+    }
+
+    /// `window` arrived as a global fullscreen view sway no longer tracks as
+    /// `root->fullscreen_global`: `workspace_add_floating` keeps its mode 2
+    /// and restores nothing (sway/tree/workspace.c:961-972), so it stays
+    /// orphaned here.
+    pub fn arrive_orphaned_global_fullscreen(&mut self, window: &W::Id) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        if self.fullscreen_mode(id).is_none() {
+            return;
+        }
+        self.set_pending_fullscreen(id, Some(FullscreenMode::Global));
+        self.orphaned_global_fullscreen = Some(id);
+        // It sits in `ws->floating`, so it takes no share of the split.
+        self.fullscreen_arrived = true;
+        self.request_window_sizes();
+    }
+
+    /// Record this tree's global fullscreen node as orphaned (see
+    /// `orphaned_global_fullscreen`). Returns false when there is none.
+    pub fn orphan_global_fullscreen(&mut self) -> bool {
+        let Some(id) = self
+            .fullscreen_node()
+            .filter(|_| self.has_global_fullscreen())
+        else {
+            return false;
+        };
+        self.orphaned_global_fullscreen = Some(id);
+        true
+    }
+
     pub fn mark_fullscreen_arrived(&mut self) {
         if self.fullscreen_node().is_some() {
             self.fullscreen_arrived = true;

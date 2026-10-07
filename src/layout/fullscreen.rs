@@ -18,7 +18,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn global_fullscreen_active(&self) -> bool {
         self.workspaces().any(|(_, _, workspace)| {
             workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global)
-                && !workspace.tiling().global_fullscreen_orphaned()
+                && !workspace.global_fullscreen_orphaned()
         })
     }
 

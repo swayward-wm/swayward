@@ -1256,6 +1256,25 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .is_some_and(|entry| entry.tree.focused_leaf_is_only_child_of_resident_root())
     }
 
+    /// A floating group holds a global fullscreen node sway no longer
+    /// tracks as `root->fullscreen_global`.
+    pub fn global_fullscreen_orphaned(&self) -> bool {
+        self.tree_entries
+            .iter()
+            .any(|entry| entry.tree.global_fullscreen_orphaned())
+    }
+
+    /// See [`TilingTree::orphan_global_fullscreen`].
+    pub fn orphan_tree_global_fullscreen(&mut self, root: NodeId) {
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.root == root)
+        {
+            entry.tree.orphan_global_fullscreen();
+        }
+    }
+
     pub fn fullscreen_mode(&self) -> Option<super::tiling_tree::FullscreenMode> {
         self.tree_entries.iter().find_map(|entry| {
             let fullscreen = entry.tree.fullscreen_node()?;

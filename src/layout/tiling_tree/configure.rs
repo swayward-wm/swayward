@@ -19,6 +19,23 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         let mut excluded = self.mapped_under_fullscreen.clone();
         excluded.extend(arrived);
+        // A global fullscreen view floated out of a split left it empty, and
+        // `container_reap_empty` destroyed it (sway/tree/container.c:969-975);
+        // with `root->fullscreen_global` cleared the workspace is arranged in
+        // full, so the split's singleton ancestors take no share either.
+        if let Some(mut id) = arrived
+            .filter(|id| self.is_floating_fullscreen(*id) && self.global_fullscreen_orphaned())
+        {
+            while let Some(parent) = self
+                .nodes
+                .get(&id)
+                .and_then(|node| node.parent)
+                .filter(|parent| *parent != self.root && self.split_len(*parent) == Some(1))
+            {
+                excluded.insert(parent);
+                id = parent;
+            }
+        }
         excluded.extend(self.moved_under_fullscreen.keys().copied());
         std::borrow::Cow::Owned(excluded)
     }
@@ -116,7 +133,14 @@ impl<W: LayoutElement> TilingTree<W> {
 
     pub(super) fn compute_geometry(&self) -> geometry::Geometry<W::Id> {
         let excluded = self.split_excluded();
-        let fullscreen = self.fullscreen_node().into_iter().collect();
+        // A floating group whose global fullscreen a detach orphaned is
+        // arranged at its own box (`arrange_floating`,
+        // sway/tree/arrange.c:214-219 and 249-262).
+        let fullscreen = self
+            .fullscreen_node()
+            .filter(|_| !(self.resident_root && self.global_fullscreen_orphaned()))
+            .into_iter()
+            .collect();
         let visible_leaves = self.visible_leaves();
         geometry::compute(geometry::GeometryInput {
             nodes: &self.nodes,

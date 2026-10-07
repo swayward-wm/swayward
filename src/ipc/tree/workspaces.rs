@@ -188,7 +188,7 @@ fn describe_workspace(
         &mut tiled.nodes,
         &mut floating_nodes,
         state.visible,
-        !workspace.tiling().global_fullscreen_orphaned(),
+        !workspace.global_fullscreen_orphaned(),
     );
     let mut node = common_node(CommonNodeContext {
         id: workspace_id(workspace.id().get()),
@@ -398,7 +398,10 @@ fn order_focus(
     if workspace.floating_is_active() || !workspace.tiling().ipc_focus_follows_history() {
         order_by_recency(workspace, focus, nodes, floating_nodes, &focus_timestamps);
     }
-    if workspace.floating_is_active() {
+    // A fullscreen view floated while focused is the seat focus too: sway
+    // raises its old parent and then the view (`container_set_floating`,
+    // sway/tree/container.c:969-973).
+    if workspace.floating_is_active() || workspace.active_floating_is_fullscreen() {
         // The focused floating container heads the seat stack even when it
         // is not on top, as after a move onto a floating mark stacks it
         // below another view (`seat_set_focus`, sway/input/seat.c).
@@ -520,7 +523,8 @@ fn order_by_recency(
 /// A workspace fullscreen container hides every view outside it, across the
 /// tiling and floating layers (`view_is_visible`,
 /// `sway/sway/tree/view.c:1187-1193`). A tiling global fullscreen view a
-/// `layout` wrap orphaned hides nothing (`tiling_fullscreen_hides` false).
+/// `layout` wrap or a `floating` change orphaned hides nothing, in either
+/// layer (`tiling_fullscreen_hides` false).
 fn apply_workspace_visibility(
     layout: NodeLayout,
     focus: &[i64],
@@ -529,7 +533,8 @@ fn apply_workspace_visibility(
     workspace_visible: bool,
     tiling_fullscreen_hides: bool,
 ) {
-    let floating_fullscreen = floating_nodes.iter().any(contains_fullscreen);
+    let floating_fullscreen =
+        tiling_fullscreen_hides && floating_nodes.iter().any(contains_fullscreen);
     let tiling_fullscreen = if !tiling_fullscreen_hides {
         false
     } else if floating_fullscreen {

@@ -213,9 +213,15 @@ impl<W: LayoutElement> TilingTree<W> {
             // sway/tree/container.c:1380-1391 and 1440-1446). The layout
             // command then arranges the workspace like any other: the wrapper
             // and the fullscreen view report their tile slots.
-            let global = self
-                .fullscreen_node()
-                .is_some_and(|id| self.fullscreen_mode(id) == Some(FullscreenMode::Global));
+            // A floating global fullscreen view is in `ws->floating`, which
+            // the wrap leaves alone: it stays `root->fullscreen_global`, and
+            // `arrange_root` arranges only it (sway/tree/arrange.c:349-355),
+            // so the wrapper stays unarranged as under workspace fullscreen.
+            let already_orphaned = self.global_fullscreen_orphaned();
+            let global = self.fullscreen_node().is_some_and(|id| {
+                self.fullscreen_mode(id) == Some(FullscreenMode::Global)
+                    && (already_orphaned || !self.is_floating_fullscreen(id))
+            });
             let pre_layout_ipc_rects = self
                 .fullscreen_node()
                 .filter(|_| !global)

@@ -798,6 +798,15 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
         let sticky_trees = self.workspaces[old_idx].take_sticky_trees();
+        // Only an orphaned global fullscreen view lets the switch happen
+        // (sway/commands/workspace.c:175-178); it keeps mode 2 on the way.
+        let orphaned_global = {
+            let source = &self.workspaces[old_idx];
+            source
+                .global_fullscreen_orphaned()
+                .then(|| source.fullscreen_window().cloned())
+                .flatten()
+        };
         let sticky = self.workspaces[old_idx].take_sticky_tiles();
         let target = &mut self.workspaces[self.active_workspace_idx];
         let target_was_empty = !target.has_windows();
@@ -813,6 +822,11 @@ impl<W: LayoutElement> Monitor<W> {
                     is_floating: true,
                 },
             );
+        }
+        if let Some(window) = orphaned_global {
+            target
+                .tiling_mut()
+                .arrive_orphaned_global_fullscreen(&window);
         }
         if target_was_empty {
             target.focus_workspace_itself();

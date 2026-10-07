@@ -2445,3 +2445,168 @@ fn closing_global_fullscreen_keeps_the_workspace_focused_unless_released() {
     );
     assert_eq!(focused_app(&mut f), (false, vec!["b"]));
 }
+
+// Differential family diff-fam-v3-gfs-float-sibling-visible, seeds 30833,
+// 30889, 30897, 30924, 30947, 31008, 31110, 31309, 31982 and 32193; oracle
+// rows global_fullscreen_floating_shows_tiled_sibling and
+// global_fullscreen_for_window_layout_new_view_focus. `floating` on the
+// global fullscreen view detaches it, clearing `root->fullscreen_global`
+// while the view keeps mode 2 (sway/tree/container.c:941-1011 and
+// 1440-1446). The arrange that follows lays the sibling out over the
+// workspace and nothing is hidden (sway/tree/arrange.c:317-321,
+// sway/tree/view.c:1195-1201). A `for_window` layout wrap orphans it the
+// same way before `should_focus` runs, so the new view takes focus
+// (sway/tree/view.c:707-710 and 943-945).
+#[test]
+fn floating_or_rule_layout_wrap_orphans_global_fullscreen() {
+    for commands in [
+        &[
+            "fullscreen enable global",
+            "[app_id=\"^two$\"] floating enable",
+        ][..],
+        &["fullscreen toggle global", "floating toggle"][..],
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        map_app(&mut f, client, "one");
+        map_app(&mut f, client, "two");
+        run(&mut f, commands);
+
+        let tree = tree_json(&mut f);
+        let one = find_json_node_with_app_id(&tree, "one").unwrap();
+        let two = find_json_node_with_app_id(&tree, "two").unwrap();
+        assert_eq!(two["type"], "floating_con", "{two}");
+        assert_eq!(two["fullscreen_mode"], 2, "{two}");
+        assert_eq!(one["percent"], 1.0, "{one}");
+        assert_eq!(one["visible"], true, "{one}");
+        assert!(crate::command::execute(f.niri_state(), "workspace number 3")[0].success);
+    }
+
+    // `splitt` hands global fullscreen to the new split (`container_replace`,
+    // sway/tree/container.c:1471-1501); floating that split orphans it the
+    // same way.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(
+        &mut f,
+        &[
+            "fullscreen enable global",
+            "splitt",
+            "focus parent; floating toggle",
+        ],
+    );
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let split = &workspace["floating_nodes"][0];
+    assert_eq!(split["fullscreen_mode"], 2, "{workspace}");
+    assert_eq!(one["visible"], true, "{one}");
+    // `arrange_floating` lays the group out at its own box
+    // (sway/tree/arrange.c:214-219 and 249-262).
+    assert_eq!(split["rect"]["width"], 640, "{split}");
+    assert_eq!(split["nodes"][0]["rect"]["width"], 640, "{split}");
+
+    // A view floated out of a split leaves it empty for `container_reap_empty`
+    // (sway/tree/container.c:969-975), so its sibling takes the workspace.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(
+        &mut f,
+        &[
+            "split toggle",
+            "fullscreen enable global",
+            "focus parent; floating toggle",
+        ],
+    );
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    assert_eq!(one["percent"], 1.0, "{one}");
+    assert_eq!(one["visible"], true, "{one}");
+
+    // The orphan lets `workspace` switch (sway/commands/workspace.c:175-178),
+    // and a sticky one keeps mode 2 on the new workspace
+    // (sway/input/seat.c:1209-1221, sway/tree/workspace.c:961-972).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle global",
+            "floating enable",
+            "sticky enable",
+            "workspace 4",
+        ],
+    );
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    assert_eq!(one["fullscreen_mode"], 2, "{one}");
+    assert_eq!(one["visible"], true, "{one}");
+    // It sits in the new workspace's floating list, so a view mapped there
+    // takes the whole split.
+    map_app(&mut f, client, "two");
+    let tree = tree_json(&mut f);
+    let two = find_json_node_with_app_id(&tree, "two").unwrap();
+    assert_eq!(two["percent"], 1.0, "{two}");
+    assert_eq!(two["visible"], true, "{two}");
+
+    // With the global view orphaned, floating another tiled view arranges
+    // the workspace's remaining children in full (sway/tree/arrange.c:317-321).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "two");
+    run(&mut f, &["fullscreen toggle global"]);
+    map_app(&mut f, client, "three");
+    map_app(&mut f, client, "four");
+    run(&mut f, &["[app_id=\"^(two|three)$\"] floating enable"]);
+    let tree = tree_json(&mut f);
+    let four = find_json_node_with_app_id(&tree, "four").unwrap();
+    assert_eq!(four["percent"], 1.0, "{four}");
+    assert_eq!(four["visible"], true, "{four}");
+
+    // The floated view joins the top of `ws->floating`
+    // (`workspace_add_floating`, sway/tree/workspace.c:961-972), above a view
+    // floated earlier.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(&mut f, &["floating enable"]);
+    map_app(&mut f, client, "two");
+    run(&mut f, &["fullscreen toggle global", "floating enable"]);
+    let tree = tree_json(&mut f);
+    let floating = &tree["nodes"][1]["nodes"][0]["floating_nodes"];
+    assert_eq!(floating[0]["app_id"], "one", "{floating}");
+    assert_eq!(floating[1]["app_id"], "two", "{floating}");
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle global",
+            "for_window [app_id=\"two\"] layout tabbed",
+        ],
+    );
+    map_app(&mut f, client, "two");
+
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    let two = find_json_node_with_app_id(&tree, "two").unwrap();
+    assert_eq!(one["fullscreen_mode"], 2, "{one}");
+    assert_eq!(one["focused"], false, "{one}");
+    assert_eq!(one["visible"], false, "{one}");
+    assert_eq!(two["focused"], true, "{two}");
+    assert_eq!(two["visible"], true, "{two}");
+}
