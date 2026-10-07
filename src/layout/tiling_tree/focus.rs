@@ -521,8 +521,11 @@ impl<W: LayoutElement> TilingTree<W> {
         let mut wrap = None;
 
         while let Some(parent) = self.nodes.get(&current).and_then(|node| node.parent) {
+            // The fullscreen container ends the walk before any non-force wrap candidate is
+            // used: sway leaves for another output or returns NULL
+            // (`node_get_in_direction_tiling`, sway/commands/focus.c:143-155).
             if Some(current) == barrier {
-                break;
+                return None;
             }
             let Some(TreeNode::Split {
                 layout, children, ..
@@ -560,7 +563,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 }
             }
             if Some(parent) == barrier {
-                break;
+                return None;
             }
             current = parent;
         }

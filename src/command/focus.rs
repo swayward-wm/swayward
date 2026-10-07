@@ -34,10 +34,27 @@ fn directional(
         Direction::Up => Action::FocusWindowOrMonitorUp,
         Direction::Down => Action::FocusWindowOrMonitorDown,
     };
+    let wrapping = state.swayward.config.borrow().layout.focus_wrapping;
+    let local_wrap = matches!(
+        wrapping,
+        swayward_config::FocusWrapping::Force | swayward_config::FocusWrapping::Workspace
+    );
     if !state.swayward.layout.global_fullscreen_active()
         && state.swayward.layout.focused_fullscreen_mode()
             == Some(crate::layout::tiling_tree::FullscreenMode::Workspace)
     {
+        // sway walks up from the focused view first, so a child of a fullscreen split moves
+        // among its siblings; only reaching the fullscreen container goes to the output
+        // (`node_get_in_direction_tiling`, sway/commands/focus.c:143-155).
+        let floating = state
+            .swayward
+            .layout
+            .active_workspace()
+            .is_some_and(|workspace| workspace.floating_is_active());
+        if !floating && local(&mut state.swayward.layout, local_wrap) {
+            state.swayward.queue_redraw_all();
+            return None;
+        }
         let output = match direction {
             Direction::Left => state.swayward.adjacent_output_left(),
             Direction::Right => state.swayward.adjacent_output_right(),
@@ -76,11 +93,6 @@ fn directional(
         }
         return None;
     }
-    let wrapping = state.swayward.config.borrow().layout.focus_wrapping;
-    let local_wrap = matches!(
-        wrapping,
-        swayward_config::FocusWrapping::Force | swayward_config::FocusWrapping::Workspace
-    );
     let workspace_focused = state
         .swayward
         .layout

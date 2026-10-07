@@ -125,6 +125,28 @@ fn focus_stack_focus_sibling_does_not_leave_a_fullscreen_view() {
     assert_eq!(find_json_node(&tree, "con", true).unwrap()["app_id"], "one");
 }
 
+/// `focus right` off the edge of a fullscreen split does not wrap inside it: reaching the
+/// fullscreen container returns NULL with no other output, before the wrap candidate is used
+/// (`node_get_in_direction_tiling`, sway/commands/focus.c:143-155). Family
+/// diff-fam-focus-edge-in-fullscreen-split, seeds 15587 and 16845.
+#[test]
+fn focus_stack_focus_direction_does_not_wrap_inside_a_fullscreen_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "one");
+    map_test_window(&mut f, client, "two");
+    run_focus_commands(&mut f, &["fullscreen enable", "split h"]);
+    map_test_window(&mut f, client, "three");
+    run_focus_commands(&mut f, &["focus right"]);
+
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(
+        find_json_node(&tree, "con", true).unwrap()["app_id"],
+        "three"
+    );
+}
+
 /// A sibling wrap candidate still descends to its focus-inactive view
 /// (sway/commands/focus.c:216-220). Seed 2730.
 #[test]
