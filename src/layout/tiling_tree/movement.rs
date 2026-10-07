@@ -564,6 +564,56 @@ impl<W: LayoutElement> TilingTree<W> {
         true
     }
 
+    /// Places `window`, which just arrived on this workspace by a directional
+    /// move from another output, where sway's
+    /// `container_move_to_workspace_from_direction` puts it
+    /// (sway/commands/move.c:168-196): at the leading edge of a parallel
+    /// workspace for right/down and the trailing edge for left/up, otherwise
+    /// into the workspace child holding the focus-inactive container, by
+    /// `container_move_to_container_from_direction`. Focus is untouched; the
+    /// caller's transfer already decided it.
+    pub fn place_arrival_from_direction(&mut self, window: &W::Id, direction: Direction) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        let focus = self.focus;
+        // Park the arrival at workspace level so the destination search below
+        // cannot descend into it.
+        if let Some(old_parent) = self.detach_subtree_only(id) {
+            let end = self.split_len(self.root).unwrap_or(0);
+            self.insert_child_at(self.root, id, end);
+            self.reap_empty_from(old_parent);
+        }
+        let destination = if self
+            .root_layout()
+            .is_some_and(|layout| Self::layouts_parallel(layout, direction.axis()))
+        {
+            Some(self.root)
+        } else {
+            // `seat_get_focus_inactive_tiling` ran while the moved container
+            // was still on its old workspace, so its own entries do not count.
+            self.focus_inactive_in_excluding(self.root, id)
+                .and_then(|inactive| self.root_branch(inactive))
+        };
+        let Some(destination) = destination.filter(|destination| *destination != id) else {
+            // No other tiling child: `workspace_add_tiling` appends.
+            return;
+        };
+        let old = self.compute_geometry();
+        let focus_history = self.focus_history.clone();
+        if self.move_into_directional_destination(id, destination, direction) {
+            self.focus_history = focus_history
+                .into_iter()
+                .filter(|node| self.nodes.contains_key(node))
+                .collect();
+            if focus.is_some_and(|focus| self.nodes.contains_key(&focus)) {
+                self.focus = focus;
+            }
+            self.request_window_sizes();
+            self.animate_geometry_changes(old, Some(id));
+        }
+    }
+
     fn move_into_directional_destination(
         &mut self,
         id: NodeId,

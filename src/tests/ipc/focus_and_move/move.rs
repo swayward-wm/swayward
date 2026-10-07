@@ -29,12 +29,14 @@ fn bare_directional_move_crosses_each_adjacent_output_without_wrapping() {
     let window_id = f.swayward().layout.focus().unwrap().id();
 
     // A perpendicular move first reorients the workspace in place, and only
-    // the next one crosses (sway/commands/move.c:333-344, 394-412).
+    // the next one crosses (sway/commands/move.c:333-344, 394-412). Arriving
+    // on an empty workspace leaves its layout alone (`workspace_add_tiling`,
+    // sway/commands/move.c:183-189), so `move left` from the horizontal
+    // bottom-right workspace crosses at once.
     for (command, expected_output) in [
         ("move right", "top-right"),
         ("move down", "top-right"),
         ("move down", "bottom-right"),
-        ("move left", "bottom-right"),
         ("move left", "bottom-left"),
         ("move up", "bottom-left"),
         ("move up", "top-left"),
@@ -949,4 +951,70 @@ fn directional_move_of_only_view_in_perpendicular_workspace_stays_on_output() {
     // A parallel workspace sends its only view on to the next output.
     assert!(crate::command::execute(f.niri_state(), "move left")[0].success);
     assert_eq!(output_of(&mut f), "left");
+}
+
+/// `move right` into a horizontal workspace on the next output lands the view
+/// at its leading edge and keeps it focused
+/// (`container_move_to_workspace_from_direction`, sway/commands/move.c:168-181).
+/// Family diff-fam-v3-cross-output-insert-order, v3 seeds 30037 and 30442.
+#[test]
+fn directional_move_into_a_parallel_output_lands_at_its_leading_edge() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_test_window(&mut f, client, "one");
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    map_test_window(&mut f, client, "two");
+    map_test_window(&mut f, client, "three");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+
+    assert!(crate::command::execute(f.niri_state(), "move right")[0].success);
+
+    let tree = focus_stack_tree(&mut f);
+    let output = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] == "right")
+        .unwrap();
+    let workspace = &output["nodes"][0];
+    assert_eq!(workspace["representation"], "H[one two three]");
+    assert_eq!(workspace["nodes"][0]["focused"], true);
+}
+
+/// `move down` into a horizontal workspace on the output below descends to
+/// the workspace's focus-inactive view and lands before it
+/// (sway/commands/move.c:183-195, 124-131).
+#[test]
+fn directional_move_into_a_perpendicular_output_lands_beside_its_focus_inactive_child() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("top".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("bottom".into(), (800, 600), Some((0, 600)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output bottom")[0].success);
+    map_test_window(&mut f, client, "one");
+    map_test_window(&mut f, client, "two");
+    map_test_window(&mut f, client, "three");
+    assert!(crate::command::execute(f.niri_state(), "focus left")[0].success);
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "focus output top")[0].success);
+    map_test_window(&mut f, client, "moved");
+
+    // The first move reorients the top workspace in place
+    // (sway/commands/move.c:333-344); the second crosses.
+    assert!(crate::command::execute(f.niri_state(), "move down")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move down")[0].success);
+
+    let tree = focus_stack_tree(&mut f);
+    let output = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] == "bottom")
+        .unwrap();
+    let workspace = &output["nodes"][0];
+    assert_eq!(workspace["representation"], "H[one moved two three]");
+    assert_eq!(workspace["nodes"][1]["focused"], true);
 }

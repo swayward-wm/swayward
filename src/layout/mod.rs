@@ -3978,16 +3978,16 @@ impl<W: LayoutElement> Layout<W> {
         activate: ActivateWindow,
     ) {
         self.move_to_output(Some(window), output, None, activate);
-        // Sway inserts right/down moves at the leading edge of a parallel
-        // destination (`sway/commands/move.c:168-193`). The generic transfer
-        // inserts after the destination focus, so move the new leaf across it.
-        let opposite = match direction {
-            tiling_tree::Direction::Right => Some(tiling_tree::Direction::Left),
-            tiling_tree::Direction::Down => Some(tiling_tree::Direction::Up),
-            tiling_tree::Direction::Left | tiling_tree::Direction::Up => None,
-        };
-        if let Some(direction) = opposite {
-            self.move_window_in_direction(window, direction, 10.);
+        // The generic transfer inserts after the destination focus; sway
+        // places a directional arrival by edge or by the focus-inactive
+        // container (sway/commands/move.c:168-196).
+        if let Some(workspace) = self
+            .workspaces_mut()
+            .find(|workspace| workspace.tiling().node_for_window(window).is_some())
+        {
+            workspace
+                .tiling_mut()
+                .place_arrival_from_direction(window, direction);
         }
     }
 

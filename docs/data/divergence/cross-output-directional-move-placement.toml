@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs"]
+what = "A directional move onto another output places the window by sway's container_move_to_workspace_from_direction: at the parallel workspace's edge, or into the workspace child that holds the focus-inactive container."
+why = "Sway places a cross-output directional arrival by edge or focus-inactive container (sway/commands/move.c:168-196). The previous fix-up stepped the window one slot left, so it only matched when the destination focus was first. Family diff-fam-v3-cross-output-insert-order, oracle rows cross_output_move_insert_order and cross_output_move_insert_order_perpendicular."
