@@ -2320,3 +2320,128 @@ fn view_mapped_into_a_fullscreen_split_in_a_layout_wrapper_is_arranged() {
         assert_eq!(view["percent"], 0.5, "{view}");
     }
 }
+
+// Differential family diff-fam-v3-kill-global-fullscreen-focus, seeds 30913,
+// 31521, 31627 and 31703; oracle row kill_orphaned_global_fullscreen_focuses_sibling.
+// The `layout` wrap clears `root->fullscreen_global` (sway/tree/workspace.c:
+// 898-910, sway/tree/container.c:1440-1446), so closing the orphaned view
+// obstructs nothing and the seat refocuses the sibling
+// (sway/input/seat.c:273-315, 1148-1156) rather than staying on the workspace.
+#[test]
+fn closing_orphaned_global_fullscreen_view_focuses_the_sibling() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(
+        &mut f,
+        &["fullscreen toggle global", "layout tabbed", "kill"],
+    );
+    f.double_roundtrip(client);
+    let closed = f
+        .client(client)
+        .state
+        .windows
+        .iter()
+        .filter(|window| window.close_requested)
+        .map(|window| window.surface.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(closed.len(), 1);
+    for surface in closed {
+        f.client(client).window(&surface).destroy_role();
+    }
+    f.double_roundtrip(client);
+
+    let tree = tree_json(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["focused"], false, "{workspace}");
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    assert_eq!(one["focused"], true, "{one}");
+    f.swayward().layout.verify_invariants();
+}
+
+fn run_and_close(f: &mut Fixture, client: super::client::ClientId, commands: &[&str]) {
+    for command in commands {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+        let closed = f
+            .client(client)
+            .state
+            .windows
+            .iter()
+            .filter(|window| window.close_requested)
+            .map(|window| window.surface.clone())
+            .collect::<Vec<_>>();
+        for surface in closed {
+            let window = f.client(client).window(&surface);
+            window.close_requested = false;
+            window.destroy_role();
+        }
+        f.double_roundtrip(client);
+    }
+}
+
+// Differential family diff-fam-v3-kill-global-fullscreen-focus, seeds 30913,
+// 31521, 31627 and 31703. Closing a global fullscreen view emits the destroy
+// signal while `root->fullscreen_global` still names it, so the seat refuses
+// every view it obstructs, floating ones included, and the workspace keeps
+// focus (sway/tree/container.c:488-501, sway/input/seat.c:1148-1151). After
+// `split toggle` the wrapper holds the mode (sway/tree/container.c:1471-1501)
+// and `container_reap_empty` destroys it the same way. A scratchpad view
+// drops global fullscreen before the signal (sway/tree/container.c:484-486),
+// so its close refocuses the sibling.
+#[test]
+fn closing_global_fullscreen_keeps_the_workspace_focused_unless_released() {
+    let focused_app = |f: &mut Fixture| {
+        let tree = tree_json(f);
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        let mut focused = Vec::new();
+        for app in ["a", "b"] {
+            if find_json_node_with_app_id(&tree, app).is_some_and(|node| node["focused"] == true) {
+                focused.push(app);
+            }
+        }
+        f.swayward().layout.verify_invariants();
+        (workspace["focused"] == true, focused)
+    };
+
+    for commands in [
+        &[
+            "floating enable",
+            "map:b",
+            "fullscreen toggle global",
+            "kill",
+        ][..],
+        &["map:b", "fullscreen toggle global", "split toggle", "kill"][..],
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        map_app(&mut f, client, "a");
+        for command in commands {
+            if let Some(app) = command.strip_prefix("map:") {
+                map_app(&mut f, client, app);
+            } else {
+                run_and_close(&mut f, client, &[command]);
+            }
+        }
+        assert_eq!(focused_app(&mut f), (true, vec![]), "{commands:?}");
+    }
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "a");
+    run(&mut f, &["move scratchpad"]);
+    map_app(&mut f, client, "b");
+    run_and_close(
+        &mut f,
+        client,
+        &["[app_id=\"a\"] focus", "fullscreen toggle global", "kill"],
+    );
+    assert_eq!(focused_app(&mut f), (false, vec!["b"]));
+}

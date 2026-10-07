@@ -972,6 +972,11 @@ impl<W: LayoutElement> Workspace<W> {
                 .floating
                 .active_window()
                 .is_some_and(|window| window.id() == id);
+        let keeps_workspace_focus = !transfer
+            && self
+                .tiling
+                .node_for_window(id)
+                .is_some_and(|node| self.tiling.close_keeps_workspace_focus(node));
         let removed = if self.floating.has_window(id) {
             from_floating = true;
             self.floating.remove_tile(id, transaction)
@@ -995,6 +1000,11 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
+        // The seat refuses a floating view the closing global fullscreen container still
+        // obstructs, as it does a tiled one (sway/input/seat.c:1148-1151).
+        if keeps_workspace_focus && self.floating_is_active.get() {
+            self.floating_is_active = FloatingActive::NoButRaised;
+        }
         // Removing the focused floating window hands focus to the workspace's
         // focus-inactive node (seat_get_focus_inactive(ws), as in
         // root_scratchpad_hide, sway/tree/root.c:211-229), which is a view

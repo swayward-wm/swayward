@@ -309,6 +309,38 @@ impl<W: LayoutElement> TilingTree<W> {
         })
     }
 
+    /// Whether closing the focused leaf `id` leaves the workspace itself focused. Sway emits
+    /// the destroy signal while the global fullscreen container is still
+    /// `root->fullscreen_global` (sway/tree/container.c:488-501), so the seat refuses every
+    /// view it obstructs (sway/input/seat.c:1148-1151, 273-315). That holds when `id` is the
+    /// global fullscreen container, and when it is the last view of one: `container_split`
+    /// hands the mode to the new wrapper (sway/tree/container.c:1471-1501), which
+    /// `container_reap_empty` destroys the same way (sway/tree/view.c:994-996). A `layout`
+    /// wrap that orphaned the container, or a scratchpad view's close
+    /// (sway/tree/container.c:484-486), cleared `root->fullscreen_global` first, so nothing
+    /// is obstructed and focus moves on as for any close.
+    pub fn close_keeps_workspace_focus(&self, id: NodeId) -> bool {
+        self.focus == Some(id)
+            && !self.global_fullscreen_orphaned()
+            && self.fullscreen_node().is_some_and(|fullscreen| {
+                self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Global)
+                    && self.leaf_ids_in(fullscreen) == [id]
+            })
+    }
+
+    /// A scratchpad view's close disables its global fullscreen before the destroy signal
+    /// (`container_begin_destroy`, sway/tree/container.c:484-486), as a `layout` wrap does.
+    pub fn release_global_fullscreen_before_close(&mut self, window: &W::Id) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        if self.fullscreen_node() == Some(id)
+            && self.fullscreen_mode(id) == Some(FullscreenMode::Global)
+        {
+            self.orphaned_global_fullscreen = Some(id);
+        }
+    }
+
     pub fn remove_tile_node(&mut self, id: NodeId) -> Option<Tile<W>> {
         let old_geometries = self.compute_geometry();
         if !matches!(
@@ -336,9 +368,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 .collect::<Vec<_>>();
             self.unarranged_under_fullscreen.extend(unarranged);
         }
-        let removed_global = removed_fullscreen
-            && self.fullscreen_mode(id) == Some(FullscreenMode::Global)
-            && self.focus == Some(id);
+        let removed_global = self.close_keeps_workspace_focus(id);
         let node = self.remove_node(id)?;
         if removed_fullscreen {
             self.mapped_under_fullscreen.clear();
@@ -364,9 +394,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.pending_modes.clear();
             self.set_focus_id(None);
         } else if removed_global {
-            // Sway emits the destroy signal while the view is still global fullscreen
-            // (sway/tree/container.c:488-501), so the seat refuses every sibling it obstructs
-            // and focus stays on the workspace (sway/input/seat.c:1148-1151).
+            // See `close_keeps_workspace_focus`.
             self.set_focus_id(Some(self.root));
         } else if self.focus == Some(id) {
             self.set_focus_id(

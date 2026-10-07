@@ -1390,6 +1390,10 @@ impl<W: LayoutElement> Layout<W> {
                         .find(|workspace| workspace.has_window(window))
                     {
                         let source_workspace = ws.id();
+                        if !transfer && self.scratchpad_windows.contains(window) {
+                            ws.tiling_mut()
+                                .release_global_fullscreen_before_close(window);
+                        }
                         let removed = if transfer {
                             ws.remove_tile_for_transfer(window, transaction)
                         } else {
