@@ -265,7 +265,8 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// The sticky fullscreen floater holding this tree's fullscreen was carried to another
     /// workspace (see `unarranged_after_sticky_carry`): the tiled nodes keep the boxes in
-    /// `hidden`, taken before it left.
+    /// `hidden`, taken before it left, and the views mapped or moved under it keep their
+    /// never-arranged boxes.
     pub(in crate::layout) fn keep_unarranged_after_sticky_carry(
         &mut self,
         hidden: HiddenUnderFullscreen,
@@ -273,9 +274,7 @@ impl<W: LayoutElement> TilingTree<W> {
         if self.fullscreen_node().is_some() {
             return;
         }
-        let mut boxes = hidden.boxes;
-        boxes.retain(|id, _| self.nodes.contains_key(id));
-        self.unarranged_under_fullscreen = boxes;
+        self.restore_hidden_under_fullscreen(hidden);
         self.unarranged_after_sticky_carry = true;
     }
 

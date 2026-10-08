@@ -1303,3 +1303,73 @@ fn sticky_fullscreen_floater_leaves_source_tiles_unarranged_like_sway() {
     assert_eq!(tile["percent"], 0.5, "{tree:#}");
     assert_eq!(tile["rect"]["width"], 960, "{tree:#}");
 }
+
+/// A view mapped under the sticky fullscreen floater after it was carried keeps calloc's box
+/// when the floater is carried away again: `seat_set_workspace_focus` only detaches it and
+/// adds it to the new workspace (`sway/sway/input/seat.c:1209-1221`), so nothing arranges the
+/// workspace the view was mapped on. Oracle row:
+/// sticky_fullscreen_floating_carry_keeps_mapped_view_unarranged.
+#[test]
+fn sticky_fullscreen_floater_leaves_mapped_view_unarranged_like_sway() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let map = |f: &mut Fixture| {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    let run = |f: &mut Fixture, command: &str| {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    };
+    let workspace_2_view = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let workspace = tree["nodes"][1]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|workspace| workspace["name"] == "2")
+            .unwrap_or_else(|| panic!("{tree:#}"))
+            .clone();
+        let mut view = workspace["nodes"][0].clone();
+        view.as_object_mut().unwrap().remove("focused");
+        view
+    };
+
+    map(&mut f);
+    map(&mut f);
+    for command in [
+        "fullscreen enable",
+        "floating enable",
+        "sticky enable",
+        "workspace 2",
+    ] {
+        run(&mut f, command);
+    }
+    map(&mut f);
+    let before = workspace_2_view(&mut f);
+    assert_eq!(before["percent"], 0.0, "{before:#}");
+    run(&mut f, "workspace 3");
+    let after = workspace_2_view(&mut f);
+    assert_eq!(after["percent"], 0.0, "{after:#}");
+    assert_eq!(after["rect"], before["rect"], "{after:#}");
+    assert_eq!(after["deco_rect"], before["deco_rect"], "{after:#}");
+    assert_eq!(after["window_rect"], before["window_rect"], "{after:#}");
+    f.swayward().layout.verify_invariants();
+}

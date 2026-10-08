@@ -243,6 +243,8 @@ impl<W: LayoutElement> TilingTree<W> {
     /// Any arrange of this workspace lays out the nodes a sticky carry left unarranged.
     pub(super) fn forget_unarranged_after_sticky_carry(&mut self) {
         if std::mem::take(&mut self.unarranged_after_sticky_carry) {
+            self.mapped_under_fullscreen.clear();
+            self.moved_under_fullscreen.clear();
             self.unarranged_under_fullscreen.clear();
         }
     }
