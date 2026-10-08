@@ -488,9 +488,17 @@ impl<W: LayoutElement> Layout<W> {
         let target = self.workspace_mut(target_workspace).ok_or_else(no_node)?;
         let moved = match target.floating_tree_root_for_window(&window) {
             Some(root) => floating_tree::StackSlot::Tree(root),
-            None => floating_tree::StackSlot::Window(window),
+            None => floating_tree::StackSlot::Window(window.clone()),
         };
         target.restack_floating_above(&moved, &anchor_slot);
+        if matches!(moved, floating_tree::StackSlot::Window(_)) {
+            // The moved view keeps its place at the top of the seat's focus stack, so it is the
+            // target workspace's focus-inactive floater (sway/commands/move.c:553-606).
+            target.activate_window_without_raising(&window);
+        }
+        // `container_add_sibling` refreshes the representation up to the workspace
+        // (sway/tree/container.c:750-773,1410-1423), even one that so far held only floaters.
+        target.tiling_mut().restore_has_had_tile(true);
         Ok(())
     }
 
