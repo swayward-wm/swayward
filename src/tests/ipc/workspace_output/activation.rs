@@ -556,6 +556,46 @@ fn auto_back_and_forth_returns_to_the_previous_workspace_on_another_output() {
     assert_eq!(focused(&mut f), second);
 }
 
+/// `move <direction>` across outputs never calls `seat_set_focus`, so the seat
+/// keeps its workspace and `prev_workspace_name` (sway/sway/commands/move.c:
+/// 277-298, 672-745; sway/sway/input/seat.c:1098-1113). `move container to
+/// workspace back_and_forth` then targets the workspace the view just reached
+/// and leaves it there. A command that changes no seat focus in between, such
+/// as `mark`, does not catch the seat up. Oracle scenario
+/// move_back_and_forth_after_cross_output_move; random-v3 seed 32806.
+#[test]
+fn move_back_and_forth_after_cross_output_move_keeps_the_seat_record() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    run_urgency_commands(
+        &mut f,
+        client,
+        &[
+            "@moved",
+            "focus output right",
+            "focus output left",
+            "move right",
+            "mark --add x",
+            "move container to workspace back_and_forth",
+        ],
+    );
+    let swayward = f.swayward();
+    let workspaces = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let focused = workspaces
+        .iter()
+        .find(|workspace| workspace.focused)
+        .unwrap();
+    assert_eq!(focused.name, "2", "{workspaces:?}");
+    let holding = swayward
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.windows().next().is_some())
+        .and_then(|(_, _, workspace)| workspace.sway_name());
+    assert_eq!(holding.as_deref(), Some("2"));
+}
+
 fn run_urgency_commands(f: &mut Fixture, client: crate::tests::client::ClientId, steps: &[&str]) {
     for step in steps {
         if let Some(app_id) = step.strip_prefix('@') {

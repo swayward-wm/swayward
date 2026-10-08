@@ -19,6 +19,7 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         let current = (active.id(), active.sway_name());
+        self.observed_active_workspace = Some(current.0);
         match &mut self.seat_workspace {
             Some(seat) if seat.0 == current.0 => seat.1 = current.1,
             seat => {
@@ -29,6 +30,24 @@ impl<W: LayoutElement> Layout<W> {
                 }
             }
         }
+    }
+
+    /// Syncs the seat only if the active workspace changed since it was last observed, as
+    /// pointer focus and bindings between commands do. A command that left the seat on
+    /// another workspace stays unrecorded until focus actually moves.
+    pub fn sync_seat_workspace_if_moved(&mut self) {
+        let active = self.active_workspace().map(Workspace::id);
+        if active != self.observed_active_workspace {
+            self.sync_seat_workspace();
+        }
+    }
+
+    /// Observes the active workspace without a seat focus change: `move <direction>`
+    /// carries the focused view to another output's workspace, but never calls
+    /// `seat_set_focus`, so `seat->workspace` and `prev_workspace_name` keep their values
+    /// (sway/commands/move.c:277-298, 672-745; sway/input/seat.c:1098-1113).
+    pub fn observe_active_workspace_without_seat_focus(&mut self) {
+        self.observed_active_workspace = self.active_workspace().map(Workspace::id);
     }
 
     /// The seat's previous workspace while it still exists, else its last name. A rename

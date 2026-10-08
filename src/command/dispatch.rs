@@ -26,7 +26,7 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     let mut retained_targets = None;
     let mut outcomes = Vec::new();
     // Focus may have moved since the last command (pointer, bindings).
-    state.swayward.layout.sync_seat_workspace();
+    state.swayward.layout.sync_seat_workspace_if_moved();
     for parsed in parsed {
         let outcome = match parsed {
             Ok(parsed) => {
@@ -38,16 +38,28 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
                 // (sway/sway/tree/container.c:1850-1869).
                 let saved = matches!(parsed.command, Command::Swap(_))
                     .then(|| state.swayward.layout.seat_back_and_forth());
+                // `move <direction>` never calls `seat_set_focus`, so the seat keeps
+                // its workspace and `prev_workspace_name` even when the view crosses
+                // outputs (sway/sway/commands/move.c:277-298, 672-745).
+                let keeps_seat = matches!(parsed.command, Command::MoveDirection { .. });
                 // Sway clears a view's urgency in `seat_set_focus` whichever
                 // command moves seat focus onto it (sway/sway/input/seat.c:
                 // 1223-1240). When seat focus returns from a split or the
                 // workspace to the view that kept keyboard focus, no keyboard
                 // focus change follows, so clear it here.
                 let seat_view_before = focus::seat_focused_view(state);
+                let focus_before = seat_focus(state);
                 let outcome = execute_one(state, parsed, &mut retained_targets);
                 focus::refocus_clears_urgency(state, seat_view_before);
                 match saved {
                     Some(saved) => state.swayward.layout.restore_seat_back_and_forth(saved),
+                    // Only `seat_set_focus` moves `seat->workspace`
+                    // (sway/sway/input/seat.c:1098-1113, 1195), so a command
+                    // that changes no focus leaves a stale seat workspace alone.
+                    None if keeps_seat || seat_focus(state) == focus_before => state
+                        .swayward
+                        .layout
+                        .observe_active_workspace_without_seat_focus(),
                     None => state.swayward.layout.sync_seat_workspace(),
                 }
                 outcome
@@ -65,6 +77,26 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     }
     state.ipc_commit_workspace_transaction();
     outcomes
+}
+
+/// The seat's focused workspace and node, to tell whether a command changed
+/// seat focus.
+fn seat_focus(
+    state: &State,
+) -> (
+    Option<crate::layout::workspace::WorkspaceId>,
+    swayward_ipc::command::FocusedNode,
+    Option<super::CommandTarget>,
+) {
+    (
+        state
+            .swayward
+            .layout
+            .active_workspace()
+            .map(|workspace| workspace.id()),
+        super::targeted::focused_node(state),
+        super::targeted::focused_target(state),
+    )
 }
 
 /// Whether an outcome is sway's CMD_INVALID, which ends a command list.

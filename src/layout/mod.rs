@@ -437,6 +437,11 @@ pub struct Layout<W: LayoutElement> {
     /// Sway's `seat->prev_workspace_name`: the workspace the seat focused before
     /// `seat_workspace`, on any output.
     previous_seat_workspace: Option<(WorkspaceId, Option<String>)>,
+    /// The active workspace when the seat was last synced. A command that moves the
+    /// focused view to another workspace without a seat focus change leaves the seat
+    /// behind (`cmd_move_in_direction`, sway/commands/move.c:672-745), so only a
+    /// change of the active workspace after this observation reaches the seat.
+    observed_active_workspace: Option<WorkspaceId>,
 }
 
 #[derive(Debug)]
@@ -825,6 +830,7 @@ impl<W: LayoutElement> Layout<W> {
             workspace_configs: Vec::new(),
             seat_workspace: None,
             previous_seat_workspace: None,
+            observed_active_workspace: None,
         }
     }
 
@@ -867,6 +873,7 @@ impl<W: LayoutElement> Layout<W> {
             workspace_configs: config.workspaces.clone(),
             seat_workspace: None,
             previous_seat_workspace: None,
+            observed_active_workspace: None,
         }
     }
 
