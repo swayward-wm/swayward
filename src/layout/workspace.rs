@@ -1602,8 +1602,12 @@ impl<W: LayoutElement> Workspace<W> {
         // the workspace focused (`set_focus = focus == container`,
         // sway/tree/container.c:946-949).
         let workspace_focused = self.is_workspace_focused();
-        let target_is_active =
-            !workspace_focused && id.is_none_or(|id| Some(id) == active_id.as_ref());
+        // A named view is the seat focus only when focus sits on the view itself: with a split
+        // focused, `active_window` is that split's focus-inactive view, which sway does not
+        // treat as `focus == container` (sway/tree/container.c:946-949).
+        let focus_is_view = self.floating_is_active.get() || self.tiling.active_tile().is_some();
+        let target_is_active = !workspace_focused
+            && id.is_none_or(|id| focus_is_view && Some(id) == active_id.as_ref());
         let Some(id) = id.cloned().or(active_id) else {
             return;
         };

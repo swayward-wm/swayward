@@ -1369,3 +1369,55 @@ fn workspace_focus_order_matches_sway() {
         assert_eq!(focus, *expected, "{seed}: {workspace:#}");
     }
 }
+
+/// Differential seeds 32750 32752 32782 ... (diff-fam-v3-floating-focus-after-fullscreen-structure;
+/// oracle row float_split_children_of_focused_wrapper_keeps_tiled_focus). With a split focused,
+/// floating one of its views by criteria leaves the seat focus on the split: `set_focus` is only
+/// true when the floated container is the focus (`container_set_floating`,
+/// sway/tree/container.c:946-949), so the new floater stays unfocused.
+#[test]
+fn criteria_float_from_a_focused_split_keeps_focus_on_the_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-diff-1", "fixture-diff-2"] {
+        crate::tests::windows::map_window(
+            &mut f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in [
+        "focus parent; split v",
+        "[app_id=\"^fixture-diff-[23]$\"] floating enable",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let split = &workspace["nodes"][0];
+    assert_eq!(split["type"], "con");
+    assert_eq!(split["focused"], true);
+    assert_eq!(split["nodes"][0]["app_id"], "fixture-diff-1");
+    assert_eq!(split["nodes"][0]["focused"], false);
+    let floater = &workspace["floating_nodes"][0];
+    assert_eq!(floater["app_id"], "fixture-diff-2");
+    assert_eq!(floater["focused"], false);
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([split["id"], floater["id"]])
+    );
+    swayward.layout.verify_invariants();
+}
