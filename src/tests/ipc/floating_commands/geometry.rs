@@ -1337,6 +1337,43 @@ fn fullscreen_disable_of_a_floating_fullscreen_split_arranges_the_mapped_view() 
     assert_arranged(&tree_json(&mut f));
 }
 
+/// Differential family low_medium_medium_medium_diff_fam (oracle row rv4_otherfs): a tiled
+/// view under a fullscreen floating split taking `fullscreen enable` ends the floating split's
+/// fullscreen (`container_set_fullscreen`, sway/tree/container.c:1308-1313) and the arrange
+/// gives the tiled view its border.
+#[test]
+fn tiled_fullscreen_enable_under_a_floating_fullscreen_split_takes_the_fullscreen() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "floating enable",
+            "splith",
+            "[app_id=fixture-2] fullscreen enable",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let split = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(split["fullscreen_mode"], 0, "{tree}");
+    let floating = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(floating["focused"], false, "{floating}");
+    assert_eq!(floating["visible"], false, "{floating}");
+    let tiled = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(tiled["fullscreen_mode"], 1, "{tiled}");
+    assert_eq!(tiled["focused"], true, "{tiled}");
+    assert_eq!(tiled["visible"], true, "{tiled}");
+    assert_eq!(tiled["border"], "normal", "{tiled}");
+    assert_ne!(tiled["current_border_width"], 0, "{tiled}");
+    assert_eq!(tiled["percent"], 1.0, "{tiled}");
+}
+
 /// `floating disable` moves the fullscreen split back into the tiling tree, still fullscreen,
 /// and `arrange_workspace` reaches only it (sway/commands/floating.c:55,
 /// sway/tree/arrange.c:310-316). The view mapped under it stays unarranged and the tiled
