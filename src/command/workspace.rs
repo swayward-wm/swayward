@@ -49,6 +49,9 @@ pub(super) fn activate(
     // keeps the focus itself.
     if let Some(workspace) = state.swayward.layout.active_workspace_mut() {
         let switched = previous != Some(workspace.id());
+        if switched {
+            workspace.raise_tiling_focus_on_switch();
+        }
         if !switched || workspace.has_non_sticky_windows() {
             workspace.focus_inactive_below_workspace();
         }

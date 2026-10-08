@@ -68,7 +68,22 @@ impl<W: LayoutElement> Workspace<W> {
         subtree: DetachedSubtree<W>,
     ) -> (NodeId, Vec<(NodeId, NodeId)>) {
         let target = self.tiling.focus_inactive_tiling();
-        self.attach_tiling_subtree_at(subtree, target)
+        let mut arrived = Vec::new();
+        subtree.for_each_window(|window| arrived.push(window.id().clone()));
+        let focused_split = subtree.is_focused_split();
+        let attached = self.attach_tiling_subtree_at(subtree, target);
+        // Sway keeps one seat-wide focus stack, so a moved view focused more recently than
+        // the destination's focus-inactive view stays ahead of it there, and a later switch
+        // to the workspace focuses it (`seat_get_focus_inactive`, sway/input/seat.c:1357-1372;
+        // sway/commands/move.c:583-608).
+        for window in &arrived {
+            self.tiling.rank_arrived_window_by_focus_timestamp(window);
+        }
+        // A focused split was the seat focus, above its own views and everything here.
+        if focused_split {
+            self.tiling.set_focus(attached.0);
+        }
+        attached
     }
 
     pub fn attach_tiling_subtree_from_direction(
@@ -513,6 +528,19 @@ impl<W: LayoutElement> Workspace<W> {
     /// `workspace_switch` does with `seat_get_focus_inactive(ws)`, which only returns the
     /// workspace itself when nothing under it was focused (sway/tree/workspace.c:731-743;
     /// sway/input/seat.c:1357-1372).
+    /// `workspace_switch` hands the seat focus to the workspace's focus-inactive node
+    /// (sway/tree/workspace.c:731-743), and `seat_set_focus` raises every ancestor of it
+    /// (sway/input/seat.c:1178-1190). A wrapper a move created around that view was never
+    /// focused, so the switch is what lifts it above its siblings.
+    pub fn raise_tiling_focus_on_switch(&mut self) {
+        if self.is_workspace_focused() || self.floating_is_active.get() {
+            return;
+        }
+        if let Some(focus) = self.tiling.focus() {
+            self.tiling.set_focus(focus);
+        }
+    }
+
     pub fn focus_inactive_below_workspace(&mut self) {
         if !self.is_workspace_focused() {
             return;
@@ -1340,11 +1368,13 @@ impl<W: LayoutElement> Workspace<W> {
             }
             // Returning a focused container to tiling leaves the seat focus on it
             // (`container_set_floating`, sway/tree/container.c:976-1011).
-            // That holds for a focused container below the root too, such as the group a
-            // `split` wrapped in a new floating container.
+            // That holds for a focused container or view below the root too, such as the
+            // group a `split` wrapped in a new floating container: `cmd_floating` walks up
+            // to the root (sway/commands/floating.c:40-46) and `set_focus` is false, so the
+            // seat focus stays where it was.
             let focused_container = self
                 .floating
-                .focused_container_node()
+                .focused_tree_node()
                 .filter(|_| self.floating_is_active.get())
                 .filter(|focused| self.floating.tree_root_for_node(*focused) == Some(root));
             let subtree = self.floating.remove_tree(root)?;

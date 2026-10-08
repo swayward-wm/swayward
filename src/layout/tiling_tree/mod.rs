@@ -234,6 +234,13 @@ impl<W: LayoutElement> DetachedSubtree<W> {
         self.node.has_fullscreen()
     }
 
+    /// Whether the moved container itself, a split rather than a view, held the focus.
+    pub fn is_focused_split(&self) -> bool {
+        self.root_focused
+            && !self.wrapped_workspace
+            && !matches!(self.node, DetachedNode::Leaf { .. })
+    }
+
     pub fn is_wrapped_workspace(&self) -> bool {
         self.wrapped_workspace
     }
