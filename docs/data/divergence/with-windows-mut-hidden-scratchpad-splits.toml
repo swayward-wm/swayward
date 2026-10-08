@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs"]
+what = "Layout::with_windows_mut also visits the views inside hidden scratchpad split trees."
+why = "windows() already lists them; without the mutable walk, urgent enable on a view in a hidden scratchpad split was a silent no-op where sway sets it (view_set_urgent, sway/sway/tree/view.c:1205-1228). Differential seeds 30910, 31090."

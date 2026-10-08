@@ -2024,6 +2024,13 @@ impl<W: LayoutElement> Layout<W> {
         for removed in &mut self.scratchpad {
             f(removed.tile.window_mut(), None);
         }
+        // A hidden scratchpad split holds views too; `windows()` lists them,
+        // so per-view state such as urgency must reach them as well.
+        for removed in &mut self.scratchpad_trees {
+            for tile in removed.tree.tiles_mut() {
+                f(tile.window_mut(), None);
+            }
+        }
 
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {

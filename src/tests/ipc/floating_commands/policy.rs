@@ -2036,3 +2036,45 @@ fn criteria_floating_enable_with_fullscreen_keeps_match_order() {
         tree["nodes"][1]["nodes"][0]
     );
 }
+
+/// Criteria urgency reaches a view inside a split hidden in the scratchpad
+/// (`view_set_urgent`, sway/sway/tree/view.c:1205-1228): a wrapped workspace
+/// and a floating split, each sent to the scratchpad.
+/// Differential seeds 30910 and 31090.
+#[test]
+fn urgent_command_marks_a_view_in_a_hidden_scratchpad_split() {
+    for (setup, target) in [
+        (&["focus parent; fullscreen toggle"][..], "only"),
+        (&["floating enable", "splitv"][..], "inner"),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        let add = |f: &mut Fixture, app_id: &str| {
+            let window = f.client(client).create_window();
+            window.xdg_toplevel.set_app_id(app_id.into());
+            window.commit();
+            let surface = window.surface.clone();
+            f.roundtrip(client);
+            let window = f.client(client).window(&surface);
+            window.attach_new_buffer();
+            window.ack_last_and_commit();
+            f.double_roundtrip(client);
+        };
+        add(&mut f, "only");
+        for command in setup {
+            let outcome = crate::command::execute(f.niri_state(), command);
+            assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+        }
+        if target == "inner" {
+            add(&mut f, "inner");
+        }
+        assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+        let outcome = crate::command::execute(
+            f.niri_state(),
+            &format!("focus parent; [app_id={target}] urgent enable"),
+        );
+        assert!(outcome[1].success, "{outcome:?}");
+        assert!(test_window_is_urgent(&mut f, target), "{setup:?}");
+    }
+}
