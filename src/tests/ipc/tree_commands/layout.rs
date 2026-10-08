@@ -1659,6 +1659,62 @@ fn move_wrap_after_resize_keeps_whole_pixel_fractions() {
     );
 }
 
+// random-v2 seed 14473 step 9 (diff-fam-floating-toggle-ppt-resize-residual-1):
+// `resize shrink width` on a view in a splitv resizes its splith ancestor, and
+// sway answers success only if the arrange that follows moved the view's own
+// fraction, compared bitwise (sway/commands/resize.c:273-277). That arrange
+// divides the splitv's fractions by their sum (sway/tree/arrange.c:47-52),
+// which moves an even split of 6 or 7 by an ulp but not one of 3, 5 or 8.
+// Oracle row nested_ppt_shrink_ancestor_reply.
+#[test]
+fn nested_ppt_shrink_reply_follows_the_inner_renormalisation() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-npsa-1");
+    map_app(&mut f, client, "fixture-npsa-2");
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    let mut replies = Vec::new();
+    for (app_ids, probe) in [
+        (&["fixture-npsa-3", "fixture-npsa-4"][..], 3),
+        (&["fixture-npsa-5", "fixture-npsa-6"][..], 5),
+        (&["fixture-npsa-7"][..], 6),
+        (&["fixture-npsa-8"][..], 7),
+        (&["fixture-npsa-9"][..], 8),
+        (&["fixture-npsa-10"][..], 9),
+    ] {
+        for app_id in app_ids {
+            map_app(&mut f, client, app_id);
+        }
+        let outcome = crate::command::execute(f.niri_state(), "resize shrink width 5 ppt");
+        replies.push((probe, outcome[0].success));
+    }
+    assert_eq!(
+        replies,
+        [
+            (3, false),
+            (5, false),
+            (6, true),
+            (7, true),
+            (8, false),
+            (9, true)
+        ]
+    );
+
+    // Seed 14473 itself: seven views mapped into the splitv with no resize
+    // between them, so only the insertion arithmetic decides the ulp.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-diff-1");
+    map_app(&mut f, client, "fixture-diff-2");
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    for app_id in ["4", "5", "6", "7", "8", "9"] {
+        map_app(&mut f, client, &format!("fixture-diff-{app_id}"));
+    }
+    assert!(crate::command::execute(f.niri_state(), "resize shrink width 5 ppt")[0].success);
+}
+
 // random-v2 seed 1071 step 5 (diff-fam-percent-rounding): under a fullscreen
 // view, sway leaves the other children at the whole-pixel boxes they last had
 // over the visible children (`arrange_workspace`, sway/tree/arrange.c:310-316):
