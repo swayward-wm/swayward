@@ -1658,3 +1658,43 @@ fn fullscreen_rule_view_mapped_under_a_fullscreen_floating_group_takes_focus_and
     assert_eq!(held["rect"]["width"], group["rect"]["width"], "{tree:#}");
     f.swayward().layout.verify_invariants();
 }
+
+/// Differential family diff-fam-v3-global-fs-map-under-floating-fs: a
+/// `for_window ... fullscreen enable global` view mapped under a fullscreen floating group.
+/// `container_set_fullscreen(GLOBAL)` leaves the group's workspace fullscreen alone
+/// (sway/tree/container.c:1316-1323), `should_focus` accepts a global fullscreen view first
+/// (sway/tree/view.c:703-705), and `arrange_root` lays out only `root->fullscreen_global`
+/// (sway/tree/arrange.c:347-353), so the new view takes focus and the whole output while the
+/// group stays workspace fullscreen.
+/// Oracle row: floating_fullscreen_group_map_global_rule.
+#[test]
+fn global_fullscreen_rule_view_mapped_under_a_fullscreen_floating_group_takes_the_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[r#"for_window [app_id="fixture-2"] fullscreen enable global"#],
+    );
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &["focus parent", "floating toggle", "fullscreen enable"],
+    );
+    map_app(&mut f, client, "fixture-2");
+
+    let tree = tree_json(&mut f);
+    let group = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(group["fullscreen_mode"], 1, "{tree:#}");
+    assert_eq!(group["focused"], false, "{tree:#}");
+    let mapped = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(mapped["focused"], true, "{mapped}");
+    assert_eq!(mapped["fullscreen_mode"], 2, "{mapped}");
+    assert_eq!(mapped["visible"], true, "{mapped}");
+    assert_eq!(mapped["percent"], 1.0, "{mapped}");
+    assert_eq!(mapped["rect"]["width"], 1280, "{mapped}");
+    assert_eq!(mapped["rect"]["height"], 720, "{mapped}");
+    f.swayward().layout.verify_invariants();
+}

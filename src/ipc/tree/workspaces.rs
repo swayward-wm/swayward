@@ -538,8 +538,12 @@ fn apply_workspace_visibility(
     let tiling_fullscreen = if !tiling_fullscreen_hides {
         false
     } else if floating_fullscreen {
-        for node in nodes.iter_mut() {
-            set_windows_visible(node, false);
+        // A tiled global fullscreen view beside the floating workspace fullscreen is visible
+        // too (`container_is_fullscreen_or_child`, sway/tree/view.c:1195-1201).
+        if !apply_fullscreen_state(nodes, workspace_visible) {
+            for node in nodes.iter_mut() {
+                set_windows_visible(node, false);
+            }
         }
         false
     } else {

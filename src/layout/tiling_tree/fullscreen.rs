@@ -151,6 +151,13 @@ impl<W: LayoutElement> TilingTree<W> {
             self.pre_layout_ipc_rects.clear();
         }
         if let Some(fullscreen) = fullscreen {
+            // The arrange that follows always reaches the new fullscreen container
+            // (sway/tree/arrange.c:310-316 and 347-353), even when a floating container keeps
+            // the workspace fullscreen beside a new global one
+            // (`container_set_fullscreen`, sway/tree/container.c:1316-1323).
+            self.mapped_under_fullscreen.remove(&id);
+            self.moved_under_fullscreen.remove(&id);
+            self.unarranged_under_fullscreen.remove(&id);
             self.set_pending_fullscreen(id, Some(fullscreen));
             if self.focus != Some(id) {
                 self.set_focus_id(self.focused_leaf_in(id));
