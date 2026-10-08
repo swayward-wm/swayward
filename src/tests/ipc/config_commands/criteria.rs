@@ -770,3 +770,59 @@ fn criteria_scoped_layout_options_apply_like_sway() {
     );
     assert_eq!(config.layout.titlebar.font, "monospace 13");
 }
+
+// differential seeds 2212 17365 17820 30962 31011 31173 31362 31587 31618
+// 31833 32798: `[floating]` and `[tiling]` test `container_is_floating` on the
+// view itself, true only for a parentless floater
+// (`sway/sway/criteria.c:422-432`, `sway/sway/tree/container.c:1041-1050`).
+// A view inside a floating split has a parent, so it is tiling; a fullscreen
+// floater is still floating.
+#[test]
+fn floating_criteria_test_the_view_not_its_floating_ancestor() {
+    let no_match = || {
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("No matching node.".into()),
+            parse_error: Some(false),
+        }]
+    };
+    for setup in [
+        &["floating enable", "splitv"][..],
+        &["floating toggle", "split h"][..],
+        &["floating enable", "split toggle"][..],
+        &["focus parent", "floating enable"][..],
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.add_output(1, (1920, 1080));
+        let client = fixture.add_client();
+        map_test_window(&mut fixture, client, "one");
+        for command in setup {
+            assert!(
+                crate::command::execute(fixture.niri_state(), command)[0].success,
+                "{setup:?}: {command}"
+            );
+        }
+        assert_eq!(
+            crate::command::execute(fixture.niri_state(), "[floating] border pixel 4"),
+            no_match(),
+            "{setup:?}"
+        );
+        assert!(
+            crate::command::execute(fixture.niri_state(), "[tiling] mark --add tiled")[0].success,
+            "{setup:?}"
+        );
+    }
+
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+    let client = fixture.add_client();
+    map_test_window(&mut fixture, client, "one");
+    for command in ["floating enable", "fullscreen toggle"] {
+        assert!(crate::command::execute(fixture.niri_state(), command)[0].success);
+    }
+    assert_eq!(
+        crate::command::execute(fixture.niri_state(), "[tiling] mark --add tiled"),
+        no_match()
+    );
+    assert!(crate::command::execute(fixture.niri_state(), "[floating] border pixel 4")[0].success);
+}

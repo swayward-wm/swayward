@@ -858,7 +858,9 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
                          floating: bool,
                          candidates: &mut Vec<Candidate>,
                          snapshots: &mut HashMap<_, WindowSnapshot>| {
-            for (node, kind) in tree.nodes() {
+            let nodes = tree.nodes();
+            let root = nodes.first().map(|(node, _)| *node);
+            for (node, kind) in nodes {
                 if !matches!(kind, IpcNodeKind::Leaf) {
                     let target = CommandTarget::Container(workspace.id(), node);
                     candidates.push(Candidate::Container(target, node));
@@ -871,10 +873,16 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
                     warn!("criteria: leaf {node:?} has no mapped window");
                     continue;
                 };
+                // Only a parentless floater is floating to criteria: a view
+                // inside a floating split has a parent, so it is tiling
+                // (`sway/sway/criteria.c:422-432`,
+                // `sway/sway/tree/container.c:1041-1050`).
+                let floating = floating && root == Some(node);
                 // Floating-group leaves are not in `with_windows`.
-                let snapshot = snapshots.remove(&mapped.id()).unwrap_or_else(|| {
+                let mut snapshot = snapshots.remove(&mapped.id()).unwrap_or_else(|| {
                     WindowSnapshot::new(mapped, workspace.sway_name(), floating)
                 });
+                snapshot.floating = floating;
                 candidates.push(Candidate::Window(snapshot));
             }
         };
@@ -893,7 +901,10 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
             .map(|mapped| mapped.id())
             .collect::<Vec<_>>();
         for id in plain_floating.into_iter().rev() {
-            if let Some(snapshot) = snapshots.remove(&id) {
+            // A fullscreen floater stays parentless on the floating list, so
+            // it is still floating to criteria.
+            if let Some(mut snapshot) = snapshots.remove(&id) {
+                snapshot.floating = true;
                 candidates.push(Candidate::Window(snapshot));
             }
         }
