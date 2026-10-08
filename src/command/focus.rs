@@ -93,11 +93,11 @@ fn directional(
         }
         return None;
     }
-    let workspace_focused = state
-        .swayward
-        .layout
-        .active_workspace()
-        .is_some_and(|workspace| workspace.is_workspace_focused());
+    // sway's `focus_wrapping workspace` keeps a container inside its workspace, but the
+    // workspace node itself, empty or focused, still crosses to the adjacent output
+    // (sway/commands/focus.c:211-213, 436-450).
+    let workspace_focused =
+        super::targeted::focused_node(state) == swayward_ipc::command::FocusedNode::Nothing;
     let changed = local(&mut state.swayward.layout, local_wrap);
     if changed {
         state.swayward.queue_redraw_all();

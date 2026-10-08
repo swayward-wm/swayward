@@ -1373,3 +1373,30 @@ fn sticky_fullscreen_floater_leaves_mapped_view_unarranged_like_sway() {
     assert_eq!(after["window_rect"], before["window_rect"], "{after:#}");
     f.swayward().layout.verify_invariants();
 }
+
+/// Oracle: focus_wrapping_workspace_crosses_from_an_empty_workspace. With
+/// `focus_wrapping workspace`, `focus <direction>` stays inside a workspace only
+/// for a container; an empty focused workspace is the workspace node itself, so
+/// it jumps to the adjacent output (sway/commands/focus.c:436-450, 207-213).
+#[test]
+fn focus_wrapping_workspace_crosses_outputs_from_an_empty_workspace() {
+    let mut f = Fixture::new();
+    f.add_output_at(1, (1280, 720), Some((0, 0)));
+    f.add_output_at(2, (1280, 720), Some((1280, 0)));
+    let run = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    };
+    let active_output = |f: &mut Fixture| f.swayward().layout.active_output().unwrap().name();
+
+    run(&mut f, "focus_wrapping workspace");
+    run(&mut f, "focus output headless-1");
+    for (command, output) in [
+        ("focus right", "headless-2"),
+        ("focus left", "headless-1"),
+        ("focus down", "headless-1"),
+    ] {
+        run(&mut f, command);
+        assert_eq!(active_output(&mut f), output, "{command}");
+    }
+}
