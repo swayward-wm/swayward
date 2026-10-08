@@ -483,11 +483,11 @@ impl ResolvedResizeTarget {
                 // `container_is_floating` is true only for the root
                 // (sway/commands/resize.c:523). Ask the layout: the mapped
                 // window's own flag lags a `floating enable` in the same batch.
-                let floating = state
-                    .swayward
-                    .layout
-                    .workspaces()
-                    .any(|(_, _, ws)| ws.window_is_floating_root(&window));
+                // A fullscreen floating view counts too: sway keeps it in
+                // `ws->floating`. Differential seeds 30971, 32275, 32541.
+                let floating = state.swayward.layout.workspaces().any(|(_, _, ws)| {
+                    ws.window_is_floating_root(&window) || ws.window_is_fullscreen_floating(&window)
+                });
                 if state.swayward.layout.is_scratchpad_hidden(&window) {
                     return Err(failure("Cannot resize a hidden scratchpad container"));
                 }

@@ -179,6 +179,17 @@ impl<W: LayoutElement> Workspace<W> {
         true
     }
 
+    /// A fullscreen floating view: swayward parks it in the tiling tree, sway
+    /// keeps it in `ws->floating`, so `container_is_floating` is true for it
+    /// (sway/tree/container.c:1041-1049).
+    pub fn window_is_fullscreen_floating(&self, window: &W::Id) -> bool {
+        self.tiling.tiles().any(|tile| {
+            tile.window().id() == window
+                && tile.restore_to_floating
+                && tile.window().pending_sizing_mode().is_fullscreen()
+        })
+    }
+
     pub fn active_floating_is_fullscreen(&self) -> bool {
         self.tiling.active_tile().is_some_and(|tile| {
             tile.restore_to_floating && tile.window().pending_sizing_mode().is_fullscreen()

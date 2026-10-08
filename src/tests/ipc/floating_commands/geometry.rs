@@ -1698,3 +1698,30 @@ fn global_fullscreen_rule_view_mapped_under_a_fullscreen_floating_group_takes_th
     assert_eq!(mapped["rect"]["height"], 720, "{mapped}");
     f.swayward().layout.verify_invariants();
 }
+
+#[test]
+fn ppt_only_resize_of_a_fullscreen_floating_window_is_refused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in ["fullscreen toggle", "floating toggle"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "resize shrink width 5 ppt");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Floating containers cannot use ppt measurements")
+    );
+}
