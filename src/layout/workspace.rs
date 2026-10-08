@@ -877,14 +877,11 @@ impl<W: LayoutElement> Workspace<W> {
                 let floating_has_window = self.floating.has_window(next_to);
 
                 if is_floating && tile.window().pending_sizing_mode().is_normal() {
-                    if floating_has_window {
-                        self.floating.add_tile_above(next_to, tile, activate);
-                    } else {
-                        // Sway centres a dialog on the workspace like any floating view,
-                        // not over its parent (`container_floating_resize_and_center`,
-                        // sway/tree/container.c:850-894).
-                        self.floating.add_tile(tile, activate);
-                    }
+                    // Sway centres a dialog on the workspace like any other
+                    // floating view, not over its parent
+                    // (`container_floating_resize_and_center`,
+                    // sway/tree/container.c:848-893).
+                    self.floating.add_tile(tile, activate);
 
                     if activate || self.tiling.is_empty() {
                         self.floating_is_active = FloatingActive::Yes;
@@ -2107,10 +2104,6 @@ impl<W: LayoutElement> Workspace<W> {
                     .is_internal_edge(window.id(), edge)
                     .then_some((window, edge))
             })
-    }
-
-    pub fn descendants_added(&mut self, id: &W::Id) -> bool {
-        self.floating.descendants_added(id)
     }
 
     pub fn update_window(&mut self, window: &W::Id, serial: Option<Serial>) {

@@ -345,10 +345,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
                     tile.window().id(),
                     "a window must belong to exactly one floating entry"
                 );
-                assert!(
-                    !entry_below.tile.window().is_child_of(tile.window()),
-                    "children must be stacked above parents"
-                );
             }
         }
 

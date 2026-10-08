@@ -2,7 +2,7 @@ use super::*;
 use crate::layout::tiling_tree::Layout as TreeLayout;
 
 impl<W: LayoutElement> FloatingLayout<W> {
-    pub(super) fn add_tile_at(&mut self, mut idx: usize, mut tile: Tile<W>, activate: bool) {
+    pub fn add_tile(&mut self, mut tile: Tile<W>, activate: bool) {
         tile.update_config(self.view_size, self.scale, self.options.clone());
         tile.set_sway_csd_floating(true);
         tile.set_border_edges(ResizeEdge::all());
@@ -48,20 +48,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
             self.active_window_id = Some(win.id().clone());
         }
 
-        // Make sure the tile isn't inserted below its parent.
-        for (i, tile_above) in self
-            .entries
-            .iter()
-            .map(|entry| &entry.tile)
-            .enumerate()
-            .take(idx)
-        {
-            if win.is_child_of(tile_above.window()) {
-                idx = i;
-                break;
-            }
-        }
-
         let pos = if tile.floating_pos.is_some() {
             self.stored_or_default_tile_pos(&tile).unwrap()
         } else if tile.window().pending_sizing_mode().is_normal() {
@@ -88,14 +74,12 @@ impl<W: LayoutElement> FloatingLayout<W> {
         };
 
         let data = Data::new(self.view_size, self.working_area, &tile, pos);
-        // A new root goes on top; one kept below its parent shares the parent's
-        // place relative to groups.
-        let stamp = match idx.checked_sub(1).and_then(|above| self.entries.get(above)) {
-            Some(above) => above.stamp,
-            None => self.bump_stamp(),
-        };
+        // A new root goes on top. Sway has no transient stacking: a dialog
+        // takes its place in `workspace->floating` like any other container
+        // (`container_set_floating`, sway/tree/container.c:941-954).
+        let stamp = self.bump_stamp();
         self.insert_entry(
-            idx,
+            0,
             FloatingEntry {
                 tile,
                 data,
@@ -103,8 +87,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 titlebar: Box::default(),
             },
         );
-
-        self.bring_up_descendants_of(idx);
     }
 
     /// Sway centers a floating view's content box, not its decorated container, on the
@@ -130,53 +112,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
         let side = tile.tile_width_for_window_width(0.) / 2.;
         let top = tile.tile_height_for_window_height(0.) - side;
         content_loc - Point::from((side, top))
-    }
-
-    pub fn add_tile_above(&mut self, above: &W::Id, tile: Tile<W>, activate: bool) {
-        let idx = if let Some(idx) = self.idx_of(above) {
-            idx
-        } else if let Some((idx, _)) = self.tree_entry_for_window(above) {
-            idx.min(self.entries.len())
-        } else {
-            return;
-        };
-
-        // Sway centres a dialog on the workspace like any floating view, not over
-        // its parent (`container_floating_resize_and_center`,
-        // sway/tree/container.c:850-894); only the stacking follows the parent.
-        self.add_tile_at(idx, tile, activate);
-    }
-
-    fn bring_up_descendants_of(&mut self, idx: usize) {
-        let tile = &self.entries[idx].tile;
-        let win = tile.window();
-
-        // We always maintain the correct stacking order, so walking descendants back to front
-        // should give us all of them.
-        let mut descendants: Vec<usize> = Vec::new();
-        for (i, tile_below) in self
-            .entries
-            .iter()
-            .map(|entry| &entry.tile)
-            .enumerate()
-            .skip(idx + 1)
-            .rev()
-        {
-            let win_below = tile_below.window();
-            if win_below.is_child_of(win)
-                || descendants
-                    .iter()
-                    .any(|idx| win_below.is_child_of(self.entries[*idx].tile.window()))
-            {
-                descendants.push(i);
-            }
-        }
-
-        // Now, descendants is in back-to-front order, and repositioning them in the front-to-back
-        // order will preserve the subsequent indices and work out right.
-        for (offset, descendant_idx) in descendants.into_iter().rev().enumerate() {
-            self.raise_window(descendant_idx, idx + offset);
-        }
     }
 
     pub fn remove_tile(
@@ -291,7 +226,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
         if let Some(idx) = self.idx_of(id) {
             self.raise_window(idx, 0);
             self.active_window_id = Some(id.clone());
-            self.bring_up_descendants_of(0);
             return true;
         }
         let Some((idx, _)) = self.tree_entry_for_window(id) else {
@@ -1161,15 +1095,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
         let new_pos =
             center_preferring_top_left_in_area(self.working_area, self.entries[idx].data.size);
         self.move_to(idx, new_pos, true);
-    }
-
-    pub fn descendants_added(&mut self, id: &W::Id) -> bool {
-        let Some(idx) = self.idx_of(id) else {
-            return false;
-        };
-
-        self.bring_up_descendants_of(idx);
-        true
     }
 
     pub fn update_window(&mut self, id: &W::Id, serial: Option<Serial>) -> bool {

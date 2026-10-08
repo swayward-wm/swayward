@@ -911,10 +911,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
         self.entries.is_empty() && self.tree_entries.is_empty()
     }
 
-    pub fn add_tile(&mut self, tile: Tile<W>, activate: bool) {
-        self.add_tile_at(0, tile, activate);
-    }
-
     /// Apply a split command to the active floating container. Sway wraps a
     /// standalone floating view in a new split container (`container_split`,
     /// sway/tree/container.c:1565-1620), so a lone leaf is promoted into a

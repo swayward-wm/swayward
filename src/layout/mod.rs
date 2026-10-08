@@ -1478,16 +1478,6 @@ impl<W: LayoutElement> Layout<W> {
         monitor.reap_empty_workspaces();
     }
 
-    pub fn descendants_added(&mut self, id: &W::Id) -> bool {
-        for ws in self.workspaces_mut() {
-            if ws.descendants_added(id) {
-                return true;
-            }
-        }
-
-        false
-    }
-
     pub fn update_window(&mut self, window: &W::Id, serial: Option<Serial>) {
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if move_.tile.window().id() == window {

@@ -951,20 +951,4 @@ impl XdgShellHandler for State {
         self.update_window_rules(&toplevel);
         self.refresh_formatted_title(&toplevel);
     }
-
-    fn parent_changed(&mut self, toplevel: ToplevelSurface) {
-        let Some(parent) = toplevel.parent() else {
-            return;
-        };
-
-        if let Some((mapped, output)) = self.swayward.layout.find_window_and_output_mut(&parent) {
-            let output = output.cloned();
-            let window = mapped.window.clone();
-            if self.swayward.layout.descendants_added(&window) {
-                if let Some(output) = output {
-                    self.swayward.queue_redraw(&output);
-                }
-            }
-        }
-    }
 }

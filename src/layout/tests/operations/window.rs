@@ -201,12 +201,9 @@ pub(super) fn apply(op: Op, layout: &mut Layout<TestWindow>) -> Applied {
                 }
             }
 
-            let mut update = false;
-
             if let Some(InteractiveMoveState::Moving(move_)) = &layout.interactive_move {
                 if move_.tile.window().0.id == id {
                     move_.tile.window().0.parent_id.set(new_parent_id);
-                    update = true;
                 }
             }
 
@@ -217,7 +214,6 @@ pub(super) fn apply(op: Op, layout: &mut Layout<TestWindow>) -> Applied {
                             for win in ws.windows() {
                                 if win.0.id == id {
                                     win.0.parent_id.set(new_parent_id);
-                                    update = true;
                                     break 'outer;
                                 }
                             }
@@ -229,17 +225,10 @@ pub(super) fn apply(op: Op, layout: &mut Layout<TestWindow>) -> Applied {
                         for win in ws.windows() {
                             if win.0.id == id {
                                 win.0.parent_id.set(new_parent_id);
-                                update = true;
                                 break 'outer;
                             }
                         }
                     }
-                }
-            }
-
-            if update {
-                if let Some(new_parent_id) = new_parent_id {
-                    layout.descendants_added(&new_parent_id);
                 }
             }
         }

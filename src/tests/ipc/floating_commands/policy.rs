@@ -1203,6 +1203,110 @@ fn floating_nodes_list_groups_and_windows_in_one_stacking_order() {
     assert!(floating[1].focused);
 }
 
+/// Family diff-fam-v3-hinted-map-focus-order: sway has no transient stacking,
+/// so floating a parent appends it after its already floating dialog
+/// (`container_set_floating` -> `workspace_add_floating`,
+/// sway/tree/container.c:941-954, sway/tree/workspace.c:961-971) and GET_TREE
+/// lists the dialog first. Oracle row hinted_child_map_then_float_parent_order.
+#[test]
+fn floating_a_parent_stacks_it_above_its_dialog() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+    let map = |f: &mut Fixture, app_id: &str, parent: Option<&XdgToplevel>| {
+        let window = f.client(client).create_window();
+        window.set_title(app_id);
+        window.set_parent(parent);
+        let toplevel = window.xdg_toplevel.clone();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        toplevel
+    };
+    let parent = map(&mut f, "parent", None);
+    map(&mut f, "dialog", Some(&parent));
+    map(&mut f, "tiled", None);
+    for command in ["focus left", "floating enable"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let floating = &tree.nodes[1].nodes[0].floating_nodes;
+    let order = floating
+        .iter()
+        .map(|node| (node.name.as_deref(), node.focused))
+        .collect::<Vec<_>>();
+    assert_eq!(order, [(Some("dialog"), false), (Some("parent"), true)]);
+}
+
+/// Family diff-fam-v3-hinted-map-focus-order, random-v3 seed 33875: sway
+/// centres a dialog on the workspace like any other floating view
+/// (`container_floating_resize_and_center`, sway/tree/container.c:848-893),
+/// not over its parent, so from the dialog `focus right` reaches a floater
+/// centred right of the workspace centre and raises it
+/// (`node_get_in_direction_floating`, sway/commands/focus.c:226-258, 457-470).
+#[test]
+fn dialog_maps_centred_on_the_workspace_not_over_its_parent() {
+    use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map =
+        |f: &mut Fixture, title: &str, size: Option<(u16, u16)>, parent: Option<&XdgToplevel>| {
+            let window = f.client(client).create_window();
+            window.set_title(title);
+            if let Some((w, h)) = size {
+                window.set_size(w, h);
+            }
+            window.set_parent(parent);
+            let toplevel = window.xdg_toplevel.clone();
+            window.commit();
+            let surface = window.surface.clone();
+            f.roundtrip(client);
+            let window = f.client(client).window(&surface);
+            window.attach_new_buffer();
+            window.ack_last_and_commit();
+            f.double_roundtrip(client);
+            toplevel
+        };
+    map(&mut f, "floater", Some((700, 466)), None);
+    let reply = crate::command::execute(f.niri_state(), "floating enable");
+    assert!(reply[0].success, "{reply:?}");
+    map(&mut f, "tiled", None, None);
+    let parent = map(&mut f, "parent", None, None);
+    map(&mut f, "dialog", None, Some(&parent));
+
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let dialog = &tree.nodes[1].nodes[0].floating_nodes[1];
+    assert_eq!(dialog.name.as_deref(), Some("dialog"));
+    // Sway centres the 75x50 natural box on the workspace, then the 1x1 commit
+    // keeps its content origin, (1280-75)/2 and (720-50)/2 (floating_natural_resize and
+    // container_floating_resize_and_center, sway/tree/container.c:833-894). The
+    // parent tiles in the right half, so a dialog over it would sit near x=960.
+    assert_eq!(
+        (dialog.rect.x, dialog.rect.y),
+        (602, 335),
+        "the dialog is centred on the workspace, not over its parent: {:?}",
+        dialog.rect
+    );
+
+    let reply = crate::command::execute(f.niri_state(), "focus right");
+    assert!(reply[0].success, "{reply:?}");
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let order = tree.nodes[1].nodes[0]
+        .floating_nodes
+        .iter()
+        .map(|node| (node.name.as_deref(), node.focused))
+        .collect::<Vec<_>>();
+    assert_eq!(order, [(Some("dialog"), false), (Some("floater"), true)]);
+}
+
 /// A window mapped while a floating group's child is focused joins that group
 /// beside the child; with the group root itself focused it tiles instead
 /// (`view_map`, sway/tree/view.c:849-901). Random oracle seeds 290 and 330.
