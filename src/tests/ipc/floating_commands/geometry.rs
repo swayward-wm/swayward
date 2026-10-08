@@ -1402,3 +1402,83 @@ fn ending_a_floating_fullscreen_split_arranges_the_mapped_view() {
         }
     }
 }
+
+/// Differential family v3-floating-split-rect-after-resize (random-v3 seeds 30850, 31123,
+/// 31297, 32283; oracle row `floating_resize_ppt_split_keeps_rect`): `resize set` on a
+/// floating view moves the container by half the growth (`con->pending.x -= grow_width / 2`,
+/// sway/commands/resize.c:360-362, :381-383), so the box keeps its centre and a later split
+/// wraps the moved box.
+#[test]
+fn floating_resize_set_keeps_the_centre_and_split_wraps_it() {
+    let mut config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let surface = f.client(client).create_window().surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size(696, 491);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let floating = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        find_json_node(&tree, "floating_con", false)
+            .unwrap()
+            .clone()
+    };
+    let before = floating(&mut f);
+    let int = |node: &Value, key: &str| node["rect"][key].as_i64().unwrap();
+    let (x, y, w, h) = (
+        int(&before, "x"),
+        int(&before, "y"),
+        int(&before, "width"),
+        int(&before, "height"),
+    );
+    assert_eq!(w, 700, "{before}");
+
+    // 30 ppt of 1270 is 381, 40 ppt of 1408 is 563; the client has not committed yet.
+    assert!(
+        crate::command::execute(f.niri_state(), "resize set width 30 ppt height 40 ppt")[0].success
+    );
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    let expected = serde_json::json!({
+        "x": x - (381 - w) / 2,
+        "y": y - (563 - h) / 2,
+        "width": 381,
+        "height": 563,
+    });
+    let split = floating(&mut f);
+    assert_eq!(split["layout"], "splitv", "{split}");
+    assert_eq!(split["rect"], expected, "{before}\n{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    assert_eq!(int(child, "x"), expected["x"].as_i64().unwrap(), "{child}");
+    assert_eq!(
+        int(child, "y"),
+        expected["y"].as_i64().unwrap() + titlebar,
+        "{child}"
+    );
+}

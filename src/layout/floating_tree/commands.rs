@@ -605,7 +605,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
             ),
             change => change,
         };
+        let before = self.entries[idx].tile.tile_expected_or_current_size();
         self.set_window_width(Some(id), change, true, automatic_maximum);
+        self.recenter_after_resize_set(idx, before);
     }
 
     pub fn set_window_outer_height(
@@ -632,7 +634,28 @@ impl<W: LayoutElement> FloatingLayout<W> {
             ),
             change => change,
         };
+        let before = self.entries[idx].tile.tile_expected_or_current_size();
         self.set_window_height(Some(id), change, true, automatic_maximum);
+        self.recenter_after_resize_set(idx, before);
+    }
+
+    /// Sway's `resize set` on a floating view moves the container by half the growth, so
+    /// the box keeps its centre (`con->pending.x -= grow_width / 2`, integer division,
+    /// sway/commands/resize.c:360-362 and :381-383).
+    fn recenter_after_resize_set(&mut self, idx: usize, before: Size<f64, Logical>) {
+        let entry = &mut self.entries[idx];
+        if !entry.tile.sizing_mode().is_normal() {
+            return;
+        }
+        let after = entry.tile.tile_expected_or_current_size();
+        let shift = Point::from((
+            ((after.w - before.w).trunc() / 2.).trunc(),
+            ((after.h - before.h).trunc() / 2.).trunc(),
+        ));
+        if shift != Point::from((0., 0.)) {
+            let pos = entry.data.logical_pos - shift;
+            entry.data.set_logical_pos(pos);
+        }
     }
 
     pub fn resize_window_edge(

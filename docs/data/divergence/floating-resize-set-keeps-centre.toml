@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/floating_tree/commands.rs"]
+what = "`resize set` on a floating view moves the container by half the size change (integer-truncated), so it keeps its centre."
+why = "Sway's resize_set_floating subtracts grow_width / 2 and grow_height / 2 from the pending origin (sway/commands/resize.c:360-362, :381-383). niri kept the top-left corner, so a later split wrapped a box offset by half the growth (differential family v3-floating-split-rect-after-resize, random-v3 seeds 30850, 31123, 31297, 32283)."
