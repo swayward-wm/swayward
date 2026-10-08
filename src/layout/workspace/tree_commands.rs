@@ -391,6 +391,16 @@ impl<W: LayoutElement> Workspace<W> {
         if fullscreen {
             self.disable_fullscreen();
         }
+        if self.tiling.is_empty() && self.has_non_sticky_floating() {
+            // A wrapper the move created is a new node at the bottom of the
+            // seat's focus stack, so the floaters keep focus priority
+            // (`seat_node_from_node`, sway/input/seat.c:327-350); an existing
+            // container keeps its rank.
+            if !subtree.is_wrapped_workspace() {
+                self.floating_is_active = FloatingActive::No;
+            }
+            return self.tiling.attach_subtree_at_wrapped(subtree, target);
+        }
         self.floating_is_active = FloatingActive::No;
         self.tiling.attach_subtree_at(subtree, target)
     }

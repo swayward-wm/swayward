@@ -234,6 +234,10 @@ impl<W: LayoutElement> DetachedSubtree<W> {
         self.node.has_fullscreen()
     }
 
+    pub fn is_wrapped_workspace(&self) -> bool {
+        self.wrapped_workspace
+    }
+
     /// Trades whether two swapped views count as floating. A fullscreen
     /// floating view stays in the workspace's floating list in sway, so the
     /// view that takes its place there floats (`swap_places`,

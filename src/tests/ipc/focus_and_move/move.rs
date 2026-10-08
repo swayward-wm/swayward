@@ -1155,3 +1155,104 @@ fn kill_on_workspace_closes_sticky_floater_after_switch_like_sway() {
     }
     assert!(f.client(client).window(&surface).close_requested);
 }
+
+/// A wrapped workspace moved onto a workspace whose only window is a
+/// non-sticky floater keeps its wrapper: sway unwraps only into a target
+/// that `workspace_is_empty`, and floaters count
+/// (sway/commands/move.c:221-230, sway/tree/workspace.c:752-764). Oracle row:
+/// state move_workspace_onto_floating_only_workspace_keeps_wrapper;
+/// random-v3 seeds 30776 30911.
+#[test]
+fn moving_workspace_children_onto_floating_only_workspace_keeps_the_wrapper() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let run = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    };
+    map_test_window(&mut f, client, "floater");
+    run(&mut f, "move container to workspace 4");
+    map_test_window(&mut f, client, "tiled");
+    run(&mut f, "[app_id=\"floater\"] floating enable");
+    run(&mut f, "focus parent");
+    run(&mut f, "move container to workspace 4");
+
+    let tree = get_tree(&mut f);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let target = workspaces.iter().find(|ws| ws["name"] == "4").unwrap();
+    let nodes = target["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1, "{target:#}");
+    let wrapper = &nodes[0];
+    assert_eq!(wrapper["type"], "con");
+    assert!(wrapper["app_id"].is_null(), "{wrapper:#}");
+    assert_eq!(wrapper["border"], "none");
+    assert_eq!(wrapper["current_border_width"], 0);
+    assert_eq!(wrapper["layout"], "splith");
+    assert_eq!(wrapper["nodes"][0]["app_id"], "tiled");
+    let floater = &target["floating_nodes"][0];
+    assert_eq!(floater["app_id"], "floater");
+    // The new wrapper sits below the floater in the focus stack.
+    assert_eq!(target["focus"][0], floater["id"]);
+    assert_eq!(target["focus"][1], wrapper["id"]);
+}
+
+/// A container that already existed keeps its focus rank when it moves onto
+/// a floating-only workspace: `layout tabbed` made it, so it outranks the
+/// floater there (sway/commands/layout.c:178-183). Oracle row: state
+/// move_container_onto_floating_only_workspace_keeps_focus; random-v3 seed
+/// 30776.
+#[test]
+fn moving_existing_container_onto_floating_only_workspace_keeps_its_focus() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let run = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    };
+    map_test_window(&mut f, client, "floater");
+    run(&mut f, "move container to workspace 4");
+    map_test_window(&mut f, client, "tiled");
+    run(&mut f, "[app_id=\"floater\"] floating enable");
+    run(&mut f, "layout tabbed");
+    run(&mut f, "focus parent");
+    run(&mut f, "move container to workspace 4");
+
+    let tree = get_tree(&mut f);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let target = workspaces.iter().find(|ws| ws["name"] == "4").unwrap();
+    let container = &target["nodes"][0];
+    assert_eq!(container["layout"], "tabbed");
+    assert_eq!(target["focus"][0], container["id"], "{target:#}");
+    assert_eq!(target["focus"][1], target["floating_nodes"][0]["id"]);
+}
+
+/// A container moved onto a workspace lands beside the target's
+/// focus-inactive tiling view, not at the end
+/// (`seat_get_focus_inactive_tiling`, sway/commands/move.c:516;
+/// `container_move_to_container`, move.c:241-261). Oracle row: state
+/// move_workspace_wrapper_lands_beside_focus_inactive; random-v3 seed 30911.
+#[test]
+fn moved_workspace_wrapper_lands_beside_the_focus_inactive_view() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let run = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    };
+    map_test_window(&mut f, client, "a");
+    map_test_window(&mut f, client, "b");
+    run(&mut f, "focus left");
+    f.double_roundtrip(client);
+    run(&mut f, "workspace 2");
+    map_test_window(&mut f, client, "c");
+    run(&mut f, "focus parent");
+    run(&mut f, "move container to workspace 1");
+
+    let tree = get_tree(&mut f);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let target = workspaces.iter().find(|ws| ws["name"] == "1").unwrap();
+    assert_eq!(target["representation"], "H[a H[c] b]", "{target:#}");
+}

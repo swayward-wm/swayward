@@ -12,7 +12,13 @@ impl<W: LayoutElement> Workspace<W> {
                 .tiles()
                 .all(|tile| tile.is_sticky && self.is_floating_for_ipc(tile.window().id()));
         (!self.tiling.is_empty() && !only_sticky_fullscreen_floating)
-            || self.floating.tiles().any(|tile| !tile.is_sticky)
+            || self.has_non_sticky_floating()
+    }
+
+    /// Whether a floater that does not follow the visible workspace lives
+    /// here (`workspace_is_empty`, sway/sway/tree/workspace.c:752-764).
+    pub fn has_non_sticky_floating(&self) -> bool {
+        self.floating.tiles().any(|tile| !tile.is_sticky)
             || self
                 .floating
                 .tree_roots()

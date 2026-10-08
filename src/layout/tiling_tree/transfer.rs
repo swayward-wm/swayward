@@ -229,6 +229,18 @@ impl<W: LayoutElement> TilingTree<W> {
         (id, remapped)
     }
 
+    /// Attaches a subtree without unwrapping it into an empty root: sway
+    /// unwraps only into a workspace that `workspace_is_empty`, which a
+    /// non-sticky floater rules out (sway/commands/move.c:221-230,
+    /// sway/tree/workspace.c:752-764).
+    pub fn attach_subtree_at_wrapped(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        target: Option<NodeId>,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        self.attach_subtree_with(subtree, target, false)
+    }
+
     /// Attaches a floating group that is returning to tiling. Sway adds the group container
     /// itself with `workspace_add_tiling`, keeping it as a split even on an empty workspace
     /// (`container_set_floating`, sway/tree/container.c:976-1003), rather than unwrapping its
