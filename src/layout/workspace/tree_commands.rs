@@ -309,12 +309,10 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn focus_child(&mut self) -> bool {
         if self.floating_is_active.get() {
             self.floating.focus_child()
-        } else if self.is_workspace_focused()
-            && self.floating_is_active == FloatingActive::NoButRaised
-        {
-            self.floating_is_active = FloatingActive::Yes;
-            true
         } else {
+            // From the workspace only tiling children are candidates, so a
+            // workspace holding nothing but floating windows keeps its focus
+            // (`seat_get_active_tiling_child`, sway/input/seat.c:1419-1425).
             self.tiling.focus_child()
         }
     }

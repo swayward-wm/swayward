@@ -702,12 +702,17 @@ fn focus_parent_then_layout_targets_the_parent_of_the_focused_container() {
         .all(|node| node["focused"] == false));
 }
 
+/// Oracle: state scenario focus_child_skips_floating_child
+/// (diff-fam-v3-floating-focus-parent-child). From the workspace `focus child`
+/// considers only tiling children (`seat_get_active_tiling_child`,
+/// sway/input/seat.c:1419-1425): it gives a tiled view back, and a workspace
+/// holding nothing but a floating view keeps its focus.
 #[test]
-fn focus_child_from_workspace_restores_the_floating_child() {
+fn focus_child_from_workspace_skips_floating_children() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
-    for floating in [false, true] {
+    let map = |f: &mut Fixture| {
         let window = f.client(client).create_window();
         window.commit();
         let surface = window.surface.clone();
@@ -716,28 +721,30 @@ fn focus_child_from_workspace_restores_the_floating_child() {
         window.attach_new_buffer();
         window.ack_last_and_commit();
         f.double_roundtrip(client);
-        if floating {
-            assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
-        }
+    };
+    let workspace_focused = |f: &mut Fixture| {
+        f.swayward()
+            .layout
+            .active_workspace()
+            .unwrap()
+            .is_workspace_focused()
+    };
+
+    map(&mut f);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    for command in ["focus parent", "focus child"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        assert!(workspace_focused(&mut f), "{command}");
     }
-    let floating = f.swayward().layout.focus().unwrap().id();
 
+    map(&mut f);
+    let tiled = f.swayward().layout.focus().unwrap().id();
+    assert!(crate::command::execute(f.niri_state(), "focus floating")[0].success);
+    assert_ne!(f.swayward().layout.focus().unwrap().id(), tiled);
     assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
-    assert!(f
-        .swayward()
-        .layout
-        .active_workspace()
-        .unwrap()
-        .is_workspace_focused());
+    assert!(workspace_focused(&mut f));
     assert!(crate::command::execute(f.niri_state(), "focus child")[0].success);
-
-    assert_eq!(f.swayward().layout.focus().unwrap().id(), floating);
-
-    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "focus tiling")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "focus child")[0].success);
-    assert_ne!(f.swayward().layout.focus().unwrap().id(), floating);
+    assert_eq!(f.swayward().layout.focus().unwrap().id(), tiled);
 }
 
 #[test]
