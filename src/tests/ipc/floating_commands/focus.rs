@@ -1106,3 +1106,83 @@ fn unfloating_a_split_floated_group_keeps_focus_on_the_inner_group() {
     assert_eq!(group["nodes"][0]["focused"], false);
     swayward.layout.verify_invariants();
 }
+
+/// Differential seeds 30869 30982 31027 31038 31081 31141 31237 31247 31381
+/// 31438 31471 31496 31559 31615 31636 31817 31951 32573 32592
+/// (diff-fam-v3-map-after-float-from-split). `layout toggle` on a lone view
+/// wraps the workspace's children in a vertical split
+/// (`workspace_wrap_children`, sway/commands/layout.c:184-189). Floating the
+/// second view of that split raises the old parent split in the focus stack
+/// just below the floated view (sway/tree/container.c:969-974). The next view
+/// maps beside the focus-inactive tiling container's focus-inactive view
+/// (`seat_get_focus_inactive_tiling` then `seat_get_focus_inactive_view`,
+/// sway/tree/view.c:854-866), so it joins the split, not the workspace.
+#[test]
+fn map_after_floating_from_a_split_joins_the_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id| {
+        crate::tests::windows::map_window(
+            f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    };
+    map(&mut f, "a");
+    assert!(crate::command::execute(f.niri_state(), "layout toggle")[0].success);
+    map(&mut f, "b");
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    map(&mut f, "c");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let shape = |node: &serde_json::Value| -> String {
+        fn go(node: &serde_json::Value) -> String {
+            match node["app_id"].as_str() {
+                Some(app_id) => app_id.to_owned(),
+                None => format!(
+                    "{}[{}]",
+                    node["layout"].as_str().unwrap_or_default(),
+                    node["nodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(go)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            }
+        }
+        go(node)
+    };
+    assert_eq!(shape(workspace), "splith[splitv[a,c]]");
+    assert_eq!(workspace["nodes"][0]["nodes"][1]["percent"], 0.5);
+    drop(tree);
+
+    // Sending `c` to the scratchpad focuses the focus-inactive node under its
+    // surviving parent, `a`, not the more recently focused floating view
+    // (`seat_get_focus_inactive(parent)`, sway/tree/root.c:128-140).
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["nodes"][0]["nodes"][0]["focused"], true);
+    assert_eq!(workspace["floating_nodes"][0]["focused"], false);
+}

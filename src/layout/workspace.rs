@@ -999,6 +999,17 @@ impl<W: LayoutElement> Workspace<W> {
                 .tiling
                 .node_for_window(id)
                 .is_some_and(|node| self.tiling.close_keeps_workspace_focus(node));
+        // A focused tiled view moved away hands focus to the focus-inactive
+        // node under its old parent when that parent survives, which is never
+        // a floating view (`seat_get_focus_inactive(old_parent)`,
+        // sway/tree/root.c:128-140, sway/commands/move.c:598-608).
+        let keeps_tiling_focus = transfer.is_some()
+            && !self.floating_is_active.get()
+            && self
+                .tiling
+                .active_window()
+                .is_some_and(|window| window.id() == id)
+            && self.tiling.non_root_parent_for_window(id).is_some();
         let removed = if self.floating.has_window(id) {
             from_floating = true;
             self.floating.remove_tile(id, transaction)
@@ -1028,6 +1039,9 @@ impl<W: LayoutElement> Workspace<W> {
             self.tiling.restore_has_had_tile(true);
         }
         self.update_focus_floating_tiling_after_removing(from_floating);
+        if keeps_tiling_focus && !self.tiling.is_empty() {
+            self.floating_is_active = FloatingActive::No;
+        }
         // The seat refuses a floating view the closing global fullscreen container still
         // obstructs, as it does a tiled one (sway/input/seat.c:1148-1151).
         if keeps_workspace_focus && self.floating_is_active.get() {
