@@ -1389,3 +1389,84 @@ fn a_csd_view_floated_then_fullscreened_keeps_csd() {
         assert_eq!(view["type"], "floating_con", "{commands:?}");
     }
 }
+
+#[test]
+fn a_hinted_dialog_split_wraps_the_centred_content_box() {
+    use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+
+    // A dialog that binds no decoration protocol maps floating with csd
+    // (handle_map, sway/desktop/xdg_shell.c:484-500). Sway centres the natural
+    // size clamped to floating_minimum_size, 75x50, on the workspace rather
+    // than over the parent (floating_natural_resize and
+    // container_floating_resize_and_center, sway/tree/container.c:833-894),
+    // then shrinks the box to the 1x1 the client commits around the same
+    // content origin. `split h` wraps that box and restores the normal border;
+    // the 1 px child is below sway's 10 px lower bound, so it gets an empty box
+    // and GET_TREE reports it less the titlebar (sway/tree/arrange.c:91-94,
+    // sway/ipc-json.c:816-825). Family diff-fam-v3-hinted-floating-split-content-rect,
+    // seed 31752; oracle row hinted_floating_dialog_split_keeps_content.
+    let config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; }"#,
+    )
+    .unwrap();
+    let (mut f, _) = ipc_fixture_with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id: &str, parent: Option<&XdgToplevel>| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.set_parent(parent);
+        let toplevel = window.xdg_toplevel.clone();
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        toplevel
+    };
+    let parent = map(&mut f, "parent", None);
+    map(&mut f, "dialog", Some(&parent));
+
+    let tree = get_tree(&mut f);
+    let dialog = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(dialog["border"], "csd", "{dialog:#}");
+    assert_eq!(
+        dialog["rect"],
+        serde_json::json!({"x": 597, "y": 679, "width": 1, "height": 1}),
+        "{dialog:#}"
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "split h")[0].success);
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let split = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(split["layout"], "splith", "{split:#}");
+    assert_eq!(
+        split["rect"],
+        serde_json::json!({"x": 597, "y": 679, "width": 1, "height": 1}),
+        "{split:#}"
+    );
+    let child = &split["nodes"][0];
+    assert_eq!(child["border"], "normal", "{child:#}");
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    assert!(titlebar > 0, "{child:#}");
+    assert_eq!(
+        child["rect"],
+        serde_json::json!({"x": 597, "y": 679 + titlebar, "width": 0, "height": -titlebar}),
+        "{child:#}"
+    );
+
+    // A stacked view takes the whole 1x1 box less the titlebar row
+    // (apply_stacked_layout, sway/tree/arrange.c:199-211); seed 31816.
+    assert!(crate::command::execute(f.niri_state(), "layout stacking")[0].success);
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let child = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0]["nodes"][0];
+    assert_eq!(
+        child["rect"],
+        serde_json::json!({"x": 597, "y": 679 + titlebar, "width": 1, "height": 1 - titlebar}),
+        "{child:#}"
+    );
+}

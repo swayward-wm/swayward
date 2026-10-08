@@ -195,6 +195,7 @@ impl<W: LayoutElement> TilingTree<W> {
             smart_borders: self.options.layout.smart_borders,
             visible_leaves: &visible_leaves,
             draw_uncovered_top_border: self.options.layout.draw_uncovered_top_border,
+            floating_group: self.resident_root,
         })
     }
 

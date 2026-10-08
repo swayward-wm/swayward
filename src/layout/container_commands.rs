@@ -67,6 +67,10 @@ impl<W: LayoutElement> Layout<W> {
     pub fn use_client_decorations_from_map(&mut self, window: &W::Id) {
         for workspace in self.workspaces_mut() {
             let floating = workspace.is_floating(window);
+            if floating {
+                workspace.use_floating_client_decorations_from_map(window);
+                return;
+            }
             if let Some(tile) = workspace
                 .tiles_mut()
                 .find(|tile| tile.window().id() == window)

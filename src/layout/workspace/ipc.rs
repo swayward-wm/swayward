@@ -12,6 +12,11 @@ impl<W: LayoutElement> Workspace<W> {
             .map(|tile| tile.sway_border())
     }
 
+    /// See [`FloatingLayout::use_client_decorations_from_map`].
+    pub fn use_floating_client_decorations_from_map(&mut self, window: &W::Id) {
+        self.floating.use_client_decorations_from_map(window);
+    }
+
     pub fn set_window_border(
         &mut self,
         window: &W::Id,

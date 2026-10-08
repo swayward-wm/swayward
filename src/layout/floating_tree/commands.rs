@@ -64,6 +64,22 @@ impl<W: LayoutElement> FloatingLayout<W> {
 
         let pos = if tile.floating_pos.is_some() {
             self.stored_or_default_tile_pos(&tile).unwrap()
+        } else if tile.window().pending_sizing_mode().is_normal() {
+            // Sway centres the natural size clamped by `floating_minimum_size` and
+            // `floating_maximum_size` alone, not by the client's size hints
+            // (`floating_natural_resize`, sway/tree/container.c:833-847): a view that
+            // maps at 1x1 is centred as 75x50.
+            let natural = floating_size.unwrap_or_else(|| tile.window().natural_size());
+            let (minimum, maximum) = floating_constraints(
+                self.options.layout.floating_minimum_size,
+                self.options.layout.floating_maximum_size,
+                self.view_size,
+            );
+            let content = Size::from((
+                f64::from(natural.w).min(maximum.w).max(minimum.w),
+                f64::from(natural.h).min(maximum.h).max(minimum.h),
+            ));
+            self.centered_content_tile_pos(&tile, content)
         } else if size.w > 1 && size.h > 1 {
             self.centered_content_tile_pos(&tile, size.to_f64())
         } else {
@@ -116,22 +132,18 @@ impl<W: LayoutElement> FloatingLayout<W> {
         content_loc - Point::from((side, top))
     }
 
-    pub fn add_tile_above(&mut self, above: &W::Id, mut tile: Tile<W>, activate: bool) {
-        let (idx, above_rect) = if let Some(idx) = self.idx_of(above) {
-            let data = self.entries[idx].data;
-            (idx, Rectangle::new(data.logical_pos, data.size))
+    pub fn add_tile_above(&mut self, above: &W::Id, tile: Tile<W>, activate: bool) {
+        let idx = if let Some(idx) = self.idx_of(above) {
+            idx
         } else if let Some((idx, _)) = self.tree_entry_for_window(above) {
-            (idx.min(self.entries.len()), self.tree_entries[idx].rect)
+            idx.min(self.entries.len())
         } else {
             return;
         };
 
-        let tile_size = tile.tile_size();
-        let pos =
-            above_rect.loc + (above_rect.size.to_point() - tile_size.to_point()).downscale(2.);
-        let pos = self.clamp_within_working_area(pos, tile_size);
-        tile.floating_pos = Some(self.logical_to_size_frac(pos));
-
+        // Sway centres a dialog on the workspace like any floating view, not over
+        // its parent (`container_floating_resize_and_center`,
+        // sway/tree/container.c:850-894); only the stacking follows the parent.
         self.add_tile_at(idx, tile, activate);
     }
 
@@ -507,17 +519,39 @@ impl<W: LayoutElement> FloatingLayout<W> {
         style: swayward_ipc::command::BorderStyle,
         width: Option<u16>,
     ) -> bool {
+        self.change_decorations_keeping_content(id, |tile| {
+            tile.set_sway_border(style, width, true).is_ok()
+        })
+    }
+
+    /// See [`Tile::use_client_decorations_from_map`]. A floating root keeps the content
+    /// box it was centred on: sway marks the view CSD before `container_set_floating`
+    /// centres it (sway/tree/view.c:904-911, sway/tree/container.c:955-968).
+    pub fn use_client_decorations_from_map(&mut self, id: &W::Id) -> bool {
+        self.change_decorations_keeping_content(id, |tile| {
+            tile.use_client_decorations_from_map(true);
+            true
+        })
+    }
+
+    /// Runs `change` on the floating root `id` and moves the container so the content
+    /// stays put, as sway keeps a floating view's content box and moves the container
+    /// around it (`container_set_geometry_from_content`, sway/commands/border.c:94-96,
+    /// sway/tree/container.c:1018-1039). Returns what `change` returned, or false
+    /// when `id` is not a floating root.
+    fn change_decorations_keeping_content(
+        &mut self,
+        id: &W::Id,
+        change: impl FnOnce(&mut Tile<W>) -> bool,
+    ) -> bool {
         let Some(index) = self.idx_of(id) else {
             return false;
         };
         let entry = &mut self.entries[index];
         let content_before = entry.tile.window_loc();
-        let changed = entry.tile.set_sway_border(style, width, true).is_ok();
+        let changed = change(&mut entry.tile);
         if changed {
             entry.data.update(&entry.tile);
-            // Sway keeps a floating view's content box and moves the container around
-            // it (`container_set_geometry_from_content`, sway/commands/border.c:94-96,
-            // sway/tree/container.c:1018-1039).
             if entry.tile.sizing_mode().is_normal() {
                 let shift = entry.tile.window_loc() - content_before;
                 let pos = entry.data.logical_pos - shift;

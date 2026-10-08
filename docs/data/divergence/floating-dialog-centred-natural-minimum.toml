@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/floating_tree/commands.rs", "src/layout/workspace.rs"]
+what = "centre a new floating view, dialogs included, on the workspace at its natural size clamped by floating_minimum_size and floating_maximum_size, and keep its content box when map-time csd drops the decorations; a dialog no longer opens over its parent."
+why = "Sway centres every floating view through container_floating_resize_and_center, which ignores the parent and clamps the natural size only by the floating limits (sway/tree/container.c:833-894); niri centred a dialog over its parent and a 1x1 view on its own tiny box, so a split then wrapped a box in the wrong place."
