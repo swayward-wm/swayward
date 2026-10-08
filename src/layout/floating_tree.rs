@@ -1360,6 +1360,25 @@ impl<W: LayoutElement> FloatingLayout<W> {
         }
     }
 
+    /// [`TilingTree::yield_fullscreen`] for the group holding the fullscreen.
+    pub fn yield_fullscreen(&mut self) {
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.fullscreen_node().is_some())
+        {
+            entry.tree.yield_fullscreen();
+        }
+    }
+
+    /// The workspace has no fullscreen container left, so the next arrange reaches every
+    /// group again.
+    pub fn forget_yielded_fullscreen(&mut self) {
+        for entry in &mut self.tree_entries {
+            entry.tree.forget_floating_fullscreen();
+        }
+    }
+
     pub fn set_window_fullscreen(
         &mut self,
         window: &W::Id,

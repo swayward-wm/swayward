@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs"]
+what = "a tiled view mapped while a floating container is fullscreen is not focused, and the tiling tree keeps its boxes as unarranged under fullscreen."
+why = "A fullscreen floating container is the workspace's fullscreen in sway, so should_focus refuses the new view (sway/tree/view.c:707-710) and arrange_workspace reaches only the fullscreen container (sway/tree/arrange.c:310-316). Differential family diff-fam-v3-floating-fullscreen-map-focus, seed 30843; oracle row floating_fullscreen_group_map_keeps_focus."

@@ -1587,3 +1587,74 @@ fn fullscreen_floater_move_absolute_position_crosses_output_like_sway() {
         !crate::command::execute(f.niri_state(), "move absolute position 10 ppt 20 px")[0].success
     );
 }
+
+#[test]
+fn view_mapped_under_a_fullscreen_floating_group_keeps_the_group_focused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &["focus parent", "floating toggle", "fullscreen enable"],
+    );
+    map_app(&mut f, client, "fixture-2");
+
+    let tree = tree_json(&mut f);
+    let group = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(group["fullscreen_mode"], 1, "{tree:#}");
+    assert_eq!(group["focused"], true, "{tree:#}");
+    let mapped = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(mapped["focused"], false, "{mapped}");
+    assert_eq!(mapped["percent"], 0.0, "{mapped}");
+    assert_eq!(mapped["border"], "normal", "{mapped}");
+    assert_eq!(mapped["rect"]["width"], 0, "{mapped}");
+}
+
+#[test]
+fn fullscreen_rule_view_mapped_under_a_fullscreen_floating_group_takes_focus_and_fullscreen() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[r#"for_window [app_id="fixture-2"] fullscreen enable"#],
+    );
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &["focus parent", "floating toggle", "fullscreen enable"],
+    );
+    let held_rect = {
+        let tree = tree_json(&mut f);
+        find_json_node_with_app_id(&tree, "fixture-1").unwrap()["rect"].clone()
+    };
+    map_app(&mut f, client, "fixture-2");
+
+    let tree = tree_json(&mut f);
+    let group = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(group["fullscreen_mode"], 0, "{tree:#}");
+    assert_eq!(group["focused"], false, "{tree:#}");
+    let held = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(held["visible"], false, "{held}");
+    // Arranging the workspace reaches only the new fullscreen view
+    // (sway/tree/arrange.c:310-316), so the group's child keeps its fullscreen box.
+    assert_eq!(held["rect"], held_rect, "{held}");
+    let mapped = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(mapped["focused"], true, "{mapped}");
+    assert_eq!(mapped["fullscreen_mode"], 1, "{mapped}");
+    assert_eq!(mapped["visible"], true, "{mapped}");
+    assert_eq!(mapped["percent"], 1.0, "{mapped}");
+    f.swayward().layout.verify_invariants();
+
+    run_split_wrap_commands(&mut f, client, &["fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let group = find_json_node(&tree, "floating_con", false).unwrap();
+    let held = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_ne!(held["rect"], held_rect, "{held}");
+    assert_eq!(held["rect"]["width"], group["rect"]["width"], "{tree:#}");
+    f.swayward().layout.verify_invariants();
+}

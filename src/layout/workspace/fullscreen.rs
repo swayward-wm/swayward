@@ -62,6 +62,23 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.set_node_fullscreen(id, mode)
     }
 
+    /// A tiled container taking workspace fullscreen ends the floating container's
+    /// (`container_set_fullscreen`, sway/tree/container.c:1308-1313), and
+    /// `container_fullscreen_workspace` focuses the new one (:1199-1212). The group keeps
+    /// its boxes until the workspace fullscreen ends. That is how a
+    /// `for_window ... fullscreen enable` view mapped under a fullscreen floating group takes
+    /// focus from it.
+    pub fn end_floating_fullscreen_for_tiling(&mut self) {
+        if self.tiling.fullscreen_node().is_some()
+            || self.floating.fullscreen_mode()
+                != Some(crate::layout::tiling_tree::FullscreenMode::Workspace)
+        {
+            return;
+        }
+        self.floating.yield_fullscreen();
+        self.floating_is_active = FloatingActive::No;
+    }
+
     pub fn disable_fullscreen(&mut self) {
         if let Some(fullscreen) = self.tiling.fullscreen_node() {
             self.tiling.set_node_fullscreen(fullscreen, None);

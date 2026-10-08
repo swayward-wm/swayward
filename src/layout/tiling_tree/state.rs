@@ -198,6 +198,54 @@ impl<W: LayoutElement> TilingTree<W> {
         self.fullscreen_in_floating = true;
     }
 
+    /// A floating container became the workspace's fullscreen without passing through this
+    /// tree. `arrange_root` then reached only that container (sway/commands/fullscreen.c:55,
+    /// sway/tree/arrange.c:310-316), so every tiled node keeps the box it had until the
+    /// fullscreen ends ([`Self::forget_floating_fullscreen`]).
+    pub(in crate::layout) fn enter_floating_fullscreen(&mut self) {
+        if self.fullscreen_in_floating || self.fullscreen_node().is_some() {
+            return;
+        }
+        let root = self.root;
+        let boxes = self
+            .compute_geometry()
+            .ipc_nodes
+            .into_iter()
+            .filter(|(id, _)| *id != root)
+            .collect();
+        self.restore_hidden_under_fullscreen(HiddenUnderFullscreen {
+            mapped: HashSet::new(),
+            moved: HashMap::new(),
+            boxes,
+        });
+        self.fullscreen_in_floating = true;
+    }
+
+    /// This floating tree's fullscreen container gave the workspace fullscreen to a tiled
+    /// one (`container_set_fullscreen`, sway/tree/container.c:1308-1313). The arrange that
+    /// follows reaches only the new fullscreen container (sway/tree/arrange.c:310-316), so
+    /// every node here keeps the box it had until the workspace fullscreen ends
+    /// ([`Self::forget_floating_fullscreen`]).
+    pub(in crate::layout) fn yield_fullscreen(&mut self) {
+        let Some(fullscreen) = self.fullscreen_node() else {
+            return;
+        };
+        let root = self.root;
+        let boxes = self
+            .compute_geometry()
+            .ipc_nodes
+            .into_iter()
+            .filter(|(id, _)| *id != root)
+            .collect();
+        self.set_node_fullscreen(fullscreen, None);
+        self.restore_hidden_under_fullscreen(HiddenUnderFullscreen {
+            mapped: HashSet::new(),
+            moved: HashMap::new(),
+            boxes,
+        });
+        self.fullscreen_in_floating = true;
+    }
+
     /// The floating fullscreen container is returning to this tree (`floating disable`). It
     /// stays fullscreen, and `arrange_workspace` reaches only it
     /// (sway/commands/floating.c:55, sway/tree/arrange.c:310-316), so the hidden state goes

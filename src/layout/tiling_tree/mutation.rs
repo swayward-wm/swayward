@@ -117,10 +117,13 @@ impl<W: LayoutElement> TilingTree<W> {
         // A global fullscreen container does not set `workspace->fullscreen`
         // (`container_fullscreen_global`, sway/tree/container.c), so
         // `arrange_workspace` lays the new view out with its siblings.
+        // A fullscreen floating container holds the workspace fullscreen from outside this
+        // tree, with the same effect.
         let mapped_under_fullscreen = parent == self.root
-            && fullscreen.is_some_and(|fullscreen| {
-                self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
-            });
+            && (self.fullscreen_in_floating
+                || fullscreen.is_some_and(|fullscreen| {
+                    self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
+                }));
         self.forget_unarranged_after_map(parent, mapped_under_fullscreen);
         if fullscreen.is_some_and(|fullscreen| {
             self.divides_box_under_fullscreen(parent, fullscreen)
@@ -143,9 +146,10 @@ impl<W: LayoutElement> TilingTree<W> {
             // With no tiling container to map beside, sway attaches the view
             // with `workspace_add_tiling` (sway/tree/view.c:849-901), which
             // commits it. Only a floating fullscreen view leaves that so.
-            let floating_fullscreen = fullscreen
-                .and_then(|fullscreen| self.tile(fullscreen))
-                .is_some_and(|tile| tile.restore_to_floating);
+            let floating_fullscreen = self.fullscreen_in_floating
+                || fullscreen
+                    .and_then(|fullscreen| self.tile(fullscreen))
+                    .is_some_and(|tile| tile.restore_to_floating);
             let no_tiling_sibling = self.root_children().is_some_and(|children| {
                 children
                     .iter()

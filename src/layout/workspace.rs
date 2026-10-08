@@ -779,6 +779,10 @@ impl<W: LayoutElement> Workspace<W> {
                 let activate = activate.map_smart(|| {
                     !self.is_active_pending_fullscreen() || self.tiling.global_fullscreen_orphaned()
                 });
+                // A fullscreen floating container is the workspace's fullscreen too, so a
+                // tiled view mapped under it is not focused (`should_focus`,
+                // sway/tree/view.c:707-710).
+                let floating_fullscreen = self.floating.fullscreen_mode();
 
                 // If the tile is pending maximized or fullscreen, open it in the tiling layout,
                 // where it can enter those states.
@@ -804,6 +808,15 @@ impl<W: LayoutElement> Workspace<W> {
                     {
                         self.floating.add_tile_to_focused_group(tile, activate);
                         return;
+                    }
+                    let activate = activate && floating_fullscreen.is_none();
+                    // Only workspace fullscreen sets `workspace->fullscreen`, which limits the
+                    // map's `arrange_workspace` to the fullscreen container
+                    // (sway/tree/arrange.c:310-316).
+                    if floating_fullscreen
+                        == Some(crate::layout::tiling_tree::FullscreenMode::Workspace)
+                    {
+                        self.tiling.enter_floating_fullscreen();
                     }
                     // A fullscreen floating view stays floating in sway.
                     let has_had_tile = self.tiling.has_had_tile();
@@ -2123,6 +2136,11 @@ impl<W: LayoutElement> Workspace<W> {
         // (`split_fullscreen_floating`); once it ends, sway arranges the whole workspace.
         if self.floating.fullscreen_window().is_none() {
             self.tiling.forget_floating_fullscreen();
+        }
+        // A group that gave the workspace fullscreen to a tiled container is arranged again
+        // once that fullscreen ends.
+        if self.fullscreen_window().is_none() {
+            self.floating.forget_yielded_fullscreen();
         }
         self.tiling
             .refresh(is_active && !self.floating_is_active.get(), is_focused);

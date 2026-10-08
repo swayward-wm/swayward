@@ -89,6 +89,9 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
         if let Some(workspace) = self.workspace_mut(workspace_id) {
+            if mode == Some(tiling_tree::FullscreenMode::Workspace) {
+                workspace.end_floating_fullscreen_for_tiling();
+            }
             workspace.tiling_mut().set_node_fullscreen(node, mode);
         }
         if mode == Some(tiling_tree::FullscreenMode::Global) {
