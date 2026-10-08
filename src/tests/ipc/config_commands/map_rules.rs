@@ -437,6 +437,58 @@ fn multi_match_move_ranks_each_refocused_view_on_the_seat_stack() {
     assert_eq!(workspace_focus(&mut f, "2"), expected);
 }
 
+/// `view_map` picks the new view's parent from the seat's focus-inactive node before
+/// `should_focus` is consulted (sway/tree/view.c:849-901, 945-957), so a `no_focus` view
+/// whose focus-inactive container is a child of a floating split joins that split, unfocused.
+/// Oracle row: no_focus_maps_into_floating_split (random-v3 seeds 30866 31074 32546).
+#[test]
+fn no_focus_view_maps_into_the_focused_floating_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+
+    map_test_window(&mut f, client, "first");
+    f.niri_state().update_keyboard_focus();
+    for command in [
+        "floating enable",
+        "splith",
+        r#"no_focus [app_id="^second$"]"#,
+    ] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    map_test_window(&mut f, client, "second");
+    f.niri_state().update_keyboard_focus();
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|output| output["nodes"].as_array().unwrap())
+        .find(|workspace| workspace["name"] == "1")
+        .unwrap();
+    assert_eq!(workspace["nodes"].as_array().unwrap().len(), 0);
+    let split = &workspace["floating_nodes"][0];
+    let app_ids: Vec<_> = split["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["app_id"].clone())
+        .collect();
+    assert_eq!(app_ids, ["first", "second"]);
+    assert_eq!(
+        find_json_node(&tree, "con", true).unwrap()["app_id"],
+        "first"
+    );
+}
+
 #[test]
 fn for_window_opacity_applies_when_window_maps() {
     let (mut fixture, socket) = ipc_fixture();

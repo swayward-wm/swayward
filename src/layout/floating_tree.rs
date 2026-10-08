@@ -1408,18 +1408,23 @@ impl<W: LayoutElement> FloatingLayout<W> {
         })
     }
 
-    /// Maps `tile` into the active floating group beside its focused child.
+    /// Maps `tile` into the active floating group beside its focused child. An unactivated
+    /// tile ranks last and leaves the focus where it was.
     /// Check [`Self::maps_into_focused_group`] first.
-    pub fn add_tile_to_focused_group(&mut self, tile: Tile<W>) {
+    pub fn add_tile_to_focused_group(&mut self, tile: Tile<W>, activate: bool) {
         let id = tile.window().id().clone();
         let Some(entry) = self.active_tree_entry_mut() else {
             warn!("add_tile_to_focused_group: no active floating group");
             return;
         };
-        entry
-            .tree
-            .add_tile_with_activation(tile, super::tiling_tree::InsertTarget::Focused, true);
-        self.active_window_id = Some(id);
+        entry.tree.add_tile_with_activation(
+            tile,
+            super::tiling_tree::InsertTarget::Focused,
+            activate,
+        );
+        if activate {
+            self.active_window_id = Some(id);
+        }
     }
 
     pub fn focused_tree_child(&self) -> bool {
