@@ -108,6 +108,11 @@ impl<W: LayoutElement> TilingTree<W> {
         });
         let (parent, after) = self.insertion_slot(target);
         self.insert_child(parent, id, after);
+        // A view mapped into a wrapper a failed move left unarranged is laid
+        // out by `arrange_container(parent)` at the wrapper's empty box
+        // (sway/tree/view.c:936-937), so the wrapper stays unarranged and its
+        // children get boxes carved from nothing.
+        let into_unarranged_wrapper = self.unarranged_wrappers.contains(&parent);
         // Sway never focuses a view mapped while its workspace has a
         // fullscreen container (`should_focus`, `sway/tree/view.c:706-709`),
         // but only a view added directly to the workspace stays unarranged:
@@ -183,6 +188,9 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         self.animate_geometry_changes(old_geometries, Some(id));
         self.request_window_sizes();
+        if into_unarranged_wrapper {
+            self.arrange_wrapper_at_empty_box(parent);
+        }
         id
     }
 
@@ -492,6 +500,24 @@ impl<W: LayoutElement> TilingTree<W> {
         let id = self.node_for_window(window)?;
         let tile = self.remove_tile_node(id)?;
         self.request_window_sizes_with(Some(transaction), true);
+        Some(tile)
+    }
+
+    /// Removes a workspace-level view that is being floated. With no old parent
+    /// `container_set_floating` raises nothing (sway/tree/container.c:969-973),
+    /// so the seat stack keeps its order and a later
+    /// `seat_get_focus_inactive_tiling` still finds the most recent remaining
+    /// entry, split or view. Only this tree's own focus moves.
+    pub fn remove_tile_keeping_focus_order(&mut self, window: &W::Id) -> Option<Tile<W>> {
+        let history = self.focus_history.clone();
+        let tile = self.remove_tile(window, Transaction::new())?;
+        self.focus_history = history
+            .into_iter()
+            .filter(|node| self.nodes.contains_key(node) && *node != self.root)
+            .collect();
+        if self.focus.is_some() {
+            self.focus = self.focus_history.first().copied().or(self.focus);
+        }
         Some(tile)
     }
 

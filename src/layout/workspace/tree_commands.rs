@@ -58,11 +58,30 @@ impl<W: LayoutElement> Workspace<W> {
         Some(detached)
     }
 
+    /// Attaches a container moved here by `move container to workspace`.
+    /// Sway's destination is the workspace's focus-inactive tiling container:
+    /// the moved container goes after it when it is a view, or last inside it
+    /// when it is a split, else onto the workspace
+    /// (sway/commands/move.c:516-517, 241-262).
     pub fn attach_tiling_subtree(
         &mut self,
         subtree: DetachedSubtree<W>,
     ) -> (NodeId, Vec<(NodeId, NodeId)>) {
-        self.attach_tiling_subtree_at(subtree, None)
+        let target = self.tiling.focus_inactive_tiling();
+        self.attach_tiling_subtree_at(subtree, target)
+    }
+
+    pub fn attach_tiling_subtree_from_direction(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        direction: crate::layout::tiling_tree::Direction,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        if let Some(output) = &self.output {
+            subtree.for_each_window(|window| window.output_enter(output));
+        }
+        self.floating_is_active = FloatingActive::No;
+        self.tiling
+            .attach_subtree_from_direction(subtree, direction)
     }
 
     pub fn swap_tiling_nodes(&mut self, first: NodeId, second: NodeId) -> Result<(), &'static str> {

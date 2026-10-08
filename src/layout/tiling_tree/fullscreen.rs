@@ -119,7 +119,17 @@ impl<W: LayoutElement> TilingTree<W> {
         self.fullscreen_tile_slot = false;
         self.orphaned_global_fullscreen = None;
         self.fullscreen_arrived = false;
-        if replaced_unrelated {
+        // A wrapper a failed move left unarranged keeps the empty-box layout
+        // too: `arrange_workspace` reaches only the new workspace fullscreen
+        // container (sway/tree/arrange.c:310-316).
+        let keeps_unarranged_wrapper = fullscreen == Some(FullscreenMode::Workspace)
+            && self.unarranged_wrappers.iter().any(|wrapper| {
+                self.nodes
+                    .get(&id)
+                    .and_then(|node| node.parent)
+                    .is_some_and(|parent| parent == *wrapper)
+            });
+        if replaced_unrelated || keeps_unarranged_wrapper {
             // A `layout` wrapper's subtree keeps the empty-box layout
             // `arrange_container(wrapper)` gave it; only the new fullscreen
             // container is arranged again.

@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Where `move <direction>` put a tiling container on another output.
+pub struct DirectionalSubtreeMove {
+    pub workspace: WorkspaceId,
+    pub node: tiling_tree::NodeId,
+    pub remapped: Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>,
+}
+
 impl<W: LayoutElement> Layout<W> {
     pub fn detach_floating_group_child(&mut self, window: &W::Id) -> bool {
         self.workspaces_mut()
@@ -507,9 +514,15 @@ impl<W: LayoutElement> Layout<W> {
         if tiling.contains_node(node, destination) {
             return;
         }
-        workspace
-            .tiling_mut()
-            .move_subtree_to_node(node, destination);
+        if workspace.floating_is_active() {
+            workspace
+                .tiling_mut()
+                .move_subtree_to_node_keeping_focus(node, destination);
+        } else {
+            workspace
+                .tiling_mut()
+                .move_subtree_to_node(node, destination);
+        }
     }
 
     pub fn tiling_target_for_window(
@@ -626,6 +639,41 @@ impl<W: LayoutElement> Layout<W> {
         }
         Ok((target_workspace, remapped))
     }
+    /// `move <direction>` of a tiling container off the workspace edge onto
+    /// the adjacent output's active workspace
+    /// (`container_move_to_next_output`, sway/commands/move.c:277-298).
+    pub fn move_tiling_subtree_to_output_from_direction(
+        &mut self,
+        source_workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+        output: &Output,
+        direction: tiling_tree::Direction,
+    ) -> Option<DirectionalSubtreeMove> {
+        let target_workspace = self.active_workspace_id_for_output(output)?;
+        let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
+            return None;
+        };
+        let source_monitor = monitors
+            .iter()
+            .position(|monitor| monitor.has_ws(source_workspace))?;
+        let (source, target) =
+            Self::distinct_workspaces_mut(monitors, source_workspace, target_workspace)?;
+        if !source.tiling().contains(node) || source.tiling().is_root(node) {
+            return None;
+        }
+        let (subtree, old_parent) = source.detach_tiling_subtree(node)?;
+        let (id, remapped) = target.attach_tiling_subtree_from_direction(subtree, direction);
+        source.tiling_mut().finish_subtree_detach(old_parent);
+        if monitors[source_monitor].workspace_switch.is_none() {
+            monitors[source_monitor].clean_up_workspaces();
+        }
+        Some(DirectionalSubtreeMove {
+            workspace: target_workspace,
+            node: id,
+            remapped,
+        })
+    }
+
     /// The window of `node` when it is a floating group root on
     /// `source_workspace`.
     fn floating_group_window(

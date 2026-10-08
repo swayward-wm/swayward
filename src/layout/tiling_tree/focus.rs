@@ -32,6 +32,25 @@ impl<W: LayoutElement> TilingTree<W> {
             .filter(|parent| *parent != self.root && self.split_len(*parent).is_some_and(|n| n > 1))
     }
 
+    /// Whether floating `window` leaves no old parent: it sits at workspace
+    /// level, or in a chain of singleton splits that `container_reap_empty`
+    /// destroys up to the workspace. The seat-node destroy handler then only
+    /// re-raises the current focus (sway/input/seat.c:273-320), so nothing
+    /// else on the stack moves.
+    pub fn float_leaves_workspace_level(&self, window: &W::Id) -> bool {
+        let mut parent = self.parent_of_window(window);
+        while let Some(id) = parent {
+            if id == self.root {
+                return true;
+            }
+            if self.split_len(id) != Some(1) {
+                return false;
+            }
+            parent = self.nodes.get(&id).and_then(|node| node.parent);
+        }
+        false
+    }
+
     pub fn restore_focus_rank(&mut self, window: &W::Id, rank: usize) {
         let Some(node) = self.node_for_window(window) else {
             return;
@@ -547,7 +566,19 @@ impl<W: LayoutElement> TilingTree<W> {
 
     fn focus_direction_inner(&mut self, dir: Direction, allow_wrap: bool) -> bool {
         let next = self.directional_focus_target(dir, allow_wrap);
-        self.set_focus_id(next.or(self.focus));
+        // From a view beside a workspace fullscreen container (one moved there
+        // from another output), `seat_set_workspace_focus` refuses a target the
+        // fullscreen container hides, so focus stays put
+        // (sway/input/seat.c:1148-1151, sway/tree/container.c:570-590).
+        let obstructed = next.is_some_and(|next| {
+            self.fullscreen_node().is_some_and(|fullscreen| {
+                self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
+                    && !self.contains_node(fullscreen, next)
+            })
+        });
+        if !obstructed {
+            self.set_focus_id(next.or(self.focus));
+        }
         next.is_some()
     }
 

@@ -270,6 +270,27 @@ impl<W: LayoutElement> TilingTree<W> {
         true
     }
 
+    /// [`Self::move_subtree_to_node`] while the seat focus is outside this
+    /// tree, on a floating view. Sway only refocuses when the seat focus
+    /// itself moved and otherwise never touches the seat stack
+    /// (sway/commands/move.c:598-608), so this tree's focus and history stay
+    /// as they were.
+    pub fn move_subtree_to_node_keeping_focus(&mut self, id: NodeId, destination: NodeId) -> bool {
+        let focus = self.focus;
+        let history = self.focus_history.clone();
+        let moved = self.move_subtree_to_node(id, destination);
+        if moved {
+            self.focus_history = history
+                .into_iter()
+                .filter(|node| self.nodes.contains_key(node))
+                .collect();
+            self.focus = focus
+                .filter(|focus| self.nodes.contains_key(focus))
+                .or_else(|| self.focused_leaf_in(self.root));
+        }
+        moved
+    }
+
     pub fn move_direction(&mut self, id: NodeId, direction: Direction) -> bool {
         let old = self.compute_geometry();
         let changed = self.move_direction_inner(id, direction);
@@ -681,9 +702,13 @@ impl<W: LayoutElement> TilingTree<W> {
     /// `container_move_to_container_from_direction`. Focus is untouched; the
     /// caller's transfer already decided it.
     pub fn place_arrival_from_direction(&mut self, window: &W::Id, direction: Direction) {
-        let Some(id) = self.node_for_window(window) else {
-            return;
-        };
+        if let Some(id) = self.node_for_window(window) {
+            self.place_node_from_direction(id, direction);
+        }
+    }
+
+    /// [`Self::place_arrival_from_direction`] for any attached node.
+    pub(super) fn place_node_from_direction(&mut self, id: NodeId, direction: Direction) {
         let focus = self.focus;
         // Park the arrival at workspace level so the destination search below
         // cannot descend into it.

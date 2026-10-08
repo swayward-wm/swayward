@@ -4034,6 +4034,17 @@ impl<W: LayoutElement> Layout<W> {
                 && workspace.active_window().map(|active| active.id()) == Some(window))
             .then(|| workspace.id())
         });
+        let was_focused = self.focus().map(|focus| focus.id()) == Some(window);
+        // The view's box in global coordinates: a move under a fullscreen
+        // container keeps the view's position (sway/commands/move.c:168-174).
+        let source_rect = self.monitors().find_map(|monitor| {
+            monitor.workspaces.iter().find_map(|workspace| {
+                let rect = workspace.tiling().ipc_rect_for_window(window)?;
+                let origin =
+                    monitor.output().current_location().to_f64() + workspace.working_area().loc;
+                Some(Rectangle::new(rect.loc + origin, rect.size))
+            })
+        });
         self.move_to_output(Some(window), output, None, activate);
         if let Some(source) =
             source.filter(|source| self.window_workspace_id(window) != Some(*source))
@@ -4045,6 +4056,7 @@ impl<W: LayoutElement> Layout<W> {
         // The generic transfer inserts after the destination focus; sway
         // places a directional arrival by edge or by the focus-inactive
         // container (sway/commands/move.c:168-196).
+        let output_origin = output.current_location().to_f64();
         if let Some(workspace) = self
             .workspaces_mut()
             .find(|workspace| workspace.tiling().node_for_window(window).is_some())
@@ -4052,6 +4064,16 @@ impl<W: LayoutElement> Layout<W> {
             workspace
                 .tiling_mut()
                 .place_arrival_from_direction(window, direction);
+            if let Some(rect) = source_rect {
+                let origin = output_origin + workspace.working_area().loc;
+                workspace
+                    .tiling_mut()
+                    .keep_directional_arrival_under_fullscreen(
+                        window,
+                        Rectangle::new(rect.loc - origin, rect.size),
+                        was_focused,
+                    );
+            }
         }
     }
 

@@ -1658,6 +1658,12 @@ impl<W: LayoutElement> Workspace<W> {
                 .any(|tile| tile.window().id() == &id && tile.window().focus_timestamp().is_none());
             let mut tile = if parent.is_some() {
                 self.tiling.remove_tile_without_transaction(&id).unwrap()
+            } else if target_is_active
+                && !was_floating
+                && !never_focused
+                && self.tiling.float_leaves_workspace_level(&id)
+            {
+                self.tiling.remove_tile_keeping_focus_order(&id).unwrap()
             } else {
                 self.tiling.remove_tile(&id, Transaction::new()).unwrap()
             };

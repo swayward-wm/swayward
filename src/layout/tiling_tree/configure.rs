@@ -98,6 +98,38 @@ impl<W: LayoutElement> TilingTree<W> {
         );
     }
 
+    /// A view a directional move brought from another output onto this
+    /// workspace, beside its workspace fullscreen container. Like any move
+    /// under fullscreen it keeps its position and content box over a zeroed
+    /// size (`source_rect` is its old IPC box, relative to this workspace),
+    /// but `container_move_to_workspace_from_direction` never calls
+    /// `workspace_focus_fullscreen`, so the seat focus stays on it
+    /// (sway/commands/move.c:168-196, 277-298, 715-744).
+    pub fn keep_directional_arrival_under_fullscreen(
+        &mut self,
+        window: &W::Id,
+        source_rect: Rectangle<f64, Logical>,
+        focused: bool,
+    ) {
+        let Some(fullscreen) = self
+            .fullscreen_node()
+            .filter(|id| self.fullscreen_mode(*id) == Some(FullscreenMode::Workspace))
+        else {
+            return;
+        };
+        let Some(id) = self
+            .node_for_window(window)
+            .filter(|id| *id != fullscreen && !self.contains_node(fullscreen, *id))
+        else {
+            return;
+        };
+        self.mapped_under_fullscreen.remove(&id);
+        self.moved_under_fullscreen.insert(id, source_rect);
+        if focused {
+            self.set_focus_id(Some(id));
+        }
+    }
+
     pub fn ipc_focus_follows_history(&self) -> bool {
         self.ipc_focus_follows_history
     }
@@ -264,7 +296,15 @@ impl<W: LayoutElement> TilingTree<W> {
         transaction: Option<Transaction>,
         animate: bool,
     ) {
-        self.unarranged_wrappers.clear();
+        // Under a workspace fullscreen container `arrange_workspace` arranges
+        // only that container (sway/tree/arrange.c:310-316), so a wrapper a
+        // failed move left unarranged keeps its empty box.
+        let workspace_fullscreen = self
+            .fullscreen_node()
+            .is_some_and(|id| self.fullscreen_mode(id) == Some(FullscreenMode::Workspace));
+        if !workspace_fullscreen {
+            self.unarranged_wrappers.clear();
+        }
         if self.fullscreen_node().is_none() {
             self.wrapper_arranged_boxes.clear();
         }

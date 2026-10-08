@@ -214,6 +214,21 @@ impl<W: LayoutElement> TilingTree<W> {
         self.attach_subtree_with(subtree, target, true)
     }
 
+    /// Attaches a container a directional move brought from another output.
+    /// `container_move_to_workspace_from_direction` inserts the container
+    /// itself, never unwrapping it into an empty workspace
+    /// (sway/commands/move.c:168-196), and places it by edge or beside the
+    /// focus-inactive container.
+    pub fn attach_subtree_from_direction(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        direction: Direction,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        let (id, remapped) = self.attach_subtree_with(subtree, None, false);
+        self.place_node_from_direction(id, direction);
+        (id, remapped)
+    }
+
     /// Attaches a floating group that is returning to tiling. Sway adds the group container
     /// itself with `workspace_add_tiling`, keeping it as a split even on an empty workspace
     /// (`container_set_floating`, sway/tree/container.c:976-1003), rather than unwrapping its
@@ -264,6 +279,10 @@ impl<W: LayoutElement> TilingTree<W> {
         };
         self.unarranged_under_fullscreen.clear();
         self.insert_child(parent, id, after);
+        // Attaching a container refreshes the workspace representation
+        // (`workspace_insert_tiling_direct`, `container_add_child`,
+        // sway/tree/workspace.c, sway/tree/container.c).
+        self.has_had_tile = true;
         if self
             .fullscreen_node()
             .is_some_and(|fullscreen| self.contains_node(id, fullscreen))

@@ -4,8 +4,7 @@ use swayward_ipc::command::FocusedNode;
 use swayward_ipc::{criteria, CommandOutcome};
 
 use super::movement::{
-    move_position, move_target_to_mark, move_target_to_workspace, move_tiling_subtree_to_output,
-    move_workspace_to_output,
+    move_position, move_target_to_mark, move_target_to_workspace, move_workspace_to_output,
 };
 use super::{
     execute, failure, focus, layout, movement, scratchpad, success, window, ClientColorClass,
@@ -86,20 +85,43 @@ fn move_target_to_adjacent_output(
             .swayward
             .adjacent_output(reference, reference_point, horizontal, positive)
     {
+        let layout_direction = match direction {
+            Direction::Left => crate::layout::tiling_tree::Direction::Left,
+            Direction::Right => crate::layout::tiling_tree::Direction::Right,
+            Direction::Up => crate::layout::tiling_tree::Direction::Up,
+            Direction::Down => crate::layout::tiling_tree::Direction::Down,
+        };
         match target {
             CommandTarget::Window(_) => state.swayward.layout.move_window_to_output_from_direction(
                 &window,
                 &output,
-                match direction {
-                    Direction::Left => crate::layout::tiling_tree::Direction::Left,
-                    Direction::Right => crate::layout::tiling_tree::Direction::Right,
-                    Direction::Up => crate::layout::tiling_tree::Direction::Up,
-                    Direction::Down => crate::layout::tiling_tree::Direction::Down,
-                },
+                layout_direction,
                 activate,
             ),
             CommandTarget::Container(workspace, node) => {
-                let _ = move_tiling_subtree_to_output(state, workspace, node, &output);
+                // `container_move_in_direction` leaves the seat focus alone
+                // (sway/commands/move.c:168-196, 277-298, 715-744), so a focused
+                // container keeps focus on its new output.
+                let focused = state
+                    .swayward
+                    .layout
+                    .active_workspace()
+                    .is_some_and(|active| {
+                        active.id() == workspace && active.focused_container_node() == Some(node)
+                    });
+                let layout = &mut state.swayward.layout;
+                let moved = layout.move_tiling_subtree_to_output_from_direction(
+                    workspace,
+                    node,
+                    &output,
+                    layout_direction,
+                );
+                if let Some(moved) = moved {
+                    if focused {
+                        layout.focus_tiling_node(moved.workspace, moved.node);
+                    }
+                    state.swayward.remap_container_marks(moved.remapped);
+                }
             }
         }
     }
