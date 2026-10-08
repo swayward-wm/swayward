@@ -1151,7 +1151,10 @@ impl<W: LayoutElement> Workspace<W> {
                 self.floating
                     .set_window_outer_height(window, change, automatic_maximum);
             }
-        } else {
+        } else if !self
+            .floating
+            .set_tree_window_size_sway(window, width, height)
+        {
             self.tiling.set_window_size_sway(window, width, height);
         }
     }

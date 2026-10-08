@@ -747,6 +747,144 @@ fn scratchpad_show_toggles_the_only_window() {
     assert_eq!(hidden["scratchpad_state"], "fresh");
 }
 
+/// `floating enable` on a view inside a floating split acts on the split,
+/// which is already floating, so the split stays the scratchpad container
+/// (sway/commands/floating.c:40-51, sway/tree/container.c:941-944).
+/// Differential seed 31529.
+#[test]
+fn floating_enable_inside_a_shown_scratchpad_split_keeps_it_in_the_scratchpad() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("pad".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in [
+        "move scratchpad",
+        "scratchpad show",
+        "splith",
+        "floating enable",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let split = &workspace["floating_nodes"][0];
+    assert_eq!(split["type"], "floating_con");
+    assert_eq!(split["scratchpad_state"], "fresh");
+    assert_eq!(split["nodes"][0]["scratchpad_state"], "none");
+
+    // The split is still a scratchpad container, so `scratchpad show` hides it.
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    assert_eq!(
+        tree["nodes"][1]["nodes"][0]["floating_nodes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+/// Moving the only view out of a shown scratchpad split tiles it and reaps
+/// the split, which leaves the scratchpad (sway/commands/move.c:204-232,
+/// sway/tree/container.c:495-497, 508-524), so `scratchpad show` then fails
+/// with "Scratchpad is empty". Differential seed 31529.
+#[test]
+fn moving_a_view_out_of_a_shown_scratchpad_split_empties_the_scratchpad() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("pad".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in [
+        "move scratchpad",
+        "scratchpad show",
+        "splith",
+        "[workspace=__focused__] move container to workspace 2",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let reply = &crate::command::execute(f.niri_state(), "scratchpad show")[0];
+    assert!(!reply.success);
+    assert_eq!(reply.error.as_deref(), Some("Scratchpad is empty"));
+}
+
+#[test]
+fn moving_one_view_out_of_a_two_view_scratchpad_split_keeps_the_split_in_the_scratchpad() {
+    // Oracle row rv_move_first_of_two_out: the split keeps view B, so it is
+    // not reaped and stays a scratchpad container that `scratchpad show`
+    // hides (sway/tree/container.c:495-497).
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let mut surfaces = Vec::new();
+    for (index, app_id) in ["pad-a", "pad-b"].into_iter().enumerate() {
+        if index == 1 {
+            for command in ["move scratchpad", "scratchpad show", "splith"] {
+                assert!(
+                    crate::command::execute(f.niri_state(), command)[0].success,
+                    "{command}"
+                );
+            }
+        }
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        surfaces.push(surface);
+    }
+
+    let command = "[app_id=\"^pad-a$\"] move container to workspace 2";
+    assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    let reply = &crate::command::execute(f.niri_state(), "scratchpad show")[0];
+    assert!(reply.success, "{:?}", reply.error);
+
+    let swayward = f.swayward();
+    let tree = describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    );
+    let scratch = &tree.nodes[0].nodes[0];
+    assert_eq!(scratch.floating_nodes.len(), 1);
+    let split = &scratch.floating_nodes[0];
+    assert_eq!(split.scratchpad_state.as_deref(), Some("fresh"));
+    assert_eq!(split.nodes.len(), 1);
+    let swayward_ipc::NodeProperties::View(view) = &split.nodes[0].properties else {
+        panic!("split child is not a view");
+    };
+    assert_eq!(view.app_id.as_deref(), Some("pad-b"));
+}
+
 #[test]
 fn empty_scratch_workspace_is_always_serialized() {
     let mut f = Fixture::new();
@@ -1102,4 +1240,59 @@ fn hidden_scratchpad_split_follows_the_bare_window_hidden_before_it() {
     assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
     let tree = get_tree(&mut f);
     assert!(find_json_node_with_app_id(&tree, "first").unwrap()["visible"] == true);
+}
+
+/// `resize set` on a view inside a floating split resizes it as a tiled child
+/// of the split, ppt measured against the split (`resize_set_tiled`,
+/// sway/commands/resize.c:286-336, reached because `container_is_floating`
+/// is false for the child, resize.c:523). Differential seed 32562.
+#[test]
+fn resize_set_ppt_inside_a_shown_scratchpad_split_resizes_the_child() {
+    let mut config = swayward_config::Config::default();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    map(&mut f, "a");
+    for command in ["move scratchpad", "[app_id=a] focus", "splitv"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+    map(&mut f, "b");
+    assert!(
+        crate::command::execute(f.niri_state(), "resize set width 30 ppt height 40 ppt")[0].success
+    );
+
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let split = find_json_node(&tree, "floating_con", false).unwrap();
+    let height = |node: &Value| node["rect"]["height"].as_i64().unwrap();
+    let total = height(split);
+    let (a, b) = (&split["nodes"][0], &split["nodes"][1]);
+    // 40 ppt of the split's height; the rest goes to the sibling. The split
+    // has no horizontal ancestor, so the width part changes nothing.
+    assert_eq!(height(b), total * 40 / 100, "{split}");
+    assert_eq!(height(a) + height(b), total, "{split}");
+    assert_eq!(a["rect"]["width"], split["rect"]["width"], "{split}");
 }

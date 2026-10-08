@@ -11,9 +11,15 @@ pub struct DirectionalSubtreeMove {
 
 impl<W: LayoutElement> Layout<W> {
     pub fn detach_floating_group_child(&mut self, window: &W::Id) -> bool {
-        self.workspaces_mut()
+        let siblings = self.scratchpad_split_siblings(window);
+        let detached = self
+            .workspaces_mut()
             .find(|workspace| workspace.has_window(window))
-            .is_some_and(|workspace| workspace.detach_floating_group_child(window))
+            .is_some_and(|workspace| workspace.detach_floating_group_child(window));
+        if detached {
+            self.leave_scratchpad_split(window, &siblings);
+        }
+        detached
     }
 
     /// The workspace, floating root and parent node of `window` when it is a child of a

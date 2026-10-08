@@ -670,6 +670,26 @@ impl<W: LayoutElement> FloatingLayout<W> {
         }
     }
 
+    /// `resize set` on a view inside a floating group resizes it as a tiled
+    /// child of the group, converting ppt against the group's splits
+    /// (`resize_set_tiled`, sway/commands/resize.c:286-336, reached because
+    /// `container_is_floating` is false for the child, resize.c:523).
+    /// Returns false when `window` is not inside a group.
+    pub fn set_tree_window_size_sway(
+        &mut self,
+        window: &W::Id,
+        width: Option<SizeChange>,
+        height: Option<SizeChange>,
+    ) -> bool {
+        let Some((idx, _)) = self.tree_entry_for_window(window) else {
+            return false;
+        };
+        self.tree_entries[idx]
+            .tree
+            .set_window_size_sway(window, width, height);
+        true
+    }
+
     pub fn resize_window_edge(
         &mut self,
         id: Option<&W::Id>,
