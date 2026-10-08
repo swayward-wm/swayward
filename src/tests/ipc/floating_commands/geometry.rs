@@ -1482,3 +1482,108 @@ fn floating_resize_set_keeps_the_centre_and_split_wraps_it() {
         "{child}"
     );
 }
+
+#[test]
+fn floating_move_to_another_output_rehomes_like_sway() {
+    let mut config = swayward_config::Config::default();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_named_output_at("left-head".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("right-head".into(), (1280, 720), Some((1280, 0)));
+    f.niri_focus_output(2);
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+
+    let home = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let outputs = tree["nodes"].as_array().unwrap();
+        let (output, rect) = outputs
+            .iter()
+            .find_map(|output| {
+                let workspace = output["nodes"].as_array()?.iter().find(|workspace| {
+                    !workspace["floating_nodes"].as_array().unwrap().is_empty()
+                })?;
+                Some((
+                    output["name"].as_str().unwrap().to_owned(),
+                    workspace["floating_nodes"][0]["rect"].clone(),
+                ))
+            })
+            .unwrap();
+        (
+            output,
+            rect["x"].as_i64().unwrap(),
+            rect["y"].as_i64().unwrap(),
+        )
+    };
+
+    assert_eq!(home(&mut f).0, "right-head");
+    assert!(
+        crate::command::execute(f.niri_state(), "move absolute position 10 px 20 px")[0].success
+    );
+    let (output, x, _) = home(&mut f);
+    assert_eq!((output.as_str(), x), ("left-head", 10));
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        "left-head"
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "move right 1500 px")[0].success);
+    let (output, x, _) = home(&mut f);
+    assert_eq!((output.as_str(), x), ("right-head", 1510));
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        "right-head"
+    );
+}
+
+#[test]
+fn fullscreen_floater_move_absolute_position_crosses_output_like_sway() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left-head".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("right-head".into(), (1280, 720), Some((1280, 0)));
+    f.niri_focus_output(2);
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move position 10 px 20 px")[0].success);
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        "right-head"
+    );
+    assert!(
+        crate::command::execute(f.niri_state(), "move absolute position 10 px 20 px")[0].success
+    );
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        "left-head"
+    );
+    let focused = f.swayward().layout.focus().unwrap().window.clone();
+    assert!(f.swayward().layout.fullscreen_mode(&focused).is_some());
+    assert!(
+        !crate::command::execute(f.niri_state(), "move absolute position 10 ppt 20 px")[0].success
+    );
+}

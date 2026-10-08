@@ -236,6 +236,15 @@ pub(super) fn move_position(
         .workspaces()
         .find_map(|(_, _, workspace)| workspace.has_window(&window).then_some(workspace))
         .ok_or("Only floating containers can be moved to an absolute position")?;
+    // A fullscreen floater lives in the tiling layer here but is floating in sway
+    // (`container_is_floating`, sway/commands/move.c:785-789).
+    if !floating_root
+        && !workspace.floating().has_window(&window)
+        && workspace.is_floating_for_ipc(&window)
+        && !matches!(position, MovePosition::Pointer)
+    {
+        return move_fullscreen_floater(state, &window, position);
+    }
     if !(floating_root || workspace.is_floating(&window)) {
         return Err("Only floating containers can be moved to an absolute position");
     }
@@ -289,6 +298,64 @@ pub(super) fn move_position(
         .swayward
         .layout
         .move_floating_window(Some(&window), x, y, true);
+    state.swayward.layout.rehome_floating_window(&window);
+    Ok(())
+}
+
+/// `move position` on a fullscreen floater: its box is the output's, so only the output under
+/// the moved box's centre matters (`cmd_move_to_position`, sway/commands/move.c:810-918).
+fn move_fullscreen_floater(
+    state: &mut State,
+    window: &smithay::desktop::Window,
+    position: &MovePosition,
+) -> Result<(), &'static str> {
+    let Some((size, workspace_origin)) = move_target_geometry(state, Some(window)) else {
+        return Err("Only floating containers can be moved to an absolute position");
+    };
+    let workspace_size = state
+        .swayward
+        .layout
+        .workspaces()
+        .find_map(|(_, _, workspace)| {
+            workspace
+                .has_window(window)
+                .then(|| workspace.working_area().size)
+        })
+        .unwrap_or_default();
+    let loc: LogicalPoint = match *position {
+        MovePosition::Coordinates { x, y, absolute } => {
+            if absolute
+                && (x.unit == ResizeUnit::PercentagePoints
+                    || y.unit == ResizeUnit::PercentagePoints)
+            {
+                return Err("Cannot move to absolute positions by ppt");
+            }
+            let loc = LogicalPoint::from((
+                coordinate(x, workspace_size.w),
+                coordinate(y, workspace_size.h),
+            ));
+            if absolute {
+                loc
+            } else {
+                loc + workspace_origin
+            }
+        }
+        MovePosition::Center { absolute: false } => {
+            workspace_origin + (workspace_size.to_point() - size.to_point()).downscale(2.)
+        }
+        MovePosition::Center { absolute: true } => {
+            let root = state
+                .swayward
+                .global_space
+                .outputs()
+                .filter_map(|output| state.swayward.global_space.output_geometry(output))
+                .reduce(|root, output| root.merge(output));
+            let Some(root) = root else { return Ok(()) };
+            crate::utils::center(root).to_f64() - size.downscale(2.)
+        }
+        MovePosition::Pointer => return Ok(()),
+    };
+    state.swayward.layout.rehome_fullscreen_floater(window, loc);
     Ok(())
 }
 
@@ -1148,12 +1215,20 @@ pub(super) fn direction_focused(
             Direction::Up => (0., -pixels),
             Direction::Down => (0., pixels),
         };
+        let moved = state
+            .swayward
+            .layout
+            .focus()
+            .map(|mapped| mapped.window.clone());
         state.swayward.layout.move_floating_window(
             None,
             PositionChange::AdjustFixed(x),
             PositionChange::AdjustFixed(y),
             true,
         );
+        if let Some(moved) = moved {
+            state.swayward.layout.rehome_floating_window(&moved);
+        }
         state.swayward.queue_redraw_all();
         Ok(None)
     } else {

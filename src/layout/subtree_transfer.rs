@@ -51,6 +51,93 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// After a floating root moved, hands it to the active workspace of the output its centre
+    /// is on, or of the nearest output when the centre is off every output, keeping its global
+    /// position (`container_floating_move_to` and `container_floating_find_output`,
+    /// sway/tree/container.c:1086-1145).
+    pub fn rehome_floating_window(&mut self, window: &W::Id) {
+        if self.is_scratchpad_hidden(window) {
+            return;
+        }
+        let Some((source_workspace, global_rect)) = self.monitors().find_map(|monitor| {
+            let origin = monitor.output().current_location().to_f64();
+            monitor.workspaces.iter().find_map(|workspace| {
+                let rect = workspace.floating().root_rect_for_window(window)?;
+                Some((workspace.id(), Rectangle::new(origin + rect.loc, rect.size)))
+            })
+        }) else {
+            return;
+        };
+        let Some(target) = self.floating_output_for_rect(global_rect) else {
+            return;
+        };
+        // The destination is the output's active workspace, so a floater on a hidden workspace
+        // moves to the visible one even on its own output.
+        if target.active_workspace_ref().id() == source_workspace {
+            return;
+        }
+        let target = target.output().clone();
+        self.move_to_output(Some(window), &target, None, ActivateWindow::Smart);
+        let origin = target.current_location().to_f64();
+        let Some(workspace) = self.workspaces_mut().find(|ws| ws.has_window(window)) else {
+            return;
+        };
+        let local = global_rect.loc - origin - workspace.working_area().loc;
+        workspace.move_floating_window(
+            Some(window),
+            PositionChange::SetFixed(local.x),
+            PositionChange::SetFixed(local.y),
+            false,
+        );
+    }
+
+    /// The output whose box holds the centre of `rect`, or the nearest one
+    /// (`container_floating_find_output`, sway/tree/container.c:1086-1111).
+    pub fn floating_output_for_rect(&self, rect: Rectangle<f64, Logical>) -> Option<&Monitor<W>> {
+        let center = rect.loc + rect.size.downscale(2.);
+        let mut closest: Option<(f64, &Monitor<W>)> = None;
+        for monitor in self.monitors() {
+            let output = monitor.output();
+            let loc = output.current_location().to_f64();
+            let size = output_size(output);
+            if size.w <= 0. || size.h <= 0. {
+                continue;
+            }
+            // wlr_box_closest_point keeps the closest point 1/256 inside the far edges.
+            let x = center.x.clamp(loc.x, loc.x + size.w - 1. / 256.);
+            let y = center.y.clamp(loc.y, loc.y + size.h - 1. / 256.);
+            if x == center.x && y == center.y {
+                return Some(monitor);
+            }
+            let distance = (x - center.x).powi(2) + (y - center.y).powi(2);
+            if closest.as_ref().is_none_or(|(best, _)| distance < *best) {
+                closest = Some((distance, monitor));
+            }
+        }
+        closest.map(|(_, monitor)| monitor)
+    }
+
+    /// A fullscreen floater covers its output, so a `move position` that puts that output-sized
+    /// box's centre on another output hands it, still fullscreen, to that output's active
+    /// workspace (`container_floating_move_to`, sway/tree/container.c:1113-1145). `loc` is the
+    /// requested global top-left corner.
+    pub fn rehome_fullscreen_floater(&mut self, window: &W::Id, loc: Point<f64, Logical>) {
+        let Some((source_workspace, size)) = self.monitors().find_map(|monitor| {
+            let workspace = monitor.workspaces.iter().find(|ws| ws.has_window(window))?;
+            Some((workspace.id(), output_size(monitor.output())))
+        }) else {
+            return;
+        };
+        let Some(target) = self.floating_output_for_rect(Rectangle::new(loc, size)) else {
+            return;
+        };
+        if target.active_workspace_ref().id() == source_workspace {
+            return;
+        }
+        let target = target.output().clone();
+        self.move_to_output(Some(window), &target, None, ActivateWindow::Smart);
+    }
+
     pub fn is_tiling_root(&self, workspace: WorkspaceId, node: tiling_tree::NodeId) -> bool {
         self.workspace(workspace)
             .is_some_and(|candidate| candidate.tiling().is_root(node))

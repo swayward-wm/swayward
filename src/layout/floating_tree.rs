@@ -1192,6 +1192,15 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .and_then(|entry| entry.entered_by_departed)
     }
 
+    /// The rectangle of the floating root holding `window`, in workspace view coordinates.
+    pub fn root_rect_for_window(&self, window: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        if let Some(idx) = self.idx_of(window) {
+            let data = &self.entries.get(idx)?.data;
+            return Some(Rectangle::new(data.logical_pos, data.size));
+        }
+        self.tree_entry_with_window(window).map(|entry| entry.rect)
+    }
+
     pub fn tree_rect(&self, root: NodeId) -> Option<Rectangle<f64, Logical>> {
         self.tree_entries
             .iter()

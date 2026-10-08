@@ -220,7 +220,9 @@ fn move_targeted_direction(
         layout_direction,
         f64::from(pixels.unwrap_or(10)),
     );
-    if !moved {
+    if moved {
+        state.swayward.layout.rehome_floating_window(&window);
+    } else {
         move_target_to_adjacent_output(state, CommandTarget::Window(target), direction, activate);
     }
     Ok(moved)
