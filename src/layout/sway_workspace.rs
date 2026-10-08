@@ -854,7 +854,11 @@ impl<W: LayoutElement> Layout<W> {
         };
         let target =
             &self.resolve_move_workspace_target(source.id(), target.clone(), auto_back_and_forth);
-        if !source.floating().window_root_is_sticky(window) {
+        // A fullscreen floating view lives in swayward's tiling tree but in sway's
+        // `workspace->floating` list, so `container_is_sticky` holds for it too.
+        let fullscreen_floating_sticky =
+            source.is_floating_for_ipc(window) && source.is_window_sticky(window);
+        if !source.floating().window_root_is_sticky(window) && !fullscreen_floating_sticky {
             return Ok(());
         }
         let Some(source_output) = source_monitor.map(|monitor| monitor.output().clone()) else {
