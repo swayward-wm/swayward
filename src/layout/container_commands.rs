@@ -6,6 +6,14 @@ use super::*;
 /// Containers a layout command flattened, as `(old, new)` ids in a workspace.
 type Remapped = (WorkspaceId, Vec<(NodeId, NodeId)>);
 
+/// A workspace's focus before a view maps: a tiling node, or the active floating view with
+/// the focused node of its group, if it is in one.
+#[derive(Debug, Clone)]
+pub enum PreMapFocus<Id> {
+    Tiling(NodeId),
+    Floating(Id, Option<NodeId>),
+}
+
 impl<W: LayoutElement> Layout<W> {
     pub fn window_border(
         &self,
@@ -292,6 +300,30 @@ impl<W: LayoutElement> Layout<W> {
         };
         workspace.tiling_mut().set_layout(node, layout);
         true
+    }
+
+    /// The active workspace's focused node, recorded before a view maps.
+    pub fn pre_map_focus(&self) -> Option<(WorkspaceId, PreMapFocus<W::Id>)> {
+        let workspace = self.active_workspace()?;
+        Some((workspace.id(), workspace.pre_map_focus()?))
+    }
+
+    /// Sway runs a mapping view's criteria before it focuses the view (`view_map`,
+    /// sway/tree/view.c:943-957), so a `for_window` move takes the view away while the seat
+    /// still focuses what it did before the map, and `move` restores that focus
+    /// (sway/commands/move.c:598-608). Swayward activated the view on insertion, so put the
+    /// workspace's earlier focus back once the view has left it.
+    pub fn restore_focus_after_map_move(
+        &mut self,
+        (workspace_id, focus): (WorkspaceId, PreMapFocus<W::Id>),
+        window: &W::Id,
+    ) {
+        if let Some(workspace) = self
+            .workspace_mut(workspace_id)
+            .filter(|workspace| !workspace.has_window(window))
+        {
+            workspace.restore_pre_map_focus(focus);
+        }
     }
 
     /// See [`tiling_tree::TilingTree::raise_focus_into_fresh_wrappers`].

@@ -511,6 +511,7 @@ impl State {
         } else {
             AddWindowTarget::Auto
         };
+        let focus_before_map = self.swayward.layout.pre_map_focus();
         let output = self
             .swayward
             .layout
@@ -595,6 +596,11 @@ impl State {
             let _ = crate::command::execute(self, &targeted);
         }
         crate::command::run_for_window(self, mapped_id);
+        if let Some(focus) = focus_before_map {
+            self.swayward
+                .layout
+                .restore_focus_after_map_move(focus, &window);
+        }
         self.swayward
             .layout
             .keep_committed_size_of_mapped_scratchpad_window(&window);

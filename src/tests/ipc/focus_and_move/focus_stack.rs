@@ -463,6 +463,66 @@ fn focus_stack_view_moved_by_for_window_leaves_the_empty_destination_focused() {
     );
 }
 
+/// A `for_window` rule moves a mapping view before `should_focus` runs, so the view never had
+/// seat focus and `move` restores the seat's current focus, here the focused workspace
+/// (sway/tree/view.c:943-957; sway/commands/move.c:598-608). Seeds 31083, 30926.
+#[test]
+fn focus_stack_view_moved_by_for_window_keeps_the_focused_workspace_focused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "stays");
+    run_focus_commands(
+        &mut f,
+        &[
+            "focus parent",
+            r#"for_window [app_id="moved"] move container to workspace 2"#,
+        ],
+    );
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(
+        find_json_node(&tree, "workspace", true).unwrap()["name"],
+        "1"
+    );
+    map_test_window(&mut f, client, "moved");
+    let tree = focus_stack_tree(&mut f);
+    assert!(find_json_node(&tree, "con", true).is_none());
+    assert_eq!(
+        find_json_node(&tree, "workspace", true).unwrap()["name"],
+        "1"
+    );
+}
+
+/// The same holds when the focus before the map is a floating container or a floating view:
+/// the moved view never took focus, so the seat keeps the floating node. Seed 30926.
+#[test]
+fn focus_stack_view_moved_by_for_window_keeps_the_focused_floating_node_focused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "floater");
+    run_focus_commands(
+        &mut f,
+        &[
+            "floating enable",
+            r#"for_window [app_id="^moved"] move container to workspace 2"#,
+        ],
+    );
+    map_test_window(&mut f, client, "moved-1");
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(
+        find_json_node(&tree, "floating_con", true).unwrap()["app_id"],
+        "floater"
+    );
+
+    run_focus_commands(&mut f, &["split v", "focus parent"]);
+    map_test_window(&mut f, client, "moved-2");
+    let tree = focus_stack_tree(&mut f);
+    let focused = find_json_node(&tree, "floating_con", true).unwrap();
+    assert!(focused["app_id"].is_null(), "{focused}");
+    assert_eq!(focused["nodes"][0]["app_id"], "floater");
+}
+
 /// A directional move across outputs leaves the seat's focus alone (sway/commands/move.c:
 /// 277-298, 715-744). Focusing the view had raised its workspace right below it
 /// (sway/input/seat.c:1178-1190), so once it leaves, the workspace node heads that

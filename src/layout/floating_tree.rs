@@ -1257,6 +1257,33 @@ impl<W: LayoutElement> FloatingLayout<W> {
         true
     }
 
+    /// The focused node of the group holding the active view.
+    pub fn focused_tree_node(&self) -> Option<NodeId> {
+        self.active_tree_entry()?.tree.focus()
+    }
+
+    /// Makes `window` active again, with its group focused on `node` when it is in one.
+    /// Returns false when the window or the node is gone.
+    pub fn restore_tree_focus(&mut self, window: &W::Id, node: Option<NodeId>) -> bool {
+        match node {
+            Some(node) => {
+                let Some(entry) = self.tree_entry_with_window_mut(window) else {
+                    return false;
+                };
+                if !entry.tree.contains(node) {
+                    return false;
+                }
+                if entry.tree.focus() != Some(node) {
+                    entry.tree.set_focus(node);
+                }
+            }
+            None if self.idx_of(window).is_none() => return false,
+            None => {}
+        }
+        self.active_window_id = Some(window.clone());
+        true
+    }
+
     /// Records that focus entered the group holding `window` at `stamp`, before the view leaves
     /// it.
     pub fn record_departing_focus(&mut self, window: &W::Id, stamp: std::time::Duration) {

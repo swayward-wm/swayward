@@ -444,6 +444,41 @@ impl<W: LayoutElement> Workspace<W> {
         root
     }
 
+    /// See [`Layout::pre_map_focus`].
+    pub fn pre_map_focus(&self) -> Option<crate::layout::container_commands::PreMapFocus<W::Id>> {
+        use crate::layout::container_commands::PreMapFocus;
+        if self.floating_is_active.get() {
+            let window = self.floating.active_window()?.id().clone();
+            let node = self.floating.focused_tree_node();
+            Some(PreMapFocus::Floating(window, node))
+        } else {
+            self.tiling.focus().map(PreMapFocus::Tiling)
+        }
+    }
+
+    /// See [`Layout::restore_focus_after_map_move`].
+    pub fn restore_pre_map_focus(
+        &mut self,
+        focus: crate::layout::container_commands::PreMapFocus<W::Id>,
+    ) {
+        use crate::layout::container_commands::PreMapFocus;
+        match focus {
+            PreMapFocus::Tiling(node) => {
+                if !self.floating_is_active.get()
+                    && self.tiling.contains(node)
+                    && self.tiling.focus() != Some(node)
+                {
+                    self.tiling.set_focus(node);
+                }
+            }
+            PreMapFocus::Floating(window, node) => {
+                if self.floating.restore_tree_focus(&window, node) {
+                    self.floating_is_active = FloatingActive::Yes;
+                }
+            }
+        }
+    }
+
     pub fn focus_floating_tree_view(&mut self, root: NodeId) {
         self.floating.focus_tree_view(root);
     }

@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/handlers/compositor.rs"]
+what = "the map handler records the active workspace's tiling focus before inserting the view and, once for_window commands have moved the view off that workspace, restores it, so a focused split or workspace node keeps focus."
+why = "sway runs criteria before should_focus (view_map, sway/tree/view.c:943-957), so a for_window move takes a never-focused view away and move restores the seat's existing focus (sway/commands/move.c:598-608); oracle state scenario for_window_move_keeps_focused_parent, random-v3 seeds 30926 31083."
