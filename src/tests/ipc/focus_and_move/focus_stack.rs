@@ -587,3 +587,45 @@ fn focus_stack_criteria_focus_on_marked_split_switches_workspace() {
     assert_eq!(workspace["nodes"][0]["focused"], true);
     assert_eq!(workspace["nodes"][0]["nodes"][0]["focused"], false);
 }
+
+/// A focused view moved off its workspace hands focus to the focus-inactive node of its old
+/// parent, which is the split it left when that split was focused on its own
+/// (`seat_get_focus_inactive(old_parent)`, sway/commands/move.c:598-608). The rule holds when
+/// the destination is on another output, and when the moved view is the workspace's
+/// fullscreen container. Family parity-f2-focused-flag, seeds 15806 and 32093.
+#[test]
+fn focus_stack_move_to_workspace_refocuses_the_focused_old_parent() {
+    for (layout, moved_fullscreen, move_command) in [
+        ("split h", false, "move container to workspace 2"),
+        (
+            "layout stacking",
+            true,
+            "move container to workspace number 3",
+        ),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        f.add_output_at(2, (1280, 720), Some((1280, 0)));
+        let client = f.add_client();
+        map_focus_window(&mut f, client, "one");
+        let commands: &[&str] = if moved_fullscreen {
+            &[layout, "focus parent"]
+        } else {
+            &["focus parent", layout]
+        };
+        run_focus_commands(&mut f, commands);
+        map_test_window(&mut f, client, "two");
+        if moved_fullscreen {
+            run_focus_commands(&mut f, &["fullscreen enable"]);
+        }
+        run_focus_commands(&mut f, &[move_command]);
+
+        let tree = focus_stack_tree(&mut f);
+        let workspace = focus_stack_workspace(&tree);
+        assert_eq!(workspace["name"], "1", "{move_command}");
+        let split = &workspace["nodes"][0];
+        assert_eq!(split["focused"], true, "{move_command}: {split}");
+        assert_eq!(split["nodes"][0]["app_id"], "one", "{move_command}");
+        assert_eq!(split["nodes"][0]["focused"], false, "{move_command}");
+    }
+}

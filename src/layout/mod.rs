@@ -3981,7 +3981,9 @@ impl<W: LayoutElement> Layout<W> {
             }
 
             let transaction = Transaction::new();
-            let mut removed = ws.remove_tile(&window, transaction);
+            // A cross-output move refocuses like any transfer, not like a close
+            // (sway/commands/move.c:598-608).
+            let mut removed = ws.remove_tile_for_transfer(&window, transaction);
 
             removed.tile.stop_move_animations();
 

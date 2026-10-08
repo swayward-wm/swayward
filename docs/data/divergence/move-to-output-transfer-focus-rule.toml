@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs"]
+what = "a focused tiled view moved to a workspace on another output leaves its old workspace focusing the focus-inactive node of its old parent, using the transfer rule rather than the close rule."
+why = "Sway restores focus after a move with `seat_get_focus_inactive(old_parent)`, which can be a split focused on its own, whatever the destination output (sway/commands/move.c:598-608). `move_to_output` removed the tile with the close rule, which only ever focuses a view (sway/input/seat.c:273-286), so the old split lost its focus (family parity-f2-focused-flag, random-v3 seed 32093)."

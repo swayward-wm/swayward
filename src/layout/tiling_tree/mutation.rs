@@ -449,11 +449,15 @@ impl<W: LayoutElement> TilingTree<W> {
         transaction: Transaction,
     ) -> Option<Tile<W>> {
         let id = self.node_for_window(window)?;
-        let target = (self.focus == Some(id) && self.fullscreen_node().is_none())
-            .then(|| {
-                self.transfer_focus_target(Some(id), self.nodes.get(&id).and_then(|n| n.parent))
-            })
-            .flatten();
+        // The moved view may itself be the fullscreen container; only another fullscreen
+        // container keeps focus on itself (`workspace_focus_fullscreen`,
+        // sway/commands/move.c:96-110).
+        let target = (self.focus == Some(id)
+            && self
+                .fullscreen_node()
+                .is_none_or(|fullscreen| fullscreen == id))
+        .then(|| self.transfer_focus_target(Some(id), self.nodes.get(&id).and_then(|n| n.parent)))
+        .flatten();
         let tile = self.remove_tile(window, transaction)?;
         if self.focus.is_some() {
             self.resolve_transfer_focus(target);
