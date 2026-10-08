@@ -1771,3 +1771,182 @@ fn ppt_only_resize_of_a_fullscreen_floating_window_is_refused() {
         Some("Floating containers cannot use ppt measurements")
     );
 }
+
+/// The oracle harness config with one 1270x1408 output and a server-side
+/// decorated client that commits a 696x491 buffer when it maps.
+fn scratchpad_rect_fixture() -> (Fixture, super::client::ClientId) {
+    let mut config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    (f, client)
+}
+
+fn map_natural_window(f: &mut Fixture, client: super::client::ClientId, app_id: &str) {
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id(app_id.into());
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size(696, 491);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+}
+
+/// Asserts `rect` against `(x, y, width, height)`, allowing the x origin to round
+/// either way: the default scratchpad box is centred at a half pixel (315.5), which
+/// sway reports truncated.
+fn assert_rect_near(rect: &Value, (x, y, w, h): (i64, i64, i64, i64), context: &Value) {
+    let int = |key: &str| rect[key].as_i64().unwrap();
+    assert!(
+        (int("x") - x).abs() <= 1,
+        "x {} vs {x}: {context}",
+        int("x")
+    );
+    assert_eq!(
+        (int("y"), int("width"), int("height")),
+        (y, w, h),
+        "{context}"
+    );
+}
+
+fn floating_con_json(f: &mut Fixture) -> Value {
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    find_json_node(&tree, "floating_con", false)
+        .unwrap()
+        .clone()
+}
+
+/// Differential family v3-scratchpad-show-rect (random-v3 seeds 31690, 32687; oracle row
+/// `scratchpad_rule_show_uses_natural_size`): a `for_window` rule that moves a mapping view
+/// to the scratchpad gives it the default scratchpad box, centred
+/// (`root_scratchpad_add_container`, sway/tree/root.c:114-119), but the map commit's
+/// `handle_commit` runs after the criteria and resizes the hidden floating view to its
+/// committed geometry while keeping the content origin (`view_update_size`,
+/// sway/desktop/xdg_shell.c:319-326, sway/tree/view.c:1026-1031).
+#[test]
+fn for_window_move_scratchpad_keeps_the_committed_size() {
+    let (mut f, client) = scratchpad_rect_fixture();
+    let rule = r#"for_window [app_id="^fixture-ssr-1$"] move scratchpad"#;
+    assert!(crate::command::execute(f.niri_state(), rule)[0].success);
+    map_natural_window(&mut f, client, "fixture-ssr-1");
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "split h")[0].success);
+    f.double_roundtrip(client);
+
+    let split = floating_con_json(&mut f);
+    assert_eq!(split["layout"], "splith", "{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    // The default box has 635x1056 content: the container is 639 wide and
+    // 1058 + titlebar high, centred on the 1270x1408 workspace. The committed
+    // 696x491 content then keeps that content origin.
+    let x = (1270 - 639) / 2;
+    let y = (1408 - (1058 + titlebar)) / 2;
+    assert_rect_near(&split["rect"], (x, y, 700, 493 + titlebar), &split);
+    assert_rect_near(&child["rect"], (x, y + titlebar, 700, 493), child);
+}
+
+/// Differential family v3-scratchpad-show-rect (random-v3 seeds 31529, 32562; oracle row
+/// `scratchpad_tabbed_criteria_focus_split_rect`): a tabbed view sent to the scratchpad is
+/// sized and centred as a floating container with its own titlebar
+/// (`container_floating_set_default_size`, `container_floating_move_to_center`,
+/// sway/tree/container.c:896-917, 1147-1156), not as the tab whose titlebar its parent drew.
+#[test]
+fn tabbed_view_moved_to_scratchpad_centres_its_own_titlebar() {
+    let (mut f, client) = scratchpad_rect_fixture();
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    map_natural_window(&mut f, client, "fixture-ssr-2");
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    f.double_roundtrip(client);
+    assert!(
+        crate::command::execute(f.niri_state(), r#"[app_id="^fixture-ssr-2$"] focus"#)[0].success
+    );
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    f.double_roundtrip(client);
+
+    let split = floating_con_json(&mut f);
+    assert_eq!(split["layout"], "splitv", "{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    let x = (1270 - 639) / 2;
+    let y = (1408 - (1058 + titlebar)) / 2;
+    assert_rect_near(&split["rect"], (x, y, 639, 1058 + titlebar), &split);
+    assert_rect_near(&child["rect"], (x, y + titlebar, 639, 1058), child);
+}
+
+/// Differential family v3-scratchpad-show-rect (random-v3 seed 31529): a view a `for_window`
+/// rule made fullscreen leaves fullscreen as it enters the scratchpad (sway/tree/root.c:109-112),
+/// so its default box is centred with the floating titlebar and border it gets back
+/// (sway/tree/root.c:114-119), and a split before the client commits that box wraps it rather
+/// than the last committed fullscreen size (sway/tree/container.c:1543-1548). No oracle row:
+/// pinned sway's capture of this shape varies run to run with when foot snaps to its cell grid.
+#[test]
+fn fullscreen_view_moved_to_scratchpad_centres_its_floating_box() {
+    let (mut f, client) = scratchpad_rect_fixture();
+    let rule = r#"for_window [app_id="^fixture-ssr-3$"] fullscreen enable"#;
+    assert!(crate::command::execute(f.niri_state(), rule)[0].success);
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixture-ssr-3".into());
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    // Like foot, the client takes every configured size and picks 696x491
+    // when it is left to choose.
+    let follow = |f: &mut Fixture| {
+        let window = f.client(client).window(&surface);
+        let (serial, configure) = window.configures_received.last().unwrap();
+        if window.last_acked_configure == Some(*serial) {
+            return;
+        }
+        let (w, h) = configure.size;
+        let (w, h) = if w > 0 && h > 0 { (w, h) } else { (696, 491) };
+        window.attach_new_buffer();
+        window.set_size(w as u16, h as u16);
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    follow(&mut f);
+    // The rule's fullscreen configure; the client commits it.
+    follow(&mut f);
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    f.double_roundtrip(client);
+    // The split arrives before the client commits the floating size, while
+    // its last commit is still the fullscreen one.
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
+    f.double_roundtrip(client);
+    follow(&mut f);
+
+    let split = floating_con_json(&mut f);
+    assert_eq!(split["layout"], "splith", "{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    let x = (1270 - 639) / 2;
+    let y = (1408 - (1058 + titlebar)) / 2;
+    assert_rect_near(&split["rect"], (x, y, 639, 1058 + titlebar), &split);
+    assert_rect_near(&child["rect"], (x, y + titlebar, 639, 1058), child);
+}

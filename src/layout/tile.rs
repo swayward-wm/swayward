@@ -1016,12 +1016,22 @@ impl<W: LayoutElement> Tile<W> {
     pub fn tile_expected_or_current_size(&self) -> Size<f64, Logical> {
         let mut size = self.window_expected_or_current_size();
 
-        if self.sizing_mode.is_fullscreen() {
+        // The expected size belongs to the pending state, so the pending
+        // sizing mode decides whether it is a fullscreen size: a view leaving
+        // fullscreen for a floating box keeps its committed fullscreen mode
+        // until the client commits the floating configure, but sway already
+        // holds the floating box (sway/tree/container.c:1246-1258).
+        if self.window.pending_sizing_mode().is_fullscreen() {
             // Normally we'd just return the fullscreen size here, but this makes things a bit
             // nicer if a fullscreen window is bigger than the fullscreen size for some reason.
             size.w = f64::max(size.w, self.view_size.w);
             size.h = f64::max(size.h, self.view_size.h);
             return size;
+        }
+        // The committed mode still hides the titlebar; the pending normal
+        // state draws it.
+        if !self.sizing_mode.is_normal() && self.window.pending_sizing_mode().is_normal() {
+            return self.floating_tile_size_for_window_size(size);
         }
 
         let (left, right, top, bottom) = self.decoration_insets();
@@ -1192,6 +1202,25 @@ impl<W: LayoutElement> Tile<W> {
     pub fn tile_height_for_window_height(&self, size: f64) -> f64 {
         let (_, _, top, bottom) = self.decoration_insets();
         size + top + bottom
+    }
+
+    /// The decorated size of a floating window with content `size` in the
+    /// normal sizing mode: the border on every edge and, under `border normal`,
+    /// the titlebar on top (`container_set_geometry_from_content`,
+    /// sway/tree/container.c:1018-1039). Unlike `tile_size`, it does not depend
+    /// on the current sizing mode, so a fullscreen view leaving for the
+    /// scratchpad is measured as the floating view it becomes.
+    pub fn floating_tile_size_for_window_size(
+        &self,
+        size: Size<f64, Logical>,
+    ) -> Size<f64, Logical> {
+        let width = self.configured_border_width();
+        let top = if self.has_configured_sway_titlebar() && !self.border.is_off() {
+            super::titlebar::height(self.scale, &self.options.layout.titlebar)
+        } else {
+            width
+        };
+        Size::from((size.w + 2. * width, size.h + top + width))
     }
 
     pub fn window_width_for_tile_width(&self, size: f64) -> f64 {

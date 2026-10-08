@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/tile.rs", "src/handlers/compositor.rs"]
+what = "A floating tile's expected size uses the pending sizing mode and, leaving fullscreen, the floating decorations; a view that a map-time rule hides in the scratchpad takes its committed size."
+why = "Sway's floating box is the pending one: a fullscreen view sent to the scratchpad has its floating box at once, and a split wraps it before the client commits (sway/tree/root.c:109-119, sway/tree/container.c:1543-1548). niri measured with the committed fullscreen mode and wrapped the fullscreen size. The map commit's handle_commit resizes a rule-hidden scratchpad view to its geometry after criteria run (sway/desktop/xdg_shell.c:319-326, sway/tree/view.c:1026-1031). Differential family v3-scratchpad-show-rect, random-v3 seeds 31529, 31690, 32562, 32687."

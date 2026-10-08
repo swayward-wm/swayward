@@ -39,10 +39,15 @@ impl<W: LayoutElement> Workspace<W> {
             ensure_min_max_size(content_height.round() as i32, min_size.h, max_size.h);
         tile.floating_window_size = Some(Size::from((window_width.max(1), window_height.max(1))));
 
-        let tile_size = Size::from((
-            tile.tile_width_for_window_width(f64::from(window_width)),
-            tile.tile_height_for_window_height(f64::from(window_height)),
-        ));
+        // The view is floating and out of fullscreen by now, with its own
+        // border on every edge and its own titlebar
+        // (sway/tree/root.c:109-118), which a tab, a stack or fullscreen did
+        // not give it, so centre the floating box it is about to have.
+        tile.set_sway_csd_floating(true);
+        let tile_size = tile.floating_tile_size_for_window_size(Size::from((
+            f64::from(window_width),
+            f64::from(window_height),
+        )));
         let pos = self.working_area.loc
             + (self.working_area.size.to_point() - tile_size.to_point()).downscale(2.);
         tile.floating_pos = Some(self.floating.logical_to_size_frac(pos));

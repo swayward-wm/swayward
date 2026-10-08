@@ -595,6 +595,9 @@ impl State {
             let _ = crate::command::execute(self, &targeted);
         }
         crate::command::run_for_window(self, mapped_id);
+        self.swayward
+            .layout
+            .keep_committed_size_of_mapped_scratchpad_window(&window);
         // Sway decides focus after running criteria (`view_map`,
         // sway/tree/view.c:943-945). A rule whose `layout` wrap detached the
         // global fullscreen view clears `root->fullscreen_global`, so

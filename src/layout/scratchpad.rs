@@ -272,6 +272,26 @@ impl<W: LayoutElement> Layout<W> {
         Some(shown)
     }
 
+    /// Gives a view that a map-time rule hid in the scratchpad its committed
+    /// size. Sway runs the criteria inside `view_map`, then the map commit's
+    /// `handle_commit` finds the geometry new and resizes the floating view to
+    /// it, keeping the content origin (sway/desktop/xdg_shell.c:319-326,
+    /// `view_update_size`, sway/tree/view.c:1026-1031). The tile's stored
+    /// position is its decorated origin, which the unchanged decorations keep.
+    pub fn keep_committed_size_of_mapped_scratchpad_window(&mut self, window: &W::Id) {
+        let Some(removed) = self
+            .scratchpad
+            .iter_mut()
+            .find(|removed| removed.tile.window().id() == window)
+        else {
+            return;
+        };
+        let size = removed.tile.window().size();
+        if size.w > 0 && size.h > 0 {
+            removed.tile.floating_window_size = Some(size);
+        }
+    }
+
     pub fn scratchpad_tiles(&self) -> impl Iterator<Item = (&W, bool)> {
         self.scratchpad
             .iter()
