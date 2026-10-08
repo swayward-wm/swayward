@@ -328,7 +328,7 @@ impl<W: LayoutElement> TilingTree<W> {
     /// representation whenever a child is attached or detached or a layout changes below it
     /// (`container_update_representation`, sway/tree/container.c:750-773), so a different
     /// shape means the cached representation was rebuilt.
-    pub(super) fn representation_shape(&self) -> TreeShape {
+    pub(in crate::layout) fn representation_shape(&self) -> TreeShape {
         let mut shape = Vec::new();
         let mut stack = vec![self.root];
         while let Some(id) = stack.pop() {

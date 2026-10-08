@@ -1336,9 +1336,6 @@ impl<W: LayoutElement> Monitor<W> {
         let Some(WorkspaceSwitch::Animation(_)) = self.workspace_switch else {
             return;
         };
-        if !self.active_workspace_ref().has_windows() {
-            return;
-        }
         self.workspace_switch = None;
         if let Some(previous) = self.previous_workspace_id.filter(|id| Some(*id) != target) {
             self.consider_destroy_workspace(previous);

@@ -513,7 +513,7 @@ macro_rules! side_tables {
 use side_tables;
 
 /// Every node with its split layout (`None` for a leaf), depth first.
-type TreeShape = Vec<(NodeId, Option<Layout>)>;
+pub(in crate::layout) type TreeShape = Vec<(NodeId, Option<Layout>)>;
 
 #[derive(Debug)]
 pub struct TilingTree<W: LayoutElement> {

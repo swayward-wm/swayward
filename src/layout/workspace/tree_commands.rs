@@ -872,9 +872,7 @@ impl<W: LayoutElement> Workspace<W> {
         layout: crate::layout::tiling_tree::Layout,
     ) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            self.floating
-                .focused_child_tree_mut()
-                .map(|tree| tree.set_focused_layout(layout))
+            self.in_floating_tree_refreshing_representation(|tree| tree.set_focused_layout(layout))
                 .unwrap_or_default()
         } else {
             self.tiling.set_focused_layout(layout)
@@ -886,7 +884,7 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         if self.floating_is_active.get() {
-            self.floating.split_active(layout);
+            self.split_active_floating(layout);
         } else {
             self.tiling.split_focused(layout);
         }
@@ -904,10 +902,10 @@ impl<W: LayoutElement> Workspace<W> {
         toggle: &swayward_ipc::command::LayoutToggle,
     ) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            self.floating
-                .focused_child_tree_mut()
-                .map(|tree| tree.toggle_focused_layout(toggle))
-                .unwrap_or_default()
+            self.in_floating_tree_refreshing_representation(|tree| {
+                tree.toggle_focused_layout(toggle)
+            })
+            .unwrap_or_default()
         } else {
             self.tiling.toggle_focused_layout(toggle)
         }
@@ -915,9 +913,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
         if self.floating_is_active.get() {
-            self.floating
-                .focused_child_tree_mut()?
-                .restore_focused_split_layout()
+            self.in_floating_tree_refreshing_representation(
+                crate::layout::tiling_tree::TilingTree::restore_focused_split_layout,
+            )
+            .flatten()
         } else {
             self.tiling.restore_focused_split_layout()
         }
@@ -925,10 +924,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn toggle_focused_layout_split(&mut self) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            self.floating
-                .focused_child_tree_mut()
-                .map(crate::layout::tiling_tree::TilingTree::toggle_focused_layout_split)
-                .unwrap_or_default()
+            self.in_floating_tree_refreshing_representation(
+                crate::layout::tiling_tree::TilingTree::toggle_focused_layout_split,
+            )
+            .unwrap_or_default()
         } else {
             self.tiling.toggle_focused_layout_split()
         }
@@ -957,7 +956,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
         self.tiling.keep_unarranged_for_floating_fullscreen(hidden);
         self.floating_is_active = FloatingActive::Yes;
-        self.floating.split_active(layout);
+        self.split_active_floating(layout);
         if let Some(root) = self.floating.tree_root_for_window(&window) {
             if let Some(tree) = self.floating.tree_mut(root) {
                 tree.set_node_fullscreen(root, mode);
@@ -985,6 +984,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
         if let Some(tree) = self.floating.focused_child_tree_mut() {
             tree.toggle_focused_split();
+            self.tiling.restore_has_had_tile(true);
             return;
         }
         let layout = if self.tiling.root_layout() == Some(Layout::SplitV) {
@@ -992,7 +992,33 @@ impl<W: LayoutElement> Workspace<W> {
         } else {
             Layout::SplitV
         };
+        self.split_active_floating(layout);
+    }
+
+    /// A split in the floating layer. `container_split` always refreshes the representation
+    /// up to the workspace, through `container_update_representation` on the reused parent or
+    /// through `container_replace` and `container_add_sibling` on a new one
+    /// (sway/tree/container.c:750-773,1410-1423,1508-1552), so a workspace that never held a
+    /// tile reports one from then on.
+    fn split_active_floating(&mut self, layout: crate::layout::tiling_tree::Layout) {
         self.floating.split_active(layout);
+        self.tiling.restore_has_had_tile(true);
+    }
+
+    /// Runs a `layout` command in the focused floating tree. A layout that changes refreshes
+    /// the representation up to the workspace (`container_update_representation`,
+    /// sway/commands/layout.c:171-176, sway/tree/container.c:750-773).
+    fn in_floating_tree_refreshing_representation<T>(
+        &mut self,
+        f: impl FnOnce(&mut crate::layout::tiling_tree::TilingTree<W>) -> T,
+    ) -> Option<T> {
+        let tree = self.floating.focused_child_tree_mut()?;
+        let before = tree.representation_shape();
+        let result = f(tree);
+        if tree.representation_shape() != before {
+            self.tiling.restore_has_had_tile(true);
+        }
+        Some(result)
     }
 
     /// See [`Layout::split_floating_target`].
