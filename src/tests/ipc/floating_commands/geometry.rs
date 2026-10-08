@@ -295,11 +295,20 @@ fn move_position_uses_workspace_coordinates_and_rejects_absolute_ppt() {
     }
 }
 
-/// Oracle: floating_window_ppt_resize_rejected. A floating view resizes only
-/// in px or unitless amounts; a ppt-only resize is refused and leaves the
-/// window alone (sway/commands/resize.c:523-537). Differential seed 1136.
+/// Oracle: floating_window_ppt_resize_rejected and floating_toggle_ppt_resize.
+/// A floating view resizes only in px or unitless amounts; a ppt-only resize
+/// is refused and leaves the window alone (sway/commands/resize.c:523-537),
+/// whether `floating enable` or `floating toggle` floated it. Differential
+/// seed 1136; family diff-fam-floating-toggle-ppt-resize, random-v2 seeds
+/// 13089, 13561, 14434, 14557, 14661, 17858.
 #[test]
 fn ppt_only_resize_of_a_floating_window_is_refused() {
+    for float in ["floating enable", "floating toggle"] {
+        ppt_only_resize_of_a_floating_window_is_refused_after(float);
+    }
+}
+
+fn ppt_only_resize_of_a_floating_window_is_refused_after(float: &str) {
     let mut f = Fixture::new();
     f.add_output(1, (1000, 800));
     let client = f.add_client();
@@ -311,7 +320,7 @@ fn ppt_only_resize_of_a_floating_window_is_refused() {
     window.attach_new_buffer();
     window.ack_last_and_commit();
     f.double_roundtrip(client);
-    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), float)[0].success);
 
     let rect = |f: &mut Fixture| {
         f.niri_state().ipc_refresh_layout();
@@ -333,13 +342,13 @@ fn ppt_only_resize_of_a_floating_window_is_refused() {
         "resize grow left 5 ppt",
     ] {
         let outcome = crate::command::execute(f.niri_state(), command);
-        assert!(!outcome[0].success, "{command}: {outcome:?}");
+        assert!(!outcome[0].success, "{float}; {command}: {outcome:?}");
         assert_eq!(
             outcome[0].error.as_deref(),
             Some("Floating containers cannot use ppt measurements"),
-            "{command}"
+            "{float}; {command}"
         );
-        assert_eq!(rect(&mut f), before, "{command}");
+        assert_eq!(rect(&mut f), before, "{float}; {command}");
     }
 }
 
