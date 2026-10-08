@@ -557,3 +557,33 @@ fn focus_stack_split_on_split_focused_workspace_refreshes_the_representation() {
     assert_eq!(workspace["representation"], "H[V[one]]");
     assert_eq!(workspace["nodes"][0]["focused"], true);
 }
+
+/// A criteria focus on a split on another workspace moves the seat there: sway's seat focus
+/// switches the workspace with the node (`seat_set_workspace_focus`,
+/// sway/input/seat.c:1130-1200), and the empty workspace it left is destroyed.
+/// Differential seed 31733.
+#[test]
+fn focus_stack_criteria_focus_on_marked_split_switches_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_focus_window(&mut f, client, "one");
+    run_focus_commands(
+        &mut f,
+        &[
+            "layout stacking",
+            "focus parent",
+            "mark n",
+            "workspace 2",
+            "[con_mark=\"n\"] focus",
+        ],
+    );
+    let tree = focus_stack_tree(&mut f);
+    let output = &tree["nodes"][1];
+    assert_eq!(output["current_workspace"], "1");
+    assert_eq!(output["nodes"].as_array().unwrap().len(), 1);
+    let workspace = focus_stack_workspace(&tree);
+    assert_eq!(workspace["nodes"][0]["marks"][0], "n");
+    assert_eq!(workspace["nodes"][0]["focused"], true);
+    assert_eq!(workspace["nodes"][0]["nodes"][0]["focused"], false);
+}

@@ -2314,10 +2314,33 @@ impl<W: LayoutElement> Layout<W> {
         workspace_id: workspace::WorkspaceId,
         id: tiling_tree::NodeId,
     ) -> bool {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return false;
+        // Sway's seat focus takes the node's workspace and output with it
+        // (`seat_set_focus`, sway/input/seat.c:1209-1237), so a criteria focus
+        // on a split elsewhere switches there as a view focus does.
+        let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &mut self.monitor_set
+        else {
+            let Some(workspace) = self.workspace_mut(workspace_id) else {
+                return false;
+            };
+            return workspace.focus_tiling_node(id);
         };
-        workspace.focus_tiling_node(id)
+        for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
+            let Some(workspace_idx) = mon.workspaces.iter().position(|ws| ws.id() == workspace_id)
+            else {
+                continue;
+            };
+            if !mon.workspaces[workspace_idx].focus_tiling_node(id) {
+                return false;
+            }
+            *active_monitor_idx = monitor_idx;
+            mon.switch_workspace(workspace_idx);
+            return true;
+        }
+        false
     }
 
     pub fn set_tiling_node_layout(&mut self, id: tiling_tree::NodeId, layout: tiling_tree::Layout) {
