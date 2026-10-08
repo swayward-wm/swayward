@@ -942,10 +942,68 @@ impl<W: LayoutElement> FloatingLayout<W> {
             }
             return;
         }
-        let Some(index) = self.idx_of(&active) else {
-            return;
+        self.split_standalone(&active, layout);
+    }
+
+    /// `container_split` on a named container in a floating group, as a criteria
+    /// command runs it (`do_split`, sway/commands/split.c:12-33). With `toggle` the
+    /// layout comes from the parent (`cmd_split`, sway/commands/split.c:64-71); a group
+    /// root's parent layout is the workspace's, which the caller passes as `layout`.
+    pub fn split_tree_node(
+        &mut self,
+        node: NodeId,
+        layout: super::tiling_tree::Layout,
+        toggle: bool,
+    ) -> bool {
+        self.interactive_resize = None;
+        let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.contains(node))
+        else {
+            return false;
         };
-        let FloatingEntry { tile, data, .. } = self.remove_entry(index);
+        if toggle && node != entry.root {
+            entry.tree.toggle_split(node);
+        } else {
+            entry.tree.split(node, layout);
+        }
+        if let Some(root) = entry
+            .tree
+            .resident_root()
+            .filter(|root| *root != entry.root)
+        {
+            let old_root = std::mem::replace(&mut entry.root, root);
+            entry.tree.set_split_sticky(old_root, entry.sticky);
+            entry.sticky = false;
+        }
+        true
+    }
+
+    /// `container_split` on `id`, a view in the floating layer: a group child or root
+    /// splits inside its group, a standalone view becomes a new group.
+    pub fn split_window(
+        &mut self,
+        id: &W::Id,
+        layout: super::tiling_tree::Layout,
+        toggle: bool,
+    ) -> bool {
+        if let Some((_, node)) = self.tree_entry_for_window(id) {
+            return self.split_tree_node(node, layout, toggle);
+        }
+        self.interactive_resize = None;
+        self.split_standalone(id, layout)
+    }
+
+    fn split_standalone(&mut self, id: &W::Id, layout: super::tiling_tree::Layout) -> bool {
+        let Some(index) = self.idx_of(id) else {
+            return false;
+        };
+        let previous_active = self.active_window_id.clone();
+        let active = id.clone();
+        let FloatingEntry {
+            tile, data, stamp, ..
+        } = self.remove_entry(index);
         // Sway's split copies the container's pending box (sway/tree/container.c:1543-1548),
         // which `container_floating_resize_and_center` set when the view floated, before
         // the client commits that size. `data.size` still holds the last committed tile.
@@ -961,18 +1019,37 @@ impl<W: LayoutElement> FloatingLayout<W> {
         tree.add_tile(tile, super::tiling_tree::InsertTarget::Focused);
         tree.split_focused(layout);
         let Some(root) = tree.parent_of_window(&active) else {
-            return;
+            return false;
         };
         let Some((subtree, _)) = tree.detach_subtree(root) else {
-            return;
+            return false;
         };
-        self.add_tree(subtree, rect);
+        // `container_replace` puts the wrapper in the view's slot in `floating_nodes`
+        // (sway/tree/container.c:1484-1488), so the group keeps the view's stamp.
+        self.add_tree_with_stamp(subtree, rect, stamp);
+        // `container_split` moves focus only when the view held it
+        // (sway/tree/container.c:1532-1560).
+        if previous_active.as_ref() != Some(&active) {
+            self.active_window_id = previous_active;
+        }
+        true
     }
 
     pub fn add_tree(
         &mut self,
         subtree: DetachedSubtree<W>,
         rect: Rectangle<f64, Logical>,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        let stamp = self.bump_stamp();
+        self.add_tree_with_stamp(subtree, rect, stamp)
+    }
+
+    /// [`Self::add_tree`] at `stamp`'s place in the stack rather than on top.
+    fn add_tree_with_stamp(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        rect: Rectangle<f64, Logical>,
+        stamp: u64,
     ) -> (NodeId, Vec<(NodeId, NodeId)>) {
         let (tree, root, remapped) = TilingTree::from_detached_subtree(
             self.view_size,
@@ -989,9 +1066,13 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .any(|entry| entry.tree.contains(root)));
         self.active_window_id = tree.active_window().map(|window| window.id().clone());
         let sticky = tree.is_split_sticky(root);
-        let stamp = self.bump_stamp();
+        let index = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.stamp < stamp)
+            .unwrap_or(self.tree_entries.len());
         self.tree_entries.insert(
-            0,
+            index,
             FloatingTreeEntry {
                 stamp,
                 tree,

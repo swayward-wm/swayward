@@ -242,6 +242,31 @@ impl<W: LayoutElement> Layout<W> {
         true
     }
 
+    /// A criteria `split` on a container in the floating layer: a view standing alone, a
+    /// group child, or a group root (`do_split`, sway/commands/split.c:12-33). `node` names
+    /// a group container, else `window` the view. `layout` of `None` is `split toggle`,
+    /// which reads the parent's layout; a floating root's parent is the workspace
+    /// (`container_parent_layout`, sway/tree/container.c:1353-1361).
+    pub fn split_floating_target(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: Option<&W::Id>,
+        node: Option<NodeId>,
+        layout: Option<tiling_tree::Layout>,
+    ) -> bool {
+        let Some(workspace) = self.workspace_mut(workspace_id) else {
+            return false;
+        };
+        workspace.split_floating_target(window, node, layout)
+    }
+
+    /// The workspace holding `window` in its floating layer.
+    pub fn floating_workspace_for_window(&self, window: &W::Id) -> Option<WorkspaceId> {
+        self.workspaces()
+            .find(|(_, _, workspace)| workspace.floating().has_window(window))
+            .map(|(_, _, workspace)| workspace.id())
+    }
+
     pub fn toggle_tiling_node_split(&mut self, workspace_id: WorkspaceId, node: NodeId) -> bool {
         let Some(workspace) = self
             .workspaces_mut()

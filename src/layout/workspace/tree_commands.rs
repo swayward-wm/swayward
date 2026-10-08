@@ -995,6 +995,27 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating.split_active(layout);
     }
 
+    /// See [`Layout::split_floating_target`].
+    pub fn split_floating_target(
+        &mut self,
+        window: Option<&W::Id>,
+        node: Option<NodeId>,
+        layout: Option<crate::layout::tiling_tree::Layout>,
+    ) -> bool {
+        use crate::layout::tiling_tree::Layout;
+        let toggled = if self.tiling.root_layout() == Some(Layout::SplitV) {
+            Layout::SplitH
+        } else {
+            Layout::SplitV
+        };
+        let (layout, toggle) = layout.map_or((toggled, true), |layout| (layout, false));
+        match (node, window) {
+            (Some(node), _) => self.floating.split_tree_node(node, layout, toggle),
+            (None, Some(window)) => self.floating.split_window(window, layout, toggle),
+            (None, None) => false,
+        }
+    }
+
     pub fn set_focused_display(&mut self, display: ColumnDisplay) {
         if self.floating_is_active.get() {
             return;

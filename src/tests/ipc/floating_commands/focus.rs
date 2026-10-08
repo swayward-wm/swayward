@@ -1186,3 +1186,83 @@ fn map_after_floating_from_a_split_joins_the_split() {
     assert_eq!(workspace["nodes"][0]["nodes"][0]["focused"], true);
     assert_eq!(workspace["floating_nodes"][0]["focused"], false);
 }
+
+#[test]
+fn for_window_split_on_a_view_mapped_into_a_floating_group_wraps_it() {
+    // random-v3 seeds 31002 31379 31522 32690 (diff-fam-v3-for-window-split-in-floating-group;
+    // oracle row for_window_split_in_floating_group). A view mapped while a floating group's
+    // child has focus joins that group (sway/tree/view.c:851-871), and a `for_window` split runs
+    // `container_split` on it like on any other container (`do_split`,
+    // sway/commands/split.c:12-33): it has a sibling, so it is wrapped in a new splitv container.
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id| {
+        crate::tests::windows::map_window(
+            f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    };
+    map(&mut f, "first");
+    for command in [
+        "floating enable",
+        "split toggle",
+        r#"for_window [app_id="second"] split v"#,
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    map(&mut f, "second");
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let group = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(group["nodes"][0]["app_id"], "first", "{group:#}");
+    let wrapper = &group["nodes"][1];
+    assert_eq!(wrapper["type"], "con", "{group:#}");
+    assert_eq!(wrapper["layout"], "splitv", "{group:#}");
+    assert_eq!(wrapper["focused"], false, "{group:#}");
+    assert_eq!(wrapper["nodes"][0]["app_id"], "second", "{group:#}");
+    assert_eq!(wrapper["nodes"][0]["focused"], true, "{group:#}");
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
+fn criteria_split_on_an_unfocused_standalone_floating_view_keeps_its_stack_slot() {
+    // Oracle row rv_split_unfocused_standalone. `container_split` wraps the view through
+    // `container_replace`, which puts the wrapper in the view's slot in `floating_nodes`
+    // (sway/tree/container.c:1484-1488) rather than raising it, and focus stays put because
+    // the view did not hold it (sway/tree/container.c:1532-1560).
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["a", "b"] {
+        crate::tests::windows::map_window(
+            &mut f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+        let outcome = crate::command::execute(f.niri_state(), "floating enable");
+        assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    }
+    let outcome = crate::command::execute(f.niri_state(), r#"[app_id="^a$"] split v"#);
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let floating = &tree["nodes"][1]["nodes"][0]["floating_nodes"];
+    assert_eq!(floating[0]["layout"], "splitv", "{floating:#}");
+    assert_eq!(floating[0]["focused"], false, "{floating:#}");
+    assert_eq!(floating[0]["nodes"][0]["app_id"], "a", "{floating:#}");
+    assert_eq!(floating[0]["nodes"][0]["focused"], false, "{floating:#}");
+    assert_eq!(floating[1]["app_id"], "b", "{floating:#}");
+    assert_eq!(floating[1]["focused"], true, "{floating:#}");
+    f.swayward().layout.verify_invariants();
+}

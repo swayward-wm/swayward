@@ -104,6 +104,9 @@ pub(super) fn split_targeted(
     target: CommandTarget,
     layout: Option<Layout>,
 ) -> Result<(), CommandOutcome> {
+    if let Some(result) = split_floating_targeted(state, target, layout) {
+        return result;
+    }
     let (workspace, node) = tiling_target(state, target, "Unable to split floating windows")?;
     let changed = match layout {
         Some(Layout::SplitH) => state.swayward.layout.split_tiling_node(
@@ -140,6 +143,45 @@ pub(super) fn split_targeted(
     }
     state.swayward.queue_redraw_all();
     Ok(())
+}
+
+/// A criteria `split` naming a container in the floating layer, which sway splits like any
+/// other (`do_split`, sway/commands/split.c:12-33). `None` when the target is not floating.
+fn split_floating_targeted(
+    state: &mut State,
+    target: CommandTarget,
+    layout: Option<Layout>,
+) -> Option<Result<(), CommandOutcome>> {
+    let layout = match layout {
+        Some(Layout::SplitH) => Some(crate::layout::tiling_tree::Layout::SplitH),
+        Some(Layout::SplitV) => Some(crate::layout::tiling_tree::Layout::SplitV),
+        Some(Layout::ToggleSplit) => None,
+        // `split none` flattens and the rest are parse errors; both take the tiling path.
+        _ => return None,
+    };
+    let layout_state = &mut state.swayward.layout;
+    let changed = match target {
+        CommandTarget::Container(workspace, node) => {
+            let in_group = layout_state
+                .workspace(workspace)
+                .is_some_and(|ws| ws.floating().tree_root_for_node(node).is_some());
+            if !in_group {
+                return None;
+            }
+            layout_state.split_floating_target(workspace, None, Some(node), layout)
+        }
+        CommandTarget::Window(window) => {
+            let window = super::mapped_window(state, window)?;
+            let layout_state = &mut state.swayward.layout;
+            let workspace = layout_state.floating_workspace_for_window(&window)?;
+            layout_state.split_floating_target(workspace, Some(&window), None, layout)
+        }
+    };
+    if !changed {
+        return Some(Err(failure("No matching node.")));
+    }
+    state.swayward.queue_redraw_all();
+    Some(Ok(()))
 }
 
 pub(super) fn fullscreen(state: &mut State, mode: Toggle, global: bool) {
