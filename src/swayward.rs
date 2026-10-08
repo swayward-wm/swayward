@@ -422,6 +422,9 @@ pub struct Swayward {
     pub bind_cooldown_timers: HashMap<swayward_config::BindIdentity, RegistrationToken>,
     pub bind_repeat_timer: Option<RegistrationToken>,
     pub keyboard_focus: KeyboardFocus,
+    /// The keyboard focus surface took focus while its workspace itself held the seat focus,
+    /// so its view has not been raised on the seat stack yet.
+    pub keyboard_focus_unraised: bool,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
     pub is_fdo_idle_inhibited: Arc<AtomicBool>,
@@ -1410,6 +1413,7 @@ impl Swayward {
 
             window_mru_ui,
             pending_mru_commit: None,
+            keyboard_focus_unraised: false,
             urgency_timers: HashMap::new(),
             urgency_active_workspaces: HashSet::new(),
 

@@ -490,7 +490,17 @@ fn order_by_recency(
                 .find(|mapped| &mapped.window == window)?;
             Some((container_id(node), mapped.focus_timestamp()?))
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .chain(
+            workspace
+                .tiling()
+                .entered_by_departed()
+                .map(|(node, stamp)| (container_id(node), stamp)),
+        )
+        .fold(std::collections::HashMap::new(), |mut map, (id, stamp)| {
+            let entry = map.entry(id).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+            map
+        });
     // A floating group keeps its place too after a view focus entered it through leaves it.
     let departed = workspace
         .ipc_floating_trees()

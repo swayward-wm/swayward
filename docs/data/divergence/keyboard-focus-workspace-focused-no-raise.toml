@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/swayward.rs", "src/swayward/keyboard_focus.rs"]
+what = "a view that takes keyboard focus while its workspace itself holds the seat focus gets no focus timestamp until seat focus comes back down to it (`keyboard_focus_unraised`)."
+why = "Sway's seat focuses the workspace node there and raises no view (`focus parent`, sway/commands/focus.c:339-351; `seat_set_focus`, sway/input/seat.c), so the IPC workspace focus list keeps a floater ahead of the tiled view. Oracle row floating_toggle_focus_parent_focus_order."

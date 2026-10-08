@@ -1672,7 +1672,8 @@ impl<W: LayoutElement> Workspace<W> {
             if let Some(parent) = parent.filter(|parent| {
                 target_is_active && !was_floating && !never_focused && self.tiling.contains(*parent)
             }) {
-                self.tiling.set_focus(parent);
+                let stamp = tile.window().focus_timestamp();
+                self.tiling.set_focus_raised_by_departed(parent, stamp);
             }
             tile.tiling_focus_rank = rank;
             tile.tiling_parent = parent;

@@ -60,6 +60,7 @@ impl<W: LayoutElement> TilingTree<W> {
             focus: None,
             ipc_stale_nodes: HashSet::new(),
             last_entered_by: HashMap::new(),
+            entered_by_departed: HashMap::new(),
             has_had_tile: false,
             empty_representation_layout: None,
             focus_history: Vec::new(),

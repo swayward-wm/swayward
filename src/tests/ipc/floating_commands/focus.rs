@@ -1266,3 +1266,106 @@ fn criteria_split_on_an_unfocused_standalone_floating_view_keeps_its_stack_slot(
     assert_eq!(floating[1]["focused"], true, "{floating:#}");
     f.swayward().layout.verify_invariants();
 }
+
+/// Workspace focus lists in the first-divergence shapes of parity-f3-focus-order
+/// (oracle row floating_toggle_focus_parent_focus_order). Each case lists the commands
+/// and sway 1.12's workspace `focus` as app ids, most recent first.
+#[test]
+fn workspace_focus_order_matches_sway() {
+    let cases: &[(&str, &[&str], &[&str])] = &[
+        (
+            "31161",
+            &["map 1", "map 2", "floating toggle", "focus parent"],
+            &["2", "1"],
+        ),
+        (
+            "31762",
+            &[
+                "map 1",
+                "floating enable",
+                "map 2",
+                "layout stacking",
+                "focus next",
+            ],
+            &["1", "con"],
+        ),
+        (
+            "15446",
+            &[
+                "map 2",
+                "floating toggle",
+                "map 4",
+                "layout stacking",
+                "focus right",
+            ],
+            &["2", "con"],
+        ),
+        (
+            "31573",
+            &[
+                "map 1",
+                "layout tabbed",
+                "map 2",
+                "map 3",
+                r#"[app_id="^[23]$"] floating enable"#,
+            ],
+            &["3", "con", "2"],
+        ),
+        (
+            "31006",
+            &[
+                "map 1",
+                "map 2",
+                "map 3",
+                "layout tabbed; layout toggle",
+                r#"[app_id="^[23]$"] floating enable"#,
+            ],
+            &["3", "con", "2"],
+        ),
+        (
+            "31762 before focus",
+            &["map 1", "floating enable", "map 2", "layout stacking"],
+            &["1", "con"],
+        ),
+    ];
+    for (seed, steps, expected) in cases {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        for step in *steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+                continue;
+            }
+            for outcome in crate::command::execute(f.niri_state(), step) {
+                assert!(outcome.success, "{seed} {step}: {outcome:?}");
+            }
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        let children = workspace["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(workspace["floating_nodes"].as_array().unwrap())
+            .collect::<Vec<_>>();
+        let focus = workspace["focus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| {
+                let child = children.iter().find(|child| child["id"] == *id).unwrap();
+                child["app_id"].as_str().unwrap_or("con").to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(focus, *expected, "{seed}: {workspace:#}");
+    }
+}

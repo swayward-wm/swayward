@@ -8,8 +8,35 @@ impl State {
         let focus = self.compute_keyboard_focus();
         if self.swayward.keyboard_focus != focus {
             self.apply_keyboard_focus_change(focus);
+        } else if self.swayward.keyboard_focus_unraised {
+            // Focus moved from the workspace back down to the view that kept keyboard focus,
+            // which raises it now (`seat_set_focus`, sway/input/seat.c).
+            if let KeyboardFocus::Layout {
+                surface: Some(surface),
+            } = &focus
+            {
+                if !self.keyboard_focus_workspace_focused(surface) {
+                    self.swayward.keyboard_focus_unraised = false;
+                    if let Some((mapped, _)) =
+                        self.swayward.layout.find_window_and_output_mut(surface)
+                    {
+                        mapped.set_focus_timestamp(get_monotonic_time());
+                    }
+                }
+            } else {
+                self.swayward.keyboard_focus_unraised = false;
+            }
         }
         self.swayward.record_urgency_active_workspaces();
+    }
+
+    /// Whether the workspace holding `surface` has the workspace itself focused.
+    fn keyboard_focus_workspace_focused(&self, surface: &WlSurface) -> bool {
+        self.swayward
+            .layout
+            .workspaces()
+            .find(|(_, _, ws)| ws.find_wl_surface(surface).is_some())
+            .is_some_and(|(_, _, ws)| ws.is_workspace_focused())
     }
 
     fn compute_keyboard_focus(&mut self) -> KeyboardFocus {
@@ -158,6 +185,8 @@ impl State {
             focus
         );
 
+        self.swayward.keyboard_focus_unraised = false;
+
         // Tell the windows their new focus state for window rule purposes.
         if let KeyboardFocus::Layout {
             surface: Some(surface),
@@ -174,9 +203,20 @@ impl State {
             // Sway clears urgency when seat focus reaches the view
             // (`sway/sway/input/seat.c:260-315`; `sway/sway/tree/view.c`).
             self.swayward.focus_clears_urgency(surface);
+            // With the workspace itself focused sway's seat focuses no view, so the view that
+            // only holds keyboard focus is not raised on the seat stack (`seat_set_focus` on the
+            // workspace node, sway/input/seat.c).
+            let workspace_focused = self.keyboard_focus_workspace_focused(surface);
+            self.swayward.keyboard_focus_unraised = workspace_focused;
             if let Some((mapped, _)) = self.swayward.layout.find_window_and_output_mut(surface) {
                 mapped.set_is_focused(true);
-
+            }
+            if let Some((mapped, _)) = self
+                .swayward
+                .layout
+                .find_window_and_output_mut(surface)
+                .filter(|_| !workspace_focused)
+            {
                 // Structural focus fallback follows sway's seat-wide stack immediately. The
                 // recent-windows UI still uses the debounce below before committing its order.
                 let stamp = get_monotonic_time();

@@ -12,6 +12,29 @@ impl<W: LayoutElement> TilingTree<W> {
             .filter_map(|(node, leaf)| Some((*node, self.tile(*leaf)?.window().id())))
     }
 
+    /// Each container a departing view raised, with that view's focus time.
+    pub fn entered_by_departed(&self) -> impl Iterator<Item = (NodeId, std::time::Duration)> + '_ {
+        self.entered_by_departed
+            .iter()
+            .map(|(node, stamp)| (*node, *stamp))
+    }
+
+    /// Focus the container `parent` that a departing view focused at `stamp` raised.
+    pub fn set_focus_raised_by_departed(
+        &mut self,
+        parent: NodeId,
+        stamp: Option<std::time::Duration>,
+    ) {
+        if !self.nodes.contains_key(&parent) {
+            return;
+        }
+        self.set_focus_id(Some(parent));
+        if let Some(stamp) = stamp {
+            let entry = self.entered_by_departed.entry(parent).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+        }
+    }
+
     pub fn focus_rank_for_window(&self, window: &W::Id) -> Option<usize> {
         let node = self.node_for_window(window)?;
         self.focus_history
@@ -576,8 +599,10 @@ impl<W: LayoutElement> TilingTree<W> {
                     && !self.contains_node(fullscreen, next)
             })
         });
-        if !obstructed {
-            self.set_focus_id(next.or(self.focus));
+        // No target leaves the seat stack alone, so a wrapper never focused stays at its
+        // tail (`if (next_focus)`, sway/commands/focus.c:461-468).
+        if !obstructed && next.is_some() {
+            self.set_focus_id(next);
         }
         next.is_some()
     }

@@ -502,6 +502,7 @@ macro_rules! side_tables {
             ("focus_history", $($ref)+ $tree.focus_history as $($ref)+ dyn SideTable),
             ("ipc_stale_nodes", $($ref)+ $tree.ipc_stale_nodes),
             ("last_entered_by", $($ref)+ $tree.last_entered_by),
+            ("entered_by_departed", $($ref)+ $tree.entered_by_departed),
             ("pending_modes", $($ref)+ $tree.pending_modes),
             ("mapped_under_fullscreen", $($ref)+ $tree.mapped_under_fullscreen),
             ("moved_under_fullscreen", $($ref)+ $tree.moved_under_fullscreen),
@@ -533,6 +534,10 @@ pub struct TilingTree<W: LayoutElement> {
     /// which outlives that leaf moving away (`seat_set_raw_focus`,
     /// sway/input/seat.c).
     last_entered_by: HashMap<NodeId, NodeId>,
+    /// The focus time of a view that raised each container as it left the tree: floating the
+    /// focused view raises its old parent (`container_set_floating`,
+    /// sway/tree/container.c:969-973), so the container ranks as recent as that view.
+    entered_by_departed: HashMap<NodeId, std::time::Duration>,
     has_had_tile: bool,
     empty_representation_layout: Option<Layout>,
     focus_history: Vec<NodeId>,

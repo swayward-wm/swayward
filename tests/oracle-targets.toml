@@ -28,6 +28,11 @@ paths = ["swayward-config/", "contrib/sway-to-kdl"]
 state = ["command_coverage"]
 
 [[target]]
+paths = ["src/swayward.rs", "src/swayward/keyboard_focus.rs"]
+state = ["workspace_focus_recency", "container_mark", "nested_tabbed_in_stacked", "empty_workspace_container_move", "one_floating"]
+events = ["two_floating", "three_floating_raise", "nested_tabbed_in_stacked", "two_workspaces"]
+
+[[target]]
 paths = ["src/swayward/urgency.rs"]
 state = ["urgent_via_command"]
 events = ["urgent_via_command"]
