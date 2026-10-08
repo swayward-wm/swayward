@@ -927,6 +927,18 @@ impl<W: LayoutElement> FloatingLayout<W> {
         if let Some((idx, _)) = self.tree_entry_for_window(&active) {
             if let Some(entry) = self.tree_entries.get_mut(idx) {
                 entry.tree.split_focused(layout);
+                // Splitting the group root wraps it in a new floating container that takes
+                // its place, and its sticky flag stays on the now-tiled child
+                // (`container_split`, sway/tree/container.c:1542-1552).
+                if let Some(root) = entry
+                    .tree
+                    .resident_root()
+                    .filter(|root| *root != entry.root)
+                {
+                    let old_root = std::mem::replace(&mut entry.root, root);
+                    entry.tree.set_split_sticky(old_root, entry.sticky);
+                    entry.sticky = false;
+                }
             }
             return;
         }

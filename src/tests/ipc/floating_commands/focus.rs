@@ -1009,3 +1009,100 @@ fn focus_after_a_view_leaves_matches_sway() {
         assert_eq!(node["focused"], true, "{seed}: {workspace:#}");
     }
 }
+
+#[test]
+fn split_of_a_floated_workspace_wrapper_wraps_it_and_keeps_focus_on_it() {
+    // random-v3 seeds 30754 30769 30860 ... (diff-fam-v3-split-floated-workspace-focus; oracle
+    // row split_floated_workspace_wrapper). A floating container has no H/V parent for
+    // `container_split` (`current = L_NONE`, sway/tree/container.c:1516-1518), so `split v` on
+    // a floated group wraps it in a new floating splitv container and gives focus back to the
+    // group (sway/tree/container.c:1542-1560).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("two"),
+            ..Default::default()
+        },
+    );
+    for command in ["focus parent; floating toggle", "split v"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let floating = tree["nodes"][1]["nodes"][0]["floating_nodes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(floating.len(), 1);
+    let wrapper = &floating[0];
+    assert_eq!(wrapper["type"], "floating_con");
+    assert_eq!(wrapper["layout"], "splitv");
+    assert_eq!(wrapper["focused"], false);
+    let group = &wrapper["nodes"][0];
+    assert_eq!(wrapper["focus"], serde_json::json!([group["id"]]));
+    assert_eq!(group["type"], "con");
+    assert_eq!(group["layout"], "splith");
+    assert_eq!(group["focused"], true);
+    assert_eq!(group["nodes"][0]["app_id"], "two");
+    assert_eq!(wrapper["rect"], group["rect"]);
+    swayward.layout.verify_invariants();
+}
+
+#[test]
+fn unfloating_a_split_floated_group_keeps_focus_on_the_inner_group() {
+    // random-v3 seed 32339 (diff-fam-v3-split-floated-workspace-focus). `splitt` wraps the
+    // floated group in a new floating container and leaves focus on the group; `floating toggle`
+    // then tiles the wrapper, and `container_set_floating` leaves the seat focus where it was
+    // (sway/tree/container.c:976-1011).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("three"),
+            ..Default::default()
+        },
+    );
+    for command in [
+        "focus parent",
+        "floating enable",
+        "splitt",
+        "floating toggle",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["floating_nodes"], serde_json::json!([]));
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["layout"], "splitv");
+    assert_eq!(wrapper["focused"], false);
+    let group = &wrapper["nodes"][0];
+    assert_eq!(group["layout"], "splith");
+    assert_eq!(group["focused"], true);
+    assert_eq!(group["nodes"][0]["app_id"], "three");
+    assert_eq!(group["nodes"][0]["focused"], false);
+    swayward.layout.verify_invariants();
+}

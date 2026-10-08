@@ -1017,8 +1017,13 @@ impl<W: LayoutElement> Workspace<W> {
             }
             // Returning a focused container to tiling leaves the seat focus on it
             // (`container_set_floating`, sway/tree/container.c:976-1011).
-            let root_focused = self.floating_is_active.get()
-                && self.floating.focused_container_node() == Some(root);
+            // That holds for a focused container below the root too, such as the group a
+            // `split` wrapped in a new floating container.
+            let focused_container = self
+                .floating
+                .focused_container_node()
+                .filter(|_| self.floating_is_active.get())
+                .filter(|focused| self.floating.tree_root_for_node(*focused) == Some(root));
             let subtree = self.floating.remove_tree(root)?;
             if let Some(output) = &self.output {
                 subtree.for_each_window(|window| window.output_enter(output));
@@ -1030,12 +1035,16 @@ impl<W: LayoutElement> Workspace<W> {
                 None
             };
             self.floating_is_active = FloatingActive::No;
-            let (root, _) = self.tiling.attach_unfloated_subtree(subtree);
+            let (root, remapped) = self.tiling.attach_unfloated_subtree(subtree);
             if let Some(hidden) = hidden {
                 self.tiling.restore_hidden_under_fullscreen(hidden);
             }
-            if root_focused {
-                self.tiling.set_focus(root);
+            if let Some(focused) = focused_container {
+                let focused = remapped
+                    .iter()
+                    .find_map(|(old, new)| (*old == focused).then_some(*new))
+                    .unwrap_or(focused);
+                self.tiling.set_focus(focused);
             }
             if self.floating.is_empty() {
                 self.floating_is_active = FloatingActive::No;

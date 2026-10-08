@@ -103,10 +103,14 @@ impl<W: LayoutElement> TilingTree<W> {
         // i3 does not split a singleton under an H/V parent: sway changes the
         // parent's layout instead, for views and containers alike
         // (`container_split`, sway/tree/container.c:1510-1529).
-        let split_parent = matches!(
-            self.split_layout(parent),
-            Some(Layout::SplitH | Layout::SplitV)
-        );
+        // A floating container counts as having no H/V parent (`current = L_NONE`,
+        // sway/tree/container.c:1516-1518), so a floating group root is always wrapped.
+        let floating_root = self.resident_root && parent == self.root;
+        let split_parent = !floating_root
+            && matches!(
+                self.split_layout(parent),
+                Some(Layout::SplitH | Layout::SplitV)
+            );
         if id == self.root {
             self.change_split_layout(id, layout);
         } else if siblings <= 1 && split_parent {
