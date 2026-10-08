@@ -126,15 +126,13 @@ pub(super) fn parent(state: &mut State) {
 }
 
 pub(super) fn child(state: &mut State) {
-    let before = seat_focused_view(state);
     state.swayward.layout.focus_child();
-    refocus_clears_urgency(state, before);
     state.swayward.queue_redraw_all();
 }
 
 /// The view holding sway's seat focus: none while a split or the workspace
 /// itself is focused, even though the keyboard stays on a view.
-fn seat_focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
+pub(super) fn seat_focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
     match super::targeted::focused_node(state) {
         swayward_ipc::command::FocusedNode::View => match super::targeted::focused_target(state)? {
             CommandTarget::Window(id) => Some(id),
@@ -147,7 +145,10 @@ fn seat_focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
 /// Seat focus moved onto the keyboard-focused view from its parent or
 /// workspace. No keyboard focus change follows, so clear its urgency here
 /// as sway's seat focus change does (sway/sway/input/seat.c:1223-1240).
-fn refocus_clears_urgency(state: &mut State, before: Option<crate::window::mapped::MappedId>) {
+pub(super) fn refocus_clears_urgency(
+    state: &mut State,
+    before: Option<crate::window::mapped::MappedId>,
+) {
     let Some(after) = seat_focused_view(state) else {
         return;
     };

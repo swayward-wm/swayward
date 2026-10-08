@@ -38,7 +38,14 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
                 // (sway/sway/tree/container.c:1850-1869).
                 let saved = matches!(parsed.command, Command::Swap(_))
                     .then(|| state.swayward.layout.seat_back_and_forth());
+                // Sway clears a view's urgency in `seat_set_focus` whichever
+                // command moves seat focus onto it (sway/sway/input/seat.c:
+                // 1223-1240). When seat focus returns from a split or the
+                // workspace to the view that kept keyboard focus, no keyboard
+                // focus change follows, so clear it here.
+                let seat_view_before = focus::seat_focused_view(state);
                 let outcome = execute_one(state, parsed, &mut retained_targets);
+                focus::refocus_clears_urgency(state, seat_view_before);
                 match saved {
                     Some(saved) => state.swayward.layout.restore_seat_back_and_forth(saved),
                     None => state.swayward.layout.sync_seat_workspace(),

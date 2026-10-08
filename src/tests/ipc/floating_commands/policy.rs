@@ -570,6 +570,64 @@ fn criteria_focus_from_a_focused_workspace_clears_the_views_urgency() {
     assert!(!test_window_is_urgent(&mut f, "only"));
 }
 
+/// `workspace N` naming the workspace already focused runs sway's
+/// `workspace_switch`, which moves seat focus from the workspace back onto
+/// its focus-inactive view and clears that view's urgency
+/// (sway/sway/tree/workspace.c:731-743, sway/sway/input/seat.c:1223-1240).
+/// Differential seed 31428 (random-v3).
+#[test]
+fn switching_to_the_focused_workspace_clears_the_views_urgency() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("only".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "focus parent; [app_id=only] urgent enable");
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    assert!(test_window_is_urgent(&mut f, "only"));
+
+    let outcome = crate::command::execute(f.niri_state(), "workspace --no-auto-back-and-forth 1");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(!test_window_is_urgent(&mut f, "only"));
+}
+
+/// `focus tiling` from a focused workspace also lands seat focus on the
+/// view that kept keyboard focus, and clears its urgency. Differential seed
+/// 31339 (random-v3).
+#[test]
+fn focus_tiling_from_a_focused_workspace_clears_the_views_urgency() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("only".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "focus parent; [app_id=only] urgent enable");
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    assert!(test_window_is_urgent(&mut f, "only"));
+
+    let outcome = crate::command::execute(f.niri_state(), "focus tiling");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(!test_window_is_urgent(&mut f, "only"));
+}
+
 #[test]
 fn scratchpad_show_remaps_floating_center_between_asymmetric_outputs() {
     let mut f = Fixture::new();
