@@ -2136,3 +2136,49 @@ fn urgent_command_marks_a_view_in_a_hidden_scratchpad_split() {
         assert!(test_window_is_urgent(&mut f, target), "{setup:?}");
     }
 }
+
+/// A fixed-size view tiled by `floating disable` moves to another workspace
+/// as a tiled container: `container_move_to_workspace` branches on
+/// `container_is_floating` (sway/sway/commands/move.c:204-232), never on the
+/// view's size hints. Differential family
+/// diff-fam-v3-floating-disable-move-to-workspace, seeds 31866 and 32007;
+/// oracle row floating_disabled_fixed_view_moves_tiled.
+#[test]
+fn a_tiled_fixed_size_view_moves_to_a_workspace_tiled() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixed".into());
+    window.set_min_size(400, 300);
+    window.set_max_size(400, 300);
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["floating disable", "move container to workspace 2"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        f.double_roundtrip(client);
+    }
+
+    let tree = get_tree(&mut f);
+    let workspace = tree["nodes"][1]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ws| ws["name"] == "2")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        workspace["floating_nodes"].as_array().unwrap().len(),
+        0,
+        "{workspace:#}"
+    );
+    assert_eq!(workspace["nodes"][0]["app_id"], "fixed", "{workspace:#}");
+    assert_eq!(workspace["representation"], "H[fixed]", "{workspace:#}");
+}

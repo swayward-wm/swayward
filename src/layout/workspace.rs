@@ -1619,7 +1619,11 @@ impl<W: LayoutElement> Workspace<W> {
             .unwrap_or_default();
 
         if self.floating.has_window(&id) {
-            let removed = self.floating.remove_tile(&id, Transaction::new());
+            let mut removed = self.floating.remove_tile(&id, Transaction::new());
+            // The view is tiled now: a later move must not re-float it from the
+            // flag its floating map left behind (`container_move_to_workspace`
+            // tests `container_is_floating`, sway/commands/move.c:204-232).
+            removed.tile.restore_to_floating = false;
             let rank = removed.tile.tiling_focus_rank;
             let parent = removed.tile.tiling_parent;
             if let Some(parent) = parent.filter(|parent| self.tiling.contains(*parent)) {
