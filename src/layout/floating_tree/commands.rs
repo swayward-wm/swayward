@@ -263,6 +263,18 @@ impl<W: LayoutElement> FloatingLayout<W> {
         true
     }
 
+    /// Makes `id` the active floating view without touching its group's focus
+    /// stack, for a view that arrived already holding seat focus: sway's
+    /// `seat_set_focus` returns early for the focused node, so its new
+    /// ancestors are not raised (sway/input/seat.c:1146-1150).
+    pub fn adopt_focused_window(&mut self, id: &W::Id) -> bool {
+        if !self.contains(id) {
+            return false;
+        }
+        self.active_window_id = Some(id.clone());
+        true
+    }
+
     pub fn activate_window(&mut self, id: &W::Id) -> bool {
         if let Some(idx) = self.idx_of(id) {
             self.raise_window(idx, 0);

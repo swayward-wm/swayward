@@ -46,6 +46,19 @@ impl<W: LayoutElement> TilingTree<W> {
             }
         }
         self.swap_fullscreen_modes(first, second);
+        // A fullscreen floating view's place is in the floating list, so the
+        // view that takes it floats (`swap_places`,
+        // sway/tree/container.c:1747-1760).
+        let floating = |tree: &Self, id| tree.tile(id).map(|tile| tile.restore_to_floating);
+        if let (Some(first_floating), Some(second_floating)) =
+            (floating(self, first), floating(self, second))
+        {
+            for (id, value) in [(first, second_floating), (second, first_floating)] {
+                if let Some(tile) = self.tile_mut(id) {
+                    tile.restore_to_floating = value;
+                }
+            }
+        }
         self.trade_box_with_hidden_view(first, second);
         self.trade_box_with_hidden_view(second, first);
         if let Some(other) = raise_after_swap {

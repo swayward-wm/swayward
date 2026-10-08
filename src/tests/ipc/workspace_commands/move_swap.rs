@@ -1916,3 +1916,293 @@ fn a_lone_split_under_tabs_keeps_the_tab_bar_out_of_its_percent_after_border_non
     split_percent(&mut f, &mut stream, "split v");
     split_percent(&mut f, &mut stream, "border none");
 }
+
+// differential family diff-fam-v3-swap-floating-con-id-residual: sway's
+// `container_swap` trades any two containers, wherever they live
+// (sway/tree/container.c:1718-1798, 1800-1890).
+fn open_swap_view(f: &mut Fixture, client: crate::tests::client::ClientId, app_id: &str) -> i64 {
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id(app_id.into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    crate::ipc::tree::window_id(f.swayward().layout.focus().unwrap().id())
+}
+
+fn run_swap_commands(f: &mut Fixture, commands: &[&str]) {
+    for command in commands {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+}
+
+/// A workspace's name, tiled app ids, floating app ids, and whether its
+/// floating layer is active.
+type SwapWorkspaceState = (String, Vec<String>, Vec<String>, bool);
+
+/// Every non-empty workspace, then the focused app id.
+fn swap_layout_state(f: &mut Fixture) -> (Vec<SwapWorkspaceState>, String) {
+    let app_id = |window: &crate::window::Mapped| {
+        crate::utils::with_toplevel_role(window.toplevel(), |role| role.app_id.clone()).unwrap()
+    };
+    let layout = &f.swayward().layout;
+    let workspaces = layout
+        .workspaces()
+        .map(|(_, _, workspace)| {
+            (
+                workspace.sway_name().unwrap_or_default(),
+                workspace
+                    .tiling()
+                    .tiles()
+                    .map(|t| app_id(t.window()))
+                    .collect(),
+                workspace
+                    .floating()
+                    .tiles()
+                    .map(|t| app_id(t.window()))
+                    .collect(),
+                workspace.floating_is_active(),
+            )
+        })
+        .filter(|(_, tiled, floating, _): &SwapWorkspaceState| {
+            !tiled.is_empty() || !floating.is_empty()
+        })
+        .collect();
+    (workspaces, app_id(layout.focus().unwrap()))
+}
+
+/// Random-v3 seeds 30236 and 32570: a tiled view swaps with a view inside
+/// a floating split container. The view that arrives in the split keeps
+/// focus, and the split's focus stack is left alone, so its other child
+/// stays ahead of the wrapper the arrival landed in.
+#[test]
+fn swap_trades_a_floating_split_child_with_a_tiled_view() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let one = open_swap_view(&mut f, client, "one");
+    open_swap_view(&mut f, client, "two");
+    run_swap_commands(&mut f, &["move down", "focus parent; floating toggle"]);
+    open_swap_view(&mut f, client, "three");
+    run_swap_commands(&mut f, &[&format!("swap container with con_id {one}")]);
+
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let tiled = workspace["nodes"].as_array().unwrap();
+    assert_eq!(tiled.len(), 1, "{workspace:#}");
+    assert_eq!(tiled[0]["app_id"], "one", "{workspace:#}");
+    let group = &workspace["floating_nodes"][0];
+    let children = group["nodes"].as_array().unwrap();
+    assert_eq!(children.len(), 2, "{group:#}");
+    let (wrapper, two) = (&children[0], &children[1]);
+    assert_eq!(wrapper["nodes"][0]["app_id"], "three", "{group:#}");
+    assert_eq!(wrapper["nodes"][0]["focused"], true, "{group:#}");
+    assert_eq!(two["app_id"], "two", "{group:#}");
+    assert_eq!(
+        group["focus"],
+        serde_json::json!([two["id"], wrapper["id"]]),
+        "{group:#}"
+    );
+}
+
+/// Random-v3 seeds 31781, 30812 and 32158: a floating view swaps with a tiled
+/// view on another workspace, and the seat focuses whichever now holds the
+/// focused one's place.
+#[test]
+fn swap_trades_a_floating_view_with_a_tiled_view_on_another_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    open_swap_view(&mut f, client, "one");
+    run_swap_commands(&mut f, &["mark m", "workspace number 3"]);
+    open_swap_view(&mut f, client, "seven");
+    run_swap_commands(&mut f, &["floating enable", "swap container with mark m"]);
+    assert_eq!(
+        swap_layout_state(&mut f),
+        (
+            vec![
+                ("1".into(), vec!["seven".into()], vec![], false),
+                ("3".into(), vec![], vec!["one".into()], true),
+            ],
+            "one".into()
+        )
+    );
+
+    // The tiled view on the hidden workspace is the target this time.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    open_swap_view(&mut f, client, "seven");
+    run_swap_commands(&mut f, &["floating enable"]);
+    let eight = open_swap_view(&mut f, client, "eight");
+    run_swap_commands(
+        &mut f,
+        &[
+            "move container to workspace oracle",
+            &format!("swap container with con_id {eight}"),
+        ],
+    );
+    assert_eq!(
+        swap_layout_state(&mut f),
+        (
+            vec![
+                ("1".into(), vec![], vec!["eight".into()], true),
+                ("oracle".into(), vec!["seven".into()], vec![], false),
+            ],
+            "eight".into()
+        )
+    );
+}
+
+/// Random-v3 seed 32390: the same swap across two outputs, with the
+/// floating view unfocused on the other output.
+#[test]
+fn swap_trades_a_floating_view_with_a_tiled_view_on_another_output() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("right".into(), (1280, 720), Some((1280, 0)));
+    let client = f.add_client();
+    run_swap_commands(&mut f, &["focus output left"]);
+    open_swap_view(&mut f, client, "one");
+    run_swap_commands(&mut f, &["floating enable", "mark m", "focus output right"]);
+    open_swap_view(&mut f, client, "two");
+    run_swap_commands(&mut f, &["swap container with mark m"]);
+    let (workspaces, focus) = swap_layout_state(&mut f);
+    assert_eq!(focus, "one");
+    let mut tiled = workspaces
+        .iter()
+        .map(|(_, t, fl, _)| (t.clone(), fl.clone()))
+        .collect::<Vec<_>>();
+    tiled.sort();
+    assert_eq!(
+        tiled,
+        [
+            (vec![], vec!["two".to_owned()]),
+            (vec!["one".to_owned()], vec![])
+        ]
+    );
+}
+
+/// Random-v3 seed 30844: a tiled view swaps with a floating view on a hidden
+/// workspace.
+#[test]
+fn swap_trades_a_tiled_view_with_a_floating_view_on_a_hidden_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    open_swap_view(&mut f, client, "three");
+    run_swap_commands(&mut f, &["move container to workspace 2"]);
+    open_swap_view(&mut f, client, "four");
+    run_swap_commands(
+        &mut f,
+        &[
+            r#"[app_id="three"] mark --add x"#,
+            r#"[app_id="three"] floating enable"#,
+            "swap container with mark x",
+        ],
+    );
+    assert_eq!(
+        swap_layout_state(&mut f),
+        (
+            vec![
+                ("1".into(), vec!["three".into()], vec![], false),
+                ("2".into(), vec![], vec!["four".into()], true),
+            ],
+            "three".into()
+        )
+    );
+}
+
+/// Random-v3 seeds 32240 and 32745: the view taking a shown scratchpad
+/// view's floating place is shown from the scratchpad, which focuses it
+/// (`root_scratchpad_show`, sway/tree/root.c:157-204).
+#[test]
+fn swap_with_a_shown_scratchpad_view_focuses_the_view_that_floats() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let four = open_swap_view(&mut f, client, "four");
+    open_swap_view(&mut f, client, "six");
+    run_swap_commands(
+        &mut f,
+        &[
+            "move scratchpad",
+            r#"[app_id="six"] focus"#,
+            &format!("swap container with con_id {four}"),
+        ],
+    );
+    assert_eq!(
+        swap_layout_state(&mut f),
+        (
+            vec![("1".into(), vec!["six".into()], vec!["four".into()], true)],
+            "four".into()
+        )
+    );
+}
+
+/// Random-v3 seed 30812: a fullscreen floating view swaps with a tiled view on
+/// another workspace. Sway keeps a fullscreen floating view in the floating
+/// list, so the view taking its place floats, fullscreen, and the one leaving
+/// is tiled (`swap_places`, sway/tree/container.c:1747-1760).
+#[test]
+fn swap_hands_a_fullscreen_floating_place_to_the_view_taking_it() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    open_swap_view(&mut f, client, "two");
+    let three = open_swap_view(&mut f, client, "three");
+    run_swap_commands(
+        &mut f,
+        &[
+            "move container to workspace 2",
+            "floating toggle",
+            "fullscreen enable",
+            &format!("swap container with con_id {three}"),
+        ],
+    );
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let one = &workspaces[0];
+    assert_eq!(one["nodes"], serde_json::json!([]), "{one:#}");
+    let floater = &one["floating_nodes"][0];
+    assert_eq!(floater["app_id"], "three", "{one:#}");
+    assert_eq!(floater["fullscreen_mode"], 1, "{one:#}");
+    assert_eq!(floater["focused"], true, "{one:#}");
+    let two = &workspaces[1];
+    assert_eq!(two["floating_nodes"], serde_json::json!([]), "{two:#}");
+    assert_eq!(two["nodes"][0]["app_id"], "two", "{two:#}");
+    assert_eq!(two["nodes"][0]["fullscreen_mode"], 0, "{two:#}");
+}
+
+/// The same on one workspace: the tiled view takes the fullscreen floating
+/// view's place in the floating list.
+#[test]
+fn swap_on_one_workspace_hands_a_fullscreen_floating_place_to_the_tiled_view() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    open_swap_view(&mut f, client, "two");
+    let three = open_swap_view(&mut f, client, "three");
+    run_swap_commands(
+        &mut f,
+        &[
+            r#"[app_id="two"] focus"#,
+            "floating toggle",
+            "fullscreen enable",
+            &format!("swap container with con_id {three}"),
+        ],
+    );
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["representation"], "H[two]", "{workspace:#}");
+    let floater = &workspace["floating_nodes"][0];
+    assert_eq!(floater["app_id"], "three", "{workspace:#}");
+    assert_eq!(floater["fullscreen_mode"], 1, "{workspace:#}");
+}

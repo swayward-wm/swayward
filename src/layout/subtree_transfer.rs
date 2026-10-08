@@ -220,7 +220,75 @@ impl<W: LayoutElement> Layout<W> {
                     *id = floated.clone();
                 }
             }
+            // The view taking a shown scratchpad view's place is shown in turn,
+            // which focuses it (`root_scratchpad_show`, sway/tree/root.c:157-204,
+            // from `container_swap`, sway/tree/container.c:1871-1876).
+            if let Some(candidate) = self.workspace_mut(workspace) {
+                candidate.activate_window(&floated);
+            }
         }
+        Ok(remapped)
+    }
+
+    /// Swaps standalone floating view `window` on `floater_workspace` with
+    /// tiled `node` on another workspace: the view takes the tiled slot and
+    /// the container floats in the view's box. A focused endpoint hands seat
+    /// focus to whichever container now holds its place, so the focused
+    /// workspace stays put (`swap_places`, `swap_focus`,
+    /// sway/tree/container.c:1718-1798).
+    pub fn swap_floating_window_with_tiling_node_across_workspaces(
+        &mut self,
+        window: &W::Id,
+        floater_workspace: WorkspaceId,
+        tiled_workspace: WorkspaceId,
+        node: tiling_tree::NodeId,
+    ) -> Result<Vec<(tiling_tree::NodeId, tiling_tree::NodeId)>, String> {
+        if self.scratchpad_windows.contains(window) {
+            return Err(
+                "swapping a scratchpad window across workspaces is not implemented yet".into(),
+            );
+        }
+        let no_node = || "No matching node.".to_owned();
+        let active = self.active_workspace().map(Workspace::id);
+        let tiled = self.workspace(tiled_workspace).ok_or_else(no_node)?;
+        if !tiled.tiling().contains(node) || tiled.tiling().is_root(node) {
+            return Err("Can only swap with containers and views".into());
+        }
+        let tiled_focused = active == Some(tiled_workspace)
+            && !tiled.floating_is_active()
+            && tiled
+                .tiling()
+                .focus()
+                .is_some_and(|focus| tiled.tiling().contains_node(node, focus));
+        let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
+            return Err("cannot swap containers without an output".into());
+        };
+        let (floater_ws, tiled_ws) =
+            Self::distinct_workspaces_mut(monitors, floater_workspace, tiled_workspace)
+                .ok_or_else(no_node)?;
+        let mut source = floater_ws
+            .take_floating_window_for_swap(window)
+            .ok_or_else(|| "Can only swap with containers and views".to_owned())?;
+        let Some((mut subtree, slot)) = tiled_ws.detach_tiling_subtree_for_swap(node) else {
+            floater_ws.float_swapped_subtree(source.leaf, source.placement, source.focused);
+            return Err(no_node());
+        };
+        source.leaf.swap_fullscreen_position(&mut subtree);
+        // Across workspaces the seat focuses the container that took the
+        // focused one's place, and the focused one stays next on the focus
+        // stack, so each workspace's focus-inactive view is a swapped one.
+        let floater_seat_focused = source.focused && active == Some(floater_workspace);
+        tiled_ws.tile_swapped_window(
+            source.leaf,
+            window,
+            slot,
+            tiled_focused || floater_seat_focused,
+        );
+        let (_, remapped) = floater_ws.float_swapped_subtree(
+            subtree,
+            source.placement,
+            tiled_focused || source.focused,
+        );
         Ok(remapped)
     }
 
@@ -257,6 +325,7 @@ impl<W: LayoutElement> Layout<W> {
             .detach_tiling_subtree_for_swap(second)
             .ok_or_else(|| "No matching node.".to_owned())?;
         first_subtree.swap_fullscreen_position(&mut second_subtree);
+        first_subtree.trade_floating_flag(&mut second_subtree);
         let second_remapped = first_ws
             .attach_tiling_subtree_for_swap(second_subtree, first_slot)
             .1;

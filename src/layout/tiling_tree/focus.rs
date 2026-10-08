@@ -89,6 +89,26 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// Gives every split above `node` its own focus entry at the rank it has
+    /// now, so a view swapped in below it does not raise it. Sway's seat stack
+    /// holds the split itself, and a swap that keeps focus on the focused node
+    /// leaves the stack alone (`seat_set_focus` returns early,
+    /// sway/input/seat.c:1146-1150).
+    pub(crate) fn pin_ancestor_focus_ranks(&mut self, node: NodeId) {
+        let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
+        while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            if !self.focus_history.contains(&ancestor) {
+                let rank = self
+                    .focus_history
+                    .iter()
+                    .position(|entry| self.contains_node(ancestor, *entry))
+                    .unwrap_or(self.focus_history.len());
+                self.focus_history.insert(rank, ancestor);
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+    }
+
     pub(crate) fn sort_focus_history_by_timestamp(&mut self) {
         let mut history = self
             .focus_history

@@ -234,6 +234,22 @@ impl<W: LayoutElement> DetachedSubtree<W> {
         self.node.has_fullscreen()
     }
 
+    /// Trades whether two swapped views count as floating. A fullscreen
+    /// floating view stays in the workspace's floating list in sway, so the
+    /// view that takes its place there floats (`swap_places`,
+    /// sway/tree/container.c:1747-1760), while swayward keeps it in the tiling
+    /// tree marked `restore_to_floating`.
+    pub fn trade_floating_flag(&mut self, other: &mut Self) {
+        if let (DetachedNode::Leaf { tile: first, .. }, DetachedNode::Leaf { tile: second, .. }) =
+            (&mut self.node, &mut other.node)
+        {
+            std::mem::swap(
+                &mut first.restore_to_floating,
+                &mut second.restore_to_floating,
+            );
+        }
+    }
+
     /// Swaps which subtree root holds fullscreen, clearing fullscreen everywhere below the roots.
     pub fn swap_fullscreen_position(&mut self, other: &mut Self) {
         let first = self.node.fullscreen();

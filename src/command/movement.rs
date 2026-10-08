@@ -855,19 +855,22 @@ fn swap_with_floating_window(
         Ok(endpoint) => endpoint,
         Err(error) => return Some(error),
     };
-    if workspace != floater.1
-        || !state
-            .swayward
-            .layout
-            .workspace_contains_tiling_node(workspace, node)
+    if !state
+        .swayward
+        .layout
+        .workspace_contains_tiling_node(workspace, node)
     {
         return Some(failure("Can only swap with containers and views"));
     }
-    let remapped = match state
-        .swayward
-        .layout
-        .swap_floating_window_with_tiling_node(&floater.0, workspace, node)
-    {
+    let layout = &mut state.swayward.layout;
+    let swapped = if workspace == floater.1 {
+        layout.swap_floating_window_with_tiling_node(&floater.0, workspace, node)
+    } else {
+        layout.swap_floating_window_with_tiling_node_across_workspaces(
+            &floater.0, floater.1, workspace, node,
+        )
+    };
+    let remapped = match swapped {
         Ok(remapped) => remapped,
         Err(error) => return Some(failure(error)),
     };

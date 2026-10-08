@@ -6,6 +6,20 @@ use super::*;
 /// and the node IDs the floated container was renumbered with.
 pub type FloatingTiledSwap<Id> = (Option<Id>, Vec<(NodeId, NodeId)>);
 
+/// A floating view's stored position, stored size and current box.
+pub type FloatingSwapPlacement = (
+    Option<Point<f64, SizeFrac>>,
+    Option<Size<i32, Logical>>,
+    Rectangle<f64, Logical>,
+);
+
+/// A floating view taken out of its workspace for a cross-workspace swap.
+pub struct FloatingSwapSource<W: LayoutElement> {
+    pub leaf: DetachedSubtree<W>,
+    pub placement: FloatingSwapPlacement,
+    pub focused: bool,
+}
+
 impl<W: LayoutElement> Workspace<W> {
     pub fn add_tile_at_drop(
         &mut self,
@@ -55,7 +69,107 @@ impl<W: LayoutElement> Workspace<W> {
         if self.tiling.contains(first) && self.tiling.contains(second) {
             return self.tiling.swap_nodes(first, second);
         }
+        if self.tiling.contains(first) && self.floating.tree_root_for_node(second).is_some() {
+            return self.swap_tiling_node_with_floating_child(first, second);
+        }
+        if self.tiling.contains(second) && self.floating.tree_root_for_node(first).is_some() {
+            return self.swap_tiling_node_with_floating_child(second, first);
+        }
         self.floating.swap_nodes(first, second)
+    }
+
+    /// Swaps a tiled container with a container inside a floating group on
+    /// this workspace: each takes the other's parent and index, and focus
+    /// follows the container that had it (`swap_places`, `swap_focus`,
+    /// sway/tree/container.c:1718-1798).
+    fn swap_tiling_node_with_floating_child(
+        &mut self,
+        tiled: NodeId,
+        child: NodeId,
+    ) -> Result<(), &'static str> {
+        const NOT_SWAPPABLE: &str = "Can only swap with containers and views";
+        let root = self
+            .floating
+            .tree_root_for_node(child)
+            .ok_or(NOT_SWAPPABLE)?;
+        let tree = self.floating.tree(root).ok_or(NOT_SWAPPABLE)?;
+        if child == root || self.tiling.is_root(tiled) {
+            // A whole floating group swaps through the floating/tiled path.
+            return Err(NOT_SWAPPABLE);
+        }
+        if !tree.fits_at(child, self.tiling.node_height(tiled))
+            || !self.tiling.fits_at(tiled, tree.node_height(child))
+        {
+            return Err(crate::layout::tiling_tree::TOO_DEEP);
+        }
+        let tiled_focus = (!self.floating_is_active.get())
+            .then(|| self.tiling.active_window())
+            .flatten()
+            .filter(|_| {
+                self.tiling
+                    .focus()
+                    .is_some_and(|focus| self.tiling.contains_node(tiled, focus))
+            })
+            .map(|window| window.id().clone());
+        let child_focus = (self.floating_is_active.get())
+            .then(|| self.floating.active_window())
+            .flatten()
+            .filter(|window| {
+                tree.node_for_window(window.id())
+                    .is_some_and(|node| tree.contains_node(child, node))
+            })
+            .map(|window| window.id().clone());
+
+        let tree = self.floating.tree_mut(root).ok_or(NOT_SWAPPABLE)?;
+        tree.pin_ancestor_focus_ranks(child);
+        self.tiling.pin_ancestor_focus_ranks(tiled);
+        let (mut child_subtree, child_slot) =
+            tree.detach_subtree_for_swap(child).ok_or(NOT_SWAPPABLE)?;
+        let Some((mut tiled_subtree, tiled_slot)) = self.tiling.detach_subtree_for_swap(tiled)
+        else {
+            tree.attach_subtree_for_swap(child_subtree, child_slot);
+            return Err(NOT_SWAPPABLE);
+        };
+        tiled_subtree.swap_fullscreen_position(&mut child_subtree);
+        let windows = |subtree: &DetachedSubtree<W>| {
+            let mut ids = Vec::new();
+            subtree.for_each_window(|window| ids.push(window.id().clone()));
+            ids
+        };
+        let to_tiling = windows(&child_subtree);
+        let to_floating = windows(&tiled_subtree);
+
+        // Both trees keep their node IDs unique across the workspace, so the
+        // reinserted subtrees keep their IDs and no container mark moves.
+        self.tiling
+            .attach_subtree_for_swap(child_subtree, tiled_slot);
+        self.tiling.finish_subtree_detach(None);
+        tree.attach_subtree_for_swap(tiled_subtree, child_slot);
+        tree.finish_subtree_detach(None);
+        // swap_places leaves the seat focus stack alone: each arrival keeps
+        // its own place on it rather than the departed container's.
+        for window in to_tiling.iter().rev() {
+            self.tiling.rank_arrived_window_by_focus_timestamp(window);
+        }
+        for window in to_floating.iter().rev() {
+            tree.rank_arrived_window_by_focus_timestamp(window);
+        }
+        if let Some(focus) = tiled_focus {
+            self.tiling.focus_inactive_view_keeping_history();
+            self.floating.adopt_focused_window(&focus);
+            self.floating_is_active = FloatingActive::Yes;
+        } else if let Some(focus) = child_focus {
+            tree.focus_inactive_view_keeping_history();
+            self.tiling.activate_window(&focus);
+            self.floating.focus_tree_view(root);
+            self.floating_is_active = FloatingActive::No;
+        } else {
+            tree.focus_inactive_view_keeping_history();
+            if self.floating.active_window().is_none() {
+                self.floating.focus_tree_view(root);
+            }
+        }
+        Ok(())
     }
 
     /// Swaps a standalone floating view with a tiled container or view on
@@ -130,6 +244,96 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating_is_active = FloatingActive::Yes;
         }
         Some(floated)
+    }
+
+    /// Takes standalone floating view `window` out for a swap with a tiled
+    /// container on another workspace. Returns the view as a detached leaf,
+    /// its floating box, and whether it held this workspace's focus.
+    pub fn take_floating_window_for_swap(
+        &mut self,
+        window: &W::Id,
+    ) -> Option<FloatingSwapSource<W>> {
+        if !self.floating.window_is_floating_root(window) {
+            return None;
+        }
+        let rect = self
+            .floating
+            .tiles_with_offsets()
+            .find(|(tile, _)| tile.window().id() == window)
+            .map(|(tile, pos)| Rectangle::new(pos, tile.tile_size()))?;
+        let focused = self.floating_is_active.get()
+            && self
+                .floating
+                .active_window()
+                .is_some_and(|active| active.id() == window);
+        let RemovedTile { mut tile, .. } = self.floating.remove_tile(window, Transaction::new());
+        if let Some(output) = &self.output {
+            tile.window().output_leave(output);
+        }
+        let placement = (tile.floating_pos, tile.floating_window_size, rect);
+        tile.tiling_parent = None;
+        tile.tiling_focus_rank = None;
+        tile.stop_move_animations();
+        Some(FloatingSwapSource {
+            leaf: DetachedSubtree::from_tile(tile),
+            placement,
+            focused,
+        })
+    }
+
+    /// Floats `subtree` where a swapped-out floating view was, focusing it
+    /// when `focus` is set. Returns the view it floated, when it is a lone
+    /// view, and the node IDs a floated container was renumbered with.
+    pub fn float_swapped_subtree(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        (floating_pos, floating_size, rect): FloatingSwapPlacement,
+        focus: bool,
+    ) -> FloatingTiledSwap<W::Id> {
+        if let Some(output) = &self.output {
+            subtree.for_each_window(|window| window.output_enter(output));
+        }
+        let floated = match subtree.into_tile() {
+            Ok(mut tile) => {
+                tile.floating_pos = floating_pos;
+                tile.floating_window_size = floating_size;
+                tile.tiling_parent = None;
+                tile.tiling_focus_rank = None;
+                tile.stop_move_animations();
+                let id = tile.window().id().clone();
+                self.floating.add_tile(tile, focus);
+                (Some(id), Vec::new())
+            }
+            Err(subtree) => {
+                let (root, remapped) = self.floating.add_tree(*subtree, rect);
+                if focus {
+                    self.floating.focus_tree_view(root);
+                }
+                (None, remapped)
+            }
+        };
+        if focus || self.tiling.is_empty() {
+            self.floating_is_active = FloatingActive::Yes;
+        }
+        floated
+    }
+
+    /// Puts a swapped-in view into the tiled slot a swapped-out container left,
+    /// focusing it when `focus` is set.
+    pub fn tile_swapped_window(
+        &mut self,
+        leaf: DetachedSubtree<W>,
+        window: &W::Id,
+        slot: crate::layout::tiling_tree::DetachedSlot,
+        focus: bool,
+    ) {
+        self.attach_tiling_subtree_for_swap(leaf, slot);
+        self.tiling.finish_subtree_detach(None);
+        self.tiling.rank_arrived_window_by_focus_timestamp(window);
+        if focus {
+            self.tiling.activate_window(window);
+            self.floating_is_active = FloatingActive::No;
+        }
     }
 
     pub fn detach_tiling_subtree_for_swap(
