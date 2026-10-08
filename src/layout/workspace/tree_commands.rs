@@ -887,6 +887,14 @@ impl<W: LayoutElement> Workspace<W> {
             self.split_active_floating(layout);
         } else {
             self.tiling.split_focused(layout);
+            // `workspace_split` moves seat focus from the workspace to the new
+            // container (sway/sway/tree/workspace.c:1071-1076), so the
+            // workspace-focused floating state no longer applies.
+            if self.floating_is_active == FloatingActive::NoButRaised
+                && !self.tiling.root_is_focused()
+            {
+                self.floating_is_active = FloatingActive::No;
+            }
         }
     }
 

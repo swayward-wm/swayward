@@ -9,6 +9,7 @@ impl State {
         if self.swayward.keyboard_focus != focus {
             self.apply_keyboard_focus_change(focus);
         }
+        self.swayward.record_urgency_active_workspaces();
     }
 
     fn compute_keyboard_focus(&mut self) -> KeyboardFocus {
@@ -157,21 +158,6 @@ impl State {
             focus
         );
 
-        let workspace_for_surface = |surface: &WlSurface| {
-            self.swayward.layout.windows().find_map(|(_, mapped)| {
-                mapped
-                    .is_wl_surface(surface)
-                    .then(|| self.swayward.layout.window_workspace_id(&mapped.window))
-                    .flatten()
-            })
-        };
-        let last_workspace = self
-            .swayward
-            .keyboard_focus
-            .surface()
-            .and_then(workspace_for_surface);
-        let new_workspace = focus.surface().and_then(workspace_for_surface);
-
         // Tell the windows their new focus state for window rule purposes.
         if let KeyboardFocus::Layout {
             surface: Some(surface),
@@ -187,10 +173,7 @@ impl State {
         {
             // Sway clears urgency when seat focus reaches the view
             // (`sway/sway/input/seat.c:260-315`; `sway/sway/tree/view.c`).
-            self.swayward.focus_clears_urgency(
-                surface,
-                last_workspace.is_some() && last_workspace != new_workspace,
-            );
+            self.swayward.focus_clears_urgency(surface);
             if let Some((mapped, _)) = self.swayward.layout.find_window_and_output_mut(surface) {
                 mapped.set_is_focused(true);
 

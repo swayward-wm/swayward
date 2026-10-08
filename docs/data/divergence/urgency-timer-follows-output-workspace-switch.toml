@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/swayward.rs", "src/swayward/keyboard_focus.rs", "src/layout/workspace/tree_commands.rs"]
+what = "start the urgency timer only when the focused view's output showed another workspace before the focus change, and clear nothing while a split or the workspace holds seat focus; `split` from a focused workspace with a raised floater drops the raised-floating state so seat focus lands on the new container."
+why = "Sway's seat_set_workspace_focus compares the output's previously active workspace, not the previously focused view's workspace, and only clears urgency when a view takes seat focus (sway/sway/input/seat.c:1158-1161, 1223-1240); workspace_split moves seat focus to the new container (sway/sway/tree/workspace.c:1071-1076)."

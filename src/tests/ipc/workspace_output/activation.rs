@@ -555,3 +555,96 @@ fn auto_back_and_forth_returns_to_the_previous_workspace_on_another_output() {
     assert!(outcome.iter().all(|outcome| outcome.success), "{outcome:?}");
     assert_eq!(focused(&mut f), second);
 }
+
+fn run_urgency_commands(f: &mut Fixture, client: crate::tests::client::ClientId, steps: &[&str]) {
+    for step in steps {
+        if let Some(app_id) = step.strip_prefix('@') {
+            map_test_window(f, client, app_id);
+        } else {
+            let outcome = crate::command::execute(f.niri_state(), step);
+            assert!(outcome.iter().all(|o| o.success), "{step}: {outcome:?}");
+            f.double_roundtrip(client);
+        }
+    }
+}
+
+/// Sway starts the urgency timer only when the focused view's output showed
+/// another workspace before the focus change (`last_workspace`,
+/// sway/sway/input/seat.c:1158-1161, 1223-1240), not when the previously
+/// focused view sat elsewhere. Focusing across outputs onto a visible
+/// workspace clears at once. Differential seed 31799 (random-v3).
+#[test]
+fn focus_onto_another_outputs_visible_workspace_clears_urgency_at_once() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    run_urgency_commands(
+        &mut f,
+        client,
+        &[
+            "@left",
+            "focus output right",
+            "@right",
+            "focus output left",
+            "[app_id=right] urgent enable",
+        ],
+    );
+    assert!(test_window_is_urgent(&mut f, "right"));
+    run_urgency_commands(&mut f, client, &["focus right"]);
+    assert!(f.swayward().urgency_timers.is_empty());
+    assert!(!test_window_is_urgent(&mut f, "right"));
+}
+
+/// Focusing a view from an empty workspace on the same output switches that
+/// output's workspace, so sway starts the timer and the view stays urgent
+/// for now, even with no previously focused view. Differential seed 32407
+/// (random-v3).
+#[test]
+fn focus_from_an_empty_workspace_on_the_same_output_starts_the_urgency_timer() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    run_urgency_commands(
+        &mut f,
+        client,
+        &[
+            "@target",
+            "workspace number 3",
+            "[app_id=target] urgent enable",
+            "[app_id=target] focus",
+        ],
+    );
+    assert_eq!(f.swayward().urgency_timers.len(), 1);
+    assert!(test_window_is_urgent(&mut f, "target"));
+}
+
+/// `split v` with the workspace focused moves seat focus to the new
+/// container, not to a view (`workspace_split`,
+/// sway/sway/tree/workspace.c:1071-1076), so an urgent view under it stays
+/// urgent. Differential seed 32574 (random-v3).
+#[test]
+fn splitting_a_focused_workspace_with_a_floater_keeps_urgency() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    run_urgency_commands(
+        &mut f,
+        client,
+        &[
+            "focus output right",
+            "@two",
+            "@four",
+            "focus output left",
+            "[app_id=four] urgent enable",
+            "@twelve",
+            "focus next",
+            "floating enable",
+            "focus parent",
+        ],
+    );
+    assert!(test_window_is_urgent(&mut f, "four"));
+    run_urgency_commands(&mut f, client, &["split v"]);
+    assert!(test_window_is_urgent(&mut f, "four"));
+}
