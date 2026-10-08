@@ -79,6 +79,7 @@ impl<W: LayoutElement> TilingTree<W> {
             unarranged_under_fullscreen: HashMap::new(),
             split_under_fullscreen: HashSet::new(),
             fullscreen_in_floating: false,
+            unarranged_after_sticky_carry: false,
             interactive_resize: None,
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),
@@ -260,6 +261,22 @@ impl<W: LayoutElement> TilingTree<W> {
             moved: std::mem::take(&mut self.moved_under_fullscreen),
             boxes: std::mem::take(&mut self.unarranged_under_fullscreen),
         })
+    }
+
+    /// The sticky fullscreen floater holding this tree's fullscreen was carried to another
+    /// workspace (see `unarranged_after_sticky_carry`): the tiled nodes keep the boxes in
+    /// `hidden`, taken before it left.
+    pub(in crate::layout) fn keep_unarranged_after_sticky_carry(
+        &mut self,
+        hidden: HiddenUnderFullscreen,
+    ) {
+        if self.fullscreen_node().is_some() {
+            return;
+        }
+        let mut boxes = hidden.boxes;
+        boxes.retain(|id, _| self.nodes.contains_key(id));
+        self.unarranged_under_fullscreen = boxes;
+        self.unarranged_after_sticky_carry = true;
     }
 
     pub(in crate::layout) fn restore_hidden_under_fullscreen(

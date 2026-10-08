@@ -146,7 +146,7 @@ impl<W: LayoutElement> TilingTree<W> {
     /// leaves the subtree, gives them their tiled boxes again.
     pub(super) fn active_stale_fullscreen_rects(&self) -> HashMap<NodeId, Rectangle<f64, Logical>> {
         let Some(fullscreen) = self.fullscreen_node() else {
-            if self.fullscreen_in_floating {
+            if self.fullscreen_in_floating || self.unarranged_after_sticky_carry {
                 return self.unarranged_under_fullscreen.clone();
             }
             return HashMap::new();
@@ -308,6 +308,7 @@ impl<W: LayoutElement> TilingTree<W> {
         if self.fullscreen_node().is_none() {
             self.wrapper_arranged_boxes.clear();
         }
+        self.forget_unarranged_after_sticky_carry();
         // Forget a stale representation once the tree changed, so a mutation that later
         // restores the same shape does not bring it back.
         if self

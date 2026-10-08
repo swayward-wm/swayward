@@ -1256,3 +1256,50 @@ fn moved_workspace_wrapper_lands_beside_the_focus_inactive_view() {
     let target = workspaces.iter().find(|ws| ws["name"] == "1").unwrap();
     assert_eq!(target["representation"], "H[a H[c] b]", "{target:#}");
 }
+
+#[test]
+fn sticky_fullscreen_floater_leaves_source_tiles_unarranged_like_sway() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+
+    for command in [
+        "fullscreen enable",
+        "floating enable",
+        "sticky enable",
+        "workspace 2",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let source = tree["nodes"][1]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["name"] == "1")
+        .unwrap_or_else(|| panic!("{tree:#}"));
+    let tile = &source["nodes"][0];
+    assert_eq!(tile["percent"], 0.5, "{tree:#}");
+    assert_eq!(tile["rect"]["width"], 960, "{tree:#}");
+}

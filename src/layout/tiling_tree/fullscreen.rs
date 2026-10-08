@@ -224,6 +224,7 @@ impl<W: LayoutElement> TilingTree<W> {
     /// Without a workspace fullscreen container it arranges the tiling children, which gives a
     /// wrapper a failed move left unarranged its box (sway/tree/arrange.c:317-321).
     pub fn arrange_workspace(&mut self) {
+        self.forget_unarranged_after_sticky_carry();
         let Some(id) = self.fullscreen_node() else {
             self.unarranged_wrappers.clear();
             self.wrapper_arranged_boxes.clear();
@@ -236,6 +237,13 @@ impl<W: LayoutElement> TilingTree<W> {
             self.fullscreen_tile_slot = false;
             self.fullscreen_rearranged = true;
             self.forget_wrapper_boxes_in(id);
+        }
+    }
+
+    /// Any arrange of this workspace lays out the nodes a sticky carry left unarranged.
+    pub(super) fn forget_unarranged_after_sticky_carry(&mut self) {
+        if std::mem::take(&mut self.unarranged_after_sticky_carry) {
+            self.unarranged_under_fullscreen.clear();
         }
     }
 
@@ -260,6 +268,7 @@ impl<W: LayoutElement> TilingTree<W> {
     /// container gets the root or output box again (sway/tree/arrange.c:310-316
     /// and 340-361).
     pub fn arrange_root(&mut self) {
+        self.forget_unarranged_after_sticky_carry();
         let Some(id) = self.fullscreen_node() else {
             return;
         };

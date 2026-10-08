@@ -601,6 +601,11 @@ pub struct TilingTree<W: LayoutElement> {
     /// (sway/tree/arrange.c:310-316), so `mapped_under_fullscreen`,
     /// `moved_under_fullscreen` and `unarranged_under_fullscreen` keep applying until it ends.
     fullscreen_in_floating: bool,
+    /// A sticky fullscreen floater left for another workspace. Sway moves it with
+    /// `container_detach` and `workspace_add_floating` only (sway/input/seat.c:1209-1221),
+    /// so nothing arranges this workspace and `unarranged_under_fullscreen` keeps the boxes
+    /// the tiled nodes had under it until the next arrange.
+    unarranged_after_sticky_carry: bool,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,

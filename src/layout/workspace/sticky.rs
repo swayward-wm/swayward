@@ -93,8 +93,18 @@ impl<W: LayoutElement> Workspace<W> {
             .chain(fullscreen_floating)
             .map(|tile| tile.window().id().clone())
             .collect::<Vec<_>>();
-        ids.iter()
+        let carries_fullscreen = self
+            .tiling
+            .fullscreen_window()
+            .is_some_and(|window| ids.contains(window));
+        let hidden = carries_fullscreen.then(|| self.tiling.hidden_under_fullscreen());
+        let removed = ids
+            .iter()
             .map(|id| self.remove_tile(id, Transaction::new()))
-            .collect()
+            .collect();
+        if let Some(hidden) = hidden {
+            self.tiling.keep_unarranged_after_sticky_carry(hidden);
+        }
+        removed
     }
 }
