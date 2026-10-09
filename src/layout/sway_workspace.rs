@@ -50,18 +50,24 @@ impl<W: LayoutElement> Layout<W> {
         self.observed_active_workspace = self.active_workspace().map(Workspace::id);
     }
 
-    /// The seat's previous workspace while it still exists, else its last name. A rename
-    /// carries over to the recorded name.
+    /// The seat's previous workspace name, with the workspace that now carries it. Sway
+    /// stores `prev_workspace_name` as a string copied when focus leaves a workspace and
+    /// resolves it by name (sway/input/seat.c:1104-1106, sway/tree/workspace.c:526-532),
+    /// so renaming that workspace afterwards does not follow it: `back_and_forth` then
+    /// finds or creates the old name.
     fn previous_seat_workspace(&self) -> Option<(Option<SeatWorkspacePosition>, String)> {
         let (id, name) = self.previous_seat_workspace.as_ref()?;
-        let position = self.workspaces().find_map(|(monitor, index, workspace)| {
-            (workspace.id() == *id)
-                .then(|| (monitor.map(|monitor| monitor.output().clone()), index))
-        });
-        let name = self
-            .workspace(*id)
-            .and_then(Workspace::sway_name)
-            .or_else(|| name.clone())?;
+        let Some(name) = name.clone() else {
+            // A workspace without a sway name is tracked by identity.
+            let position = self.workspaces().find_map(|(monitor, index, workspace)| {
+                (workspace.id() == *id)
+                    .then(|| (monitor.map(|monitor| monitor.output().clone()), index))
+            });
+            let name = self.workspace(*id).and_then(Workspace::sway_name)?;
+            return Some((position, name));
+        };
+        let position =
+            self.find_sway_workspace_position(&crate::command::WorkspaceTarget::Name(name.clone()));
         Some((position, name))
     }
 
@@ -429,14 +435,12 @@ impl<W: LayoutElement> Layout<W> {
                 monitor.sort_sway_workspaces();
             }
         }
-        // Sway's seat keeps a workspace pointer, so a rename carries over to it.
+        // Sway's seat keeps a workspace pointer, so a rename carries over to it. Its
+        // `prev_workspace_name` is a copied string, which a rename leaves alone
+        // (sway/commands/rename.c never touches it).
         let renamed = self.workspace(id).and_then(Workspace::sway_name);
-        for entry in [&mut self.seat_workspace, &mut self.previous_seat_workspace]
-            .into_iter()
-            .flatten()
-            .filter(|entry| entry.0 == id)
-        {
-            entry.1 = renamed.clone();
+        if let Some(entry) = self.seat_workspace.as_mut().filter(|entry| entry.0 == id) {
+            entry.1 = renamed;
         }
         Ok(())
     }

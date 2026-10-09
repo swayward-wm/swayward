@@ -575,3 +575,46 @@ fn moving_the_active_workspace_away_shows_the_most_recently_focused_one() {
         .unwrap();
     assert_eq!(right.active_workspace_ref().number(), Some(1));
 }
+
+/// Sway's `prev_workspace_name` is a string copied when focus leaves a workspace
+/// (sway/input/seat.c:1104-1106), so renaming that workspace afterwards leaves it alone and
+/// `back_and_forth` creates a workspace under the old name
+/// (sway/commands/workspace.c:215-222). Oracle: diff-fam-v3-rename-then-back-and-forth,
+/// seed 32729.
+#[test]
+fn back_and_forth_after_renaming_the_previous_workspace_uses_the_old_name() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+
+    assert!(crate::command::execute(f.niri_state(), "workspace oracle")[0].success);
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in [
+        "workspace --no-auto-back-and-forth 1",
+        "rename workspace oracle to oracle-renamed",
+        "workspace back_and_forth",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let layout = &f.swayward().layout;
+    let active = layout.active_workspace().unwrap();
+    assert_eq!(active.sway_name().as_deref(), Some("oracle"));
+    assert!(!active.has_windows());
+    let renamed = layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.sway_name().as_deref() == Some("oracle-renamed"))
+        .map(|(_, _, workspace)| workspace.has_windows());
+    assert_eq!(renamed, Some(true));
+}
