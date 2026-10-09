@@ -1425,3 +1425,33 @@ fn focusing_a_tiled_view_ends_a_shown_scratchpad_global_fullscreen_back_to_float
     assert_eq!(tiled["focused"], true);
     assert_eq!(tiled["percent"], 1.0);
 }
+
+/// `floating enable` on a shown scratchpad view taken fullscreen is a no-op:
+/// the view is still in `ws->floating`, so `container_set_floating` returns
+/// early and the view keeps its scratchpad place
+/// (sway/tree/container.c:941-944, 1041-1049). Differential seed 33191.
+#[test]
+fn floating_enable_on_a_fullscreen_shown_scratchpad_view_keeps_it_in_the_scratchpad() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "pad");
+    for command in [
+        "move scratchpad",
+        r#"[app_id="pad"] scratchpad show"#,
+        "fullscreen enable",
+        "floating enable",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let pad = find_json_node_with_app_id(&tree, "pad").unwrap();
+    assert_eq!(pad["scratchpad_state"], "fresh", "{pad:#}");
+    assert_eq!(pad["type"], "floating_con", "{pad:#}");
+    assert_eq!(pad["fullscreen_mode"], 1, "{pad:#}");
+}
