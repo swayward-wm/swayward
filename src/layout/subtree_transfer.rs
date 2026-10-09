@@ -587,19 +587,25 @@ impl<W: LayoutElement> Layout<W> {
                 self.move_floating_group_to_sway_workspace(&window, target, auto_back_and_forth)?;
             return Ok((target_workspace, Vec::new()));
         }
-        let (floating, empty_root) = self
+        // A focused workspace moves as `workspace_wrap_children`'s wrapper,
+        // which takes only the tiling children: floating containers stay
+        // behind and keep the source workspace alive
+        // (sway/commands/move.c:430-436, sway/tree/workspace.c:898-910).
+        let (keeps_floating, empty_root) = self
             .workspace(source_workspace)
             .filter(|workspace| workspace.tiling().is_root(node))
             .map(|workspace| {
                 (
-                    workspace.floating_transfer_window_ids(),
+                    !workspace.floating_transfer_window_ids().is_empty(),
                     workspace.tiling().tiles().next().is_none(),
                 )
             })
             .unwrap_or_default();
+        if empty_root {
+            return Err("Can't move an empty workspace".to_owned());
+        }
         let target =
             self.resolve_move_workspace_target(source_workspace, target, auto_back_and_forth);
-        let floating_target = target.clone();
         let (target_output, target_index) = self.resolve_sway_workspace_target(target)?;
         let target_workspace = match target_output.as_ref() {
             Some(output) => self
@@ -619,13 +625,6 @@ impl<W: LayoutElement> Layout<W> {
             self.move_tiling_node_to_focus_inactive(source_workspace, node);
             return Ok((target_workspace, Vec::new()));
         }
-        if empty_root {
-            for window in floating {
-                self.move_window_to_sway_workspace(&window, floating_target.clone(), false)?;
-            }
-            return Ok((target_workspace, Vec::new()));
-        }
-
         let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
             return Err("cannot move a container without an output".into());
         };
@@ -643,12 +642,10 @@ impl<W: LayoutElement> Layout<W> {
                     source_workspace,
                     node,
                     target_workspace,
-                    preserve_empty_workspace || !floating.is_empty(),
+                    preserve_empty_workspace || keeps_floating,
                 )
                 .ok_or_else(|| "No matching node.".to_owned())?;
-            for window in floating {
-                self.move_window_to_sway_workspace(&window, floating_target.clone(), false)?;
-            }
+            self.focus_workspace_left_with_floating(source_workspace, keeps_floating);
             return Ok((target_workspace, remapped));
         }
 
@@ -657,12 +654,21 @@ impl<W: LayoutElement> Layout<W> {
             (source_monitor, source_workspace),
             (target_monitor, target_workspace),
             node,
-            preserve_empty_workspace || !floating.is_empty(),
+            preserve_empty_workspace || keeps_floating,
         )?;
-        for window in floating {
-            self.move_window_to_sway_workspace(&window, floating_target.clone(), false)?;
-        }
+        self.focus_workspace_left_with_floating(source_workspace, keeps_floating);
         Ok((target_workspace, remapped))
+    }
+
+    /// The seat focused the workspace node, not the wrapper that left, so
+    /// sway's restore leaves the workspace itself focused
+    /// (sway/commands/move.c:598-607).
+    fn focus_workspace_left_with_floating(&mut self, workspace: WorkspaceId, keeps_floating: bool) {
+        if keeps_floating {
+            if let Some(workspace) = self.workspace_mut(workspace) {
+                workspace.focus_workspace_itself();
+            }
+        }
     }
     /// `move <direction>` of a tiling container off the workspace edge onto
     /// the adjacent output's active workspace

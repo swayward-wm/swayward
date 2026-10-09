@@ -2206,3 +2206,47 @@ fn swap_on_one_workspace_hands_a_fullscreen_floating_place_to_the_tiled_view() {
     assert_eq!(floater["app_id"], "three", "{workspace:#}");
     assert_eq!(floater["fullscreen_mode"], 1, "{workspace:#}");
 }
+
+// Differential family diff-fam-v3-workspace-container-move-floating (random-v3
+// seeds 32134, 32225, 32227, 32485, 32835). A focused workspace moves as
+// `workspace_wrap_children`'s wrapper, which holds only the tiling children, so
+// its floating containers stay behind and keep it alive; a workspace holding
+// only floating containers is "empty" and refuses the move
+// (sway/commands/move.c:430-436, sway/tree/workspace.c:898-910). Oracle row
+// move_focused_workspace_leaves_floating_behind.
+#[test]
+fn moving_a_focused_workspace_leaves_its_floating_containers_behind() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    open_swap_view(&mut f, client, "floater");
+    run_swap_commands(&mut f, &["floating enable"]);
+    open_swap_view(&mut f, client, "tiled");
+    run_swap_commands(&mut f, &["focus parent", "move container to workspace 2"]);
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    assert_eq!(workspaces.len(), 2, "{tree:#}");
+    let one = &workspaces[0];
+    assert_eq!(one["name"], "1", "{one:#}");
+    assert_eq!(one["nodes"], serde_json::json!([]), "{one:#}");
+    assert_eq!(one["floating_nodes"][0]["app_id"], "floater", "{one:#}");
+    assert_eq!(one["focused"], true, "{one:#}");
+    assert_eq!(one["floating_nodes"][0]["focused"], false, "{one:#}");
+    let two = &workspaces[1];
+    assert_eq!(two["name"], "2", "{two:#}");
+    assert_eq!(two["floating_nodes"], serde_json::json!([]), "{two:#}");
+    assert!(
+        find_json_node_with_app_id(two, "tiled").is_some(),
+        "{two:#}"
+    );
+
+    let one_floating = [r#"[app_id="floater"] focus"#, "focus parent"];
+    run_swap_commands(&mut f, &one_floating);
+    let outcome = crate::command::execute(f.niri_state(), "move container to workspace 3");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Can't move an empty workspace"),
+        "{outcome:?}"
+    );
+}
