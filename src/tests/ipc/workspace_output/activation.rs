@@ -596,6 +596,45 @@ fn move_back_and_forth_after_cross_output_move_keeps_the_seat_record() {
     assert_eq!(holding.as_deref(), Some("2"));
 }
 
+/// `move [absolute] position` re-homes a floater onto the workspace of the
+/// output under it through `container_floating_move_to`, which never calls
+/// `seat_set_focus` (sway/sway/tree/container.c:1113-1145; sway/sway/commands/
+/// move.c:775, 831, 917). The seat keeps its workspace and
+/// `prev_workspace_name`, so `move container to workspace back_and_forth`
+/// targets the workspace the floater just reached and leaves it there.
+/// Oracle scenario move_back_and_forth_after_cross_output_floating_move.
+#[test]
+fn move_back_and_forth_after_cross_output_floating_move_keeps_the_seat_record() {
+    for position in [
+        "move absolute position 1500 px 100 px",
+        "move position 1500 px 100 px",
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        f.add_output(2, (1280, 720));
+        let client = f.add_client();
+        run_urgency_commands(
+            &mut f,
+            client,
+            &[
+                "@moved",
+                "focus output right",
+                "focus output left",
+                "floating enable",
+                position,
+                "move container to workspace back_and_forth",
+            ],
+        );
+        let swayward = f.swayward();
+        let holding = swayward
+            .layout
+            .workspaces()
+            .find(|(_, _, workspace)| workspace.windows().next().is_some())
+            .and_then(|(_, _, workspace)| workspace.sway_name());
+        assert_eq!(holding.as_deref(), Some("2"), "{position}");
+    }
+}
+
 fn run_urgency_commands(f: &mut Fixture, client: crate::tests::client::ClientId, steps: &[&str]) {
     for step in steps {
         if let Some(app_id) = step.strip_prefix('@') {

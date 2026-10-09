@@ -40,8 +40,14 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
                     .then(|| state.swayward.layout.seat_back_and_forth());
                 // `move <direction>` never calls `seat_set_focus`, so the seat keeps
                 // its workspace and `prev_workspace_name` even when the view crosses
-                // outputs (sway/sway/commands/move.c:277-298, 672-745).
-                let keeps_seat = matches!(parsed.command, Command::MoveDirection { .. });
+                // outputs (sway/sway/commands/move.c:277-298, 672-745). Nor does
+                // `move [absolute] position|center|mouse`, which re-homes a floater
+                // through `container_floating_move_to` (sway/sway/tree/container.c:
+                // 1113-1145; sway/sway/commands/move.c:775, 831, 917).
+                let keeps_seat = matches!(
+                    parsed.command,
+                    Command::MoveDirection { .. } | Command::MovePosition(_)
+                );
                 // Sway clears a view's urgency in `seat_set_focus` whichever
                 // command moves seat focus onto it (sway/sway/input/seat.c:
                 // 1223-1240). When seat focus returns from a split or the
