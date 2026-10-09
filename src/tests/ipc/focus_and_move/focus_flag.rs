@@ -184,3 +184,48 @@ fn focus_flag_moved_focused_split_is_refocused_on_switch() {
     assert_eq!(split["focused"], true);
     assert_eq!(split["nodes"][0]["focused"], false);
 }
+
+// Family diff-fam-v3-floating-split-scratchpad-focus-residual-1, declared in
+// docs/KNOWN_DEVIATIONS.md#fullscreen-view-inside-a-floating-split-sent-to-the-scratchpad.
+
+/// `move scratchpad` on a fullscreen view inside a floating split hides the split and clears
+/// fullscreen on every container in it, as `root_scratchpad_hide` does
+/// (sway/tree/root.c:223-224). Sway's `root_scratchpad_add_container` clears only the root
+/// (sway/tree/root.c:109-112) and leaves `ws->fullscreen` pointing at the hidden view, which
+/// keeps focus on it and hides the tiled view. Swayward declares that difference: the view
+/// reports `fullscreen_mode` 0 and the tiled view takes focus. Seeds 33853, 33075; oracle
+/// rows floating_split_fullscreen_child_move_scratchpad and
+/// floating_split_fullscreen_child_move_scratchpad_tiled_sibling.
+#[test]
+fn focus_flag_scratchpad_fullscreen_view_in_floating_split_clears_its_fullscreen() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "one");
+    map_test_window(&mut f, client, "two");
+    let tree = focus_flag_tree(
+        &mut f,
+        &[
+            "floating enable",
+            "split t",
+            "fullscreen toggle; move scratchpad",
+        ],
+    );
+    let scratch = &tree["nodes"][0]["nodes"][0];
+    let hidden = &scratch["floating_nodes"][0]["nodes"][0];
+    assert_eq!(hidden["app_id"], "two");
+    assert_eq!(hidden["fullscreen_mode"], 0);
+    assert_eq!(hidden["focused"], false);
+    let workspace = focus_stack_workspace(&tree);
+    assert_eq!(workspace["nodes"][0]["app_id"], "one");
+    assert_eq!(workspace["nodes"][0]["focused"], true);
+    assert_eq!(workspace["nodes"][0]["visible"], true);
+
+    let tree = focus_flag_tree(&mut f, &["workspace 2", "scratchpad show", "workspace 1"]);
+    let output = &tree["nodes"][1];
+    assert_eq!(output["nodes"][0]["nodes"][0]["app_id"], "one");
+    assert_eq!(output["nodes"][0]["nodes"][0]["focused"], true);
+    let shown = &output["nodes"][1]["floating_nodes"][0]["nodes"][0];
+    assert_eq!(shown["app_id"], "two");
+    assert_eq!(shown["fullscreen_mode"], 0);
+}

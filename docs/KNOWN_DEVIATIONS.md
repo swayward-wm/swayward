@@ -617,6 +617,38 @@ view to the root box, and rendering, input and bar hiding on the other
 outputs. The oracle row `fullscreen_global_two_outputs` measures the
 difference.
 
+### Fullscreen view inside a floating split sent to the scratchpad
+
+**Deliberate.**
+
+`move scratchpad` on a view inside a floating split hides the split's root
+(`sway/commands/move.c:934-945`). Sway's `root_scratchpad_add_container` clears
+fullscreen on that root only (`sway/tree/root.c:109-112`). When the fullscreen
+container is a view below the root, the view keeps `fullscreen_mode` 1.
+`container_detach` clears `workspace->fullscreen` only when the detached
+container is fullscreen itself (`sway/tree/container.c:1440-1442`), so the old
+workspace still points at the hidden view. That stale pointer then obstructs
+every tiled view on the workspace (`container_obstructing_fullscreen_container`,
+`sway/tree/container.c:570-578`). The seat refuses to focus them, so keyboard
+focus stays on the hidden scratchpad view (`sway/input/seat.c:1148-1151`). The
+tiled views report `visible: false` (`sway/tree/view.c:1195-1201`). Showing the
+split on another workspace does not reset the pointer
+(`container_handle_fullscreen_reparent` checks only the root,
+`sway/tree/container.c:1380-1391`). Pinned sway 1.12 shown that split on
+workspace 2, then refused `workspace 1`: workspace 2 stayed focused.
+Closing the view leaves the pointer dangling, because
+`container_begin_destroy` clears only the view's current workspace
+(`sway/tree/container.c:481-483`).
+
+Swayward clears fullscreen on every container in the hidden split, as sway's
+own `root_scratchpad_hide` does (`sway/tree/root.c:223-224`). The hidden view
+reports `fullscreen_mode` 0, and the old workspace's focus-inactive view takes
+focus and stays visible. Reproducing sway's state would leave keyboard input
+going to a window nobody can see and leave a workspace blank until restart.
+The oracle rows `floating_split_fullscreen_child_move_scratchpad` and
+`floating_split_fullscreen_child_move_scratchpad_tiled_sibling` record the
+difference.
+
 ### Urgency for assigned windows
 
 **Deliberate.**
