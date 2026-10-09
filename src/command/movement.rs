@@ -1103,6 +1103,29 @@ fn mark_is_inside_source(state: &State, source: CommandTarget, destination: Comm
         .is_some_and(|windows| windows.contains(&window))
 }
 
+/// `move container to output` targets the output's focus-inactive node
+/// (`seat_get_focus_inactive`, sway/commands/move.c:519-525). When that is a
+/// floating view, `container_move_to_container` makes a tiled source its
+/// floating sibling, exactly as a move onto a floating view's mark
+/// (move.c:241-261). `None` when the output's focus-inactive node is tiled.
+fn move_tiling_to_output_floating_focus(
+    state: &mut State,
+    source: CommandTarget,
+    output: &smithay::output::Output,
+) -> Option<CommandOutcome> {
+    let layout = &state.swayward.layout;
+    let workspace = layout.workspace(layout.active_workspace_id_for_output(output)?)?;
+    if !workspace.floating_is_active() {
+        return None;
+    }
+    let anchor = workspace.floating().active_window()?;
+    if !workspace.is_floating(&anchor.window) {
+        return None;
+    }
+    let anchor = CommandTarget::Window(anchor.id());
+    move_tiling_to_floating_mark(state, source, anchor)
+}
+
 pub(super) fn move_target_to_mark(
     state: &mut State,
     source: CommandTarget,
@@ -1366,6 +1389,9 @@ pub(super) fn to_output_focused(state: &mut State, target: &OutputTarget) -> sup
         wrap_moved_workspace_root(state, focused_target);
         failure(error)
     })?;
+    if let Some(outcome) = move_tiling_to_output_floating_focus(state, focused_target, &output) {
+        return super::handled_outcome(outcome);
+    }
     if let CommandTarget::Container(workspace, node) = focused_target {
         super::handled_outcome(move_tiling_subtree_to_output(
             state, workspace, node, &output,
@@ -1421,6 +1447,11 @@ pub(super) fn to_output_targeted(
     let reference_point = state.swayward.layout.window_center(&window);
     let output =
         output_target(state, output_target_name, reference, reference_point).map_err(failure)?;
+    if let Some(outcome) =
+        move_tiling_to_output_floating_focus(state, CommandTarget::Window(target), &output)
+    {
+        return super::handled_outcome(outcome);
+    }
     state.swayward.layout.move_to_output(
         Some(&window),
         &output,

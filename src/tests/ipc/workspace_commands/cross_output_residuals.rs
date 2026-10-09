@@ -260,3 +260,57 @@ fn floating_a_workspace_level_view_keeps_the_tiled_focus_order() {
     );
     assert_eq!(cross_output_view(&tree, "one")["focused"], true);
 }
+
+/// Family diff-fam-v3-hinted-cross-output-move-floating (seeds 33017 33054
+/// 33135 33156 33473 33880); oracle row
+/// cross_output_move_onto_floating_only_workspace_tiles. `move container to
+/// output` targets the output's focus-inactive node
+/// (`seat_get_focus_inactive`, sway/commands/move.c:519-525); when that is a
+/// floating view, `container_move_to_container` adds the tiled view as its
+/// floating sibling (move.c:241-261). Focus stays on the old workspace
+/// (move.c:598-608).
+#[test]
+fn tiled_view_moved_to_an_output_focused_on_a_floater_floats() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    windows::map_window(
+        &mut f,
+        client,
+        windows::WindowSpec {
+            app_id: Some("fixed"),
+            min_size: Some((300, 200)),
+            max_size: Some((300, 200)),
+            ..Default::default()
+        },
+    );
+    let ok = |f: &mut Fixture, command: &str| {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply.iter().all(|o| o.success), "{command}: {reply:?}");
+    };
+    ok(&mut f, "focus output left");
+    windows::map_window(
+        &mut f,
+        client,
+        windows::WindowSpec {
+            app_id: Some("tiled"),
+            ..Default::default()
+        },
+    );
+    ok(&mut f, "move container to output left");
+    f.double_roundtrip(client);
+    f.swayward().layout.verify_invariants();
+    let tree = get_tree(&mut f);
+
+    let one = cross_output_workspace(&tree, "1");
+    assert_eq!(one["nodes"].as_array().unwrap().len(), 0, "{one:#}");
+    assert_eq!(one["representation"], "H[]");
+    let floating = one["floating_nodes"].as_array().unwrap();
+    let apps: Vec<_> = floating.iter().map(|n| n["app_id"].clone()).collect();
+    assert_eq!(apps, ["fixed", "tiled"]);
+    assert_eq!(floating[1]["focused"], false);
+    let two = cross_output_workspace(&tree, "2");
+    assert_eq!(two["focused"], true, "{two:#}");
+    assert_eq!(two["representation"], "H[]");
+}
