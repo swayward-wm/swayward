@@ -1341,3 +1341,54 @@ fn resize_set_ppt_inside_a_shown_scratchpad_split_resizes_the_child() {
     assert_eq!(height(a) + height(b), total, "{split}");
     assert_eq!(a["rect"]["width"], split["rect"]["width"], "{split}");
 }
+
+/// `focus parent` from a floating dialog focuses the workspace; `split v`
+/// then wraps the workspace's tiling children and focuses the wrapper
+/// (`workspace_split`, sway/tree/workspace.c:1058-1079), so `move scratchpad`
+/// sends that split, not the dialog (sway/commands/move.c:921-949).
+/// Differential family diff-fam-v3-hinted-split-move-scratchpad-border,
+/// random-v3 seed 32482.
+#[test]
+fn move_scratchpad_after_focus_parent_split_from_a_dialog_hides_the_wrapper() {
+    let mut config = swayward_config::Config::default();
+    config.animations.off = true;
+    let (mut f, _) = ipc_fixture_with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_surface = parent.surface.clone();
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let dialog = f.client(client).create_window();
+    dialog.xdg_toplevel.set_app_id("dialog".into());
+    dialog.set_parent(Some(&parent_toplevel));
+    let dialog_surface = dialog.surface.clone();
+    dialog.commit();
+    f.roundtrip(client);
+    let dialog = f.client(client).window(&dialog_surface);
+    dialog.attach_new_buffer();
+    dialog.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["focus parent; split v", "move scratchpad"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+        f.double_roundtrip(client);
+    }
+    let tree = get_tree(&mut f);
+    let scratch = &tree["nodes"][0]["nodes"][0]["floating_nodes"];
+    assert_eq!(scratch.as_array().unwrap().len(), 1, "{tree:#}");
+    let hidden = &scratch[0];
+    assert_eq!(hidden["border"], "none", "{hidden:#}");
+    assert_eq!(hidden["current_border_width"], 0, "{hidden:#}");
+    assert_eq!(hidden["layout"], "splitv", "{hidden:#}");
+    assert_eq!(hidden["nodes"][0]["app_id"], "parent", "{hidden:#}");
+    let dialog = find_json_node_with_app_id(&tree, "dialog").unwrap();
+    assert_eq!(dialog["scratchpad_state"], "none", "{dialog:#}");
+}
