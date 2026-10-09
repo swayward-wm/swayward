@@ -272,6 +272,19 @@ impl<W: LayoutElement> Layout<W> {
         workspace.split_floating_target(window, node, layout)
     }
 
+    /// A criteria `split none` on a container below a floating group's root, named by `node`
+    /// or by its view `window`; see [`floating_tree::FloatingLayout::flatten_tree_node`].
+    pub fn flatten_floating_target(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: Option<&W::Id>,
+        node: Option<NodeId>,
+    ) -> Option<Remapped> {
+        self.workspace_mut(workspace_id)?
+            .flatten_floating_target(window, node)
+            .map(|remapped| (workspace_id, remapped))
+    }
+
     /// The workspace holding `window` in its floating layer.
     pub fn floating_workspace_for_window(&self, window: &W::Id) -> Option<WorkspaceId> {
         self.workspaces()

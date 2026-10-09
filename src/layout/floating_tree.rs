@@ -976,6 +976,79 @@ impl<W: LayoutElement> FloatingLayout<W> {
         true
     }
 
+    /// `split none` on `node`, a container below a floating group's root. Sway's
+    /// `container_flatten` replaces each singleton ancestor with `node`, up to and including
+    /// the floating root (sway/commands/split.c:35-50, sway/tree/container.c:526-538,1471-1491):
+    /// a split that takes the root's place becomes the group's root, and a view becomes a
+    /// standalone floater in the root's stack slot and box. `None` when sway refuses, because
+    /// `node` is a floating root or has siblings.
+    pub fn flatten_tree_node(&mut self, node: NodeId) -> Option<Vec<(NodeId, NodeId)>> {
+        let idx = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.tree.contains(node))?;
+        let entry = self.tree_entries.get_mut(idx)?;
+        if node == entry.root {
+            return None;
+        }
+        // A fullscreen view that would become a standalone floater moves into swayward's
+        // parked fullscreen slot, which this path does not model; refuse rather than drop
+        // the mode.
+        if entry.tree.fullscreen_node().is_some()
+            && !entry.tree.is_split(node)
+            && entry.tree.windows().nth(1).is_none()
+        {
+            return None;
+        }
+        self.interactive_resize = None;
+        let remapped = entry.tree.flatten_ancestors(node)?;
+        let Some(root) = entry.tree.resident_root() else {
+            return Some(remapped);
+        };
+        if root == entry.root {
+            return Some(remapped);
+        }
+        if entry.tree.is_split(root) {
+            entry.sticky = entry.tree.is_split_sticky(root);
+            entry.root = root;
+            return Some(remapped);
+        }
+        let entry = self.tree_entries.remove(idx);
+        let mut tree = entry.tree;
+        let Some(mut tile) = tree.remove_tile_node(root) else {
+            return Some(remapped);
+        };
+        tile.set_sway_csd_floating(true);
+        tile.set_border_edges(ResizeEdge::all());
+        tile.set_decorated_box(
+            super::tile::DecoratedCorners::ALL,
+            tile.has_sway_titlebar(),
+            false,
+        );
+        let data = Data::new(self.view_size, self.working_area, &tile, entry.rect.loc);
+        let index = self
+            .entries
+            .iter()
+            .position(|other| other.stamp < entry.stamp)
+            .unwrap_or(self.entries.len());
+        self.insert_entry(
+            index,
+            FloatingEntry {
+                tile,
+                data,
+                stamp: entry.stamp,
+                titlebar: Box::default(),
+            },
+        );
+        Some(remapped)
+    }
+
+    /// [`Self::flatten_tree_node`] on the focused container of the active group.
+    pub fn flatten_focused_tree_node(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
+        let focus = self.active_tree_entry()?.tree.focus()?;
+        self.flatten_tree_node(focus)
+    }
+
     /// `container_split` on `id`, a view in the floating layer: a group child or root
     /// splits inside its group, a standalone view becomes a new group.
     pub fn split_window(

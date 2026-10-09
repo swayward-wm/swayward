@@ -156,7 +156,8 @@ fn split_floating_targeted(
         Some(Layout::SplitH) => Some(crate::layout::tiling_tree::Layout::SplitH),
         Some(Layout::SplitV) => Some(crate::layout::tiling_tree::Layout::SplitV),
         Some(Layout::ToggleSplit) => None,
-        // `split none` flattens and the rest are parse errors; both take the tiling path.
+        None => return flatten_floating_targeted(state, target),
+        // The rest are parse errors and take the tiling path.
         _ => return None,
     };
     let layout_state = &mut state.swayward.layout;
@@ -180,6 +181,41 @@ fn split_floating_targeted(
     if !changed {
         return Some(Err(failure("No matching node.")));
     }
+    state.swayward.queue_redraw_all();
+    Some(Ok(()))
+}
+
+/// A criteria `split none` naming a container in a floating group, which sway flattens like
+/// any other (`do_unsplit`, sway/commands/split.c:35-50). `None` when the target is not in a
+/// group.
+fn flatten_floating_targeted(
+    state: &mut State,
+    target: CommandTarget,
+) -> Option<Result<(), CommandOutcome>> {
+    let layout_state = &mut state.swayward.layout;
+    let remapped = match target {
+        CommandTarget::Container(workspace, node) => {
+            let in_group = layout_state
+                .workspace(workspace)
+                .is_some_and(|ws| ws.floating().tree_root_for_node(node).is_some());
+            if !in_group {
+                return None;
+            }
+            layout_state.flatten_floating_target(workspace, None, Some(node))
+        }
+        CommandTarget::Window(window) => {
+            let window = super::mapped_window(state, window)?;
+            let layout_state = &mut state.swayward.layout;
+            let workspace = layout_state.floating_workspace_for_window(&window)?;
+            layout_state.flatten_floating_target(workspace, Some(&window), None)
+        }
+    };
+    if remapped.is_none() {
+        return Some(Err(failure(
+            "Can only flatten a child container with no siblings",
+        )));
+    }
+    remap_marks(state, remapped);
     state.swayward.queue_redraw_all();
     Some(Ok(()))
 }

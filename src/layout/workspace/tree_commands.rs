@@ -968,9 +968,11 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn flatten_focused_parent(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
-        (!self.floating_is_active.get())
-            .then(|| self.tiling.focus())
-            .flatten()
+        if self.floating_is_active.get() {
+            return self.floating.flatten_focused_tree_node();
+        }
+        self.tiling
+            .focus()
             .and_then(|focus| self.tiling.flatten_ancestors(focus))
     }
 
@@ -1114,6 +1116,23 @@ impl<W: LayoutElement> Workspace<W> {
             self.tiling.restore_has_had_tile(true);
         }
         Some(result)
+    }
+
+    /// See [`Layout::flatten_floating_target`].
+    pub fn flatten_floating_target(
+        &mut self,
+        window: Option<&W::Id>,
+        node: Option<NodeId>,
+    ) -> Option<Vec<(NodeId, NodeId)>> {
+        let node = match (node, window) {
+            (Some(node), _) => node,
+            (None, Some(window)) => {
+                let root = self.floating.tree_root_for_window(window)?;
+                self.floating.tree(root)?.node_for_window(window)?
+            }
+            (None, None) => return None,
+        };
+        self.floating.flatten_tree_node(node)
     }
 
     /// See [`Layout::split_floating_target`].
