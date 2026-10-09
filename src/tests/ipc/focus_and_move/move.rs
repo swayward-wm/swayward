@@ -1400,3 +1400,82 @@ fn focus_wrapping_workspace_crosses_outputs_from_an_empty_workspace() {
         assert_eq!(active_output(&mut f), output, "{command}");
     }
 }
+
+/// Oracle row: state two_output_fullscreen_move_right_appends (differential seed 33195). A
+/// workspace-fullscreen view moved by direction goes through `container_move_to_workspace`,
+/// which appends it to the destination's tiling list (`workspace_add_tiling`), not through
+/// the edge placement of `container_move_to_workspace_from_direction`
+/// (sway/commands/move.c:198-231, 286-292).
+#[test]
+fn workspace_fullscreen_directional_move_appends_on_the_next_output() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_test_window(&mut f, client, "moved");
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    map_test_window(&mut f, client, "resident");
+    assert!(crate::command::execute(f.niri_state(), "sticky enable")[0].success);
+    for command in ["focus output left", "fullscreen toggle", "move right"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+
+    let tree = focus_stack_tree(&mut f);
+    let output = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] == "right")
+        .unwrap();
+    let workspace = &output["nodes"][0];
+    assert_eq!(workspace["representation"], "H[resident moved]", "{tree:#}");
+    let moved = &workspace["nodes"][1];
+    assert_eq!(moved["app_id"], "moved");
+    assert_eq!(moved["fullscreen_mode"], 1);
+    assert_eq!(moved["focused"], true);
+    assert_eq!(moved["percent"], 1.0);
+    // Only the fullscreen container is arranged, so the resident keeps its
+    // full-width box (sway/tree/container.c:1380-1391).
+    assert_eq!(workspace["nodes"][0]["percent"], 1.0);
+}
+
+/// A workspace-fullscreen split takes the same `container_move_to_workspace`
+/// path as a view and lands last on the next output (sway/commands/move.c:198-231,
+/// 286-292).
+#[test]
+fn workspace_fullscreen_split_directional_move_appends_on_the_next_output() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left".into(), (800, 600), Some((0, 0)));
+    f.add_named_output_at("right".into(), (800, 600), Some((800, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    map_test_window(&mut f, client, "resident");
+    assert!(crate::command::execute(f.niri_state(), "focus output left")[0].success);
+    map_test_window(&mut f, client, "one");
+    map_test_window(&mut f, client, "two");
+    for command in ["splitv", "focus parent", "fullscreen toggle", "move right"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+        f.double_roundtrip(client);
+    }
+
+    let tree = focus_stack_tree(&mut f);
+    let output = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["name"] == "right")
+        .unwrap();
+    let workspace = &output["nodes"][0];
+    assert_eq!(
+        workspace["representation"], "H[resident V[two]]",
+        "{tree:#}"
+    );
+    assert_eq!(workspace["nodes"][1]["fullscreen_mode"], 1);
+    assert_eq!(workspace["nodes"][0]["percent"], 1.0);
+}

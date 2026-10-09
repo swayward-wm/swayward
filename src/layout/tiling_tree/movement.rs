@@ -707,6 +707,29 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// Places `window`, which just arrived as a workspace-fullscreen view, last
+    /// among the workspace's children: sway moves it with
+    /// `container_move_to_workspace`, whose `workspace_add_tiling` appends
+    /// (sway/commands/move.c:198-231, 286-292). Focus is untouched.
+    pub fn place_arrival_at_workspace_end(&mut self, window: &W::Id) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        let focus = self.focus;
+        if let Some(old_parent) = self.detach_subtree_only(id) {
+            let end = self.split_len(self.root).unwrap_or(0);
+            self.insert_child_at(self.root, id, end);
+            self.reap_empty_from(old_parent);
+            if focus.is_some_and(|focus| self.nodes.contains_key(&focus)) {
+                self.focus = focus;
+            }
+        }
+        // `container_handle_fullscreen_reparent` arranges only the fullscreen
+        // container (sway/tree/container.c:1380-1391, sway/tree/arrange.c:310-316),
+        // so the residents keep their boxes.
+        self.mark_fullscreen_arrived_and_relayout();
+    }
+
     /// [`Self::place_arrival_from_direction`] for any attached node.
     pub(super) fn place_node_from_direction(&mut self, id: NodeId, direction: Direction) {
         let focus = self.focus;

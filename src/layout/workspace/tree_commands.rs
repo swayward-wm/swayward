@@ -99,6 +99,23 @@ impl<W: LayoutElement> Workspace<W> {
             .attach_subtree_from_direction(subtree, direction)
     }
 
+    /// Attaches a workspace-fullscreen container a directional move brought
+    /// from another output, last among the workspace's children
+    /// (`container_move_to_workspace`, sway/commands/move.c:198-231).
+    pub fn attach_tiling_subtree_at_workspace_end(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        if let Some(output) = &self.output {
+            subtree.for_each_window(|window| window.output_enter(output));
+        }
+        // `container_handle_fullscreen_reparent` ends the destination's
+        // fullscreen (sway/tree/container.c:1380-1391).
+        self.disable_fullscreen();
+        self.floating_is_active = FloatingActive::No;
+        self.tiling.attach_subtree_at_workspace_end(subtree)
+    }
+
     pub fn swap_tiling_nodes(&mut self, first: NodeId, second: NodeId) -> Result<(), &'static str> {
         if self.tiling.contains(first) && self.tiling.contains(second) {
             return self.tiling.swap_nodes(first, second);

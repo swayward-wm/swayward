@@ -4060,6 +4060,8 @@ impl<W: LayoutElement> Layout<W> {
                 Some(Rectangle::new(rect.loc + origin, rect.size))
             })
         });
+        let workspace_fullscreen =
+            self.window_own_fullscreen_mode(window) == Some(tiling_tree::FullscreenMode::Workspace);
         self.move_to_output(Some(window), output, None, activate);
         if let Some(source) =
             source.filter(|source| self.window_workspace_id(window) != Some(*source))
@@ -4076,6 +4078,12 @@ impl<W: LayoutElement> Layout<W> {
             .workspaces_mut()
             .find(|workspace| workspace.tiling().node_for_window(window).is_some())
         {
+            if workspace_fullscreen {
+                workspace
+                    .tiling_mut()
+                    .place_arrival_at_workspace_end(window);
+                return;
+            }
             workspace
                 .tiling_mut()
                 .place_arrival_from_direction(window, direction);

@@ -229,6 +229,16 @@ impl<W: LayoutElement> TilingTree<W> {
         (id, remapped)
     }
 
+    /// [`Self::attach_subtree_from_direction`] for a workspace-fullscreen
+    /// container, which `workspace_add_tiling` appends to the workspace
+    /// (sway/commands/move.c:198-231).
+    pub fn attach_subtree_at_workspace_end(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        self.attach_subtree_with(subtree, None, false)
+    }
+
     /// Attaches a subtree without unwrapping it into an empty root: sway
     /// unwraps only into a workspace that `workspace_is_empty`, which a
     /// non-sticky floater rules out (sway/commands/move.c:221-230,

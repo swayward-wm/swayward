@@ -692,8 +692,17 @@ impl<W: LayoutElement> Layout<W> {
         if !source.tiling().contains(node) || source.tiling().is_root(node) {
             return None;
         }
+        // A workspace-fullscreen container goes through
+        // `container_move_to_workspace`, which appends it
+        // (sway/commands/move.c:198-231, 286-292).
+        let workspace_fullscreen =
+            source.tiling().fullscreen_mode(node) == Some(tiling_tree::FullscreenMode::Workspace);
         let (subtree, old_parent) = source.detach_tiling_subtree(node)?;
-        let (id, remapped) = target.attach_tiling_subtree_from_direction(subtree, direction);
+        let (id, remapped) = if workspace_fullscreen {
+            target.attach_tiling_subtree_at_workspace_end(subtree)
+        } else {
+            target.attach_tiling_subtree_from_direction(subtree, direction)
+        };
         source.tiling_mut().finish_subtree_detach(old_parent);
         if monitors[source_monitor].workspace_switch.is_none() {
             monitors[source_monitor].clean_up_workspaces();
