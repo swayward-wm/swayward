@@ -1039,6 +1039,15 @@ impl<W: LayoutElement> Layout<W> {
                             .unwrap_or(0);
                         let monitor = &mut monitors[target];
                         if !workspace.has_non_sticky_windows() {
+                            // The seat focus stack still leads with a focused sticky
+                            // floater once evacuate_sticky moved it, so destroying the
+                            // workspace refocuses it on the new workspace
+                            // (sway/sway/tree/output.c:188-203, input/seat.c:242-256).
+                            let focused_sticky = (removed_was_active
+                                && workspace.id() == removed_active_workspace)
+                                .then(|| workspace.active_window().map(|w| w.id().clone()))
+                                .flatten()
+                                .filter(|id| workspace.is_window_sticky(id));
                             let target_workspace = monitor.active_workspace();
                             for removed in workspace.take_sticky_trees() {
                                 target_workspace.add_floating_tree(removed, true);
@@ -1056,6 +1065,11 @@ impl<W: LayoutElement> Layout<W> {
                                         is_floating: true,
                                     },
                                 );
+                            }
+                            if let Some(id) = focused_sticky {
+                                if target_workspace.activate_window(&id) {
+                                    active_monitor_idx = target;
+                                }
                             }
                             continue;
                         }

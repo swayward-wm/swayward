@@ -95,3 +95,24 @@ fn set_fullscreen_on_removed_output_does_not_panic() {
     window.set_fullscreen(Some(&wl_output));
     f.double_roundtrip(id);
 }
+
+// Oracle state row output_disable_refocuses_evacuated_sticky_floater: sway moves the
+// focused sticky floater to the surviving output's workspace and refocuses it when the
+// emptied workspace is destroyed (sway/sway/tree/output.c:188-203, input/seat.c:242-256).
+#[test]
+fn removing_output_keeps_focus_on_evacuated_sticky_floater() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    let tiled = map_window(&mut f, client);
+    f.niri_focus_output(2);
+    let floater = map_window(&mut f, client);
+    assert_ne!(tiled, floater);
+    assert!(crate::command::execute(f.niri_state(), "floating enable, sticky enable")[0].success);
+    let removed = f.niri_output(2);
+
+    f.swayward().remove_output(&removed);
+
+    assert_eq!(f.swayward().layout.focus().unwrap().window, floater);
+}
