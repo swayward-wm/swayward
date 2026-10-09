@@ -826,3 +826,55 @@ fn floating_criteria_test_the_view_not_its_floating_ancestor() {
     );
     assert!(crate::command::execute(fixture.niri_state(), "[floating] border pixel 4")[0].success);
 }
+
+// differential seed 32369, oracle row
+// tiling_criteria_skips_fullscreen_hinted_floater: a fixed-size dialog maps
+// floating; fullscreen keeps it parentless on the floating list, so
+// `[tiling]` skips it and marks only its tiled parent
+// (`sway/sway/criteria.c:428-432`, `sway/sway/tree/container.c:1041-1050`).
+#[test]
+fn tiling_criteria_skip_a_fullscreen_hinted_floater() {
+    use std::os::unix::net::UnixStream;
+
+    let (mut f, socket) = ipc_fixture_with_config(swayward_config::Config::default());
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+
+    let parent = f.client(client).create_ssd_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_surface = parent.surface.clone();
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let dialog = f.client(client).create_ssd_window();
+    dialog.xdg_toplevel.set_app_id("dialog".into());
+    dialog.set_min_size(400, 300);
+    dialog.set_max_size(400, 300);
+    dialog.set_parent(Some(&parent_toplevel));
+    let dialog_surface = dialog.surface.clone();
+    dialog.commit();
+    f.roundtrip(client);
+    let dialog = f.client(client).window(&dialog_surface);
+    dialog.attach_new_buffer();
+    dialog.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["fullscreen toggle", "[tiling] mark --add tiled"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, swayward_ipc::MessageType::GetTree);
+    let marks = |app_id| find_json_node_with_app_id(&tree, app_id).unwrap()["marks"].clone();
+    assert_eq!(marks("parent"), serde_json::json!(["tiled"]));
+    assert_eq!(marks("dialog"), serde_json::json!([]));
+}
