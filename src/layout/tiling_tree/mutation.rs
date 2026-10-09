@@ -449,6 +449,13 @@ impl<W: LayoutElement> TilingTree<W> {
         transaction: Transaction,
     ) -> Option<Tile<W>> {
         let id = self.node_for_window(window)?;
+        // A fullscreen floating view only parks here; sway keeps it in `ws->floating` with no
+        // parent, so the search starts at the workspace (sway/commands/move.c:599-607).
+        let old_parent = self
+            .nodes
+            .get(&id)
+            .and_then(|n| n.parent)
+            .filter(|_| !self.tile(id).is_some_and(|tile| tile.restore_to_floating));
         // The moved view may itself be the fullscreen container; only another fullscreen
         // container keeps focus on itself (`workspace_focus_fullscreen`,
         // sway/commands/move.c:96-110).
@@ -456,7 +463,7 @@ impl<W: LayoutElement> TilingTree<W> {
             && self
                 .fullscreen_node()
                 .is_none_or(|fullscreen| fullscreen == id))
-        .then(|| self.transfer_focus_target(Some(id), self.nodes.get(&id).and_then(|n| n.parent)))
+        .then(|| self.transfer_focus_target(Some(id), old_parent))
         .flatten();
         let tile = self.remove_tile(window, transaction)?;
         if self.focus.is_some() {

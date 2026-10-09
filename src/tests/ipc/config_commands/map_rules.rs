@@ -830,3 +830,82 @@ fn for_window_layout_wrapper_is_raised_with_the_mapped_view() {
         serde_json::json!([wrapper["id"], workspace["floating_nodes"][0]["id"]])
     );
 }
+
+#[test]
+fn moving_a_for_window_split_view_away_refocuses_the_tabbed_container() {
+    // `for_window [...] split v` wraps the mapping view in a split before
+    // `should_focus` focuses it, which raises the split and the tabbed
+    // container ahead of the older tab (sway/tree/view.c:943-956,
+    // sway/input/seat.c:1177-1191). Moving the view away looks for
+    // `seat_get_focus_inactive(old_parent)`, empty now, then for the old
+    // workspace's, which is the tabbed container (sway/commands/move.c:598-608).
+    // Reaping the split leaves that focus alone (sway/input/seat.c:316-323).
+    // Oracle row: for_window_split_tabbed_move_refocuses_emptied_split
+    // (random-v3 seed 32960).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    f.niri_focus_output(1);
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fwst-1");
+    for command in ["layout tabbed", r#"for_window [app_id="^fwst-2$"] split v"#] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    map_test_window(&mut f, client, "fwst-2");
+    assert!(crate::command::execute(f.niri_state(), "move container to workspace next")[0].success);
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let first = find_json_node_with_app_id(&tree, "fwst-1").unwrap();
+    assert_eq!(first["focused"], false);
+    let tabbed = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|output| output["nodes"].as_array().unwrap())
+        .find(|workspace| find_json_node_with_app_id(workspace, "fwst-1").is_some())
+        .map(|workspace| &workspace["nodes"][0])
+        .unwrap();
+    assert_eq!(tabbed["layout"], "tabbed");
+    assert_eq!(tabbed["focused"], true);
+}
+
+#[test]
+fn moving_a_floated_fullscreen_view_away_refocuses_the_tabbed_container() {
+    // `floating toggle` on the focused fullscreen view raises its old parent,
+    // then the view (`container_set_floating`, sway/tree/container.c:969-973).
+    // Moving it away searches from the workspace, because a floater has no
+    // parent, and finds the tabbed container (sway/commands/move.c:598-608).
+    // Oracle row: floated_fullscreen_move_refocuses_old_parent
+    // (random-v3 seeds 33006 33120).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "ffm-1");
+    for command in ["fullscreen toggle", "layout tabbed"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    map_test_window(&mut f, client, "ffm-2");
+    for command in ["floating toggle", "move container to workspace number 3"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["representation"], "H[T[ffm-2]]");
+    assert_eq!(workspace["nodes"][0]["focused"], true);
+    assert_eq!(workspace["nodes"][0]["nodes"][0]["focused"], false);
+}

@@ -174,6 +174,11 @@ impl<W: LayoutElement> Workspace<W> {
         // (sway/tree/container.c:955-965, 995-1003).
         let floating = tile.restore_to_floating;
         tile.set_sway_csd_floating(floating);
+        // Floating the focused view raises its old parent and then the view
+        // (`container_set_floating`, sway/tree/container.c:969-973).
+        if floating && !was_floating {
+            self.tiling.raise_parent_then_focused(window);
+        }
         self.tiling
             .orphan_global_fullscreen_on_floating(window, floating);
         true

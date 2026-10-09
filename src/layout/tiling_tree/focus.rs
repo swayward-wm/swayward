@@ -345,6 +345,29 @@ impl<W: LayoutElement> TilingTree<W> {
         self.set_focus_id(Some(self.root));
     }
 
+    /// Raises the focused `window`'s non-root parent, then the view, as sway's
+    /// `seat_set_raw_focus` pair does (sway/tree/container.c:969-973).
+    pub fn raise_parent_then_focused(&mut self, window: &W::Id) {
+        let Some(id) = self
+            .node_for_window(window)
+            .filter(|id| self.focus == Some(*id))
+        else {
+            return;
+        };
+        let Some(parent) = self
+            .nodes
+            .get(&id)
+            .and_then(|node| node.parent)
+            .filter(|parent| *parent != self.root)
+        else {
+            return;
+        };
+        self.focus_history
+            .retain(|candidate| *candidate != id && *candidate != parent);
+        self.focus_history.insert(0, parent);
+        self.focus_history.insert(0, id);
+    }
+
     pub fn set_focus(&mut self, id: NodeId) {
         if self.nodes.contains_key(&id) {
             self.set_focus_id(Some(id));
@@ -355,6 +378,11 @@ impl<W: LayoutElement> TilingTree<W> {
     /// fresh wrapper. Sway runs a mapped view's criteria before it focuses
     /// the view (`view_map`, sway/tree/view.c:943-956), so a container a
     /// `for_window` command wrapped the view in is raised with it.
+    ///
+    /// A `for_window [...] split` wraps the still unfocused view, so
+    /// `container_split` raises nothing (sway/tree/container.c:1532-1560); the
+    /// later focus raises the new split and then each outer ancestor, leaving
+    /// the outermost highest (sway/input/seat.c:1179-1191).
     pub fn raise_focus_into_fresh_wrappers(&mut self, window: &W::Id) {
         let Some(focus) = self
             .focus
@@ -366,9 +394,29 @@ impl<W: LayoutElement> TilingTree<W> {
             .ipc_stale_nodes
             .iter()
             .any(|wrapper| self.contains_node(*wrapper, focus))
+            || !self.ancestors_ranked_outermost_first(focus)
         {
             self.set_focus_id(Some(focus));
         }
+    }
+
+    /// Whether `id`'s non-root ancestors rank in the focus history as
+    /// `set_focus_id` leaves them: the outermost first.
+    fn ancestors_ranked_outermost_first(&self, id: NodeId) -> bool {
+        let rank = |node: NodeId| self.focus_history.iter().position(|entry| *entry == node);
+        let mut inner = self.nodes.get(&id).and_then(|node| node.parent);
+        while let Some(child) = inner.filter(|node| *node != self.root) {
+            let outer = self.nodes.get(&child).and_then(|node| node.parent);
+            if let Some(parent) = outer.filter(|node| *node != self.root) {
+                if let (Some(inner_rank), Some(outer_rank)) = (rank(child), rank(parent)) {
+                    if inner_rank < outer_rank {
+                        return false;
+                    }
+                }
+            }
+            inner = outer;
+        }
+        true
     }
 
     pub fn contains(&self, id: NodeId) -> bool {
