@@ -618,3 +618,90 @@ fn back_and_forth_after_renaming_the_previous_workspace_uses_the_old_name() {
         .map(|(_, _, workspace)| workspace.has_windows());
     assert_eq!(renamed, Some(true));
 }
+
+fn output_focus_by_workspace_name(tree: &serde_json::Value, output: &str) -> Vec<String> {
+    let output = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == output)
+        .unwrap();
+    output["focus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            output["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|workspace| workspace["id"] == *id)
+                .unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Windows mapped on `left`, commands, the surviving output and its `focus` by name.
+type FocusOrderCase = (
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static str,
+    &'static [&'static str],
+);
+
+#[test]
+fn output_disable_merges_workspace_focus_order_by_seat_recency() {
+    // Oracle state scenarios output_disable_moved_workspace_focus_order and
+    // output_disable_evacuated_workspaces_focus_order: an output's `focus` lists its
+    // workspaces in the order of the one seat focus stack (sway/sway/ipc-json.c:786-835),
+    // so workspaces evacuated by `output disable` (sway/sway/tree/output.c:205-253)
+    // interleave with the surviving output's by when each was last focused.
+    let cases: [FocusOrderCase; 2] = [
+        (
+            &["first"],
+            &[
+                "move right",
+                "move workspace to output right",
+                "focus output right",
+                "output left disable",
+            ],
+            "right",
+            &["3", "2"],
+        ),
+        (
+            &["first", "second"],
+            &[
+                "move container to workspace next",
+                "move container to workspace number 3",
+                "output right disable",
+            ],
+            "left",
+            &["1", "2", "3"],
+        ),
+    ];
+    for (windows, commands, survivor, expected) in cases {
+        let (mut f, socket) = ipc_fixture();
+        f.add_named_output_at("left".into(), (1280, 720), Some((0, 0)));
+        f.add_named_output_at("right".into(), (1280, 720), Some((1280, 0)));
+        let client = f.add_client();
+        for window in windows {
+            map_test_window(&mut f, client, window);
+        }
+        for command in commands {
+            assert!(
+                crate::command::execute(f.niri_state(), command)[0].success,
+                "{command}"
+            );
+        }
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+        assert_eq!(
+            output_focus_by_workspace_name(&tree, survivor),
+            expected,
+            "{commands:?}"
+        );
+    }
+}

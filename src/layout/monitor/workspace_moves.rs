@@ -11,14 +11,20 @@ impl<W: LayoutElement> Monitor<W> {
         (name, number): (Option<String>, Option<i32>),
         layout_config: Option<LayoutPart>,
     ) -> WorkspaceId {
-        if let Some(workspace) = self.workspaces.iter_mut().find(|workspace| {
+        let id = if let Some(workspace) = self.workspaces.iter_mut().find(|workspace| {
             workspace.id() != moving && !workspace.has_sway_identity() && !workspace.has_windows()
         }) {
             workspace.set_sway_identity(name, number);
             workspace.id()
         } else {
             self.add_sway_workspace_at(1, name, number, layout_config)
+        };
+        // Sway raw-focuses the replacement (`workspace_move_to_output`,
+        // sway/sway/tree/workspace.c:1146-1154), raising it in the seat focus stack.
+        if let Some(idx) = self.idx_of_ws(id) {
+            self.workspaces[idx].mark_focused();
         }
+        id
     }
 }
 

@@ -122,9 +122,19 @@ pub struct Workspace<W: LayoutElement> {
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
+
+    /// This workspace's place in sway's one seat focus stack; see [`Self::focus_seq`].
+    focus_seq: i64,
 }
 
 static WORKSPACE_ID_COUNTER: IdCounter = IdCounter::new();
+static WORKSPACE_FOCUS_COUNTER: IdCounter = IdCounter::new();
+
+/// Sway appends a new node to the tail of the seat focus stack (`seat_node_from_node`,
+/// sway/sway/input/seat.c:327-352): below every workspace already there, focused or not.
+fn creation_focus_seq() -> i64 {
+    -(WORKSPACE_FOCUS_COUNTER.next() as i64)
+}
 
 /// Ord follows the monotonic allocation counter, so comparing two ids compares
 /// creation order. The workspace sort relies on that to break ties the way
@@ -317,6 +327,7 @@ impl<W: LayoutElement> Workspace<W> {
             gaps,
             outer_gaps,
             id: WorkspaceId::next(),
+            focus_seq: creation_focus_seq(),
         }
     }
 
@@ -384,6 +395,7 @@ impl<W: LayoutElement> Workspace<W> {
             gaps,
             outer_gaps,
             id: WorkspaceId::next(),
+            focus_seq: creation_focus_seq(),
         }
     }
 
@@ -393,6 +405,18 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn id(&self) -> WorkspaceId {
         self.id
+    }
+
+    /// Rank in sway's seat focus stack, which is one list for every output: higher is
+    /// more recently focused (sway/sway/input/seat.c:1116-1128).
+    pub fn focus_seq(&self) -> i64 {
+        self.focus_seq
+    }
+
+    /// Moves this workspace to the head of the seat focus stack, as `seat_set_raw_focus`
+    /// does (sway/sway/input/seat.c:1116-1128).
+    pub fn mark_focused(&mut self) {
+        self.focus_seq = WORKSPACE_FOCUS_COUNTER.next() as i64;
     }
 
     pub fn name(&self) -> Option<&String> {

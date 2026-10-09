@@ -600,6 +600,7 @@ impl<W: LayoutElement> Monitor<W> {
         if self.workspaces.is_empty() {
             self.add_sway_workspace_at(0, name, number, layout_config);
             self.active_workspace_idx = 0;
+            self.workspaces[0].mark_focused();
             let id = self.workspaces[0].id();
             self.workspace_focus_history
                 .retain(|candidate| *candidate != id);
@@ -637,6 +638,7 @@ impl<W: LayoutElement> Monitor<W> {
             self.workspaces[prev_active_idx].reset_empty_tiling_layout();
         }
         self.active_workspace_idx = idx;
+        self.workspaces[idx].mark_focused();
         let active = self.active_workspace_ref().id();
         self.workspace_focus_history.retain(|id| *id != active);
         self.workspace_focus_history.insert(0, active);
@@ -1326,10 +1328,6 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn previous_workspace_id(&self) -> Option<WorkspaceId> {
         self.previous_workspace_id
-    }
-
-    pub(crate) fn workspace_focus_history(&self) -> impl Iterator<Item = WorkspaceId> + '_ {
-        self.workspace_focus_history.iter().copied()
     }
 
     pub fn finish_workspace_switch(&mut self, target: Option<WorkspaceId>) {

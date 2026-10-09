@@ -15,9 +15,13 @@ impl<W: LayoutElement> Layout<W> {
     /// every focus change: the workspace it leaves becomes `seat->prev_workspace_name`, on
     /// whichever output it is (sway/input/seat.c:1098-1113).
     pub fn sync_seat_workspace(&mut self) {
-        let Some(active) = self.active_workspace() else {
+        let Some(active) = self.active_workspace_mut() else {
             return;
         };
+        // `seat_set_workspace_focus` raw-focuses the workspace, which heads the one seat
+        // focus stack shared by every output (sway/input/seat.c:1185-1187).
+        active.mark_focused();
+        let active = &*active;
         let current = (active.id(), active.sway_name());
         self.observed_active_workspace = Some(current.0);
         match &mut self.seat_workspace {
