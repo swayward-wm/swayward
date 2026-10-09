@@ -79,8 +79,19 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating_is_active = FloatingActive::No;
     }
 
+    /// `container_fullscreen_disable` (sway/tree/container.c:1246-1258). A
+    /// fullscreen floating view, parked in the tiling tree here, goes back to
+    /// the floating layer, since sway never took it out of `ws->floating`.
     pub fn disable_fullscreen(&mut self) {
-        if let Some(fullscreen) = self.tiling.fullscreen_node() {
+        let floater = self
+            .tiling
+            .fullscreen_window()
+            .filter(|window| self.window_is_fullscreen_floating(window))
+            .filter(|window| self.tiling.node_for_window(window) == self.tiling.fullscreen_node())
+            .cloned();
+        if let Some(window) = floater {
+            self.set_fullscreen(&window, false);
+        } else if let Some(fullscreen) = self.tiling.fullscreen_node() {
             self.tiling.set_node_fullscreen(fullscreen, None);
         } else {
             self.floating.disable_fullscreen();

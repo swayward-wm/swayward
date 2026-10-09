@@ -1392,3 +1392,36 @@ fn move_scratchpad_after_focus_parent_split_from_a_dialog_hides_the_wrapper() {
     let dialog = find_json_node_with_app_id(&tree, "dialog").unwrap();
     assert_eq!(dialog["scratchpad_state"], "none", "{dialog:#}");
 }
+
+/// A shown scratchpad view taken global fullscreen goes back to the floating
+/// layer when `focus` on a tiled view ends it: `container_fullscreen_disable`
+/// leaves `container_is_floating` true (sway/commands/focus.c:389-394,
+/// sway/tree/container.c:1246-1258). Differential seed 32873.
+#[test]
+fn focusing_a_tiled_view_ends_a_shown_scratchpad_global_fullscreen_back_to_floating() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "pad");
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    map_test_window(&mut f, client, "tiled");
+    for command in [
+        r#"[app_id="pad"] scratchpad show"#,
+        "fullscreen enable global",
+        r#"[app_id="tiled"] focus"#,
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let pad = find_json_node_with_app_id(&tree, "pad").unwrap();
+    assert_eq!(pad["type"], "floating_con");
+    assert_eq!(pad["fullscreen_mode"], 0);
+    let tiled = find_json_node_with_app_id(&tree, "tiled").unwrap();
+    assert_eq!(tiled["focused"], true);
+    assert_eq!(tiled["percent"], 1.0);
+}

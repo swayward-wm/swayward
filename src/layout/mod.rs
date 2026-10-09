@@ -1859,12 +1859,14 @@ impl<W: LayoutElement> Layout<W> {
                     .tiling()
                     .windows()
                     .find_map(|(id, candidate)| (candidate.id() == window).then_some(id))?;
-                (!workspace.tiling().contains_node(fullscreen, target))
-                    .then_some((workspace.id(), fullscreen))
+                (!workspace.tiling().contains_node(fullscreen, target)).then_some(workspace.id())
             });
-        if let Some((workspace_id, fullscreen)) = obstructing {
+        // `container_fullscreen_disable` returns a fullscreen floating view to
+        // the floating layer (sway/commands/focus.c:389-394,
+        // sway/tree/container.c:1246-1258).
+        if let Some(workspace_id) = obstructing {
             if let Some(workspace) = self.workspace_mut(workspace_id) {
-                workspace.tiling_mut().set_node_fullscreen(fullscreen, None);
+                workspace.disable_fullscreen();
             }
         }
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
