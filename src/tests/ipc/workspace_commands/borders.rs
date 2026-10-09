@@ -1568,3 +1568,71 @@ fn a_held_floating_content_box_takes_a_resize_on_the_named_axis_only() {
         "{view:#}"
     );
 }
+
+#[test]
+fn swap_keeps_each_csd_views_stored_border() {
+    // `swap_places` re-parents both containers without
+    // `container_set_floating` (sway/tree/container.c:1718-1764), so a CSD
+    // view's stored border does not move between its tiled and floating
+    // forms: the floating view keeps `csd` in the tiled slot and the tiled
+    // one keeps `normal` while floating.
+    // Differential family diff-fam-v3-hinted-swap-border, seeds 32071 32108
+    // 32169 32260 32378 32612 32943 32953 32973 33166 33750 33826; oracle row
+    // swap_csd_views_keep_stored_border.
+    let config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; }"#,
+    )
+    .unwrap();
+    let (mut f, _) = ipc_fixture_with_config(config);
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id: &str, hints: Option<(i32, i32)>| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        if let Some((width, height)) = hints {
+            window.set_min_size(width, height);
+            window.set_max_size(width, height);
+        }
+        let window = f.client(client).state.windows.last_mut().unwrap();
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    map(&mut f, "tiled", None);
+    map(&mut f, "fixed", Some((400, 300)));
+    let borders = |f: &mut Fixture| {
+        let tree = get_tree(f);
+        let workspace = tree["nodes"][1]["nodes"][0].clone();
+        (
+            workspace["nodes"][0]["app_id"].clone(),
+            workspace["nodes"][0]["border"].clone(),
+            workspace["floating_nodes"][0]["app_id"].clone(),
+            workspace["floating_nodes"][0]["border"].clone(),
+        )
+    };
+    assert_eq!(
+        borders(&mut f),
+        (
+            "tiled".into(),
+            "normal".into(),
+            "fixed".into(),
+            "csd".into()
+        )
+    );
+
+    assert!(crate::command::execute(f.niri_state(), r#"[app_id="tiled"] mark t"#)[0].success);
+    assert!(crate::command::execute(f.niri_state(), "swap container with mark t")[0].success);
+    assert_eq!(
+        borders(&mut f),
+        (
+            "fixed".into(),
+            "csd".into(),
+            "tiled".into(),
+            "normal".into()
+        )
+    );
+}

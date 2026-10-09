@@ -73,6 +73,9 @@ pub struct Tile<W: LayoutElement> {
     /// The style a CSD view returns to when it is tiled again
     /// (`con->saved_border`, sway/commands/border.c:15-31).
     sway_saved_border: Option<BorderStyle>,
+    /// Set while a swap re-parents the view: sway's `swap_places` never calls
+    /// `container_set_floating`, so the stored border stays as it was.
+    sway_csd_pinned: bool,
     border_edges: ResizeEdge,
     border_visible: bool,
     titlebar_attached: bool,
@@ -284,6 +287,7 @@ impl<W: LayoutElement> Tile<W> {
             sway_border: None,
             sway_uses_csd: false,
             sway_saved_border: None,
+            sway_csd_pinned: false,
             border_edges: ResizeEdge::all(),
             border_visible: true,
             titlebar_attached: false,
@@ -2019,7 +2023,7 @@ impl<W: LayoutElement> Tile<W> {
     /// the matching decoration mode (sway/tree/container.c:955-964, 995-1003).
     /// A view that is not using CSD is left alone.
     pub fn set_sway_csd_floating(&mut self, floating: bool) {
-        if !self.sway_uses_csd {
+        if !self.sway_uses_csd || self.sway_csd_pinned {
             return;
         }
         // A view mapped with CSD may still follow `default_border`; it goes
@@ -2042,6 +2046,12 @@ impl<W: LayoutElement> Tile<W> {
         self.window.request_server_decoration(!floating);
         self.sway_border = border;
         self.update_border_config();
+    }
+
+    /// Keeps the stored border through a re-parent that sway does without
+    /// `container_set_floating` (`swap_places`, sway/tree/container.c:1718-1764).
+    pub fn pin_sway_csd(&mut self, pinned: bool) {
+        self.sway_csd_pinned = pinned;
     }
 
     fn update_border_config(&mut self) {

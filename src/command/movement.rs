@@ -754,6 +754,21 @@ pub(super) fn swap_target(
     source: CommandTarget,
     target: &SwapTarget,
 ) -> CommandOutcome {
+    // `swap_places` re-parents both containers without
+    // `container_set_floating`, so a CSD view keeps its stored border: a
+    // floating one stays `csd` in a tiled slot and a tiled one keeps its
+    // style while floating (sway/tree/container.c:1718-1764).
+    state.swayward.layout.pin_sway_csd(true);
+    let outcome = swap_target_unpinned(state, source, target);
+    state.swayward.layout.pin_sway_csd(false);
+    outcome
+}
+
+fn swap_target_unpinned(
+    state: &mut State,
+    source: CommandTarget,
+    target: &SwapTarget,
+) -> CommandOutcome {
     let destination = match swap_destination(state, target) {
         Ok(destination) => destination,
         Err(error) => return error,

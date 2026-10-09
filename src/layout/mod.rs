@@ -5766,6 +5766,16 @@ impl<W: LayoutElement> Layout<W> {
         iter_normal.chain(iter_no_outputs)
     }
 
+    /// Pins or unpins every placed view's stored border; see
+    /// [`Tile::pin_sway_csd`].
+    pub fn pin_sway_csd(&mut self, pinned: bool) {
+        for workspace in self.workspaces_mut() {
+            for tile in workspace.tiles_mut() {
+                tile.pin_sway_csd(pinned);
+            }
+        }
+    }
+
     pub fn window_center(&self, window: &W::Id) -> Option<Point<i32, Logical>> {
         self.monitors().find_map(|monitor| {
             let output_origin = monitor.output().current_location();
