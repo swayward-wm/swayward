@@ -2673,3 +2673,72 @@ fn floating_or_rule_layout_wrap_orphans_global_fullscreen() {
     assert_eq!(two["focused"], true, "{two}");
     assert_eq!(two["visible"], true, "{two}");
 }
+
+// Differential family diff-fam-v3-gfs-workspace-move-current, random-v3 seeds
+// 32758, 33123 and 33896; oracle row
+// global_fullscreen_split_child_moves_to_new_workspace. After `split h` a
+// fullscreen split wraps the view alone. Moving the view out leaves that
+// parent empty, so sway refocuses the most recent entry on the old workspace
+// (sway/commands/move.c:589-597). That entry is outside the fullscreen split,
+// which obstructs it, so `seat_set_focus` refuses (sway/input/seat.c:1148-1151)
+// and the view keeps focus. Reaping the emptied split then puts the view's new
+// workspace on the focus stack (sway/input/seat.c:304-313), and the old
+// workspace is destroyed.
+#[test]
+fn moving_the_lone_child_of_a_fullscreen_split_follows_it_to_the_new_workspace() {
+    let check = |f: &mut Fixture, app: &str| {
+        let tree = tree_json(f);
+        let output = &tree["nodes"][1];
+        assert_eq!(output["current_workspace"], "3", "{output}");
+        let view = find_json_node_with_app_id(&tree, app).unwrap();
+        assert_eq!(view["focused"], true, "{view}");
+        assert_eq!(view["fullscreen_mode"], 0, "{view}");
+        f.swayward().layout.verify_invariants();
+    };
+
+    // Global fullscreen: workspace 1 is left empty and destroyed.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(
+        &mut f,
+        &[
+            "layout tabbed",
+            "fullscreen toggle global",
+            "split h",
+            "move container to workspace number 3",
+        ],
+    );
+    check(&mut f, "one");
+    let tree = tree_json(&mut f);
+    assert_eq!(
+        tree["nodes"][1]["nodes"].as_array().unwrap().len(),
+        1,
+        "{tree}"
+    );
+
+    // Workspace fullscreen beside other views: workspace 1 survives with them.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(&mut f, &["split toggle"]);
+    map_app(&mut f, client, "three");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle",
+            "split toggle",
+            "move container to workspace number 3",
+        ],
+    );
+    check(&mut f, "three");
+    let tree = tree_json(&mut f);
+    assert_eq!(
+        tree["nodes"][1]["nodes"].as_array().unwrap().len(),
+        2,
+        "{tree}"
+    );
+}

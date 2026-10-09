@@ -799,12 +799,31 @@ impl<W: LayoutElement> Layout<W> {
                 && self
                     .workspace(target_workspace)
                     .is_some_and(|workspace| !workspace.has_windows()));
+        let follows_moved_view = moved_window_was_focused
+            && moved_window.as_ref().is_some_and(|window| {
+                source_workspace
+                    .and_then(|source| self.workspace(source))
+                    .is_some_and(|source| source.tiling().departing_view_keeps_focus(window))
+            });
         if target_output != source_output {
             let output =
                 target_output.ok_or_else(|| "target workspace has no output".to_owned())?;
             self.move_to_output(window, &output, Some(target_index), ActivateWindow::No);
         } else {
             self.move_to_workspace_id(window, target_workspace, ActivateWindow::No);
+        }
+        if let Some(window) = moved_window.as_ref().filter(|_| follows_moved_view) {
+            self.activate_window(window);
+            if let Some(monitor) = source_workspace.and_then(|source| {
+                self.monitors_mut()
+                    .find(|monitor| monitor.has_ws(source))
+                    .map(|monitor| (monitor, source))
+            }) {
+                let (monitor, source) = monitor;
+                monitor.workspace_switch = None;
+                monitor.consider_destroy_workspace(source);
+            }
+            return Ok(());
         }
         if target_workspace_focused {
             if let Some(workspace) = self.workspace_mut(target_workspace).filter(|workspace| {

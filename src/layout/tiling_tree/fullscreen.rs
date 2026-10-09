@@ -465,6 +465,46 @@ impl<W: LayoutElement> TilingTree<W> {
         find(FullscreenMode::Global).or_else(|| find(FullscreenMode::Workspace))
     }
 
+    /// Whether focus stays on the focused `window` when it leaves this tree
+    /// for another workspace. An emptied old parent sends sway's refocus to the
+    /// most recent entry on the old workspace (sway/commands/move.c:589-597).
+    /// Focusing the view put its ancestors on the seat's stack outermost first
+    /// (sway/input/seat.c:1178-1190), so that entry is the outermost ancestor.
+    /// When that ancestor is outside the fullscreen container, the fullscreen
+    /// container obstructs it and `seat_set_focus` refuses
+    /// (sway/input/seat.c:1148-1151). The moved view keeps focus, and reaping
+    /// the emptied containers puts its new workspace on the stack
+    /// (sway/input/seat.c:304-313).
+    pub fn departing_view_keeps_focus(&self, window: &W::Id) -> bool {
+        let (Some(leaf), Some(fullscreen)) = (self.node_for_window(window), self.fullscreen_node())
+        else {
+            return false;
+        };
+        if fullscreen == leaf
+            || self.global_fullscreen_orphaned()
+            || !self.contains_node(fullscreen, leaf)
+        {
+            return false;
+        }
+        let Some(parent) = self
+            .parent_of_node(leaf)
+            .filter(|parent| *parent != self.root)
+        else {
+            return false;
+        };
+        if self.split_len(parent) != Some(1) {
+            return false;
+        }
+        let mut outermost = parent;
+        while let Some(next) = self
+            .parent_of_node(outermost)
+            .filter(|next| *next != self.root)
+        {
+            outermost = next;
+        }
+        !self.contains_node(fullscreen, outermost)
+    }
+
     pub fn fullscreen_mode(&self, id: NodeId) -> Option<FullscreenMode> {
         self.pending_modes.get(&id).and_then(|mode| mode.fullscreen)
     }
