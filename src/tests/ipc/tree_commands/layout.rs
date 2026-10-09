@@ -2784,3 +2784,42 @@ fn moving_the_lone_child_of_a_fullscreen_split_follows_it_to_the_new_workspace()
         "{tree}"
     );
 }
+
+/// Differential family v3-resize-set-ppt-floating-sibling-split (random-v3 seed 32799; oracle
+/// row `floating_focus_parent_split_resize_set_ppt`). With a floater raised and the workspace
+/// focused, `split v` wraps the tiling children and focuses the wrapper
+/// (`workspace_split`, sway/tree/workspace.c:1058-1079). `resize set` then targets that
+/// singleton wrapper, which has no sibling to resize against
+/// (`container_resize_tiled`, sway/commands/resize.c:66-78), so the tiled views keep their
+/// halves rather than the last focused view taking 30 ppt.
+#[test]
+fn resize_set_ppt_after_focus_parent_split_from_floater_resizes_the_wrapper() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-6", "fixture-7", "fixture-8"] {
+        map_app(&mut f, client, app_id);
+    }
+    for command in [
+        "floating enable",
+        "focus parent; split v",
+        "resize set width 30 ppt height 40 ppt",
+    ] {
+        for outcome in crate::command::execute(f.niri_state(), command) {
+            assert!(outcome.success, "{command}: {outcome:?}");
+        }
+        f.double_roundtrip(client);
+    }
+
+    let tree = tree_json(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(workspace["layout"], "splitv", "{workspace}");
+    assert_eq!(wrapper["layout"], "splith", "{wrapper}");
+    assert_eq!(wrapper["focused"], true, "{wrapper}");
+    for app_id in ["fixture-6", "fixture-7"] {
+        let view = find_json_node_with_app_id(&tree, app_id).unwrap();
+        assert_eq!(view["percent"], 0.5, "{app_id}: {view}");
+    }
+    f.swayward().layout.verify_invariants();
+}
