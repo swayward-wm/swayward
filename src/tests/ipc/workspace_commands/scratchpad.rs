@@ -885,6 +885,51 @@ fn moving_one_view_out_of_a_two_view_scratchpad_split_keeps_the_split_in_the_scr
     assert_eq!(view.app_id.as_deref(), Some("pad-b"));
 }
 
+/// Focus on a view mapped into a shown scratchpad split is focus inside the
+/// split, and `scratchpad show` acts on the split, so it hides the whole
+/// split (sway/commands/scratchpad.c:21-36). Oracle row
+/// scratchpad_split_second_view_show_hides.
+#[test]
+fn scratchpad_show_from_a_second_view_in_a_shown_split_hides_the_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for (index, app_id) in ["pad-a", "pad-b"].into_iter().enumerate() {
+        if index == 1 {
+            for command in ["move scratchpad", "scratchpad show", "splith"] {
+                assert!(
+                    crate::command::execute(f.niri_state(), command)[0].success,
+                    "{command}"
+                );
+            }
+        }
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+
+    let reply = &crate::command::execute(f.niri_state(), "scratchpad show")[0];
+    assert!(reply.success, "{:?}", reply.error);
+
+    let swayward = f.swayward();
+    let tree = describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    );
+    let scratch = &tree.nodes[0].nodes[0];
+    assert_eq!(scratch.floating_nodes.len(), 1);
+    assert_eq!(scratch.floating_nodes[0].nodes.len(), 2);
+    assert!(tree.nodes[1].nodes[0].floating_nodes.is_empty());
+}
+
 #[test]
 fn empty_scratch_workspace_is_always_serialized() {
     let mut f = Fixture::new();

@@ -124,9 +124,16 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn show_scratchpad(&mut self, window: Option<&W::Id>) -> Option<W::Id> {
-        let focused = self.focus().map(|window| window.id().clone());
+        // Focus inside a floating split acts on the split
+        // (sway/commands/scratchpad.c:21-27), so a split holding a
+        // scratchpad view is the focused scratchpad container.
+        let focused = self
+            .focus()
+            .map(|window| window.id().clone())
+            .and_then(|id| self.scratchpad_representative(&id));
         let shown = focused
-            .filter(|id| self.scratchpad_windows.contains(id) && !self.is_scratchpad_hidden(id))
+            .clone()
+            .filter(|id| !self.is_scratchpad_hidden(id))
             .or_else(|| {
                 self.scratchpad_windows
                     .iter()
@@ -176,7 +183,7 @@ impl<W: LayoutElement> Layout<W> {
                     .position(|removed| removed.tile.window().id() == window);
             }
         } else if let Some(shown) = shown {
-            if self.focus().is_some_and(|focused| focused.id() == &shown) {
+            if focused.as_ref() == Some(&shown) {
                 self.move_to_scratchpad(Some(&shown));
                 return None;
             }
@@ -208,6 +215,23 @@ impl<W: LayoutElement> Layout<W> {
         self.scratchpad.get(index)?;
         let active_workspace = self.prepare_active_workspace_for_scratchpad_show()?;
         self.show_scratchpad_tile(index, active_workspace)
+    }
+
+    /// The scratchpad window standing for the container that holds `window`:
+    /// `window` itself, or the scratchpad view of the floating split it is
+    /// in. Nothing when neither is a scratchpad container.
+    fn scratchpad_representative(&self, window: &W::Id) -> Option<W::Id> {
+        if self.scratchpad_windows.contains(window) {
+            return Some(window.clone());
+        }
+        self.workspaces().find_map(|(_, _, workspace)| {
+            let floating = workspace.floating();
+            let tree = floating.tree(floating.tree_root_for_window(window)?)?;
+            tree.windows()
+                .map(|(_, view)| view.id())
+                .find(|id| self.scratchpad_windows.contains(id))
+                .cloned()
+        })
     }
 
     /// Hides a visible scratchpad window on the way to showing it elsewhere.
