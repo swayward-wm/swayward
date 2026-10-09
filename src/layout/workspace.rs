@@ -286,7 +286,7 @@ impl<W: LayoutElement> Workspace<W> {
         let tiling = TilingTree::new(
             view_size,
             working_area,
-            has_gaps_to_edge(output_area, options.layout.outer_gaps, options.layout.gaps),
+            gaps_to_edge(output_area, working_area),
             scale.fractional_scale(),
             clock.clone(),
             options.clone(),
@@ -354,7 +354,7 @@ impl<W: LayoutElement> Workspace<W> {
         let tiling = TilingTree::new(
             view_size,
             working_area,
-            has_gaps_to_edge(output_area, options.layout.outer_gaps, options.layout.gaps),
+            gaps_to_edge(output_area, working_area),
             scale.fractional_scale(),
             clock.clone(),
             options.clone(),
@@ -485,7 +485,7 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.update_config(
             self.view_size,
             self.working_area,
-            has_gaps_to_edge(output_area, options.layout.outer_gaps, options.layout.gaps),
+            gaps_to_edge(output_area, self.working_area),
             self.scale.fractional_scale(),
             options.clone(),
         );
@@ -695,11 +695,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             output_area,
-            has_gaps_to_edge(
-                output_area,
-                self.options.layout.outer_gaps,
-                self.options.layout.gaps,
-            ),
+            gaps_to_edge(output_area, working_area),
         );
     }
 
@@ -2477,12 +2473,11 @@ pub(crate) fn compute_working_area(output: &Output) -> Rectangle<f64, Logical> {
     layer_map_for_output(output).non_exclusive_zone().to_f64()
 }
 
-fn has_gaps_to_edge(
-    area: Rectangle<f64, Logical>,
-    outer: swayward_config::OuterGaps,
-    inner: f64,
-) -> bool {
-    apply_outer_gaps(area, outer, inner) != area
+/// Sway's `gaps_to_edge` (sway/sway/tree/view.c:344-347) reads the workspace's
+/// `current_gaps`, which `workspace_add_gaps` has already reduced for smart gaps, so it
+/// compares the gapped working area rather than the configured outer gaps.
+fn gaps_to_edge(area: Rectangle<f64, Logical>, working_area: Rectangle<f64, Logical>) -> bool {
+    working_area != area
 }
 
 pub(super) fn apply_outer_gaps(

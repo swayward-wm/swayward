@@ -516,6 +516,16 @@ fn edge_border_modes_apply_to_workspace_edges_and_visible_view_count() {
     let with_gaps = window_nodes(&config("none", "no-gaps", 16), 1);
     assert_eq!(with_gaps[0]["window_rect"]["x"], 7);
     assert_eq!(with_gaps[0]["window_rect"]["y"], 7);
+    // Smart gaps leave a lone view with no current gaps, so smart_no_gaps hides its
+    // borders too: sway's gaps_to_edge reads current_gaps (sway/sway/tree/view.c:344-347).
+    let smart_gaps = window_nodes(
+        &config("none", "no-gaps", 16).replacen("layout {", "layout {\n smart-gaps \"on\"", 1),
+        1,
+    );
+    assert_eq!(
+        smart_gaps[0]["window_rect"],
+        serde_json::json!({ "x": 0, "y": 0, "width": 800, "height": 600 })
+    );
 
     let floating = window_nodes(
         &format!(

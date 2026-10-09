@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs"]
+what = "`smart_no_gaps` decides gaps-to-edge from the smart-gapped working area instead of the configured outer gaps."
+why = "sway's `gaps_to_edge` (sway/sway/tree/view.c:344-347) reads `current_gaps`, which `workspace_add_gaps` has already zeroed for `smart_gaps on` with one visible view, so that lone view loses its borders."
