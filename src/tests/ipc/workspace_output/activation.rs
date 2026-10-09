@@ -648,3 +648,98 @@ fn splitting_a_focused_workspace_with_a_floater_keeps_urgency() {
     run_urgency_commands(&mut f, client, &["split v"]);
     assert!(test_window_is_urgent(&mut f, "four"));
 }
+
+/// A sticky floater refuses `move container to workspace back_and_forth` when
+/// the previous workspace was on its own output, even after that workspace
+/// was destroyed: sway names the target from `seat->prev_workspace_name`, and
+/// a workspace it would create there is refused before creation
+/// (sway/commands/move.c:459-468, 498-511). Random-v3 seed 32488
+/// (diff-fam-v3-move-ws-back-and-forth-after-ws-move); oracle scenario
+/// sticky_move_back_and_forth_same_output_refused.
+#[test]
+fn sticky_move_to_back_and_forth_on_the_same_output_is_refused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "sticky");
+    for step in [
+        "floating enable",
+        "sticky enable",
+        "workspace 3",
+        "focus floating",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), step)[0].success,
+            "{step}"
+        );
+    }
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some(
+                "Can't move sticky container to another workspace on the same output".into()
+            ),
+            parse_error: Some(false),
+        }]
+    );
+    let swayward = f.swayward();
+    let names: Vec<_> = describe_workspaces(&swayward.layout, &swayward.global_space)
+        .into_iter()
+        .map(|workspace| workspace.name)
+        .collect();
+    assert!(!names.contains(&"1".to_owned()), "{names:?}");
+    swayward.layout.verify_invariants();
+}
+
+/// `move workspace to output` keeps the seat's focused workspace, so it
+/// records no history: `seat_set_focus` lands on the same workspace and
+/// `set_workspace` returns early (sway/commands/move.c:659-667,
+/// sway/input/seat.c:1098-1102). The previous record survives the move.
+/// Random-v3 seeds 32404, 32453, 32496
+/// (diff-fam-v3-move-ws-back-and-forth-after-ws-move); oracle scenario
+/// move_back_and_forth_after_move_workspace_to_output.
+#[test]
+fn move_workspace_to_output_keeps_the_back_and_forth_record() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output headless-1")[0].success);
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "move workspace to output headless-2")[0].error,
+        None
+    );
+    map_test_window(&mut f, client, "moved");
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("No workspace was previously active.".into()),
+            parse_error: Some(false),
+        }]
+    );
+
+    for step in [
+        "workspace 5",
+        "workspace 1",
+        "move workspace to output headless-1",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), step)[0].success,
+            "{step}"
+        );
+    }
+    assert!(
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth")[0]
+            .success
+    );
+    let swayward = f.swayward();
+    let holding: Vec<_> = describe_workspaces(&swayward.layout, &swayward.global_space)
+        .into_iter()
+        .filter(|workspace| workspace.name == "5")
+        .collect();
+    assert_eq!(holding.len(), 1);
+    swayward.layout.verify_invariants();
+}

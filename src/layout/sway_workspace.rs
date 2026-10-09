@@ -864,16 +864,27 @@ impl<W: LayoutElement> Layout<W> {
         let Some(source_output) = source_monitor.map(|monitor| monitor.output().clone()) else {
             return Ok(());
         };
-        let destination_output = match self.find_sway_workspace_position(target) {
+        // `back_and_forth`, `next`, `current` and the like resolve as
+        // `workspace_by_name` does; a vanished previous workspace is recreated
+        // under its name (sway/commands/move.c:453-468, 498-511).
+        let destination_output = match self.existing_sway_workspace_position(target) {
             Some((output, _)) => output,
-            None => match target {
-                crate::command::WorkspaceTarget::Name(name)
-                | crate::command::WorkspaceTarget::Number(name) => self
-                    .initial_monitor_for_workspace(name)
+            None => {
+                let name = match target {
+                    crate::command::WorkspaceTarget::Name(name)
+                    | crate::command::WorkspaceTarget::Number(name) => name.clone(),
+                    crate::command::WorkspaceTarget::BackAndForth => {
+                        match self.previous_seat_workspace_name() {
+                            Some(name) => name,
+                            None => return Ok(()),
+                        }
+                    }
+                    _ => return Ok(()),
+                };
+                self.initial_monitor_for_workspace(&name)
                     .and_then(|index| self.monitors().nth(index))
-                    .map(|monitor| monitor.output().clone()),
-                _ => return Ok(()),
-            },
+                    .map(|monitor| monitor.output().clone())
+            }
         };
         // The check asks only whether the destination is on the old output,
         // so the current workspace is refused too (sway/commands/move.c:542).
