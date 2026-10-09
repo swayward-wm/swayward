@@ -1386,6 +1386,22 @@ impl<W: LayoutElement> Workspace<W> {
         })
     }
 
+    /// `title_format` on a split, tiled or in a floating group: sway stores it on any container
+    /// (sway/commands/title_format.c:14-29).
+    pub fn set_split_title_format(
+        &mut self,
+        id: crate::layout::tiling_tree::NodeId,
+        format: String,
+    ) -> bool {
+        if self.tiling.is_split(id) {
+            return self.tiling.set_title_format(id, format);
+        }
+        self.floating
+            .tree_root_for_node(id)
+            .and_then(|root| self.floating.tree_mut(root))
+            .is_some_and(|tree| tree.set_title_format(id, format))
+    }
+
     pub fn is_tiling_split(&self, id: crate::layout::tiling_tree::NodeId) -> bool {
         self.tiling.is_split(id)
             || self

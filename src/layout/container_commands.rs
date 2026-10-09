@@ -416,7 +416,7 @@ impl<W: LayoutElement> Layout<W> {
         format: String,
     ) -> bool {
         self.workspace_mut(workspace_id)
-            .is_some_and(|workspace| workspace.tiling_mut().set_title_format(node, format))
+            .is_some_and(|workspace| workspace.set_split_title_format(node, format))
     }
 
     /// Sway's `floating` command on a fullscreen view: the view changes

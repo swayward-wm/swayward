@@ -2329,3 +2329,37 @@ fn a_tiled_fixed_size_view_moves_to_a_workspace_tiled() {
     assert_eq!(workspace["nodes"][0]["app_id"], "fixed", "{workspace:#}");
     assert_eq!(workspace["representation"], "H[fixed]", "{workspace:#}");
 }
+
+/// Oracle: state scenario title_format_on_floated_workspace_wrapper
+/// (diff-fam-v3-title-format-floated-workspace, seed 33395). `floating enable`
+/// with the workspace focused floats a wrapper of its children
+/// (sway/commands/floating.c:28-33); `title_format` then sets the wrapper's
+/// format like any container's (sway/commands/title_format.c:14-29).
+#[test]
+fn title_format_applies_to_a_floated_workspace_wrapper() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-tff-1");
+    for command in [
+        "focus parent",
+        "floating enable",
+        "title_format [%app_id] %title",
+    ] {
+        assert_eq!(
+            crate::command::execute(f.niri_state(), command),
+            [swayward_ipc::CommandOutcome {
+                success: true,
+                error: None,
+                parse_error: None,
+            }],
+            "{command}"
+        );
+    }
+    f.niri_state().refresh_and_flush_clients();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = find_json_parent_of_app_id(&tree, "fixture-tff-1").unwrap();
+    assert_eq!(workspace["type"], "floating_con");
+    assert_eq!(workspace["focused"], true);
+}
