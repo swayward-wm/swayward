@@ -268,6 +268,16 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Finishes every output's render-only workspace transition, so the empty
+    /// workspace it was leaving is gone. Sway destroys that workspace inside
+    /// the switch (`workspace_consider_destroy`, sway/sway/input/seat.c:
+    /// 1243-1250), before a later command can see its name as taken.
+    pub fn finish_all_sway_workspace_switches(&mut self) {
+        for monitor in self.monitors_mut() {
+            monitor.finish_workspace_switch(None);
+        }
+    }
+
     pub fn activate_sway_workspace_auto_back_and_forth(
         &mut self,
         target: crate::command::WorkspaceTarget,

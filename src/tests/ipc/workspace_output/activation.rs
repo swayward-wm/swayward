@@ -822,3 +822,53 @@ fn move_workspace_to_output_keeps_the_back_and_forth_record() {
     assert_eq!(holding.len(), 1);
     swayward.layout.verify_invariants();
 }
+
+/// `move workspace to output` detaches the workspace before naming the
+/// replacement for the emptied output (`workspace_move_to_output`,
+/// sway/sway/tree/workspace.c:1131-1161), and `workspace back_and_forth` has
+/// already destroyed the empty workspace it left. The destination's empty
+/// workspace is destroyed only after the replacement is named, so the
+/// replacement takes the name back_and_forth just released. Oracle
+/// scenario move_workspace_after_back_and_forth; random-v3 seed 32264.
+#[test]
+fn move_workspace_after_back_and_forth_reuses_the_released_name() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let swayward = f.swayward();
+    let initial = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let second = initial
+        .iter()
+        .find(|w| w.name == "2")
+        .map(|w| w.output.clone())
+        .unwrap();
+    let other = initial
+        .iter()
+        .find(|w| w.name == "1")
+        .map(|w| w.output.clone())
+        .unwrap();
+    for command in [
+        format!("focus output {second}"),
+        "workspace 4".into(),
+        "workspace 2".into(),
+        "workspace back_and_forth".into(),
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), &command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    let swayward = f.swayward();
+    let before = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let mut names = before.iter().map(|w| w.name.clone()).collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["1", "4"].map(String::from), "{before:?}");
+
+    let outcome =
+        crate::command::execute(f.niri_state(), &format!("move workspace to output {other}"));
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    let swayward = f.swayward();
+    let after = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let left = after.iter().find(|w| w.output == second).unwrap();
+    assert_eq!(left.name, "2", "{after:?}");
+    let focused = after.iter().find(|w| w.focused).unwrap();
+    assert_eq!(focused.name, "4", "{after:?}");
+}

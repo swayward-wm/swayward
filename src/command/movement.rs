@@ -482,6 +482,10 @@ pub(super) fn move_workspace_to_output(
     target: Option<CommandTarget>,
     output_target_name: &OutputTarget,
 ) -> CommandOutcome {
+    // `workspace_move_to_output` names the emptied output's replacement with
+    // workspace_next_name (sway/sway/tree/workspace.c:1146-1154); a workspace
+    // a switch already destroyed in sway must not hold its number here.
+    state.swayward.layout.finish_all_sway_workspace_switches();
     let workspace_id = match workspace_to_move(state, target) {
         Ok(Some(workspace)) => workspace,
         Ok(None) => return success(),
