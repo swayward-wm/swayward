@@ -559,6 +559,11 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn focus_parent(&mut self) -> bool {
+        // A fullscreen container keeps the focus, floating or tiled
+        // (`focus_parent`, sway/commands/focus.c:342-344).
+        if self.focused_container_fullscreen_mode().is_some() {
+            return false;
+        }
         if self.floating_is_active.get() {
             if self.floating.focus_parent() {
                 return true;

@@ -1474,3 +1474,51 @@ fn criteria_float_from_a_focused_split_keeps_focus_on_the_split() {
     );
     swayward.layout.verify_invariants();
 }
+
+/// Differential seeds 33491 33531 (diff-fam-v3-floating-toggle-fullscreen-split-chain).
+/// `focus parent` on a fullscreen view is a no-op (`focus_parent`,
+/// sway/commands/focus.c:339-344), and `floating toggle` on a view inside a floating split
+/// operates on the floating root (sway/commands/floating.c:41-47), tiling the whole group.
+#[test]
+fn floating_toggle_of_a_fullscreen_view_in_a_floating_split_tiles_the_group() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("fixture-diff-5"),
+            ..Default::default()
+        },
+    );
+    for command in [
+        "floating enable",
+        "split v",
+        "fullscreen toggle",
+        "focus parent; floating toggle",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+        f.double_roundtrip(client);
+    }
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["floating_nodes"].as_array().unwrap().len(), 0);
+    let split = &workspace["nodes"][0];
+    assert_eq!(split["type"], "con");
+    assert_eq!(split["layout"], "splitv");
+    let view = &split["nodes"][0];
+    assert_eq!(view["app_id"], "fixture-diff-5");
+    assert_eq!(view["fullscreen_mode"], 1);
+    assert_eq!(view["focused"], true);
+    swayward.layout.verify_invariants();
+}
