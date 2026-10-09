@@ -342,6 +342,22 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Runs `f` on the floating group tree holding `window` below its root, with the
+    /// window's leaf. See [`Workspace::in_floating_window_tree`].
+    pub fn in_floating_window_tree<T>(
+        &mut self,
+        window: &W::Id,
+        f: impl FnOnce(&mut tiling_tree::TilingTree<W>, NodeId) -> T,
+    ) -> Option<(WorkspaceId, T)> {
+        let workspace = self
+            .workspaces_mut()
+            .find(|workspace| workspace.floating().has_window(window))?;
+        let id = workspace.id();
+        workspace
+            .in_floating_window_tree(window, f)
+            .map(|result| (id, result))
+    }
+
     pub fn set_tiling_target_layout(
         &mut self,
         workspace_id: WorkspaceId,

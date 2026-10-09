@@ -1092,6 +1092,24 @@ impl<W: LayoutElement> Workspace<W> {
         Some(result)
     }
 
+    /// Runs a criteria `layout` command on `window`'s leaf when the window is a child of a
+    /// floating group: sway operates on its parent there like anywhere else
+    /// (sway/commands/layout.c:121-176). `None` when the window is not in a group below its
+    /// root.
+    pub fn in_floating_window_tree<T>(
+        &mut self,
+        window: &W::Id,
+        f: impl FnOnce(&mut crate::layout::tiling_tree::TilingTree<W>, NodeId) -> T,
+    ) -> Option<T> {
+        let (tree, node) = self.floating.child_tree_for_window_mut(window)?;
+        let before = tree.representation_shape();
+        let result = f(tree, node);
+        if tree.representation_shape() != before {
+            self.tiling.restore_has_had_tile(true);
+        }
+        Some(result)
+    }
+
     /// See [`Layout::split_floating_target`].
     pub fn split_floating_target(
         &mut self,

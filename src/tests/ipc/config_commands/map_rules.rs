@@ -909,3 +909,50 @@ fn moving_a_floated_fullscreen_view_away_refocuses_the_tabbed_container() {
     assert_eq!(workspace["nodes"][0]["focused"], true);
     assert_eq!(workspace["nodes"][0]["nodes"][0]["focused"], false);
 }
+
+#[test]
+fn for_window_layout_changes_the_floating_split_a_view_maps_into() {
+    // `view_map` puts a view whose focus-inactive container is a child of a
+    // floating split beside it (sway/tree/view.c:849-901), and the
+    // `for_window` layout command then runs on that tiled-in-floating view:
+    // its parent is the floating split, so the split takes the layout
+    // (sway/commands/layout.c:121-176).
+    // Oracle row: for_window_layout_in_floating_split (random-v3 seed 32461).
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "first");
+    f.niri_state().update_keyboard_focus();
+    for command in [
+        "floating enable",
+        "split toggle",
+        r#"for_window [app_id="^second$"] layout tabbed"#,
+    ] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    map_test_window(&mut f, client, "second");
+    f.niri_state().update_keyboard_focus();
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let split = &workspace["floating_nodes"][0];
+    assert_eq!(split["layout"], "tabbed");
+    assert_eq!(split["orientation"], "none");
+    let app_ids: Vec<_> = split["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["app_id"].clone())
+        .collect();
+    assert_eq!(app_ids, ["first", "second"]);
+    assert_eq!(split["nodes"][0]["visible"], false);
+    assert_eq!(split["nodes"][1]["visible"], true);
+    assert_eq!(split["nodes"][1]["focused"], true);
+}

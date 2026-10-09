@@ -1583,6 +1583,16 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .map(|entry| &mut entry.tree)
     }
 
+    /// The group tree holding `window` below its root, with the window's leaf.
+    pub fn child_tree_for_window_mut(
+        &mut self,
+        window: &W::Id,
+    ) -> Option<(&mut TilingTree<W>, NodeId)> {
+        let (idx, node) = self.tree_entry_for_window(window)?;
+        let entry = self.tree_entries.get_mut(idx)?;
+        (entry.root != node).then_some((&mut entry.tree, node))
+    }
+
     pub fn move_focused_tree_child(&mut self, direction: Direction) -> Option<bool> {
         let entry = self.active_tree_entry_mut()?;
         let focus = entry.tree.focus().filter(|focus| *focus != entry.root)?;
