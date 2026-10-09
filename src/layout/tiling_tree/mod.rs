@@ -625,6 +625,15 @@ pub struct TilingTree<W: LayoutElement> {
     /// and `unarranged_under_fullscreen` keep the boxes the tiled nodes had under it until the
     /// next arrange.
     unarranged_after_sticky_carry: bool,
+    /// The fullscreen node's pending box after a px resize, output-local. Sway's
+    /// `resize_adjust_floating` moves a fullscreen floater's pending box away from the
+    /// output box and arranges it there (sway/commands/resize.c:219-229); the next arrange
+    /// of the workspace or root puts it back (sway/tree/arrange.c:310-316, 349-355).
+    fullscreen_pending_box: Option<Rectangle<f64, Logical>>,
+    /// Bumped by every arrange of this tree's workspace (`note_workspace_arrange`). The
+    /// workspace's floating layout compares it to drop its groups' pending boxes, which the
+    /// same `arrange_workspace` resets (sway/tree/arrange.c:310-316).
+    arrange_epoch: u64,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,

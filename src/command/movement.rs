@@ -667,7 +667,10 @@ fn swap_kind_value(target: &SwapTarget) -> (&'static str, &str) {
     }
 }
 
-fn swap_destination(state: &State, target: &SwapTarget) -> Result<CommandTarget, CommandOutcome> {
+pub(super) fn swap_destination(
+    state: &State,
+    target: &SwapTarget,
+) -> Result<CommandTarget, CommandOutcome> {
     let (kind, value, destination) = match target {
         SwapTarget::Id(_) => {
             return Err(failure(

@@ -773,6 +773,17 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn add_tile(
         &mut self,
+        tile: Tile<W>,
+        target: WorkspaceAddWindowTarget<W>,
+        options: AddTileOptions,
+    ) {
+        let id = tile.window().id().clone();
+        self.add_tile_inner(tile, target, options);
+        self.arrange_after_map(&id);
+    }
+
+    fn add_tile_inner(
+        &mut self,
         mut tile: Tile<W>,
         target: WorkspaceAddWindowTarget<W>,
         options: AddTileOptions,
@@ -1022,6 +1033,14 @@ impl<W: LayoutElement> Workspace<W> {
         // node under its old parent when that parent survives, which is never
         // a floating view (`seat_get_focus_inactive(old_parent)`,
         // sway/tree/root.c:128-140, sway/commands/move.c:598-608).
+        // Only sending a view with a parent to the scratchpad leaves the workspace unarranged
+        // (sway/tree/root.c:128-137).
+        let had_parent = transfer == Some(true)
+            && !self.floating.has_window(id)
+            && self
+                .tiling
+                .parent_of_window(id)
+                .is_some_and(|parent| !self.tiling.is_root(parent));
         let keeps_tiling_focus = transfer.is_some()
             && !self.floating_is_active.get()
             && self
@@ -1057,6 +1076,7 @@ impl<W: LayoutElement> Workspace<W> {
         if floating_root || !from_floating && removed.is_floating {
             self.tiling.restore_has_had_tile(true);
         }
+        self.arrange_after_removal(had_parent);
         self.update_focus_floating_tiling_after_removing(from_floating);
         if keeps_tiling_focus && !self.tiling.is_empty() {
             self.floating_is_active = FloatingActive::No;
@@ -2179,6 +2199,7 @@ impl<W: LayoutElement> Workspace<W> {
                 self.update_config(self.base_options.clone());
             }
         }
+        self.sync_floating_arrange();
         // A floating split took the fullscreen mode from a view parked in the tiling tree
         // (`split_fullscreen_floating`); once it ends, sway arranges the whole workspace.
         if self.floating.fullscreen_window().is_none() {

@@ -2123,3 +2123,245 @@ fn resize_after_move_out_targets_the_focused_split_beside_a_raised_floater() {
     assert_eq!(tree_json(&mut f), before);
     f.swayward().layout.verify_invariants();
 }
+
+/// Family diff-fam-v3-resize-floated-fullscreen-px-residual-1: a px shrink of a fullscreen
+/// floating container moves its pending box off the output box and arranges its children
+/// there (sway/commands/resize.c:180-230); the next workspace arrange puts it back
+/// (sway/tree/arrange.c:310-316). Oracle row fullscreen_floating_group_px_shrink_shifts_children.
+#[test]
+fn px_shrink_of_a_fullscreen_floating_container_moves_its_children() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in [
+        "focus parent; floating toggle",
+        "fullscreen toggle",
+        "resize shrink left 20 px",
+    ] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 20, "{child}");
+    assert_eq!(child["rect"]["width"], 980, "{child}");
+    // Shrinking the moved box again measures it, not the output box.
+    assert!(crate::command::execute(f.niri_state(), "resize shrink width 20 px")[0].success);
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 30, "{child}");
+    assert_eq!(child["rect"]["width"], 960, "{child}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// Mapping a view onto the workspace arranges it (`view_map`, sway/tree/view.c:931-940), and
+/// `arrange_workspace` puts the fullscreen floating container back at the output box
+/// (sway/tree/arrange.c:310-316), so the shrink's moved pending box is gone.
+/// Oracle row ro1_fs_group_shrink_then_window.
+#[test]
+fn mapping_a_view_resets_a_shrunk_fullscreen_floating_container() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    for command in [
+        "focus parent; floating toggle",
+        "fullscreen toggle",
+        "resize shrink left 20 px",
+    ] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 20, "{child}");
+
+    map_app(&mut f, client, "fixture-2");
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 0, "{child}");
+    assert_eq!(child["rect"]["width"], 1000, "{child}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// A fullscreen floating view's pending box is the output box, so a px shrink succeeds and a
+/// grow on a single output meets the automatic floating maximum (sway/commands/resize.c:180-230).
+/// Oracle row fullscreen_floating_view_px_resize.
+#[test]
+fn px_shrink_of_a_fullscreen_floating_view_succeeds() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in ["floating toggle", "fullscreen toggle"] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let outcome = crate::command::execute(f.niri_state(), "resize grow left 20 px");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Cannot resize any further")
+    );
+    for command in ["resize shrink width 20 px", "resize shrink up 20 px"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    f.swayward().layout.verify_invariants();
+}
+
+/// With two outputs the automatic floating maximum is the output layout box, wider than the
+/// fullscreen output, so a px grow succeeds (sway/tree/container.c:797-814). Oracle rows
+/// fullscreen_floating_group_px_grow_two_outputs, fullscreen_floating_view_px_grow_two_outputs.
+#[test]
+fn px_grow_of_a_fullscreen_floater_succeeds_beside_a_second_output() {
+    for float in ["focus parent; floating toggle", "floating toggle"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1000, 800));
+        f.add_output(2, (1000, 800));
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        for command in [float, "fullscreen toggle", "resize grow left 20 px"] {
+            for reply in crate::command::execute(f.niri_state(), command) {
+                assert!(reply.success, "{float}: {command}: {reply:?}");
+            }
+        }
+        f.swayward().layout.verify_invariants();
+    }
+}
+
+/// `swap` of two views whose parent is the workspace ends in `arrange_node(workspace)`, an
+/// `arrange_workspace` (sway/commands/swap.c:92-103), which puts the fullscreen floating
+/// container back at the output box (sway/tree/arrange.c:310-316). Oracle row
+/// ro3a_fs_group_shrink_then_x.
+#[test]
+fn swapping_workspace_level_views_resets_a_shrunk_fullscreen_floating_container() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-g");
+    assert!(
+        crate::command::execute(f.niri_state(), "focus parent; floating toggle")
+            .iter()
+            .all(|reply| reply.success)
+    );
+    map_app(&mut f, client, "fixture-t1");
+    map_app(&mut f, client, "fixture-t2");
+    for command in [
+        "[app_id=\"^fixture-g$\"] focus",
+        "focus parent",
+        "fullscreen toggle",
+        "resize shrink left 20 px",
+    ] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 20, "{child}");
+
+    let command = "[app_id=\"^fixture-t2$\"] mark m; \
+                   [app_id=\"^fixture-t1$\"] swap container with mark m";
+    for reply in crate::command::execute(f.niri_state(), command) {
+        assert!(reply.success, "{command}: {reply:?}");
+    }
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 0, "{child}");
+    assert_eq!(child["rect"]["width"], 1000, "{child}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// `workspace_switch` arranges the workspace it shows (sway/tree/workspace.c:731-743), which
+/// puts a resized fullscreen floating container back at the output box
+/// (sway/tree/arrange.c:310-316). Oracle row review_o5_fs_group_set_then_arrange, which
+/// moves the box with `resize set` and a px grow; a px shrink moves it here.
+#[test]
+fn switching_workspaces_away_and_back_resets_a_resized_fullscreen_floating_container() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    map_app(&mut f, client, "fixture-2");
+    for command in [
+        "focus parent",
+        "floating enable",
+        "fullscreen toggle",
+        "resize shrink left 20 px",
+    ] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let group = floating_con_json(&mut f);
+    assert_eq!(group["nodes"][0]["rect"]["x"], 20, "{group}");
+
+    for command in ["workspace 2", "workspace 1"] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let group = floating_con_json(&mut f);
+    assert_eq!(group["rect"]["x"], 0, "{group}");
+    assert_eq!(group["rect"]["width"], 1000, "{group}");
+    assert_eq!(group["nodes"][0]["rect"]["x"], 0, "{group}");
+    assert_eq!(group["nodes"][1]["rect"]["x"], 500, "{group}");
+    assert_eq!(group["nodes"][1]["rect"]["width"], 500, "{group}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// Each of these handlers ends in `arrange_workspace` or `arrange_root` on the workspace
+/// (sway/commands/fullscreen.c:55, move.c:712-736, resize.c:166-170), so the fullscreen
+/// floating container's moved pending box is gone afterwards (sway/tree/arrange.c:310-316).
+#[test]
+fn workspace_arranging_commands_reset_a_shrunk_fullscreen_floating_container() {
+    for command in [
+        "[app_id=\"^fixture-t1$\"] fullscreen disable",
+        "[app_id=\"^fixture-t1$\"] move right",
+        "[app_id=\"^fixture-t1$\"] resize grow width 10 px",
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1000, 800));
+        let client = f.add_client();
+        map_app(&mut f, client, "fixture-g");
+        crate::command::execute(f.niri_state(), "focus parent; floating toggle");
+        map_app(&mut f, client, "fixture-t1");
+        map_app(&mut f, client, "fixture-t2");
+        for setup in [
+            "[app_id=\"^fixture-g$\"] focus",
+            "focus parent",
+            "fullscreen toggle",
+            "resize shrink left 20 px",
+        ] {
+            for reply in crate::command::execute(f.niri_state(), setup) {
+                assert!(reply.success, "{setup}: {reply:?}");
+            }
+        }
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+        let child = floating_con_json(&mut f)["nodes"][0].clone();
+        assert_eq!(child["rect"]["x"], 0, "{command}: {child}");
+        assert_eq!(child["rect"]["width"], 1000, "{command}: {child}");
+        f.swayward().layout.verify_invariants();
+    }
+}

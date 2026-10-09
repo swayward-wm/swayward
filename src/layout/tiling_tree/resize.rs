@@ -61,6 +61,13 @@ impl<W: LayoutElement> TilingTree<W> {
     /// everything outside it keeps the box it had, and the percent that
     /// implies, until the next full arrange.
     fn arrange_after_resize(&mut self, old: &geometry::Geometry<W::Id>, resized: NodeId) {
+        // A top-level container's `arrange_workspace` also reaches a fullscreen floating
+        // group, which keeps no node here.
+        if self.nodes.get(&resized).and_then(|node| node.parent) == Some(self.root)
+            && self.fullscreen_node().is_none()
+        {
+            self.note_workspace_arrange();
+        }
         let Some(fullscreen) = self
             .fullscreen_node()
             .filter(|id| self.fullscreen_mode(*id) == Some(FullscreenMode::Workspace))

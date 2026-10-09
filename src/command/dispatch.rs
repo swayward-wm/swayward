@@ -81,6 +81,9 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
             break;
         }
     }
+    // A command that arranged a workspace through its tiling tree also put its fullscreen
+    // floating group back at the output box (sway/tree/arrange.c:310-316).
+    state.swayward.layout.sync_floating_arranges();
     state.ipc_commit_workspace_transaction();
     outcomes
 }
@@ -338,17 +341,32 @@ fn execute_one(
                     }
                     Err(outcome) => outcome,
                 },
-                command => execute_targeted(state, command, found.target),
+                command => {
+                    let arrange = super::arrange::before(state, command, Some(found.target));
+                    let outcome = execute_targeted(state, command, found.target);
+                    if let Some(arrange) = arrange.filter(|_| outcome.success) {
+                        super::arrange::after(state, arrange);
+                    }
+                    outcome
+                }
             };
             state.update_keyboard_focus();
             outcome
         });
     }
 
+    let arrange = super::arrange::before(
+        state,
+        &parsed.command,
+        super::targeted::focused_target(state),
+    );
     let action = match run_focused(state, parsed.command) {
         Ok(action) => action,
         Err(outcome) => return outcome,
     };
+    if let Some(arrange) = arrange {
+        super::arrange::after(state, arrange);
+    }
 
     if let Some(action) = action {
         state.do_action(action, false);

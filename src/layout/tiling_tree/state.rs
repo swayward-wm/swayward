@@ -82,6 +82,8 @@ impl<W: LayoutElement> TilingTree<W> {
             split_under_fullscreen: HashSet::new(),
             fullscreen_in_floating: false,
             unarranged_after_sticky_carry: false,
+            fullscreen_pending_box: None,
+            arrange_epoch: 0,
             interactive_resize: None,
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),

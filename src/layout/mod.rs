@@ -3553,6 +3553,28 @@ impl<W: LayoutElement> Layout<W> {
         })
     }
 
+    /// See [`workspace::Workspace::adjust_fullscreen_floating_view`]. `None` when `window`
+    /// is not a fullscreen floating view.
+    pub fn adjust_fullscreen_floating_view(
+        &mut self,
+        window: &W::Id,
+        edge: Option<ResizeEdge>,
+        horizontal: bool,
+        amount: i32,
+    ) -> Option<bool> {
+        let automatic_maximum = self.output_layout_size().to_f64();
+        let workspace = self
+            .workspaces_mut()
+            .find(|ws| ws.window_is_fullscreen_floating(window))?;
+        Some(workspace.adjust_fullscreen_floating_view(
+            window,
+            edge,
+            horizontal,
+            amount,
+            automatic_maximum,
+        ))
+    }
+
     /// Sets a floating group root's outer size; see
     /// [`floating_tree::FloatingLayout::set_tree_size`].
     pub fn set_floating_tree_size(

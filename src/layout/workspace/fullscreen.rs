@@ -206,6 +206,82 @@ impl<W: LayoutElement> Workspace<W> {
         })
     }
 
+    /// `resize_adjust_floating` on a fullscreen floating view, which swayward parks in the
+    /// tiling tree. Sway measures the view's pending box, the output box until a resize moves
+    /// it, or the output layout box for global fullscreen (sway/tree/arrange.c:310-316,
+    /// 349-355), and keeps the moved box until the next arrange
+    /// (sway/commands/resize.c:180-230). The view's content stays at the output box
+    /// (`view_autoconfigure`, sway/tree/view.c:359-371). Returns false when nothing changes.
+    pub fn adjust_fullscreen_floating_view(
+        &mut self,
+        window: &W::Id,
+        edge: Option<ResizeEdge>,
+        horizontal: bool,
+        amount: i32,
+        automatic_maximum: Size<f64, Logical>,
+    ) -> bool {
+        let constraints = crate::layout::floating_tree::floating_constraints(
+            self.options.layout.floating_minimum_size,
+            self.options.layout.floating_maximum_size,
+            automatic_maximum,
+        );
+        let Some(mode) = self.fullscreen_mode_for_window(window) else {
+            return false;
+        };
+        let current = match mode {
+            crate::layout::tiling_tree::FullscreenMode::Workspace => self
+                .tiling
+                .fullscreen_pending_box()
+                .unwrap_or_else(|| Rectangle::from_size(self.view_size)),
+            crate::layout::tiling_tree::FullscreenMode::Global => {
+                Rectangle::from_size(automatic_maximum)
+            }
+        };
+        let Some(rect) = crate::layout::floating_tree::adjust_floating_box(
+            current,
+            edge,
+            horizontal,
+            amount,
+            constraints,
+        ) else {
+            return false;
+        };
+        if mode == crate::layout::tiling_tree::FullscreenMode::Workspace {
+            self.tiling.set_fullscreen_pending_box(rect);
+        }
+        true
+    }
+
+    /// Every arrange of this workspace puts a fullscreen floating group back at the output
+    /// box (sway/tree/arrange.c:310-316, 349-355). The tiling tree counts the arranges; the
+    /// floating layout catches up here.
+    pub fn sync_floating_arrange(&mut self) {
+        self.floating
+            .sync_workspace_arrange(self.tiling.arrange_epoch());
+    }
+
+    /// `view_map` arranges the workspace unless the view has a parent
+    /// (sway/tree/view.c:931-940); a view joining a floating group has one.
+    pub(super) fn arrange_after_map(&mut self, window: &W::Id) {
+        if self.floating.window_is_floating_root(window)
+            || self.tiling.view_map_arranges_workspace(window)
+        {
+            self.tiling.note_workspace_arrange();
+        }
+        self.sync_floating_arrange();
+    }
+
+    /// `view_unmap` arranges the workspace (sway/tree/view.c:1001-1006), as does moving a
+    /// view away (sway/commands/move.c:617-625). Sending one to the scratchpad arranges only
+    /// its old parent when it had one (`root_scratchpad_add_container`,
+    /// sway/tree/root.c:128-137).
+    pub(super) fn arrange_after_removal(&mut self, had_parent: bool) {
+        if !had_parent {
+            self.tiling.note_workspace_arrange();
+        }
+        self.sync_floating_arrange();
+    }
+
     pub fn active_floating_is_fullscreen(&self) -> bool {
         self.tiling.active_tile().is_some_and(|tile| {
             tile.restore_to_floating && tile.window().pending_sizing_mode().is_fullscreen()

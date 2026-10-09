@@ -544,6 +544,37 @@ fn apply_resize(
     axis: ResizeAxis,
     change: SizeChange,
 ) -> Option<bool> {
+    let edge_and_axis = |axis| match axis {
+        ResizeAxis::Width => (None, true),
+        ResizeAxis::Height => (None, false),
+        direction => {
+            let edge = resize_edge(direction);
+            (
+                Some(edge),
+                edge.intersects(crate::utils::ResizeEdge::LEFT_RIGHT),
+            )
+        }
+    };
+    if let (
+        ResolvedResizeTarget::Window {
+            window,
+            floating: true,
+        },
+        SizeChange::AdjustFixed(amount),
+    ) = (&target, change)
+    {
+        // A fullscreen floating view is still in `ws->floating`, so sway resizes its
+        // pending box (sway/commands/resize.c:180-230). Oracle rows
+        // fullscreen_floating_view_px_resize, fullscreen_floating_view_px_grow_two_outputs.
+        let (edge, horizontal) = edge_and_axis(axis);
+        if let Some(changed) = state
+            .swayward
+            .layout
+            .adjust_fullscreen_floating_view(window, edge, horizontal, amount)
+        {
+            return Some(changed);
+        }
+    }
     match (target, axis) {
         (ResolvedResizeTarget::Window { window, .. }, ResizeAxis::Width) => state
             .swayward
@@ -575,17 +606,7 @@ fn apply_resize(
             let (SizeChange::AdjustFixed(amount) | SizeChange::SetFixed(amount)) = change else {
                 return Some(false);
             };
-            let (edge, horizontal) = match axis {
-                ResizeAxis::Width => (None, true),
-                ResizeAxis::Height => (None, false),
-                direction => {
-                    let edge = resize_edge(direction);
-                    (
-                        Some(edge),
-                        edge.intersects(crate::utils::ResizeEdge::LEFT_RIGHT),
-                    )
-                }
-            };
+            let (edge, horizontal) = edge_and_axis(axis);
             state
                 .swayward
                 .layout

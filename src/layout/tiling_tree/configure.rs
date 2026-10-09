@@ -196,6 +196,17 @@ impl<W: LayoutElement> TilingTree<W> {
             visible_leaves: &visible_leaves,
             draw_uncovered_top_border: self.options.layout.draw_uncovered_top_border,
             floating_group: self.resident_root,
+            // `arrange_container` lays a fullscreen container's children out in its pending
+            // box (sway/tree/arrange.c:248-261); a fullscreen view's content goes back to the
+            // output box regardless (`view_autoconfigure`, sway/tree/view.c:359-364).
+            fullscreen_box: self.fullscreen_pending_box.filter(|_| {
+                self.fullscreen_node().is_some_and(|id| {
+                    matches!(
+                        self.nodes.get(&id).map(|node| &node.value),
+                        Some(TreeNode::Split { .. })
+                    )
+                })
+            }),
         })
     }
 

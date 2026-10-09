@@ -220,6 +220,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn arrange_sway_root(&mut self) {
         for workspace in self.workspaces_mut() {
             workspace.tiling_mut().arrange_root();
+            workspace.sync_floating_arrange();
         }
     }
 
@@ -229,6 +230,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn arrange_active_sway_workspace(&mut self) {
         if let Some(workspace) = self.active_workspace_mut() {
             workspace.tiling_mut().arrange_workspace();
+            workspace.sync_floating_arrange();
         }
     }
 
@@ -239,6 +241,28 @@ impl<W: LayoutElement> Layout<W> {
             .find(|workspace| workspace.has_window(window))
         {
             workspace.tiling_mut().arrange_workspace();
+            workspace.sync_floating_arrange();
+        }
+    }
+
+    /// Records that a command handler ended in `arrange_workspace` on each of `workspaces`, or
+    /// in `arrange_root` when `root` is set (sway/tree/arrange.c:310-316, 349-355), for a
+    /// handler whose layout changes swayward already models: only the reset of a fullscreen
+    /// container's pending box, tiled or in a floating group, is left to record.
+    pub fn note_sway_arrange(&mut self, workspaces: &[WorkspaceId], root: bool) {
+        for workspace in self.workspaces_mut() {
+            if root || workspaces.contains(&workspace.id()) {
+                workspace.tiling_mut().note_workspace_arrange();
+                workspace.sync_floating_arrange();
+            }
+        }
+    }
+
+    /// Lets every workspace's floating groups see the arranges its tiling tree recorded; see
+    /// [`Workspace::sync_floating_arrange`].
+    pub fn sync_floating_arranges(&mut self) {
+        for workspace in self.workspaces_mut() {
+            workspace.sync_floating_arrange();
         }
     }
 

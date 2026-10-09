@@ -142,6 +142,10 @@ pub struct FloatingLayout<W: LayoutElement> {
     /// Scale of the output the space is on (and rounds its sizes to).
     scale: f64,
 
+    /// The workspace tiling tree's arrange epoch last seen; see
+    /// [`Self::sync_workspace_arrange`].
+    seen_arrange_epoch: u64,
+
     /// Clock for driving animations.
     clock: Clock,
 
@@ -402,6 +406,47 @@ pub(super) fn floating_constraints(
     )
 }
 
+/// Sway's `resize_adjust_floating` on a box (sway/commands/resize.c:180-230): the size is
+/// clamped to the floating `(min, max)` constraints, a width or height change keeps the
+/// centre, and LEFT or TOP keeps the opposite edge. `None` when the clamp leaves nothing to
+/// change ("Cannot resize any further").
+pub(super) fn adjust_floating_box(
+    mut rect: Rectangle<f64, Logical>,
+    edge: Option<ResizeEdge>,
+    horizontal: bool,
+    amount: i32,
+    (min, max): (Size<f64, Logical>, Size<f64, Logical>),
+) -> Option<Rectangle<f64, Logical>> {
+    let clamp_grow = |current: f64, min: f64, max: f64| {
+        let grown = current + f64::from(amount);
+        if grown < min {
+            min - current
+        } else if grown > max {
+            max - current
+        } else {
+            f64::from(amount)
+        }
+    };
+    let (grow_w, grow_h) = if horizontal {
+        (clamp_grow(rect.size.w, min.w, max.w), 0.)
+    } else {
+        (0., clamp_grow(rect.size.h, min.h, max.h))
+    };
+    if grow_w == 0. && grow_h == 0. {
+        return None;
+    }
+    match edge {
+        None if horizontal => rect.loc.x -= (grow_w / 2.).trunc(),
+        None => rect.loc.y -= (grow_h / 2.).trunc(),
+        Some(edge) if edge.contains(ResizeEdge::LEFT) => rect.loc.x -= grow_w,
+        Some(edge) if edge.contains(ResizeEdge::TOP) => rect.loc.y -= grow_h,
+        Some(_) => {}
+    }
+    rect.size.w += grow_w;
+    rect.size.h += grow_h;
+    Some(rect)
+}
+
 fn constrain_floating_size(
     mut size: Size<i32, Logical>,
     minimum: swayward_config::FloatingSize,
@@ -450,6 +495,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
             output_area,
             output_loc,
             scale,
+            seen_arrange_epoch: 0,
             clock,
             options,
         }
@@ -1548,6 +1594,18 @@ impl<W: LayoutElement> FloatingLayout<W> {
         }
     }
 
+    /// The workspace was arranged since `epoch` was last seen (see
+    /// [`TilingTree::arrange_epoch`]), which puts a fullscreen group back at the output box
+    /// (sway/tree/arrange.c:310-316, 349-355).
+    pub fn sync_workspace_arrange(&mut self, epoch: u64) {
+        if std::mem::replace(&mut self.seen_arrange_epoch, epoch) == epoch {
+            return;
+        }
+        for entry in &mut self.tree_entries {
+            entry.tree.forget_fullscreen_pending_box();
+        }
+    }
+
     /// The workspace has no fullscreen container left, so the next arrange reaches every
     /// group again.
     pub fn forget_yielded_fullscreen(&mut self) {
@@ -1832,11 +1890,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .collect()
     }
 
-    /// Grows or shrinks a floating group root by `amount` px along `edge`, as
-    /// sway's resize_adjust_floating does (sway/commands/resize.c:180-230):
-    /// the size is clamped to the floating constraints, a width or height
-    /// change keeps the centre, and LEFT or TOP keeps the opposite edge.
-    /// Returns false when nothing changes ("Cannot resize any further").
+    /// Grows or shrinks a floating group root by `amount` px along `edge`; see
+    /// [`adjust_floating_box`]. Returns false when nothing changes ("Cannot resize any
+    /// further").
     pub fn adjust_tree_size(
         &mut self,
         root: NodeId,
@@ -1845,58 +1901,56 @@ impl<W: LayoutElement> FloatingLayout<W> {
         amount: i32,
         automatic_maximum: Size<f64, Logical>,
     ) -> bool {
-        let Some(entry) = self.tree_entries.iter().find(|entry| entry.root == root) else {
+        let Some(idx) = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.root == root)
+        else {
             return false;
         };
-        let mut rect = entry.rect;
-        // A fullscreen root's pending box is the output box, or the output
-        // layout box for global fullscreen (sway/tree/arrange.c:310-316,
-        // 349-355), so the clamp measures that. Its floating geometry is
-        // sway's saved_* box, which the resize leaves alone and the
-        // unfullscreen restores (sway/tree/container.c:1194-1197).
-        let fullscreen = entry.tree.fullscreen_mode(root).map(|mode| match mode {
-            super::tiling_tree::FullscreenMode::Workspace => self.view_size,
-            super::tiling_tree::FullscreenMode::Global => automatic_maximum,
-        });
-        if let Some(size) = fullscreen {
-            rect.size = size;
-        }
-        let (min, max) = floating_constraints(
+        let constraints = floating_constraints(
             self.options.layout.floating_minimum_size,
             self.options.layout.floating_maximum_size,
             automatic_maximum,
         );
-        let clamp_grow = |current: f64, min: f64, max: f64| {
-            let grown = current + f64::from(amount);
-            if grown < min {
-                min - current
-            } else if grown > max {
-                max - current
-            } else {
-                f64::from(amount)
+        let entry = &mut self.tree_entries[idx];
+        // A fullscreen root's pending box is the output box, or the output layout box for
+        // global fullscreen (sway/tree/arrange.c:310-316, 349-355), so the clamp measures
+        // that. Its floating geometry is sway's saved_* box, which the resize leaves alone
+        // and the unfullscreen restores (sway/tree/container.c:1194-1197).
+        match entry.tree.fullscreen_mode(root) {
+            Some(super::tiling_tree::FullscreenMode::Workspace) => {
+                let current = entry
+                    .tree
+                    .fullscreen_pending_box()
+                    .unwrap_or_else(|| Rectangle::from_size(self.view_size));
+                let Some(rect) =
+                    adjust_floating_box(current, edge, horizontal, amount, constraints)
+                else {
+                    return false;
+                };
+                // The pending box moves and the container is arranged in it, so GET_TREE
+                // reports its children there (sway/commands/resize.c:219-229).
+                entry.tree.set_fullscreen_pending_box(rect);
+                true
             }
-        };
-        let (grow_w, grow_h) = if horizontal {
-            (clamp_grow(rect.size.w, min.w, max.w), 0.)
-        } else {
-            (0., clamp_grow(rect.size.h, min.h, max.h))
-        };
-        if grow_w == 0. && grow_h == 0. {
-            return false;
+            Some(super::tiling_tree::FullscreenMode::Global) => adjust_floating_box(
+                Rectangle::from_size(automatic_maximum),
+                edge,
+                horizontal,
+                amount,
+                constraints,
+            )
+            .is_some(),
+            None => {
+                let Some(rect) =
+                    adjust_floating_box(entry.rect, edge, horizontal, amount, constraints)
+                else {
+                    return false;
+                };
+                self.move_tree(root, rect)
+            }
         }
-        if fullscreen.is_some() {
-            return true;
-        }
-        match edge {
-            None if horizontal => rect.loc.x -= (grow_w / 2.).trunc(),
-            None => rect.loc.y -= (grow_h / 2.).trunc(),
-            Some(edge) if edge.contains(ResizeEdge::LEFT) => rect.loc.x -= grow_w,
-            Some(edge) if edge.contains(ResizeEdge::TOP) => rect.loc.y -= grow_h,
-            Some(_) => {}
-        }
-        rect.size.w += grow_w;
-        rect.size.h += grow_h;
-        self.move_tree(root, rect)
     }
 
     /// Sets a floating group root's outer size, keeping its centre, as sway's

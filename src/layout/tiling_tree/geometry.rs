@@ -75,6 +75,9 @@ pub(crate) struct GeometryInput<'a, W: LayoutElement> {
     pub draw_uncovered_top_border: bool,
     /// The tree is a floating group (`TilingTree::resident_root`).
     pub floating_group: bool,
+    /// The fullscreen container's box when it is not the output box
+    /// (`TilingTree::fullscreen_pending_box`).
+    pub fullscreen_box: Option<Rectangle<f64, Logical>>,
 }
 
 pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry<W::Id> {
@@ -111,7 +114,10 @@ pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry
     result.tiled_ipc_nodes = result.ipc_nodes.clone();
     if let Some(fullscreen_root) = input.fullscreen.iter().copied().next() {
         context.fullscreen = input.fullscreen;
-        apply_fullscreen_pass(&context, fullscreen_root, input.view_size, &mut result);
+        let rect = input
+            .fullscreen_box
+            .unwrap_or_else(|| Rectangle::from_size(input.view_size));
+        apply_fullscreen_pass(&context, fullscreen_root, rect, &mut result);
     }
     result.drop_titlebars(|id| input.mapped_under_fullscreen.contains(&id));
     result.border_visible.extend(
@@ -138,14 +144,14 @@ fn workspace_area<W: LayoutElement>(input: &GeometryInput<'_, W>) -> Rectangle<f
 fn apply_fullscreen_pass<W: LayoutElement>(
     context: &AssignContext<'_, W>,
     fullscreen_root: NodeId,
-    view_size: Size<f64, Logical>,
+    rect: Rectangle<f64, Logical>,
     result: &mut Geometry<W::Id>,
 ) {
     assign(
         context,
         Assignment {
             id: fullscreen_root,
-            rect: Rectangle::from_size(view_size),
+            rect,
             covering_titlebar: None,
             decorated_by_parent: false,
             decorated_corners: DecoratedCorners::NONE,
