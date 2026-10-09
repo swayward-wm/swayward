@@ -638,10 +638,11 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn focused_container_node(&self) -> Option<crate::layout::tiling_tree::NodeId> {
+        // A raised but inactive floating space leaves the tiling focus in charge, so a
+        // focused split stays the seat's focused container (seat_get_focused_container,
+        // sway/input/seat.c:1470-1476).
         if self.floating_is_active.get() {
             self.floating.focused_container_node()
-        } else if self.floating_is_active == FloatingActive::NoButRaised {
-            self.tiling.focus().filter(|id| self.tiling.is_root(*id))
         } else {
             self.focused_tiling_node()
         }

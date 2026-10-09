@@ -2014,3 +2014,112 @@ fn px_grow_of_fullscreen_floater_cannot_resize_further(float: &str) {
     );
     f.swayward().layout.verify_invariants();
 }
+
+/// A global fullscreen container's pending box is the output layout box
+/// (sway/tree/arrange.c:349-355), which is also the automatic floating maximum
+/// (sway/tree/container.c:797-814), so a px grow of a floated split finds no
+/// room and sway answers "Cannot resize any further" (sway/commands/resize.c:216-218).
+/// Differential family diff-fam-v3-resize-floated-gfs-split-px, seeds 33784, 33929.
+/// Oracle row: global_fullscreen_floated_split_px_resize_rejected.
+#[test]
+fn px_grow_of_a_global_fullscreen_floated_split_cannot_resize_further() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "focus parent; split v",
+            "floating toggle",
+            "fullscreen enable global",
+        ],
+    );
+    let before = tree_json(&mut f);
+
+    for command in ["resize grow width 10 px", "resize grow up 10 px"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert_eq!(
+            outcome,
+            [swayward_ipc::CommandOutcome {
+                success: false,
+                error: Some("Cannot resize any further".into()),
+                parse_error: Some(true),
+            }],
+            "{command}"
+        );
+    }
+    f.double_roundtrip(client);
+    let after = tree_json(&mut f);
+    let group = find_json_node(&after, "floating_con", false).unwrap();
+    assert_eq!(group["fullscreen_mode"], 2, "{after:#}");
+    assert_eq!(
+        group["rect"],
+        find_json_node(&before, "floating_con", false).unwrap()["rect"]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+/// After a view leaves, a workspace whose floating dialog was focused earlier keeps the
+/// tiling space active with the dialog raised. Its focused split is still sway's
+/// `handler_context.container`, so `resize` acts on the split: with no parallel
+/// sibling sway answers "Cannot resize any further" (sway/commands/resize.c:46-63,
+/// 271-276) rather than resizing a view inside it.
+/// Differential family diff-fam-v3-resize-floated-gfs-split-px, seed 33929.
+/// Oracle row: raised_floater_focused_split_resize_rejected.
+#[test]
+fn resize_after_move_out_targets_the_focused_split_beside_a_raised_floater() {
+    let mut f = Fixture::new();
+    f.add_output(1, (720, 1280));
+    let client = f.add_client();
+    // A fixed-size dialog with a parent: the parent tiles, the dialog floats.
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_surface = parent.surface.clone();
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let dialog = f.client(client).create_window();
+    dialog.xdg_toplevel.set_app_id("dialog".into());
+    dialog.set_min_size(400, 300);
+    dialog.set_max_size(400, 300);
+    dialog.set_parent(Some(&parent_toplevel));
+    let dialog_surface = dialog.surface.clone();
+    dialog.commit();
+    f.roundtrip(client);
+    let dialog = f.client(client).window(&dialog_surface);
+    dialog.attach_new_buffer();
+    dialog.ack_last_and_commit();
+    f.double_roundtrip(client);
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(&mut f, client, &["layout tabbed; layout toggle"]);
+    map_app(&mut f, client, "fixture-3");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "layout toggle split",
+            "move up",
+            "move container to workspace number 3",
+        ],
+    );
+    let before = tree_json(&mut f);
+
+    let outcome = crate::command::execute(f.niri_state(), "resize grow width 10 px or 5 ppt");
+    assert_eq!(
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize any further".into()),
+            parse_error: Some(true),
+        }]
+    );
+    f.double_roundtrip(client);
+    assert_eq!(tree_json(&mut f), before);
+    f.swayward().layout.verify_invariants();
+}
