@@ -494,15 +494,34 @@ fn move_position_centers_on_root_and_pointer() {
     assert_eq!(absolute["y"], 75);
 
     assert!(crate::command::execute(f.niri_state(), "move absolute position center")[0].success);
+    // The root box is the output at (100, 50) sized 1000x800. A client that
+    // commits 1x1 floats at floating_minimum_size (floating_natural_resize,
+    // sway/tree/container.c:833-847), so centre whatever box it reports.
     let centered = rect(&mut f);
-    assert_eq!(centered["x"], 600);
-    assert_eq!(centered["y"], 450);
+    let int = |key: &str| centered[key].as_i64().unwrap();
+    assert!(
+        (int("x") - (100 + (1000 - int("width")) / 2)).abs() <= 1,
+        "{centered}"
+    );
+    assert!(
+        (int("y") - (50 + (800 - int("height")) / 2)).abs() <= 1,
+        "{centered}"
+    );
 
     f.niri_state().move_cursor((300., 250.).into());
     assert!(crate::command::execute(f.niri_state(), "move position pointer")[0].success);
+    // Sway centres the container on the cursor (cmd_move_to_position_pointer,
+    // sway/commands/move.c:755-756).
     let pointer = rect(&mut f);
-    assert_eq!(pointer["x"], 300);
-    assert_eq!(pointer["y"], 250);
+    let int = |key: &str| pointer[key].as_i64().unwrap();
+    assert!(
+        (int("x") - (300 - int("width") / 2)).abs() <= 1,
+        "{pointer}"
+    );
+    assert!(
+        (int("y") - (250 - int("height") / 2)).abs() <= 1,
+        "{pointer}"
+    );
 }
 
 #[test]

@@ -626,6 +626,20 @@ impl<W: LayoutElement> FloatingLayout<W> {
             max_size,
         );
         win.request_size_once(win_size, animate);
+        let held = f64::from(
+            constrain_floating_size(
+                Size::from((win_width, win_width)),
+                self.options.layout.floating_minimum_size,
+                self.options.layout.floating_maximum_size,
+                automatic_maximum.to_f64(),
+                Size::default(),
+                Size::default(),
+            )
+            .w,
+        );
+        tile.resize_floating_content(Some(held), None);
+        let entry = &mut self.entries[idx];
+        entry.data.update(&entry.tile);
         current_window != win_size.w
     }
 
@@ -830,6 +844,20 @@ impl<W: LayoutElement> FloatingLayout<W> {
             max_size,
         );
         win.request_size_once(win_size, animate);
+        let held = f64::from(
+            constrain_floating_size(
+                Size::from((win_height, win_height)),
+                self.options.layout.floating_minimum_size,
+                self.options.layout.floating_maximum_size,
+                automatic_maximum.to_f64(),
+                Size::default(),
+                Size::default(),
+            )
+            .h,
+        );
+        tile.resize_floating_content(None, Some(held));
+        let entry = &mut self.entries[idx];
+        entry.data.update(&entry.tile);
         current_window != win_size.h
     }
 

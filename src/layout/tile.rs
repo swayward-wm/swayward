@@ -165,6 +165,17 @@ pub struct Tile<W: LayoutElement> {
     /// tree and while maximized or fullscreen.
     tiled_content_size: Option<Size<f64, Logical>>,
 
+    /// The content box sway gave this view when it floated, with the committed
+    /// geometry it had then.
+    ///
+    /// Sway floats a view at its natural size clamped by `floating_minimum_size` and
+    /// `floating_maximum_size` (`floating_natural_resize`, sway/tree/container.c:833-847)
+    /// and only takes the client's size again when a commit changes the geometry
+    /// (`handle_commit`, sway/desktop/xdg_shell.c:313-335). A client that keeps its
+    /// geometry therefore stays in the larger box. `None` once the geometry changes or the
+    /// view leaves the floating layer.
+    floating_content: Option<(Size<f64, Logical>, Size<i32, Logical>)>,
+
     /// The view size for the tile's workspace.
     ///
     /// Used as the fullscreen target size.
@@ -301,6 +312,7 @@ impl<W: LayoutElement> Tile<W> {
             unmap_snapshot: None,
             rounded_corner_damage: Default::default(),
             tiled_content_size: None,
+            floating_content: None,
             view_size,
             scale,
             clock,
@@ -372,6 +384,12 @@ impl<W: LayoutElement> Tile<W> {
     pub fn update_window(&mut self) {
         let prev_sizing_mode = self.sizing_mode;
         self.sizing_mode = self.window.sizing_mode();
+        if self
+            .floating_content
+            .is_some_and(|(_, geometry)| geometry != self.window.size())
+        {
+            self.floating_content = None;
+        }
 
         if let Some(animate_from) = self.window.take_animation_snapshot() {
             let params = if let Some(resize) = self.resize_animation.take() {
@@ -1043,6 +1061,9 @@ impl<W: LayoutElement> Tile<W> {
 
     pub fn window_size(&self) -> Size<f64, Logical> {
         let mut size = self.window.size().to_f64();
+        if let Some(content) = self.floating_content_size() {
+            size = content;
+        }
         if let Some(slot) = self.tiled_slot_size() {
             size.w = f64::min(size.w, slot.w);
             size.h = f64::min(size.h, slot.h);
@@ -1056,6 +1077,9 @@ impl<W: LayoutElement> Tile<W> {
     pub fn window_expected_or_current_size(&self) -> Size<f64, Logical> {
         let size = self.window.expected_size();
         let mut size = size.unwrap_or_else(|| self.window.size()).to_f64();
+        if let Some(content) = self.floating_content_size() {
+            size = content;
+        }
         size = size
             .to_physical_precise_round(self.scale)
             .to_logical(self.scale);
@@ -1172,6 +1196,28 @@ impl<W: LayoutElement> Tile<W> {
         self.tiled_content_size = None;
     }
 
+    /// The floating content box, until [`Self::update_window`] sees the client commit a
+    /// different geometry; see [`Self::floating_content`].
+    fn floating_content_size(&self) -> Option<Size<f64, Logical>> {
+        let (content, _) = self.floating_content?;
+        self.sizing_mode.is_normal().then_some(content)
+    }
+
+    /// Floats the view in `content` until the client commits a different geometry.
+    pub(super) fn set_floating_content(&mut self, content: Size<f64, Logical>) {
+        self.floating_content = Some((content, self.window.size()));
+    }
+
+    /// A floating resize moves the content box on the axes it names, clamped by the
+    /// floating limits only (`resize_set_floating`, sway/commands/resize.c:341-403), so a
+    /// box still held against the client's geometry takes the new size there.
+    pub(super) fn resize_floating_content(&mut self, width: Option<f64>, height: Option<f64>) {
+        if let Some((size, _)) = &mut self.floating_content {
+            size.w = width.unwrap_or(size.w);
+            size.h = height.unwrap_or(size.h);
+        }
+    }
+
     pub fn request_tile_size(
         &mut self,
         mut size: Size<f64, Logical>,
@@ -1182,6 +1228,7 @@ impl<W: LayoutElement> Tile<W> {
         size.w = f64::max(1., size.w - left - right);
         size.h = f64::max(1., size.h - top - bottom);
         self.tiled_content_size = Some(size);
+        self.floating_content = None;
 
         // The size request has to be i32 unfortunately, due to Wayland. We floor here instead of
         // round to avoid situations where proportionally-sized columns don't fit on the screen
@@ -1240,6 +1287,7 @@ impl<W: LayoutElement> Tile<W> {
         transaction: Option<Transaction>,
     ) {
         self.tiled_content_size = None;
+        self.floating_content = None;
         self.window.request_size(
             size.to_i32_round(),
             SizingMode::Maximized,
@@ -1250,6 +1298,7 @@ impl<W: LayoutElement> Tile<W> {
 
     pub fn request_fullscreen(&mut self, animate: bool, transaction: Option<Transaction>) {
         self.tiled_content_size = None;
+        self.floating_content = None;
         self.window.request_size(
             self.view_size.to_i32_round(),
             SizingMode::Fullscreen,

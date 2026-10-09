@@ -1675,10 +1675,30 @@ impl<W: LayoutElement> Workspace<W> {
             let natural_size = tile.window().natural_size();
             if tile.floating_window_size.is_none()
                 && tile.window().pending_sizing_mode().is_normal()
-                && natural_size.w > 1
-                && natural_size.h > 1
+                && natural_size.w > 0
+                && natural_size.h > 0
             {
-                tile.floating_window_size = Some(natural_size);
+                // Sway floats the natural size clamped by `floating_minimum_size` and
+                // `floating_maximum_size` alone (`floating_natural_resize`,
+                // sway/tree/container.c:833-847), and keeps that content box until a
+                // commit changes the client's geometry (`handle_commit`,
+                // sway/desktop/xdg_shell.c:313-335). A client still at its map
+                // geometry commits nothing new, so a 1x1 view floats as 75x50.
+                let (minimum, maximum) = crate::layout::floating_tree::floating_constraints(
+                    self.options.layout.floating_minimum_size,
+                    self.options.layout.floating_maximum_size,
+                    self.view_size,
+                );
+                let content = Size::<f64, Logical>::from((
+                    f64::from(natural_size.w).min(maximum.w).max(minimum.w),
+                    f64::from(natural_size.h).min(maximum.h).max(minimum.h),
+                ));
+                if content != natural_size.to_f64() && tile.window().size() == natural_size {
+                    tile.floating_window_size = Some(content.to_i32_round());
+                    tile.set_floating_content(content);
+                } else if natural_size.w > 1 && natural_size.h > 1 {
+                    tile.floating_window_size = Some(natural_size);
+                }
             }
 
             // Come up with a default floating position close to the tile position.

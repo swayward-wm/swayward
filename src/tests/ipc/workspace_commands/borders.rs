@@ -1470,3 +1470,101 @@ fn a_hinted_dialog_split_wraps_the_centred_content_box() {
         "{child:#}"
     );
 }
+
+#[test]
+fn a_min_hinted_view_floated_from_tiling_centres_the_minimum_content_box() {
+    // Floating a tiled view runs container_floating_set_default_size and then
+    // container_floating_resize_and_center (sway/tree/container.c:966-968). The
+    // natural size, the 1x1 the client committed at map, is clamped by
+    // floating_minimum_size alone, not by the client's 200x150 min hint
+    // (floating_natural_resize, sway/tree/container.c:833-847), so the view
+    // floats as a 75x50 content box centred on the workspace. The client's 1x1
+    // geometry does not change, so no commit shrinks it (handle_commit,
+    // sway/desktop/xdg_shell.c:313-335). `split h` then wraps that box.
+    // Family diff-fam-v3-hinted-floating-split-content-rect-residual-1, seed
+    // 32047; oracle row hinted_min_size_float_enable_split_keeps_content.
+    let config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; }"#,
+    )
+    .unwrap();
+    let (mut f, _) = ipc_fixture_with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("hinted".into());
+    window.set_min_size(200, 150);
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["floating enable", "split h"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        f.double_roundtrip(client);
+        // The client acks without resizing: its buffer stays 1x1.
+        let window = f.client(client).window(&surface);
+        let last = window.configures_received.last().map(|(serial, _)| *serial);
+        if last != window.last_acked_configure {
+            window.ack_last_and_commit();
+            f.double_roundtrip(client);
+        }
+    }
+    let tree = get_tree(&mut f);
+    let split = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(split["layout"], "splith", "{split:#}");
+    assert_eq!(
+        split["rect"],
+        serde_json::json!({"x": 597, "y": 679, "width": 75, "height": 50}),
+        "{split:#}"
+    );
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    assert_eq!(
+        child["rect"],
+        serde_json::json!({"x": 597, "y": 679 + titlebar, "width": 75, "height": 50 - titlebar}),
+        "{child:#}"
+    );
+}
+
+#[test]
+fn a_held_floating_content_box_takes_a_resize_on_the_named_axis_only() {
+    // `resize set width` changes the content width around the centre, clamped by the
+    // floating limits only, and leaves the height alone (resize_set_floating,
+    // sway/commands/resize.c:341-403). The client's 200x150 min hint does not reach the
+    // held 75x50 box. Seed 32047 after the floating box fix.
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("hinted".into());
+    window.set_min_size(200, 150);
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["floating enable", "resize set width 50 ppt"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        f.double_roundtrip(client);
+        let window = f.client(client).window(&surface);
+        let last = window.configures_received.last().map(|(serial, _)| *serial);
+        if last != window.last_acked_configure {
+            window.ack_last_and_commit();
+            f.double_roundtrip(client);
+        }
+    }
+    let tree = get_tree(&mut f);
+    let view = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(view["border"], "csd", "{view:#}");
+    assert_eq!(
+        view["rect"],
+        serde_json::json!({"x": 317, "y": 679, "width": 635, "height": 50}),
+        "{view:#}"
+    );
+}
