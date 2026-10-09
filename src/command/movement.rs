@@ -1086,6 +1086,23 @@ fn move_tiling_to_floating_mark(
     Some(success())
 }
 
+/// Whether the marked view lies inside the moved container.
+fn mark_is_inside_source(state: &State, source: CommandTarget, destination: CommandTarget) -> bool {
+    let (CommandTarget::Container(workspace, node), CommandTarget::Window(window)) =
+        (source, destination)
+    else {
+        return false;
+    };
+    let Some(window) = super::mapped_window(state, window) else {
+        return false;
+    };
+    state
+        .swayward
+        .layout
+        .container_windows(workspace, node)
+        .is_some_and(|windows| windows.contains(&window))
+}
+
 pub(super) fn move_target_to_mark(
     state: &mut State,
     source: CommandTarget,
@@ -1105,6 +1122,12 @@ pub(super) fn move_target_to_mark(
             return move_window_to_mark_workspace(state, source, None)
         }
         Ok(MarkDestination::Floating(workspace)) => {
+            if mark_is_inside_source(state, source, destination) {
+                // A floating split moved to a mark on one of its own views
+                // stays put (`container_has_ancestor`,
+                // sway/commands/move.c:243-246).
+                return success();
+            }
             if let Some(outcome) = move_tiling_to_floating_mark(state, source, destination) {
                 return outcome;
             }

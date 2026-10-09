@@ -211,3 +211,28 @@ fn move_tiled_to_floating_mark_refreshes_a_fresh_workspace_representation() {
         .collect();
     assert_eq!(focus, &[ids[1].clone(), ids[0].clone()], "{second}");
 }
+
+#[test]
+fn move_floating_split_to_its_own_descendant_mark_is_a_no_op() {
+    // Family diff-fam-v3-move-to-mark-after-float-urgent (random-v3 seeds
+    // 33363, 33451, 33515): a floating split moved to a mark on its own
+    // child is a successful no-op (`container_has_ancestor`,
+    // sway/commands/move.c:243-246). Oracle row
+    // move_floating_split_to_own_child_mark.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_window(&mut f, client, "fixture-fmark-1");
+    run_ok(&mut f, "mark z");
+    run_ok(&mut f, "focus parent");
+    run_ok(&mut f, "floating toggle");
+    let before = floating_mark_tree(&mut f);
+    run_ok(&mut f, "move container to mark z");
+    let after = floating_mark_tree(&mut f);
+    assert_eq!(before, after);
+    let workspace = &after["nodes"][1]["nodes"][0];
+    let floating = workspace["floating_nodes"].as_array().unwrap();
+    assert_eq!(floating.len(), 1, "{workspace}");
+    assert_eq!(floating[0]["nodes"][0]["app_id"], "fixture-fmark-1");
+    assert_eq!(floating[0]["focused"], true);
+}
