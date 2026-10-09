@@ -437,7 +437,18 @@ impl<W: LayoutElement> Layout<W> {
             let (subtree, old_parent) = source_ws
                 .detach_tiling_subtree(source)
                 .ok_or_else(|| "No matching node.".to_owned())?;
+            let mut arrived = Vec::new();
+            subtree.for_each_window(|window| arrived.push(window.id().clone()));
             let remapped = target_ws.attach_tiling_subtree_at(subtree, Some(target)).1;
+            // `container_move_to_container` leaves the seat-wide focus stack alone, so each
+            // arrival keeps its own place on it: a view focused more recently than the tabs
+            // beside it is the visible tab (sway/commands/move.c:241-275;
+            // `view_is_visible`, sway/tree/view.c:1180-1193).
+            for window in arrived.iter().rev() {
+                target_ws
+                    .tiling_mut()
+                    .rank_arrived_window_by_focus_timestamp(window);
+            }
             if let Some((window, Some(rect))) = moved_view {
                 // `container_move_to_container` zeroes the view's size and
                 // `arrange_workspace` lays out only the destination's

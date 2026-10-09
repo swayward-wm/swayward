@@ -535,6 +535,48 @@ fn swapping_across_outputs_into_a_tabbed_parent_shows_the_recently_focused_arriv
     assert_eq!(moved["visible"], true);
 }
 
+// Family diff-fam-v3-move-to-mark-tabbed-two-output-visible, random-v3 seeds
+// 32362 32645 (two outputs). The focused tab moves to a mark on its tabbed
+// sibling. Sway's focus stack is seat-wide and `container_move_to_container`
+// does not touch it, so the moved view stays the most recently focused child
+// and remains the visible tab (sway/commands/move.c:241-275, :596-606;
+// `view_is_visible`, sway/tree/view.c:1180-1193).
+#[test]
+fn moving_the_focused_tab_to_a_marked_sibling_keeps_it_visible() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    for command in [
+        "focus output right",
+        "focus output left",
+        "mark m",
+        "layout tabbed",
+        "focus next",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.niri_state().update_keyboard_focus();
+    }
+    map_test_window(&mut f, client, "fixture-7");
+
+    let outcome = crate::command::execute(f.niri_state(), "move container to mark m");
+    assert!(outcome[0].success, "{outcome:?}");
+    f.niri_state().update_keyboard_focus();
+
+    let tree = tree_json(&mut f);
+    let parent = find_json_parent_of_app_id(&tree, "fixture-7").unwrap();
+    assert_eq!(parent["layout"], "tabbed", "{parent}");
+    let nodes = parent["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["app_id"], "fixture-1");
+    assert_eq!(nodes[0]["visible"], false, "{parent}");
+    assert_eq!(nodes[1]["app_id"], "fixture-7");
+    assert_eq!(nodes[1]["visible"], true, "{parent}");
+}
+
 // random-v2 seed 15819 (differential): swapping a fullscreen window with its
 // sibling hands fullscreen to the sibling, and enabling it there focuses the
 // sibling (`container_swap`, sway/tree/container.c:1884-1889;
