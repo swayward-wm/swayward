@@ -1522,3 +1522,100 @@ fn floating_toggle_of_a_fullscreen_view_in_a_floating_split_tiles_the_group() {
     assert_eq!(view["focused"], true);
     swayward.layout.verify_invariants();
 }
+
+/// Differential seed 33298 (diff-fam-v3-floating-fullscreen-split-focus-parent).
+/// `focus parent` is a no-op on a fullscreen container
+/// (sway/commands/focus.c:342-344), so on a fullscreen floating group root it
+/// keeps the focus there instead of handing it to the workspace, and the
+/// following `split v` wraps that floating root in a new splitv container
+/// (`container_split`, sway/tree/container.c:1508-1563).
+#[test]
+fn focus_parent_keeps_a_fullscreen_floating_group_root_focused() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("fixture-diff-10"),
+            ..Default::default()
+        },
+    );
+    for command in [
+        "focus parent",
+        "floating enable",
+        "fullscreen toggle",
+        "focus parent; split v",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["focused"], false);
+    let outer = &workspace["floating_nodes"][0];
+    assert_eq!(outer["layout"], "splitv");
+    assert_eq!(outer["focused"], false);
+    let inner = &outer["nodes"][0];
+    assert_eq!(inner["type"], "con");
+    assert_eq!(inner["layout"], "splith");
+    assert_eq!(inner["focused"], true);
+    assert_eq!(inner["nodes"][0]["app_id"], "fixture-diff-10");
+    f.swayward().layout.verify_invariants();
+}
+
+/// Review probe for diff-fam-v3-floating-fullscreen-split-focus-parent: the
+/// `focus parent` no-op on a fullscreen container
+/// (sway/commands/focus.c:342-344) also holds for a fullscreen child inside a
+/// floating group, not only for the group root, so the following `split v`
+/// wraps the fullscreen child (`container_split`,
+/// sway/tree/container.c:1508-1563) and leaves the workspace splith. The
+/// output is portrait like the capture's, so the floated group is splitv.
+#[test]
+fn focus_parent_keeps_a_fullscreen_floating_group_child_focused() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    for app_id in ["fixture-1", "fixture-2"] {
+        crate::tests::windows::map_window(
+            &mut f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in [
+        "focus parent",
+        "floating enable",
+        "focus child",
+        "fullscreen toggle",
+        "focus parent; split v",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["focused"], false);
+    assert_eq!(workspace["nodes"].as_array().map(Vec::len), Some(0));
+    let group = &workspace["floating_nodes"][0];
+    assert_eq!(group["type"], "floating_con");
+    assert_eq!(group["layout"], "splitv");
+    assert_eq!(group["nodes"][0]["app_id"], "fixture-1");
+    let wrap = &group["nodes"][1];
+    assert_eq!(wrap["type"], "con");
+    assert_eq!(wrap["layout"], "splitv");
+    assert_eq!(wrap["fullscreen_mode"], 1);
+    assert_eq!(wrap["focused"], false);
+    let child = &wrap["nodes"][0];
+    assert_eq!(child["app_id"], "fixture-2");
+    assert_eq!(child["focused"], true);
+    f.swayward().layout.verify_invariants();
+}
