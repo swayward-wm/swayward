@@ -1772,9 +1772,22 @@ impl<W: LayoutElement> FloatingLayout<W> {
         amount: i32,
         automatic_maximum: Size<f64, Logical>,
     ) -> bool {
-        let Some(mut rect) = self.tree_rect(root) else {
+        let Some(entry) = self.tree_entries.iter().find(|entry| entry.root == root) else {
             return false;
         };
+        let mut rect = entry.rect;
+        // A fullscreen root's pending box is the output box, or the output
+        // layout box for global fullscreen (sway/tree/arrange.c:310-316,
+        // 349-355), so the clamp measures that. Its floating geometry is
+        // sway's saved_* box, which the resize leaves alone and the
+        // unfullscreen restores (sway/tree/container.c:1194-1197).
+        let fullscreen = entry.tree.fullscreen_mode(root).map(|mode| match mode {
+            super::tiling_tree::FullscreenMode::Workspace => self.view_size,
+            super::tiling_tree::FullscreenMode::Global => automatic_maximum,
+        });
+        if let Some(size) = fullscreen {
+            rect.size = size;
+        }
         let (min, max) = floating_constraints(
             self.options.layout.floating_minimum_size,
             self.options.layout.floating_maximum_size,
@@ -1797,6 +1810,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
         };
         if grow_w == 0. && grow_h == 0. {
             return false;
+        }
+        if fullscreen.is_some() {
+            return true;
         }
         match edge {
             None if horizontal => rect.loc.x -= (grow_w / 2.).trunc(),

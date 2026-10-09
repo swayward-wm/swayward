@@ -1969,3 +1969,48 @@ fn fullscreen_view_moved_to_scratchpad_centres_its_floating_box() {
     assert_rect_near(&split["rect"], (x, y, 639, 1058 + titlebar), &split);
     assert_rect_near(&child["rect"], (x, y + titlebar, 639, 1058), child);
 }
+
+/// A fullscreen floater's pending box is the output's (sway/tree/arrange.c:310-316), so
+/// growing it in px runs into the automatic floating maximum, the output layout box
+/// (sway/tree/container.c:797-814), and sway answers "Cannot resize any further"
+/// (sway/commands/resize.c:216-218). Differential seed 32614.
+#[test]
+fn px_grow_of_a_fullscreen_floating_container_cannot_resize_further() {
+    px_grow_of_fullscreen_floater_cannot_resize_further("focus parent; floating toggle");
+}
+
+#[test]
+fn px_grow_of_a_fullscreen_floating_view_cannot_resize_further() {
+    px_grow_of_fullscreen_floater_cannot_resize_further("floating toggle");
+}
+
+fn px_grow_of_fullscreen_floater_cannot_resize_further(float: &str) {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in [float, "fullscreen toggle"] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "resize grow left 20 px");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Cannot resize any further")
+    );
+    let outcome = crate::command::execute(f.niri_state(), "resize grow height 20 px");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Cannot resize any further")
+    );
+    f.swayward().layout.verify_invariants();
+}
