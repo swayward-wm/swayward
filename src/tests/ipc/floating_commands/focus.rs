@@ -1370,6 +1370,59 @@ fn workspace_focus_order_matches_sway() {
     }
 }
 
+/// Differential seeds 33759 33780 33794 33812 33823 33824 33845 33857 33895
+/// (diff-fam-v3-hinted-map-focus-parent-order; oracle row
+/// focus_parent_from_floating_child_of_parent). A child toplevel floats at map
+/// (sway/desktop/xdg_shell.c `wants_floating`) and takes focus; `focus parent`
+/// then focuses the workspace and raises no view (sway/commands/focus.c:339-351),
+/// so the dialog stays ahead of its tiled parent in the workspace focus list.
+#[test]
+fn focus_parent_from_a_mapped_dialog_keeps_it_first_in_workspace_focus() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    let parent_surface = parent.surface.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let child = f.client(client).create_window();
+    child.xdg_toplevel.set_app_id("dialog".into());
+    child.set_parent(Some(&parent_toplevel));
+    let child_surface = child.surface.clone();
+    child.commit();
+    f.roundtrip(client);
+    let child = f.client(client).window(&child_surface);
+    child.attach_new_buffer();
+    child.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for outcome in crate::command::execute(f.niri_state(), "focus parent") {
+        assert!(outcome.success, "{outcome:?}");
+    }
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["focused"], true, "{workspace:#}");
+    let tiled = &workspace["nodes"][0];
+    let dialog = &workspace["floating_nodes"][0];
+    assert_eq!(tiled["app_id"], "parent", "{workspace:#}");
+    assert_eq!(dialog["app_id"], "dialog", "{workspace:#}");
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([dialog["id"], tiled["id"]]),
+        "{workspace:#}"
+    );
+    f.swayward().layout.verify_invariants();
+}
+
 /// Differential seeds 32750 32752 32782 ... (diff-fam-v3-floating-focus-after-fullscreen-structure;
 /// oracle row float_split_children_of_focused_wrapper_keeps_tiled_focus). With a split focused,
 /// floating one of its views by criteria leaves the seat focus on the split: `set_focus` is only
