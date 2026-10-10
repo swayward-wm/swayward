@@ -2823,3 +2823,30 @@ fn resize_set_ppt_after_focus_parent_split_from_floater_resizes_the_wrapper() {
     }
     f.swayward().layout.verify_invariants();
 }
+
+// Differential family diff-fam-v3-hinted-swap-border-residual-1, random-v3
+// seeds 32071 step 5 and 33750 step 8 (sway-1.12); oracle row
+// tabbed_fullscreen_map_layout_toggle_splitv_tabbed. A tabbed parent gives
+// each view child the whole parent box: the tab bar is not taken from the
+// pending box (`apply_tabbed_layout`, sway/tree/arrange.c), only from the
+// box GET_TREE reports (sway/ipc-json.c:816-825). `layout` under fullscreen
+// arranges only the fullscreen view (sway/tree/arrange.c:310-316), so after
+// `layout toggle splitv tabbed` the hidden view keeps the whole box and
+// reports percent 1 (sway/ipc-json.c:744-755).
+#[test]
+fn layout_toggle_out_of_tabbed_under_fullscreen_keeps_the_whole_box_percent() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["layout tabbed", "fullscreen toggle"]);
+    map_app(&mut f, client, "hidden");
+    run(&mut f, &["layout toggle splitv tabbed"]);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let bar = hidden["deco_rect"]["height"].as_i64().unwrap();
+    assert!(bar > 0, "{hidden}");
+    assert_eq!(rect(hidden, "rect"), [0, bar, 1270, 1408 - bar], "{hidden}");
+    assert_eq!(hidden["percent"], 1.0, "{hidden}");
+}

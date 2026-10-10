@@ -726,6 +726,20 @@ fn assign_strip<W: LayoutElement>(
             },
             result,
         );
+        // Sway's pending box for a view child is the strip's whole box; only a
+        // container child starts below the rows (`apply_tabbed_layout` and
+        // `apply_stacked_layout`, sway/tree/arrange.c:183-212). A box kept
+        // unarranged under fullscreen stays as recorded.
+        let kept =
+            context.fullscreen.is_empty() && context.stale_fullscreen_rects.contains_key(child);
+        if !kept
+            && matches!(
+                nodes.get(child).map(|node| &node.value),
+                Some(TreeNode::Leaf { .. })
+            )
+        {
+            result.ipc_nodes.insert(*child, rect);
+        }
         // A view takes the strip's whole box and GET_TREE subtracts the titlebar rows,
         // so a box shorter than the rows reports a negative height
         // (`apply_stacked_layout`, sway/tree/arrange.c:199-211;
