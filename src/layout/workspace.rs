@@ -1053,6 +1053,16 @@ impl<W: LayoutElement> Workspace<W> {
                 .active_window()
                 .is_some_and(|window| window.id() == id)
             && self.tiling.non_root_parent_for_window(id).is_some();
+        // A focused tiled view's close refocuses inside its parents before any floater
+        // (sway/input/seat.c:273-286).
+        let refocuses_tiled = transfer.is_none()
+            && !self.floating_is_active.get()
+            && !self.floating.has_window(id)
+            && self
+                .tiling
+                .active_tile()
+                .is_some_and(|tile| tile.window().id() == id)
+            && self.tiling.close_refocuses_within_parent(id);
         let removed = if self.floating.has_window(id) {
             from_floating = true;
             self.floating.remove_tile(id, transaction)
@@ -1085,6 +1095,9 @@ impl<W: LayoutElement> Workspace<W> {
         self.update_focus_floating_tiling_after_removing(from_floating);
         if keeps_tiling_focus && !self.tiling.is_empty() {
             self.floating_is_active = FloatingActive::No;
+        }
+        if refocuses_tiled && self.floating_is_active == FloatingActive::Yes {
+            self.floating_is_active = FloatingActive::NoButRaised;
         }
         // The seat refuses a floating view the closing global fullscreen container still
         // obstructs, as it does a tiled one (sway/input/seat.c:1148-1151).

@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs"]
+what = "closing a focused tiled view whose non-root parents still hold another view keeps focus in the tiling tree even when a floater was focused more recently."
+why = "sway's handle_seat_node_destroy asks each non-root parent for its most recent view before the workspace, whose search is the only one that covers floaters (sway/input/seat.c:273-286)."

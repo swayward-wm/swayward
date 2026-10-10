@@ -958,6 +958,48 @@ fn focus_after_a_view_leaves_matches_sway() {
             ],
             &[0, 1],
         ),
+        // diff-fam-v3-hinted-floater-kill-focus: a more recently focused floater does not
+        // compete while a parent of the closed view still holds a view; the walk only reaches
+        // the workspace, floaters included, after that (sway/input/seat.c:273-286).
+        (
+            "35227",
+            &[
+                "map 1",
+                "map 2",
+                "splitv",
+                "map 5",
+                "map 6",
+                r#"[app_id="5"] floating enable"#,
+                "kill",
+            ],
+            &[1, 0],
+        ),
+        (
+            "33960",
+            &[
+                "map 6",
+                "map 7",
+                "layout toggle",
+                "floating enable",
+                "map 8",
+                "kill",
+            ],
+            &[0, 0],
+        ),
+        (
+            "34760",
+            &[
+                "map hint-parent",
+                "map 7",
+                "floating enable",
+                "map 8",
+                "splitv",
+                r#"no_focus [app_id="9"]"#,
+                "map 9",
+                "kill",
+            ],
+            &[1, 0],
+        ),
         (
             "32235 later",
             &["map 4", "focus parent; split v", "map 5", "move scratchpad"],

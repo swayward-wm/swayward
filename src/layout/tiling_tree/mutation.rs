@@ -321,6 +321,25 @@ impl<W: LayoutElement> TilingTree<W> {
         })
     }
 
+    /// Whether closing `window` hands focus to another tiled view before the seat's walk up the
+    /// closed view's parents reaches the workspace. `handle_seat_node_destroy` asks each non-root
+    /// parent for its most recent view first, and only the workspace's search also covers
+    /// floaters (sway/input/seat.c:273-286), so a non-root parent that still holds a view wins
+    /// over a more recently focused floater.
+    pub fn close_refocuses_within_parent(&self, window: &W::Id) -> bool {
+        let Some(id) = self.node_for_window(window) else {
+            return false;
+        };
+        let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
+        while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            if self.leaf_ids_in(ancestor).len() > 1 {
+                return true;
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        false
+    }
+
     /// Whether closing the focused leaf `id` leaves the workspace itself focused. Sway emits
     /// the destroy signal while the global fullscreen container is still
     /// `root->fullscreen_global` (sway/tree/container.c:488-501), so the seat refuses every
