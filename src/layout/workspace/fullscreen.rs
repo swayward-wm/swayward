@@ -190,6 +190,9 @@ impl<W: LayoutElement> Workspace<W> {
         if floating && !was_floating {
             self.tiling.raise_parent_then_focused(window);
         }
+        if was_floating && !floating {
+            self.tiling.place_unfloated_fullscreen(window);
+        }
         self.tiling
             .orphan_global_fullscreen_on_floating(window, floating);
         true

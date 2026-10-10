@@ -473,6 +473,10 @@ pub struct Options {
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
     pub deactivate_unfocused_windows: bool,
+    /// Sway's `popup_during_fullscreen`; `smart` lets a view transient for the
+    /// fullscreen view take focus without leaving fullscreen
+    /// (`container_is_transient_for`, sway/tree/container.c:1566-1571).
+    pub popup_during_fullscreen: swayward_config::misc::PopupDuringFullscreen,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -754,6 +758,7 @@ impl Options {
             disable_resize_throttling: config.debug.disable_resize_throttling,
             disable_transactions: config.debug.disable_transactions,
             deactivate_unfocused_windows: config.debug.deactivate_unfocused_windows,
+            popup_during_fullscreen: config.popup_during_fullscreen,
         }
     }
 
@@ -1865,6 +1870,52 @@ impl<W: LayoutElement> Layout<W> {
         ws_idx == mon.active_workspace_idx
     }
 
+    /// `container_is_transient_for` against the workspace's fullscreen view: only
+    /// under `popup_during_fullscreen smart`, and only when the fullscreen
+    /// container is a view, not a split (sway/tree/container.c:1566-1571). The
+    /// toplevel parent chain is walked as in sway/desktop/xdg_shell.c:237-250.
+    fn is_transient_for_fullscreen(&self, workspace: &Workspace<W>, window: &W::Id) -> bool {
+        if self.options.popup_during_fullscreen
+            != swayward_config::misc::PopupDuringFullscreen::Smart
+        {
+            return false;
+        }
+        // The view holds the mode itself, so the fullscreen container is that view.
+        let Some(fullscreen) = workspace.fullscreen_window().filter(|fullscreen| {
+            workspace
+                .tiling()
+                .node_for_window(fullscreen)
+                .and_then(|node| workspace.tiling().fullscreen_mode(node))
+                .or_else(|| workspace.floating().window_own_fullscreen_mode(fullscreen))
+                .is_some()
+        }) else {
+            return false;
+        };
+        let find = |id: &W::Id| {
+            self.windows()
+                .map(|(_, win)| win)
+                .find(|win| win.id() == id)
+        };
+        let Some(mut current) = find(window) else {
+            return false;
+        };
+        // A parent chain longer than the window count has a cycle.
+        for _ in 0..self.windows().count() {
+            let Some(parent) = self
+                .windows()
+                .map(|(_, win)| win)
+                .find(|candidate| current.is_child_of(candidate))
+            else {
+                return false;
+            };
+            if parent.id() == fullscreen {
+                return true;
+            }
+            current = parent;
+        }
+        false
+    }
+
     pub fn activate_window(&mut self, window: &W::Id) {
         // A global fullscreen view sway no longer tracks as
         // `root->fullscreen_global` obstructs nothing
@@ -1885,18 +1936,19 @@ impl<W: LayoutElement> Layout<W> {
                 }
             }
         }
+        // `container_obstructing_fullscreen_container`: a workspace fullscreen
+        // container, tiled or floating, hides every view outside it except one
+        // transient for it (sway/tree/container.c:570-579).
         let obstructing = self
             .workspaces()
             .find(|(_, _, workspace)| workspace.has_window(window))
             .filter(|(_, _, workspace)| !workspace.global_fullscreen_orphaned())
-            .and_then(|(_, _, workspace)| {
-                let fullscreen = workspace.tiling().fullscreen_node()?;
-                let target = workspace
-                    .tiling()
-                    .windows()
-                    .find_map(|(id, candidate)| (candidate.id() == window).then_some(id))?;
-                (!workspace.tiling().contains_node(fullscreen, target)).then_some(workspace.id())
-            });
+            .filter(|(_, _, workspace)| {
+                workspace.fullscreen_mode().is_some()
+                    && !workspace.fullscreen_contains_window(window)
+                    && !self.is_transient_for_fullscreen(workspace, window)
+            })
+            .map(|(_, _, workspace)| workspace.id());
         // `container_fullscreen_disable` returns a fullscreen floating view to
         // the floating layer (sway/commands/focus.c:389-394,
         // sway/tree/container.c:1246-1258).

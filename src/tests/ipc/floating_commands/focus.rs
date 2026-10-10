@@ -1984,3 +1984,93 @@ fn switching_back_to_a_fullscreen_workspace_focuses_the_fullscreen_view() {
         f.swayward().layout.verify_invariants();
     }
 }
+
+/// diff-fam-v3-floating-fullscreen-sibling-focus-residual-1, shape A (seeds 34040,
+/// 34638; oracle state row criteria_focus_floater_leaves_fullscreen). A criteria
+/// `focus` on a floater a tiled fullscreen view hides first disables the obstructing
+/// fullscreen, then focuses and raises the floater (sway/commands/focus.c:385-394,
+/// sway/tree/container.c:570-590).
+#[test]
+fn criteria_focus_on_a_floater_under_a_fullscreen_view_leaves_fullscreen() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id| {
+        crate::tests::windows::map_window(
+            f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    };
+    map(&mut f, "float");
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    f.double_roundtrip(client);
+    map(&mut f, "tiled");
+    for command in ["fullscreen enable", r#"[app_id="float"] focus"#] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        f.double_roundtrip(client);
+    }
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let tiled = &workspace["nodes"][0];
+    let float = &workspace["floating_nodes"][0];
+    assert_eq!(tiled["app_id"], "tiled");
+    assert_eq!(tiled["fullscreen_mode"], 0);
+    assert_eq!(tiled["focused"], false);
+    assert_eq!(float["app_id"], "float");
+    assert_eq!(float["focused"], true);
+    assert_eq!(float["visible"], true);
+}
+
+/// Differential seeds 33979 34040 34058 34434 34638 34801 34868
+/// (diff-fam-v3-floating-fullscreen-sibling-focus; oracle row
+/// unfloat_fullscreen_floater_lands_after_tiled_sibling). Tiling a fullscreen
+/// floating view adds it beside the workspace's focus-inactive tiling container,
+/// here the view mapped under it (`container_set_floating`,
+/// sway/tree/container.c:976-990), so it lands after that view and keeps focus.
+#[test]
+fn unfloating_a_fullscreen_floater_lands_after_the_tiled_view_mapped_under_it() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixed".into());
+    window.set_min_size(300, 200);
+    window.set_max_size(300, 200);
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    f.double_roundtrip(client);
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("tiled"),
+            ..Default::default()
+        },
+    );
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(
+        workspace["representation"], "H[tiled fixed]",
+        "{workspace:#}"
+    );
+    let fixed = &workspace["nodes"][1];
+    assert_eq!(fixed["app_id"], "fixed", "{workspace:#}");
+    assert_eq!(fixed["fullscreen_mode"], 1, "{workspace:#}");
+    assert_eq!(fixed["focused"], true, "{workspace:#}");
+    assert_eq!(workspace["nodes"][0]["focused"], false, "{workspace:#}");
+    f.swayward().layout.verify_invariants();
+}

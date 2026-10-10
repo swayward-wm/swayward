@@ -445,6 +445,28 @@ impl<W: LayoutElement> TilingTree<W> {
         boxes
     }
 
+    /// `floating disable` on the fullscreen floating view `window`, which this
+    /// tree parks at the workspace level. Sway detaches it and adds it beside
+    /// the workspace's focus-inactive tiling container, or last inside it when
+    /// that is a split, else last on the workspace, without touching the seat
+    /// focus (`container_set_floating`, sway/tree/container.c:976-994).
+    pub fn place_unfloated_fullscreen(&mut self, window: &W::Id) {
+        let Some(id) = self
+            .node_for_window(window)
+            .filter(|id| self.nodes.get(id).and_then(|node| node.parent) == Some(self.root))
+        else {
+            return;
+        };
+        let reference = self.focus_history.iter().copied().find(|candidate| {
+            *candidate != self.root
+                && self.nodes.contains_key(candidate)
+                && self.contains_node(self.root, *candidate)
+                && !self.contains_node(id, *candidate)
+                && !self.is_floating_fullscreen(*candidate)
+        });
+        self.move_subtree_to_node_keeping_focus(id, reference.unwrap_or(self.root));
+    }
+
     /// `floating enable|disable` on the global fullscreen node `window`.
     /// `container_set_floating` detaches it, which clears
     /// `root->fullscreen_global`, and neither `workspace_add_floating` nor
