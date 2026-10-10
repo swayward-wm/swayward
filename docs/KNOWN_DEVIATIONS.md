@@ -15,6 +15,7 @@ explains how the tests encode these differences.
 | Reload keeps display changes | A display change made by a protocol client survives `reload` unless the file changes the output settings. | [Reload and transient output configuration](#reload-and-transient-output-configuration) |
 | Malformed IPC frames | A malformed IPC client is disconnected or receives a failure instead of waiting indefinitely. | [Malformed IPC frames](#malformed-ipc-frames) |
 | Layout and Xwayland limits | Scrollable tiling, some i3-only structures, and full X11 identity are not available. Global fullscreen covers one output. | [Layout and Xwayland](#layout-and-xwayland) |
+| Views hidden under fullscreen | `GET_TREE` reports the current layout's share and border for a view hidden behind a fullscreen container, where sway reports state it never rearranged. | [Views hidden under a fullscreen container](#views-hidden-under-a-fullscreen-container) |
 
 The details use three labels, because each kind needs something different from
 you:
@@ -269,15 +270,25 @@ truncated payload, or a header with an oversized payload length. Its IPC read
 handler returns until `FIONREAD` reports a complete header or the declared
 payload length (`sway/sway/ipc-server.c:201-252`). Sway also leaves the
 connection open without replying to an unknown request type
-(`sway/sway/ipc-server.c:927-929`). The wire-fuzz oracle records these four
+(`sway/sway/ipc-server.c:927-929`). An event type sent as a request, such as
+`0x80000000` (`IPC_EVENT_WORKSPACE`, `sway/include/ipc.h:27`), reaches the same
+default branch and gets no reply either. The wire-fuzz oracle records all five
 cases as timeouts.
 
-Swayward does not retain these waits. It closes a connection with an incomplete
-or oversized frame and returns a structured failure for an unknown request
-type. A malformed client therefore receives a failure or a closed socket, and
-cannot leave a server task waiting indefinitely. The `truncated-header`,
-`truncated-payload`, `oversized-length`, and `unknown-type` wire-fuzz mismatches
-are deliberate safety deviations.
+Swayward does not keep any of these waits. It closes a connection with an
+incomplete or oversized frame and returns a structured failure,
+`{"success": false, "error": "not implemented"}`, for an unknown request type
+or an event type sent as a request. A malformed client gets a failure or a
+closed socket, so it cannot hold a server task waiting forever. These five
+wire-fuzz cases differ on purpose, for safety:
+
+| Wire-fuzz case | Sway | Swayward |
+|---|---|---|
+| `truncated-header` | timeout | disconnect |
+| `truncated-payload` | timeout | disconnect |
+| `oversized-length` | timeout | disconnect |
+| `unknown-type` | timeout | structured failure |
+| `event-type-as-request` | timeout | structured failure |
 
 ### Per-view rendering and idle policy commands
 
@@ -648,6 +659,104 @@ going to a window nobody can see and leave a workspace blank until restart.
 The oracle rows `floating_split_fullscreen_child_move_scratchpad` and
 `floating_split_fullscreen_child_move_scratchpad_tiled_sibling` record the
 difference.
+
+### Views hidden under a fullscreen container
+
+**Deliberate.**
+
+These three entries are about sway's `GET_TREE` reply, not about what appears
+on screen. Under a fullscreen container, sway arranges only that container
+(`arrange_workspace` and `arrange_root`, `sway/tree/arrange.c:310-316,349-355`).
+The views hidden behind it keep whatever pending box and committed state they
+last had. `GET_TREE` reports a view's `percent` from its pending box
+(`sway/ipc-json.c:744-755`) and its `border` and `current_border_width` from
+its last committed state (`sway/ipc-json.c:756-761`). A hidden view's reply
+therefore depends on which earlier command touched it, not on the layout.
+Swayward copies the common cases: a view mapped, killed or wrapped under
+fullscreen reports what sway reports. Swayward does not copy the cases below.
+Each one reports a box or share that the current layout would never give the
+view.
+
+#### Border and percent of a view mapped beside a fullscreen container
+
+A view mapped beside a fullscreen container is never arranged. When
+`view_map` inserts it as a sibling of the focused container,
+`container_add_sibling` does not mark it dirty
+(`sway/tree/view.c:896-900`, `sway/tree/container.c:1410-1423`). The new
+container's committed state therefore keeps calloc's zero values: `border`
+`none` and width 0 (`sway/tree/container.c:47`). This holds even though
+`view_map` set the configured border on the pending state
+(`sway/tree/view.c:914-915`). Its percent is 0.0. Floating the fullscreen
+container does not end fullscreen. `container_detach` clears
+`workspace->fullscreen` (`sway/tree/container.c:1440-1442`), and
+`workspace_add_floating` sets it again through
+`container_handle_fullscreen_reparent` (`sway/tree/workspace.c:969`,
+`sway/tree/container.c:1380-1391`). The view stays unarranged until fullscreen
+ends. Whether a later command commits its border depends on whether that
+command's code path happens to mark the view dirty. `container_add_child`
+does (`sway/tree/container.c:1436-1437`). `container_add_sibling` does not.
+
+Swayward reports the view's configured border and the share its tiled slot
+gives it. The pinned sway 1.12 shape `map a; layout tabbed; layout toggle;
+focus parent; fullscreen toggle; map b; floating toggle` reports `b` as
+`border none`, width 0 and percent 0.0. Swayward reports `border normal`, the
+configured width and percent 1.0. The headless test
+`floated_fullscreen_split_leaves_the_hidden_sibling_its_configured_border`
+pins swayward's values. Family
+`diff-fam-v3-floated-fullscreen-tiled-sibling-border-percent`; random-v3
+seeds 34235 34333 34608 34795 34914 35662, each still differing on main
+5b64d72c or b47112dc.
+
+This entry does not cover the opposite case, where sway commits the view's
+border and swayward still reports calloc's `border none` (random-v3 seeds
+34387 34527 after `layout tabbed; floating enable`, and 35028 35393 35701
+after `move container to workspace`) or percent 0.0 (seed 35027). Swayward
+should match sway there.
+
+#### Content box of an unarranged view
+
+A view that sway never arranged has a 0x0 pending box. A command that calls
+`arrange_container` on it directly, such as `border`
+(`sway/commands/border.c:98`), runs `view_autoconfigure`. That clamps the
+content size to at least 1x1 (`sway/tree/view.c:463-464`). `GET_TREE` reports
+that 1x1 content box as `window_rect` (`sway/ipc-json.c:596-604`) while
+`rect` stays 0x0.
+
+Swayward reports a 0x0 `window_rect` inside the 0x0 `rect`. A content box
+larger than the container it sits in describes a window that does not exist.
+The reviewer-captured sway 1.12 shape is `map a; fullscreen enable;
+floating enable; map b; [app_id=b] border none`. Family
+`diff-fam-v3-sticky-carry-residual-3`. The headless test
+`border_on_an_unarranged_view_keeps_an_empty_content_box` pins swayward's
+value.
+
+#### Split shares changed under a fullscreen container
+
+`layout`, `resize`, `gaps` and output changes under a fullscreen container
+update the split's layout or fractions. The arrange that follows reaches only
+the fullscreen container (`sway/tree/arrange.c:310-316,349-355`), so the
+hidden siblings keep their old pending boxes, and `percent` reports the old
+shares. Sway gives each tabbed or stacked child the whole box only when it
+arranges them (`sway/tree/arrange.c:184-212`). For example, after `map a;
+map b; layout toggle split; fullscreen toggle; layout tabbed` (seed 32027),
+sway still reports the splitv share 0.5 for `a`.
+
+Swayward reports the share the current layout gives each hidden child, 1.0
+under the tabbed parent in that example. It keeps sway's stale box only where
+it already models the arrange that sway skips: killing, mapping and moving
+views under fullscreen, and fullscreen moving to a descendant. Reproducing
+every skipped arrange would mean storing, per command, the share sway would
+have last computed. It also cost more rows than it gained when tried
+(local branch `fullscreen-tab-slots`, net −1). The headless test
+`layout_tabbed_under_fullscreen_reports_the_tabbed_share` pins swayward's
+value. Family `parity-f8l-stale-split-share` (F8l). In each of these seeds the
+minimal shape runs a `layout`, `split`, `resize`, `gaps` or `output` command
+while a view is fullscreen, and only `percent` differs:
+15791 16203 16347 16754 17389 17431 17462 17630 17781 31210 31930 32027
+32206 32332 32361 32443 32553 33355 33378 33403 33468 33865 34368 34575
+35611. The task's other seeds are not covered. Some have no fullscreen at
+all, such as the stacked titlebar share in seed 35353 (sway 0.9625,
+swayward 1.0) and 17066. Others differ in more than `percent`.
 
 ### Urgency for assigned windows
 

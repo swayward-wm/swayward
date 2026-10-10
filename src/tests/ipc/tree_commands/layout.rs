@@ -2850,3 +2850,86 @@ fn layout_toggle_out_of_tabbed_under_fullscreen_keeps_the_whole_box_percent() {
     assert_eq!(rect(hidden, "rect"), [0, bar, 1270, 1408 - bar], "{hidden}");
     assert_eq!(hidden["percent"], 1.0, "{hidden}");
 }
+
+// Family diff-fam-v3-floated-fullscreen-tiled-sibling-border-percent, declared in
+// docs/KNOWN_DEVIATIONS.md#border-and-percent-of-a-view-mapped-beside-a-fullscreen-container.
+// Random-v3 seed 34235. Sway maps `b` as a sibling without marking it dirty
+// (sway/tree/view.c:896-900, sway/tree/container.c:1410-1423), so floating the fullscreen
+// split leaves calloc's `border none`, width 0 and percent 0.0 on `b`. Swayward reports the
+// configured border and the share of its tiled slot.
+#[test]
+fn floated_fullscreen_split_leaves_the_hidden_sibling_its_configured_border() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "a");
+    run(
+        &mut f,
+        &[
+            "layout tabbed; layout toggle",
+            "focus parent; fullscreen toggle",
+        ],
+    );
+    map_app(&mut f, client, "b");
+    run(&mut f, &["floating toggle"]);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "b").unwrap();
+    let shown = find_json_node_with_app_id(&tree, "a").unwrap();
+    assert_eq!(hidden["visible"], false, "{hidden}");
+    assert_eq!(hidden["border"], "normal", "{hidden}");
+    assert_eq!(
+        hidden["current_border_width"], shown["current_border_width"],
+        "{hidden}"
+    );
+    assert!(
+        hidden["current_border_width"].as_i64().unwrap() > 0,
+        "{hidden}"
+    );
+    assert_eq!(hidden["percent"], 1.0, "{hidden}");
+}
+
+// Family diff-fam-v3-sticky-carry-residual-3, declared in
+// docs/KNOWN_DEVIATIONS.md#content-box-of-an-unarranged-view. `border` on a view sway never
+// arranged runs `view_autoconfigure`, whose fmax clamps the content box to 1x1 inside a 0x0
+// rect (sway/commands/border.c:98, sway/tree/view.c:463-464). Swayward keeps the empty box.
+#[test]
+fn border_on_an_unarranged_view_keeps_an_empty_content_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "a");
+    run(&mut f, &["fullscreen enable", "floating enable"]);
+    map_app(&mut f, client, "b");
+    run(&mut f, &["[app_id=b] border none"]);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "b").unwrap();
+    assert_eq!(hidden["border"], "none", "{hidden}");
+    assert_eq!(hidden["rect"]["width"], 0, "{hidden}");
+    assert_eq!(hidden["rect"]["height"], 0, "{hidden}");
+    assert_eq!(rect(hidden, "window_rect"), [0, 0, 0, 0], "{hidden}");
+}
+
+// Family parity-f8l-stale-split-share, declared in
+// docs/KNOWN_DEVIATIONS.md#split-shares-changed-under-a-fullscreen-container. Random-v3 seed
+// 32027. `layout tabbed` under fullscreen arranges only the fullscreen view
+// (sway/tree/arrange.c:310-316), so sway still reports the hidden view's splitv share 0.5.
+// Swayward reports the whole-box share the tabbed parent gives it.
+#[test]
+fn layout_tabbed_under_fullscreen_reports_the_tabbed_share() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "a");
+    map_app(&mut f, client, "b");
+    run(
+        &mut f,
+        &["layout toggle split", "fullscreen toggle", "layout tabbed"],
+    );
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "a").unwrap();
+    assert_eq!(hidden["visible"], false, "{hidden}");
+    assert_eq!(hidden["percent"], 1.0, "{hidden}");
+}
