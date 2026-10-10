@@ -419,6 +419,11 @@ impl<W: LayoutElement> Workspace<W> {
         self.focus_seq = WORKSPACE_FOCUS_COUNTER.next() as i64;
     }
 
+    /// Restores a rank saved from [`Self::focus_seq`].
+    pub(super) fn set_focus_seq(&mut self, seq: i64) {
+        self.focus_seq = seq;
+    }
+
     pub fn name(&self) -> Option<&String> {
         self.name.as_ref()
     }

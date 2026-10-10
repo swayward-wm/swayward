@@ -1039,6 +1039,7 @@ impl<W: LayoutElement> Layout<W> {
                         .iter()
                         .map(|monitor| monitor.output.clone())
                         .collect::<Vec<_>>();
+                    let mut sticky_refocused = false;
                     for mut workspace in workspaces {
                         let target = workspace
                             .highest_available_output(&enabled)
@@ -1074,6 +1075,7 @@ impl<W: LayoutElement> Layout<W> {
                                 );
                             }
                             if let Some(id) = focused_sticky {
+                                sticky_refocused = true;
                                 if target_workspace.activate_window(&id) {
                                     active_monitor_idx = target;
                                 }
@@ -1085,16 +1087,60 @@ impl<W: LayoutElement> Layout<W> {
                         let end = monitor.workspaces.len();
                         monitor.attach_workspace(workspace, end, false);
                         monitor.sort_sway_workspaces();
-                        if removed_was_active && id == removed_active_workspace {
-                            // The seat focus stays inside the moved workspace,
-                            // which makes it the target's active workspace.
-                            if let Some(idx) = monitor.idx_of_ws(id) {
-                                monitor.activate_workspace(idx);
-                                monitor.workspace_switch = None;
+                        // An output's active workspace is its child highest in the seat
+                        // focus stack (output_get_active_workspace,
+                        // sway/sway/desktop/output.c:76-86), so a moved workspace focused
+                        // more recently than the target's active one replaces it. The
+                        // removed output's active workspace keeps the seat focus.
+                        let removed_active = removed_was_active && id == removed_active_workspace;
+                        let recent = monitor.idx_of_ws(id).filter(|&idx| {
+                            removed_active
+                                || monitor.workspaces[idx].focus_seq()
+                                    > monitor.active_workspace_ref().focus_seq()
+                        });
+                        if let Some(idx) = recent {
+                            let seq = monitor.workspaces[idx].focus_seq();
+                            monitor.activate_evacuated_workspace(idx);
+                            if !removed_active {
+                                // Evacuation does not focus it: later evacuees compare
+                                // against its old rank.
+                                monitor.workspaces[idx].set_focus_seq(seq);
                             }
+                        }
+                        if removed_active {
                             active_monitor_idx = target;
                         }
                         monitor.reap_empty_workspaces();
+                    }
+
+                    // An empty active workspace on the removed output is destroyed, and the
+                    // seat refocuses the head of its focus stack, which can be a workspace
+                    // evacuated to any surviving output (sway/sway/input/seat.c:242-256).
+                    let active_survived = monitors
+                        .iter()
+                        .any(|monitor| monitor.has_ws(removed_active_workspace));
+                    if removed_was_active && !active_survived && !sticky_refocused {
+                        let head = monitors
+                            .iter()
+                            .enumerate()
+                            .flat_map(|(mon_idx, monitor)| {
+                                let active = monitor.active_workspace_ref().id();
+                                monitor.workspaces.iter().enumerate().filter_map(
+                                    move |(ws_idx, workspace)| {
+                                        (workspace.must_be_kept() || workspace.id() == active)
+                                            .then_some((workspace.focus_seq(), mon_idx, ws_idx))
+                                    },
+                                )
+                            })
+                            .max();
+                        if let Some((_, mon_idx, ws_idx)) = head {
+                            let monitor = &mut monitors[mon_idx];
+                            if monitor.active_workspace_idx != ws_idx {
+                                monitor.activate_evacuated_workspace(ws_idx);
+                                monitor.reap_empty_workspaces();
+                            }
+                            active_monitor_idx = mon_idx;
+                        }
                     }
 
                     MonitorSet::Normal {

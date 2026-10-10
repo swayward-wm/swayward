@@ -705,3 +705,124 @@ fn output_disable_merges_workspace_focus_order_by_seat_recency() {
         );
     }
 }
+
+#[test]
+fn disabling_an_output_on_an_empty_workspace_focuses_the_evacuated_window() {
+    // Oracle state scenario output_disable_empty_active_focuses_evacuated_workspace
+    // (differential seeds 34855, 34844, 34949): the empty active workspace 3 is destroyed
+    // and the seat refocuses the head of its focus stack, the evacuated workspace 2
+    // (sway/sway/tree/output.c:205-253, input/seat.c:242-256).
+    let (mut f, socket) = ipc_fixture();
+    f.add_named_output_at("left".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("right".into(), (1280, 720), Some((1280, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    map_test_window(&mut f, client, "evacuated");
+    for command in ["workspace 3", "output right disable"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let left = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "left")
+        .unwrap();
+    assert_eq!(left["current_workspace"], "2");
+    let names = left["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["2"]);
+    assert!(f.swayward().layout.focus().is_some());
+}
+
+#[test]
+fn disabling_an_output_activates_a_more_recently_focused_evacuated_workspace() {
+    // Oracle state scenario output_disable_sticky_active_shows_evacuated_workspace
+    // (differential seeds 34844, 34855, 35125): workspace 2 was focused after the
+    // survivor's workspace 1, so once evacuated it heads the survivor's focus children and
+    // becomes its active workspace (sway/sway/desktop/output.c:76-86). The sticky-only
+    // workspace oracle then hands its floater to it (sway/sway/tree/output.c:188-203).
+    let (mut f, socket) = ipc_fixture();
+    f.add_named_output_at("left".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("right".into(), (1280, 720), Some((1280, 0)));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output right")[0].success);
+    map_test_window(&mut f, client, "evacuated");
+    assert!(crate::command::execute(f.niri_state(), "workspace oracle")[0].success);
+    map_test_window(&mut f, client, "sticky");
+    for command in ["floating enable", "sticky enable", "output right disable"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let left = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "left")
+        .unwrap();
+    assert_eq!(left["current_workspace"], "2");
+    let workspaces = left["nodes"].as_array().unwrap();
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0]["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(workspaces[0]["floating_nodes"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn disabling_an_output_leaves_a_sticky_floater_on_the_survivors_old_workspace() {
+    // Oracle state scenario output_disable_evacuated_focus_leaves_sticky_behind
+    // (differential seed 34949): the evacuated workspace takes the seat focus without a
+    // workspace switch, so the sticky floater stays on workspace 1
+    // (sway/sway/tree/output.c:205-253; the sticky move lives only in
+    // seat_set_workspace_focus, sway/sway/input/seat.c:1209-1220).
+    let (mut f, socket) = ipc_fixture();
+    f.add_named_output_at("left".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("right".into(), (1280, 720), Some((1280, 0)));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "sticky");
+    for command in ["floating enable", "sticky enable", "focus output right"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    map_test_window(&mut f, client, "evacuated");
+    assert!(crate::command::execute(f.niri_state(), "output right disable")[0].success);
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let left = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "left")
+        .unwrap();
+    assert_eq!(left["current_workspace"], "2");
+    let floaters = left["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| {
+            (
+                workspace["name"].as_str().unwrap().to_owned(),
+                workspace["floating_nodes"].as_array().unwrap().len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(floaters, [("1".to_owned(), 1), ("2".to_owned(), 0)]);
+    let sticky = &left["nodes"][0]["floating_nodes"][0];
+    assert_eq!(sticky["visible"], true);
+}

@@ -620,10 +620,28 @@ impl<W: LayoutElement> Monitor<W> {
         self.activate_workspace_with_anim_config(idx, None);
     }
 
+    /// Makes `idx` active without a seat workspace focus change, so sticky windows stay
+    /// where they are: output evacuation re-parents workspaces but never runs
+    /// `seat_set_workspace_focus`'s sticky move (sway/sway/tree/output.c:205-253,
+    /// input/seat.c:1209-1220).
+    pub(super) fn activate_evacuated_workspace(&mut self, idx: usize) {
+        self.activate_workspace_inner(idx, None, false);
+        self.workspace_switch = None;
+    }
+
     pub fn activate_workspace_with_anim_config(
         &mut self,
         idx: usize,
         config: Option<swayward_config::Animation>,
+    ) {
+        self.activate_workspace_inner(idx, config, true);
+    }
+
+    fn activate_workspace_inner(
+        &mut self,
+        idx: usize,
+        config: Option<swayward_config::Animation>,
+        move_sticky: bool,
     ) {
         // Preserving velocity is tracked by mu task layout-workspace-switch-velocity.
         let current_idx = self.workspace_render_idx();
@@ -642,7 +660,9 @@ impl<W: LayoutElement> Monitor<W> {
         let active = self.active_workspace_ref().id();
         self.workspace_focus_history.retain(|id| *id != active);
         self.workspace_focus_history.insert(0, active);
-        self.move_sticky_to_active_workspace(prev_active_idx);
+        if move_sticky {
+            self.move_sticky_to_active_workspace(prev_active_idx);
+        }
 
         let config = config.unwrap_or(self.options.animations.workspace_switch.0);
 
