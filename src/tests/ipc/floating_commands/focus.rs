@@ -1687,3 +1687,137 @@ fn closing_a_view_while_the_workspace_is_focused_keeps_the_workspace_focused() {
     );
     f.swayward().layout.verify_invariants();
 }
+
+/// Workspace focus lists after a move to a workspace or mark, in the first-divergence shapes
+/// of diff-fam-f3-focus-order-residual-2 (random-v3 seeds 31036 31743 31260 31964 32725;
+/// oracle row move_container_focus_order). Each case lists the outputs, the commands, the
+/// workspace to read and sway 1.12's `focus` for it as app ids, most recent first. A focused
+/// view moved under a fullscreen view drops below it (`workspace_focus_fullscreen`,
+/// sway/commands/move.c:96-110); an unfocused one keeps its own place; a view that keeps focus
+/// does not raise the split it joins; and a focused split never raises the view inside it.
+#[test]
+fn moved_container_focus_order_matches_sway() {
+    /// Seed, outputs, steps, workspace name, expected focus.
+    type Case<'a> = (&'a str, u8, &'a [&'a str], &'a str, &'a [&'a str]);
+    let cases: &[Case] = &[
+        (
+            "31036",
+            1,
+            &[
+                "map 2",
+                r#"for_window [app_id="4"] fullscreen enable"#,
+                "map 4",
+                r#"[app_id="^[23]$"] floating enable"#,
+                "[workspace=__focused__] move container to workspace 2",
+            ],
+            "2",
+            &["4", "2"],
+        ),
+        (
+            "31743",
+            2,
+            &[
+                "map 6",
+                "layout stacking",
+                "map 7",
+                "move left 20 px",
+                "[workspace=__focused__] move container to workspace 2",
+            ],
+            "2",
+            &["7", "6"],
+        ),
+        (
+            "31260",
+            1,
+            &[
+                "map 3",
+                "move container to workspace 2",
+                "map 4",
+                r#"for_window [app_id="5"] fullscreen enable"#,
+                "map 5",
+                r#"[workspace="2"] move container to workspace 1"#,
+            ],
+            "1",
+            &["5", "4", "3"],
+        ),
+        (
+            "31964",
+            1,
+            &[
+                "map 3",
+                "move container to workspace 2",
+                "map 4",
+                "map 5",
+                "fullscreen toggle",
+                r#"[workspace="2"] move container to workspace 1"#,
+            ],
+            "1",
+            &["5", "4", "3"],
+        ),
+        (
+            "32725",
+            2,
+            &[
+                "map 5",
+                "mark m",
+                "focus parent; split v",
+                "map 7",
+                "map 9",
+                "move container to mark m",
+            ],
+            "1",
+            &["7", "con"],
+        ),
+    ];
+    for (seed, outputs, steps, workspace_name, expected) in cases {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        if *outputs == 2 {
+            f.add_output_at(2, (1280, 720), Some((1280, 0)));
+        }
+        let client = f.add_client();
+        for step in *steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+                f.double_roundtrip(client);
+                continue;
+            }
+            for outcome in crate::command::execute(f.niri_state(), step) {
+                assert!(outcome.success, "{seed} {step}: {outcome:?}");
+            }
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let workspace = tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|output| output["nodes"].as_array().unwrap())
+            .find(|workspace| workspace["name"] == *workspace_name)
+            .unwrap_or_else(|| panic!("{seed}: no workspace {workspace_name}: {tree:#}"));
+        let children = workspace["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(workspace["floating_nodes"].as_array().unwrap())
+            .collect::<Vec<_>>();
+        let focus = workspace["focus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| {
+                let child = children.iter().find(|child| child["id"] == *id).unwrap();
+                child["app_id"].as_str().unwrap_or("con").to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(focus, *expected, "{seed}: {workspace:#}");
+        f.swayward().layout.verify_invariants();
+    }
+}

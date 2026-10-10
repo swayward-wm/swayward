@@ -537,7 +537,8 @@ pub struct TilingTree<W: LayoutElement> {
     last_entered_by: HashMap<NodeId, NodeId>,
     /// The focus time of a view that raised each container as it left the tree: floating the
     /// focused view raises its old parent (`container_set_floating`,
-    /// sway/tree/container.c:969-973), so the container ranks as recent as that view.
+    /// sway/tree/container.c:969-973), so the container ranks as recent as that view. A split
+    /// that held the seat focus itself also ranks as recent as that focus.
     entered_by_departed: HashMap<NodeId, std::time::Duration>,
     /// The seat-stack time of each container a view swapped into without raising it: the
     /// arrival's older focus does not raise the container (`swap_places` leaves the stack

@@ -595,6 +595,9 @@ pub(super) fn move_target_to_workspace(
                 .layout
                 .move_window_to_sway_workspace(&window, workspace_target, auto_back_and_forth)
                 .map(|_| ());
+            if moved.is_ok() && focused_before.as_ref() == Some(&target) {
+                raise_destination_fullscreen(state, &window);
+            }
             // A focused child hands focus to its old parent's focus-inactive view
             // (sway/commands/move.c:589-597), which stays in the floating group even when the
             // child tiled on its own workspace.
@@ -647,6 +650,32 @@ fn raise_refocused_view(
     let stamp = crate::utils::get_monotonic_time();
     state.swayward.layout.with_windows_mut(|mapped, _| {
         if mapped.id() == focused {
+            mapped.set_focus_timestamp(stamp);
+        }
+    });
+}
+
+/// The focused view's move made its destination the seat's focused workspace, so
+/// `workspace_focus_fullscreen` raises that workspace's fullscreen view above it on the
+/// seat stack (sway/commands/move.c:96-110, 230-232).
+fn raise_destination_fullscreen(state: &mut State, window: &smithay::desktop::Window) {
+    let Some(fullscreen) = state
+        .swayward
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.has_window(window))
+        .and_then(|(_, _, workspace)| {
+            workspace
+                .fullscreen_window()
+                .filter(|_| !workspace.fullscreen_contains_window(window))
+                .cloned()
+        })
+    else {
+        return;
+    };
+    let stamp = crate::utils::get_monotonic_time();
+    state.swayward.layout.with_windows_mut(|mapped, _| {
+        if mapped.window == fullscreen {
             mapped.set_focus_timestamp(stamp);
         }
     });

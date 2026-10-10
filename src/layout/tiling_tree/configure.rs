@@ -62,9 +62,32 @@ impl<W: LayoutElement> TilingTree<W> {
             // moved one, so the moved view's newer window focus no longer ranks
             // it first in the workspace focus list.
             // Sway's focus stack is seat-wide: the moved view, focused by the
-            // move, sits just below the re-raised fullscreen view.
+            // move, sits just below the re-raised fullscreen view. A view moved
+            // without focus keeps its own place, by when it was last focused
+            // (`container_move_to_container` leaves the stack alone,
+            // sway/commands/move.c:241-275).
+            let stamp = self
+                .tile(id)
+                .and_then(|tile| tile.window().focus_timestamp());
+            let newest = self
+                .leaf_ids_in(self.root)
+                .into_iter()
+                .filter(|leaf| *leaf != id)
+                .filter_map(|leaf| self.tile(leaf)?.window().focus_timestamp())
+                .max();
             self.focus_history.retain(|candidate| *candidate != id);
-            self.focus_history.insert(0, id);
+            let rank = if stamp > newest {
+                0
+            } else {
+                self.focus_history
+                    .iter()
+                    .position(|candidate| {
+                        self.tile(*candidate)
+                            .is_some_and(|tile| tile.window().focus_timestamp() < stamp)
+                    })
+                    .unwrap_or(self.focus_history.len())
+            };
+            self.focus_history.insert(rank, id);
             if let Some(leaf) = self.focused_leaf_in(fullscreen) {
                 self.focus_history.retain(|candidate| *candidate != leaf);
                 self.focus_history.insert(0, leaf);

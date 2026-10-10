@@ -257,9 +257,20 @@ impl<W: LayoutElement> TilingTree<W> {
                 .then(|| self.transfer_focus_target(None, Some(old_parent)))
                 .flatten()
                 .filter(|(target, _)| Some(*target) != self.focus);
+            // When the moved view keeps focus, `seat_set_focus` returns early and the splits
+            // it joined are not raised (sway/commands/move.c:598-608,
+            // sway/input/seat.c:1131-1134): each keeps the place its own views gave it.
+            let entry_stamps = if target.is_none() && self.tile(id).is_some() {
+                self.ancestor_entry_stamps_excluding(id)
+            } else {
+                Vec::new()
+            };
             self.reap_empty_from(old_parent);
             self.compact_tree();
             self.resolve_transfer_focus(target);
+            if let Some(window) = self.tile(id).map(|tile| tile.window().id().clone()) {
+                self.cap_entry_stamps_for_arrival(&window, entry_stamps);
+            }
         } else {
             self.reap_empty_from(old_parent);
             self.compact_tree();

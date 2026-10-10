@@ -54,6 +54,30 @@ impl<W: LayoutElement> TilingTree<W> {
         stamps
     }
 
+    /// As [`Self::ancestor_entry_stamps`], ignoring `node`'s own views: the times the splits
+    /// above `node` had before it arrived among them.
+    pub(crate) fn ancestor_entry_stamps_excluding(
+        &self,
+        node: NodeId,
+    ) -> Vec<(NodeId, std::time::Duration)> {
+        let moved = self.leaf_ids_in(node);
+        let mut stamps = Vec::new();
+        let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
+        while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            let newest = self
+                .leaf_ids_in(ancestor)
+                .into_iter()
+                .filter(|leaf| !moved.contains(leaf))
+                .filter_map(|leaf| self.tile(leaf)?.window().focus_timestamp())
+                .max();
+            if let Some(stamp) = newest {
+                stamps.push((ancestor, stamp));
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        stamps
+    }
+
     /// Keeps each split in `stamps` at its own seat-stack time after `window` swapped into
     /// it without raising it. A split was raised just before the view inside it that was
     /// focused then (parents first, sway/input/seat.c:1178-1190), so it ranks just below
@@ -91,6 +115,24 @@ impl<W: LayoutElement> TilingTree<W> {
         if let Some(stamp) = stamp {
             let entry = self.entered_by_departed.entry(parent).or_insert(stamp);
             *entry = (*entry).max(stamp);
+        }
+    }
+
+    /// Records that the focused split, and every split above it, held the seat focus at
+    /// `stamp`. `seat_set_focus` on a split raises it and its parents but no view inside it
+    /// (sway/input/seat.c:1178-1190), so the split ranks as recent as that.
+    pub fn record_focused_split_entry(&mut self, stamp: std::time::Duration) {
+        let Some(focus) = self
+            .focus
+            .filter(|focus| *focus != self.root && self.is_split(*focus))
+        else {
+            return;
+        };
+        let mut node = Some(focus);
+        while let Some(id) = node.filter(|id| *id != self.root) {
+            let entry = self.entered_by_departed.entry(id).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+            node = self.nodes.get(&id).and_then(|node| node.parent);
         }
     }
 

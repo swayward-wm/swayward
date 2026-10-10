@@ -27,16 +27,38 @@ impl State {
                 self.swayward.keyboard_focus_unraised = false;
             }
         }
+        self.record_focused_split_entry();
         self.swayward.record_urgency_active_workspaces();
     }
 
-    /// Whether the workspace holding `surface` has the workspace itself focused.
+    /// A split holding the seat focus is on top of sway's seat stack, above every view inside
+    /// it (`seat_set_focus`, sway/input/seat.c:1178-1190).
+    fn record_focused_split_entry(&mut self) {
+        let Some(workspace) = self.swayward.layout.active_workspace_mut() else {
+            return;
+        };
+        if workspace.floating_is_active() {
+            return;
+        }
+        workspace
+            .tiling_mut()
+            .record_focused_split_entry(get_monotonic_time());
+    }
+
+    /// Whether the workspace holding `surface` has the workspace itself or a split focused, so
+    /// the seat focuses no view. `seat_set_focus` on a split raises the split and its parents
+    /// but not the view inside it that takes keyboard focus (sway/input/seat.c:1178-1190).
     fn keyboard_focus_workspace_focused(&self, surface: &WlSurface) -> bool {
         self.swayward
             .layout
             .workspaces()
             .find(|(_, _, ws)| ws.find_wl_surface(surface).is_some())
-            .is_some_and(|(_, _, ws)| ws.is_workspace_focused())
+            .is_some_and(|(_, _, ws)| {
+                ws.is_workspace_focused()
+                    || ws
+                        .focused_container_node()
+                        .is_some_and(|node| ws.is_tiling_split(node))
+            })
     }
 
     fn compute_keyboard_focus(&mut self) -> KeyboardFocus {
