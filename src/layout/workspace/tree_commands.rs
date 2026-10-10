@@ -255,6 +255,8 @@ impl<W: LayoutElement> Workspace<W> {
                 .focus()
                 .is_some_and(|focus| self.tiling.contains_node(node, focus));
         let entry_stamps = self.tiling.ancestor_entry_stamps(node);
+
+        let tiled_is_focus = tiled_focused && self.tiling.focus() == Some(node);
         let (mut subtree, slot) = self.detach_tiling_subtree_for_swap(node)?;
         let RemovedTile { mut tile, .. } = self.floating.remove_tile(window, Transaction::new());
         let (floating_pos, floating_size) = (tile.floating_pos, tile.floating_window_size);
@@ -287,6 +289,13 @@ impl<W: LayoutElement> Workspace<W> {
         if floater_focused {
             self.tiling.activate_window(window);
             self.floating_is_active = FloatingActive::No;
+        } else if tiled_is_focus && self.tiling.window_parent_is_tabbed_or_stacked(window) {
+            // The focused container left a tabbed or stacked parent, so sway
+            // focuses the arrived view, raising it as the shown tab, then
+            // refocuses the floated container (`swap_focus`,
+            // sway/tree/container.c:1772-1777).
+            self.tiling.activate_window(window);
+            self.floating_is_active = FloatingActive::Yes;
         } else if tiled_focused {
             // The floated container keeps focus, so the next view maps
             // beside the most recently focused tiled view, not the view that

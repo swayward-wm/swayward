@@ -109,6 +109,14 @@ impl<W: LayoutElement> TilingTree<W> {
         self.nodes.get(&id)?.parent
     }
 
+    /// Whether `window`'s parent, the workspace root included, is tabbed or
+    /// stacked (`container_parent_layout`, sway/tree/container.c).
+    pub fn window_parent_is_tabbed_or_stacked(&self, window: &W::Id) -> bool {
+        self.parent_of_window(window)
+            .and_then(|parent| self.split_layout(parent))
+            .is_some_and(|layout| matches!(layout, Layout::Tabbed | Layout::Stacked))
+    }
+
     pub fn non_root_parent_for_window(&self, window: &W::Id) -> Option<NodeId> {
         self.parent_of_window(window)
             .filter(|parent| *parent != self.root && self.split_len(*parent).is_some_and(|n| n > 1))

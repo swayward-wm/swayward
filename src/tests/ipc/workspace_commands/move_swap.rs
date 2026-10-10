@@ -2303,3 +2303,42 @@ fn swapping_a_focused_floater_into_a_split_keeps_the_floated_view_ahead_of_older
         "{workspace:#}"
     );
 }
+
+/// Random-v3 seed 32461 (family diff-fam-v3-for-window-layout-in-floating-split
+/// residual): the focused tab swaps with a floating mark. Sway focuses the
+/// view arriving in the tabbed parent, raising it as the shown tab, then
+/// refocuses the floated one (`swap_focus`, sway/tree/container.c:1772-1777).
+#[test]
+fn swapping_a_focused_tab_with_a_floater_shows_the_arrived_view() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    open_swap_view(&mut f, client, "one");
+    run_swap_commands(&mut f, &["mark r", "floating enable"]);
+    open_swap_view(&mut f, client, "two");
+    open_swap_view(&mut f, client, "three");
+    run_swap_commands(
+        &mut f,
+        &[
+            "layout tabbed",
+            r#"[app_id="two"] focus"#,
+            "swap container with mark r",
+        ],
+    );
+
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let tabs = &workspace["nodes"][0]["nodes"];
+    let shown = |index: usize| {
+        (
+            tabs[index]["app_id"].clone(),
+            tabs[index]["visible"].clone(),
+        )
+    };
+    assert_eq!(shown(0), ("one".into(), true.into()), "{workspace:#}");
+    assert_eq!(shown(1), ("three".into(), false.into()), "{workspace:#}");
+    let floater = &workspace["floating_nodes"][0];
+    assert_eq!(floater["app_id"], "two", "{workspace:#}");
+    assert_eq!(floater["focused"], true, "{workspace:#}");
+}
