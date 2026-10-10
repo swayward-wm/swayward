@@ -1619,3 +1619,71 @@ fn focus_parent_keeps_a_fullscreen_floating_group_child_focused() {
     assert_eq!(child["focused"], true);
     f.swayward().layout.verify_invariants();
 }
+
+/// Differential seeds 33824 33845 (diff-fam-v3-hinted-map-focus-parent-order-residual-1; oracle
+/// row kill_workspace_after_focus_parent_from_dialog). After `focus parent` from a mapped
+/// dialog the workspace holds the seat focus. Closing a tiled view outside that focus only
+/// refreshes focus_inactive and puts the old focus back on top (`handle_seat_node_destroy`,
+/// sway/input/seat.c:316-323), so the workspace stays focused rather than the dialog.
+#[test]
+fn closing_a_view_while_the_workspace_is_focused_keeps_the_workspace_focused() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let doomed = crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("doomed"),
+            ..Default::default()
+        },
+    );
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    let parent_surface = parent.surface.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("dialog"),
+            parent: Some(&parent_toplevel),
+            ..Default::default()
+        },
+    );
+
+    for outcome in crate::command::execute(f.niri_state(), "focus parent") {
+        assert!(outcome.success, "{outcome:?}");
+    }
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&doomed);
+    window.attach_null();
+    window.commit();
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(
+        workspace["nodes"].as_array().unwrap().len(),
+        1,
+        "{workspace:#}"
+    );
+    let tiled = &workspace["nodes"][0];
+    let dialog = &workspace["floating_nodes"][0];
+    assert_eq!(tiled["app_id"], "parent", "{workspace:#}");
+    assert_eq!(dialog["app_id"], "dialog", "{workspace:#}");
+    assert_eq!(workspace["focused"], true, "{workspace:#}");
+    assert_eq!(dialog["focused"], false, "{workspace:#}");
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([dialog["id"], tiled["id"]]),
+        "{workspace:#}"
+    );
+    f.swayward().layout.verify_invariants();
+}

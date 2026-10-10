@@ -1004,6 +1004,10 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> RemovedTile<W> {
         let mut from_floating = false;
         let floating_root = self.floating.window_is_floating_root(id);
+        // Closing a view while the workspace itself holds the seat focus only refreshes
+        // focus_inactive and puts the old focus back on top (`handle_seat_node_destroy`,
+        // sway/input/seat.c:316-323), so the workspace stays focused.
+        let workspace_was_focused = transfer.is_none() && self.is_workspace_focused();
         let removed_focus = self.floating_is_active.get()
             && self
                 .floating
@@ -1061,6 +1065,16 @@ impl<W: LayoutElement> Workspace<W> {
         // obstructs, as it does a tiled one (sway/input/seat.c:1148-1151).
         if keeps_workspace_focus && self.floating_is_active.get() {
             self.floating_is_active = FloatingActive::NoButRaised;
+        }
+        if workspace_was_focused && !self.is_workspace_focused() {
+            if self.tiling.is_empty() {
+                if !self.floating.is_empty() {
+                    self.floating_is_active = FloatingActive::NoButRaised;
+                }
+            } else {
+                self.floating_is_active = FloatingActive::No;
+                self.tiling.focus_root_keeping_history();
+            }
         }
         // Removing the focused floating window hands focus to the workspace's
         // focus-inactive node (seat_get_focus_inactive(ws), as in
