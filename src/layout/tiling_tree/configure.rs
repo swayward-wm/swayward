@@ -92,6 +92,15 @@ impl<W: LayoutElement> TilingTree<W> {
                 self.focus_history.retain(|candidate| *candidate != leaf);
                 self.focus_history.insert(0, leaf);
                 self.ipc_focus_follows_history = true;
+                // The re-raised view is the workspace's focus-inactive view, so
+                // switching back focuses it rather than the hidden arrival
+                // (`workspace_switch`, sway/tree/workspace.c:731-743).
+                if self
+                    .focus
+                    .is_none_or(|focus| !self.contains_node(fullscreen, focus))
+                {
+                    self.focus = Some(leaf);
+                }
             }
         }
     }

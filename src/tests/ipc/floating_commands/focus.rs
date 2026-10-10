@@ -1886,3 +1886,59 @@ fn moved_container_focus_order_matches_sway() {
         f.swayward().layout.verify_invariants();
     }
 }
+
+/// diff-fam-parity-f2-focused-flag-residual-2 (random-v2 16099; oracle row
+/// fs_move_back_focus): a window moved from another workspace onto a workspace with a
+/// fullscreen view sits behind it, so switching back focuses the fullscreen view, never the
+/// hidden arrival (`workspace_focus_fullscreen`, sway/commands/move.c:96-110, 238;
+/// `seat_set_workspace_focus` refuses an obstructed view, sway/input/seat.c:1148-1151).
+#[test]
+fn switching_back_to_a_fullscreen_workspace_focuses_the_fullscreen_view() {
+    let cases: &[&[&str]] = &[
+        &[
+            "map a",
+            "fullscreen enable",
+            "workspace 3",
+            "map b",
+            "move container to workspace 1",
+            "workspace 1",
+        ],
+        &[
+            "map a",
+            "fullscreen enable",
+            "workspace number 3",
+            "map b",
+            "move container to workspace next",
+            "workspace --no-auto-back-and-forth 1",
+        ],
+    ];
+    for steps in cases {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        for step in *steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+                f.double_roundtrip(client);
+                continue;
+            }
+            for outcome in crate::command::execute(f.niri_state(), step) {
+                assert!(outcome.success, "{steps:?} {step}: {outcome:?}");
+            }
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let focused = find_json_node_with_app_id(&tree, "a").unwrap();
+        assert_eq!(focused["focused"], true, "{steps:?}: {tree:#}");
+        let hidden = find_json_node_with_app_id(&tree, "b").unwrap();
+        assert_eq!(hidden["focused"], false, "{steps:?}: {tree:#}");
+        f.swayward().layout.verify_invariants();
+    }
+}
