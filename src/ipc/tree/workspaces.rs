@@ -531,7 +531,10 @@ fn order_by_recency(
         .collect::<std::collections::HashMap<_, _>>();
     focus.sort_by_key(|id| {
         let timestamp = timestamp_of(id);
-        let rank = match (stale_tiling.contains(id), timestamp.is_some()) {
+        // A container focus entered ranks on the stack even when no view in it holds a
+        // focus time of its own, such as one a departed view raised.
+        let entered = effective.get(id).copied().flatten().is_some();
+        let rank = match (stale_tiling.contains(id), timestamp.is_some() || entered) {
             (false, true) => 2,
             (true, _) => 1,
             (false, false) => 0,

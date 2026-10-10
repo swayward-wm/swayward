@@ -532,6 +532,55 @@ impl<W: LayoutElement> TilingTree<W> {
         Some(tile)
     }
 
+    /// Removes the focused view being floated out of a chain of singleton splits that
+    /// `container_reap_empty` destroys up to a surviving split below the workspace. The
+    /// destroy handler raw-raises only that split's focus-inactive view, then the floated
+    /// view (sway/tree/container.c:969-975, sway/input/seat.c:273-320): no ancestor is
+    /// raised, so each keeps its place, including the one the departing view gave it.
+    pub fn remove_tile_reaping_singletons(&mut self, window: &W::Id) -> Option<Tile<W>> {
+        if self.fullscreen_node().is_some() {
+            return self.remove_tile(window, Transaction::new());
+        }
+        let id = self.node_for_window(window)?;
+        let mut survivor = self.nodes.get(&id).and_then(|node| node.parent);
+        while let Some(ancestor) = survivor.filter(|ancestor| self.split_len(*ancestor) == Some(1))
+        {
+            survivor = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        let history = self.focus_history.clone();
+        let stale = self.ipc_stale_nodes.clone();
+        let last_entered_by = self.last_entered_by.clone();
+        let capped = self.capped_entry_stamps.clone();
+        let tile = self.remove_tile(window, Transaction::new())?;
+        self.focus_history = history
+            .into_iter()
+            .filter(|node| self.nodes.contains_key(node) && *node != self.root)
+            .collect();
+        self.ipc_stale_nodes = stale
+            .into_iter()
+            .filter(|node| self.nodes.contains_key(node))
+            .collect();
+        self.last_entered_by = last_entered_by
+            .into_iter()
+            .filter(|(node, leaf)| self.nodes.contains_key(node) && self.tile(*leaf).is_some())
+            .collect();
+        self.capped_entry_stamps = capped
+            .into_iter()
+            .filter(|(node, _)| self.nodes.contains_key(node))
+            .collect();
+        if let Some(next) = survivor
+            .filter(|survivor| self.nodes.contains_key(survivor))
+            .and_then(|survivor| self.focused_leaf_in(survivor))
+        {
+            self.focus_history.retain(|node| *node != next);
+            self.focus_history.insert(0, next);
+            if self.focus.is_some() {
+                self.focus = Some(next);
+            }
+        }
+        Some(tile)
+    }
+
     /// As `remove_tile`, but resizes the remaining windows without a transaction or an
     /// animation. Emptied parents are reaped either way.
     pub fn remove_tile_without_transaction(&mut self, window: &W::Id) -> Option<Tile<W>> {

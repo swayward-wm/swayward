@@ -1700,6 +1700,9 @@ impl<W: LayoutElement> Workspace<W> {
                 .tiling
                 .tiles()
                 .any(|tile| tile.window().id() == &id && tile.window().focus_timestamp().is_none());
+            if target_is_active && !was_floating && !never_focused {
+                self.tiling.remember_entries_of_departing(&id);
+            }
             let mut tile = if parent.is_some() {
                 self.tiling.remove_tile_without_transaction(&id).unwrap()
             } else if target_is_active
@@ -1708,6 +1711,8 @@ impl<W: LayoutElement> Workspace<W> {
                 && self.tiling.float_leaves_workspace_level(&id)
             {
                 self.tiling.remove_tile_keeping_focus_order(&id).unwrap()
+            } else if target_is_active && !was_floating && !never_focused {
+                self.tiling.remove_tile_reaping_singletons(&id).unwrap()
             } else {
                 self.tiling.remove_tile(&id, Transaction::new()).unwrap()
             };

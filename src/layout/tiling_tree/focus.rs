@@ -136,6 +136,31 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// Keeps the seat-stack place of every container `window`'s focus last raised as the
+    /// view leaves for the floating layer: leaving raises none of them, so each still ranks
+    /// at that view's focus time (`container_set_floating`, sway/tree/container.c:951-975).
+    pub fn remember_entries_of_departing(&mut self, window: &W::Id) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        let Some(stamp) = self
+            .tile(id)
+            .and_then(|tile| tile.window().focus_timestamp())
+        else {
+            return;
+        };
+        let entered = self
+            .last_entered_by
+            .iter()
+            .filter(|(_, leaf)| **leaf == id)
+            .map(|(node, _)| *node)
+            .collect::<Vec<_>>();
+        for node in entered {
+            let entry = self.entered_by_departed.entry(node).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+        }
+    }
+
     pub fn focus_rank_for_window(&self, window: &W::Id) -> Option<usize> {
         let node = self.node_for_window(window)?;
         self.focus_history
@@ -475,6 +500,15 @@ impl<W: LayoutElement> TilingTree<W> {
             .retain(|candidate| *candidate != id && *candidate != parent);
         self.focus_history.insert(0, parent);
         self.focus_history.insert(0, id);
+        // The view's own focus time ranks the raised parent in the IPC focus list, as when a
+        // tiled view floats (`set_focus_raised_by_departed`).
+        if let Some(stamp) = self
+            .tile(id)
+            .and_then(|tile| tile.window().focus_timestamp())
+        {
+            let entry = self.entered_by_departed.entry(parent).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+        }
     }
 
     pub fn set_focus(&mut self, id: NodeId) {
