@@ -41,6 +41,11 @@ impl<W: LayoutElement> TilingTree<W> {
         let mut stamps = Vec::new();
         let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
         while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            // A wrapper sway never raised stays at the tail of the stack, below every stamp.
+            if self.ipc_stale_nodes.contains(&ancestor) {
+                parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+                continue;
+            }
             let newest = self
                 .leaf_ids_in(ancestor)
                 .into_iter()
@@ -76,6 +81,29 @@ impl<W: LayoutElement> TilingTree<W> {
             parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
         }
         stamps
+    }
+
+    /// The ancestors of `node` sway never raised: wrappers still at the tail of its focus
+    /// stack (`seat_node_from_node`, sway/input/seat.c:327-349).
+    pub(crate) fn stale_ancestors(&self, node: NodeId) -> Vec<NodeId> {
+        let mut stale = Vec::new();
+        let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
+        while let Some(ancestor) = parent {
+            if self.ipc_stale_nodes.contains(&ancestor) {
+                stale.push(ancestor);
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        stale
+    }
+
+    /// Leaves `nodes` at the tail of the focus stack after a refocus that sway skips.
+    pub(crate) fn keep_ipc_stale(&mut self, nodes: Vec<NodeId>) {
+        self.ipc_stale_nodes.extend(
+            nodes
+                .into_iter()
+                .filter(|node| self.nodes.contains_key(node)),
+        );
     }
 
     /// Keeps each split in `stamps` at its own seat-stack time after `window` swapped into

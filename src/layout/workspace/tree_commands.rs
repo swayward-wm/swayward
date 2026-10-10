@@ -255,7 +255,7 @@ impl<W: LayoutElement> Workspace<W> {
                 .focus()
                 .is_some_and(|focus| self.tiling.contains_node(node, focus));
         let entry_stamps = self.tiling.ancestor_entry_stamps(node);
-
+        let stale_ancestors = self.tiling.stale_ancestors(node);
         let tiled_is_focus = tiled_focused && self.tiling.focus() == Some(node);
         let (mut subtree, slot) = self.detach_tiling_subtree_for_swap(node)?;
         let RemovedTile { mut tile, .. } = self.floating.remove_tile(window, Transaction::new());
@@ -288,6 +288,11 @@ impl<W: LayoutElement> Workspace<W> {
         };
         if floater_focused {
             self.tiling.activate_window(window);
+            // `swap_focus` refocuses the floater, which already has focus, so
+            // `seat_set_focus` returns early and raises none of the arrival's
+            // new ancestors: a wrapper never raised stays at the tail
+            // (sway/tree/container.c:1786-1788, sway/input/seat.c:1131-1134).
+            self.tiling.keep_ipc_stale(stale_ancestors);
             self.floating_is_active = FloatingActive::No;
         } else if tiled_is_focus && self.tiling.window_parent_is_tabbed_or_stacked(window) {
             // The focused container left a tabbed or stacked parent, so sway
@@ -423,7 +428,22 @@ impl<W: LayoutElement> Workspace<W> {
         if let Some(output) = &self.output {
             subtree.for_each_window(|window| window.output_enter(output));
         }
-        self.tiling.attach_subtree_for_swap(subtree, slot)
+        let mut arrival = None;
+        subtree.for_each_window(|window| arrival = arrival.max(window.focus_timestamp()));
+        let attached = self.tiling.attach_subtree_for_swap(subtree, slot);
+        // swap_places leaves the seat stack alone, so a container focused more
+        // recently than this workspace's focus-inactive floater now heads the
+        // workspace's focus (`swap_places`, sway/tree/container.c:1718-1764;
+        // `focus_inactive_children_iterator`, sway/ipc-json.c:786-807).
+        let floater = self
+            .floating
+            .active_window()
+            .and_then(|window| window.focus_timestamp());
+        if self.floating_is_active == FloatingActive::Yes && arrival.is_some() && arrival > floater
+        {
+            self.floating_is_active = FloatingActive::No;
+        }
+        attached
     }
 
     pub fn attach_tiling_subtree_at(

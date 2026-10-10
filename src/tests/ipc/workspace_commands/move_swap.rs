@@ -2342,3 +2342,101 @@ fn swapping_a_focused_tab_with_a_floater_shows_the_arrived_view() {
     assert_eq!(floater["app_id"], "two", "{workspace:#}");
     assert_eq!(floater["focused"], true, "{workspace:#}");
 }
+
+/// Random-v3 seed 32655 (family diff-fam-f3-focus-order-residual-1): a tiled
+/// view swaps with the focus-inactive tiled view of another workspace whose
+/// floater was focused before it. `swap_places` leaves the seat stack alone,
+/// so the arrival, focused more recently, heads that workspace's focus ahead
+/// of the floater (sway/tree/container.c:1718-1798, sway/ipc-json.c:786-807).
+#[test]
+fn a_view_swapped_onto_another_workspace_heads_its_focus_over_an_older_floater() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let one = open_swap_view(&mut f, client, "one");
+    let two = open_swap_view(&mut f, client, "two");
+    run_swap_commands(
+        &mut f,
+        &[
+            r#"[app_id="one"] floating enable"#,
+            "[workspace=__focused__] move container to workspace 2",
+        ],
+    );
+    let three = open_swap_view(&mut f, client, "three");
+    run_swap_commands(&mut f, &[&format!("swap container with con_id {two}")]);
+
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspaces = &tree["nodes"][1]["nodes"];
+    assert_eq!(workspaces[0]["focus"], serde_json::json!([two]), "{tree:#}");
+    assert_eq!(workspaces[1]["name"], "2", "{tree:#}");
+    assert_eq!(
+        workspaces[1]["focus"],
+        serde_json::json!([three, one]),
+        "{:#}",
+        workspaces[1]
+    );
+}
+
+/// Random-v3 seed 32069 (family diff-fam-f3-focus-order-residual-1): the
+/// focused dialog swaps with its tabbed parent. `swap_focus` refocuses the
+/// dialog, which already has focus, so `seat_set_focus` returns early and
+/// the `layout tabbed` wrapper it arrives in, never raised, stays at the tail
+/// of the stack behind the floated parent (sway/tree/container.c:1786-1788,
+/// sway/input/seat.c:1131-1134).
+#[test]
+fn a_focused_dialog_swapped_into_a_fresh_tabbed_wrapper_leaves_it_unraised() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    let parent_surface = parent.surface.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let parent_id = crate::ipc::tree::window_id(f.swayward().layout.focus().unwrap().id());
+    let dialog = f.client(client).create_window();
+    dialog.xdg_toplevel.set_app_id("dialog".into());
+    dialog.set_parent(Some(&parent_toplevel));
+    let dialog_surface = dialog.surface.clone();
+    dialog.commit();
+    f.roundtrip(client);
+    let dialog = f.client(client).window(&dialog_surface);
+    dialog.attach_new_buffer();
+    dialog.ack_last_and_commit();
+    f.double_roundtrip(client);
+    open_swap_view(&mut f, client, "two");
+    run_swap_commands(
+        &mut f,
+        &[
+            "layout tabbed",
+            "focus floating",
+            &format!("swap container with con_id {parent_id}"),
+        ],
+    );
+
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let tabbed = &workspace["nodes"][0];
+    let floater = &workspace["floating_nodes"][0];
+    assert_eq!(floater["app_id"], "parent", "{workspace:#}");
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([floater["id"], tabbed["id"]]),
+        "{workspace:#}"
+    );
+    let tabs = &tabbed["nodes"];
+    assert_eq!(tabs[0]["app_id"], "dialog", "{workspace:#}");
+    assert_eq!(tabs[0]["focused"], true, "{workspace:#}");
+    assert_eq!(
+        tabbed["focus"],
+        serde_json::json!([tabs[0]["id"], tabs[1]["id"]]),
+        "{workspace:#}"
+    );
+}
