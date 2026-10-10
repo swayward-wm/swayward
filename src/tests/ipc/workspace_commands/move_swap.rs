@@ -2250,3 +2250,56 @@ fn moving_a_focused_workspace_leaves_its_floating_containers_behind() {
         "{outcome:?}"
     );
 }
+
+// differential family diff-fam-swap-floated-view-focus-order (random-v2 seed
+// 11697): exec 1, exec 2, for_window [app_id=3] floating enable, mark 2,
+// splitt, exec 3, swap container with mark. The seat stack before the swap
+// is [3, workspace, 2, split, 1]: `splitt` (split toggle) raised the new split and 2 over
+// 1, and focusing the floated 3 raised only the workspace and 3. 3 had focus,
+// so `swap_places` moves it into the split and floats 2 without touching the
+// stack, and `swap_focus` refocuses 3, which returns early
+// (sway/tree/container.c:1718-1798; sway/input/seat.c:1131-1134). The
+// workspace focus list follows that stack: [2 floated, split, 1]
+// (sway/ipc-json.c:786-807).
+#[test]
+fn swapping_a_focused_floater_into_a_split_keeps_the_floated_view_ahead_of_older_views() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for step in [
+        "map one",
+        "map two",
+        r#"for_window [app_id="three"] floating enable"#,
+        "mark --add m",
+        "splitt",
+        "map three",
+        "swap container with mark m",
+    ] {
+        if let Some(app_id) = step.strip_prefix("map ") {
+            crate::tests::windows::map_window(
+                &mut f,
+                client,
+                crate::tests::windows::WindowSpec {
+                    app_id: Some(app_id),
+                    ..Default::default()
+                },
+            );
+        } else {
+            let outcome = crate::command::execute(f.niri_state(), step);
+            assert!(outcome[0].success, "{step}: {outcome:?}");
+            f.double_roundtrip(client);
+        }
+    }
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let tiled = workspace["nodes"].as_array().unwrap();
+    let floating = workspace["floating_nodes"].as_array().unwrap();
+    assert_eq!(tiled[0]["app_id"], "one");
+    assert_eq!(tiled[1]["nodes"][0]["app_id"], "three");
+    assert_eq!(floating[0]["app_id"], "two");
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([floating[0]["id"], tiled[1]["id"], tiled[0]["id"]]),
+        "{workspace:#}"
+    );
+}

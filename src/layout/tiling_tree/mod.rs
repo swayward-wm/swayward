@@ -503,6 +503,7 @@ macro_rules! side_tables {
             ("ipc_stale_nodes", $($ref)+ $tree.ipc_stale_nodes),
             ("last_entered_by", $($ref)+ $tree.last_entered_by),
             ("entered_by_departed", $($ref)+ $tree.entered_by_departed),
+            ("capped_entry_stamps", $($ref)+ $tree.capped_entry_stamps),
             ("pending_modes", $($ref)+ $tree.pending_modes),
             ("mapped_under_fullscreen", $($ref)+ $tree.mapped_under_fullscreen),
             ("moved_under_fullscreen", $($ref)+ $tree.moved_under_fullscreen),
@@ -538,6 +539,11 @@ pub struct TilingTree<W: LayoutElement> {
     /// focused view raises its old parent (`container_set_floating`,
     /// sway/tree/container.c:969-973), so the container ranks as recent as that view.
     entered_by_departed: HashMap<NodeId, std::time::Duration>,
+    /// The seat-stack time of each container a view swapped into without raising it: the
+    /// arrival's older focus does not raise the container (`swap_places` leaves the stack
+    /// alone, sway/tree/container.c:1718-1764), so it ranks where it was until focus next
+    /// enters it. Each entry holds the capped time and the arrival's focus time.
+    capped_entry_stamps: HashMap<NodeId, (std::time::Duration, std::time::Duration)>,
     has_had_tile: bool,
     empty_representation_layout: Option<Layout>,
     focus_history: Vec<NodeId>,

@@ -19,6 +19,65 @@ impl<W: LayoutElement> TilingTree<W> {
             .map(|(node, stamp)| (*node, *stamp))
     }
 
+    /// Each container whose seat-stack time a swap capped below an arrival's focus time, while
+    /// no view inside it has been focused since.
+    pub fn capped_entry_stamps(&self) -> impl Iterator<Item = (NodeId, std::time::Duration)> + '_ {
+        self.capped_entry_stamps
+            .iter()
+            .filter(|(node, (_, arrival))| {
+                self.leaf_ids_in(**node).into_iter().all(|leaf| {
+                    self.tile(leaf)
+                        .and_then(|tile| tile.window().focus_timestamp())
+                        .is_none_or(|stamp| stamp <= *arrival)
+                })
+            })
+            .map(|(node, (stamp, _))| (*node, *stamp))
+    }
+
+    /// Each split above `node` with the newest focus time of a view inside it: the time
+    /// sway last raised the split, since focusing a view raises its ancestors
+    /// (`seat_set_workspace_focus`, sway/input/seat.c:1178-1190).
+    pub(crate) fn ancestor_entry_stamps(&self, node: NodeId) -> Vec<(NodeId, std::time::Duration)> {
+        let mut stamps = Vec::new();
+        let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
+        while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            let newest = self
+                .leaf_ids_in(ancestor)
+                .into_iter()
+                .filter_map(|leaf| self.tile(leaf)?.window().focus_timestamp())
+                .max();
+            if let Some(stamp) = newest {
+                stamps.push((ancestor, stamp));
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        stamps
+    }
+
+    /// Keeps each split in `stamps` at its own seat-stack time after `window` swapped into
+    /// it without raising it. A split was raised just before the view inside it that was
+    /// focused then (parents first, sway/input/seat.c:1178-1190), so it ranks just below
+    /// that view.
+    pub(crate) fn cap_entry_stamps_for_arrival(
+        &mut self,
+        window: &W::Id,
+        stamps: Vec<(NodeId, std::time::Duration)>,
+    ) {
+        let Some(arrival) = self
+            .node_for_window(window)
+            .and_then(|leaf| self.tile(leaf))
+            .and_then(|tile| tile.window().focus_timestamp())
+        else {
+            return;
+        };
+        for (ancestor, stamp) in stamps {
+            if arrival > stamp && self.nodes.contains_key(&ancestor) {
+                let capped = stamp.saturating_sub(std::time::Duration::from_nanos(1));
+                self.capped_entry_stamps.insert(ancestor, (capped, arrival));
+            }
+        }
+    }
+
     /// Focus the container `parent` that a departing view focused at `stamp` raised.
     pub fn set_focus_raised_by_departed(
         &mut self,
@@ -893,6 +952,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.focus_history
                 .retain(|candidate| *candidate != id && !ancestors.contains(candidate));
             for ancestor in ancestors {
+                self.capped_entry_stamps.remove(&ancestor);
                 self.focus_history.insert(0, ancestor);
                 if self.tile(id).is_some() {
                     self.last_entered_by.insert(ancestor, id);

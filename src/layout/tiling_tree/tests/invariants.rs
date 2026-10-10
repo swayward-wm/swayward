@@ -49,6 +49,15 @@ fn seed_side_table(t: &mut TilingTree<TestWindow>, name: &str, id: NodeId) {
         "last_entered_by" => {
             t.last_entered_by.insert(id, id);
         }
+        "capped_entry_stamps" => {
+            t.capped_entry_stamps.insert(
+                id,
+                (
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(2),
+                ),
+            );
+        }
         "entered_by_departed" => {
             t.entered_by_departed
                 .insert(id, std::time::Duration::from_secs(1));

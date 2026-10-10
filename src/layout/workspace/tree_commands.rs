@@ -254,6 +254,7 @@ impl<W: LayoutElement> Workspace<W> {
                 .tiling
                 .focus()
                 .is_some_and(|focus| self.tiling.contains_node(node, focus));
+        let entry_stamps = self.tiling.ancestor_entry_stamps(node);
         let (mut subtree, slot) = self.detach_tiling_subtree_for_swap(node)?;
         let RemovedTile { mut tile, .. } = self.floating.remove_tile(window, Transaction::new());
         let (floating_pos, floating_size) = (tile.floating_pos, tile.floating_window_size);
@@ -294,6 +295,11 @@ impl<W: LayoutElement> Workspace<W> {
             self.tiling.focus_inactive_view_keeping_history();
             self.floating_is_active = FloatingActive::Yes;
         }
+        // The arrival does not raise the splits above its new slot: swap_places leaves the
+        // seat stack alone, and `swap_focus` refocusing the focused floater returns early
+        // (sway/tree/container.c:1718-1798, sway/input/seat.c:1131-1134).
+        self.tiling
+            .cap_entry_stamps_for_arrival(window, entry_stamps);
         Some(floated)
     }
 

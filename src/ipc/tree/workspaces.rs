@@ -511,10 +511,20 @@ fn order_by_recency(
             ))
         })
         .collect::<std::collections::HashMap<_, _>>();
+    // A split a view swapped into without raising it keeps its own place on the stack, below
+    // that view's newer focus (`swap_places`, sway/tree/container.c:1718-1764).
+    let capped = workspace
+        .tiling()
+        .capped_entry_stamps()
+        .map(|(node, stamp)| (container_id(node), stamp))
+        .collect::<std::collections::HashMap<_, _>>();
     let effective = tiled_ids
         .iter()
         .chain(floating_nodes.iter().map(|node| &node.id))
         .map(|id| {
+            if let Some(stamp) = capped.get(id) {
+                return (*id, Some(*stamp));
+            }
             let entered = last_entered.get(id).max(departed.get(id)).copied();
             (*id, timestamp_of(id).max(entered))
         })
