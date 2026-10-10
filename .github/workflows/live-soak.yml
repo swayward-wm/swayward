@@ -83,7 +83,7 @@ jobs:
           exit "$status"
       - name: Upload failure logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: live-ipc-soak-${{ matrix.outputs }}-outputs-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/swayward-runtime-${{ matrix.outputs }}/*.log
