@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// A container's standing relative to the hidden scratchpad. Sway marks only
+/// the toplevel container it hides as a scratchpad container
+/// (sway/tree/root.c:98-123), so the descendants of a hidden group are not
+/// themselves hidden (`container_is_scratchpad_hidden`,
+/// sway/tree/container.c:1696-1698).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScratchpadPlace {
+    /// A hidden scratchpad container: a hidden view or a hidden group's root.
+    Hidden,
+    /// A split or view below the root of a hidden scratchpad group.
+    InHiddenGroup,
+    /// Not in the hidden scratchpad.
+    NotHidden,
+}
+
 impl<W: LayoutElement> Layout<W> {
     pub fn move_to_scratchpad(&mut self, window: Option<&W::Id>) {
         let window = window
@@ -109,9 +124,16 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn show_scratchpad(&mut self, window: Option<&W::Id>) -> Option<W::Id> {
-        let focused = self.focus().map(|window| window.id().clone());
+        // Focus inside a floating split acts on the split
+        // (sway/commands/scratchpad.c:21-27), so a split holding a
+        // scratchpad view is the focused scratchpad container.
+        let focused = self
+            .focus()
+            .map(|window| window.id().clone())
+            .and_then(|id| self.scratchpad_representative(&id));
         let shown = focused
-            .filter(|id| self.scratchpad_windows.contains(id) && !self.is_scratchpad_hidden(id))
+            .clone()
+            .filter(|id| !self.is_scratchpad_hidden(id))
             .or_else(|| {
                 self.scratchpad_windows
                     .iter()
@@ -161,7 +183,7 @@ impl<W: LayoutElement> Layout<W> {
                     .position(|removed| removed.tile.window().id() == window);
             }
         } else if let Some(shown) = shown {
-            if self.focus().is_some_and(|focused| focused.id() == &shown) {
+            if focused.as_ref() == Some(&shown) {
                 self.move_to_scratchpad(Some(&shown));
                 return None;
             }
@@ -193,6 +215,23 @@ impl<W: LayoutElement> Layout<W> {
         self.scratchpad.get(index)?;
         let active_workspace = self.prepare_active_workspace_for_scratchpad_show()?;
         self.show_scratchpad_tile(index, active_workspace)
+    }
+
+    /// The scratchpad window standing for the container that holds `window`:
+    /// `window` itself, or the scratchpad view of the floating split it is
+    /// in. Nothing when neither is a scratchpad container.
+    fn scratchpad_representative(&self, window: &W::Id) -> Option<W::Id> {
+        if self.scratchpad_windows.contains(window) {
+            return Some(window.clone());
+        }
+        self.workspaces().find_map(|(_, _, workspace)| {
+            let floating = workspace.floating();
+            let tree = floating.tree(floating.tree_root_for_window(window)?)?;
+            tree.windows()
+                .map(|(_, view)| view.id())
+                .find(|id| self.scratchpad_windows.contains(id))
+                .cloned()
+        })
     }
 
     /// Hides a visible scratchpad window on the way to showing it elsewhere.
@@ -255,6 +294,26 @@ impl<W: LayoutElement> Layout<W> {
             },
         );
         Some(shown)
+    }
+
+    /// Gives a view that a map-time rule hid in the scratchpad its committed
+    /// size. Sway runs the criteria inside `view_map`, then the map commit's
+    /// `handle_commit` finds the geometry new and resizes the floating view to
+    /// it, keeping the content origin (sway/desktop/xdg_shell.c:319-326,
+    /// `view_update_size`, sway/tree/view.c:1026-1031). The tile's stored
+    /// position is its decorated origin, which the unchanged decorations keep.
+    pub fn keep_committed_size_of_mapped_scratchpad_window(&mut self, window: &W::Id) {
+        let Some(removed) = self
+            .scratchpad
+            .iter_mut()
+            .find(|removed| removed.tile.window().id() == window)
+        else {
+            return;
+        };
+        let size = removed.tile.window().size();
+        if size.w > 0 && size.h > 0 {
+            removed.tile.floating_window_size = Some(size);
+        }
     }
 
     pub fn scratchpad_tiles(&self) -> impl Iterator<Item = (&W, bool)> {
@@ -352,15 +411,110 @@ impl<W: LayoutElement> Layout<W> {
                 .any(|removed| removed.contains_window(window))
     }
 
+    /// Where view `window` stands relative to the hidden scratchpad, read
+    /// from the live tree.
+    pub fn window_scratchpad_place(&self, window: &W::Id) -> ScratchpadPlace {
+        if self
+            .scratchpad
+            .iter()
+            .any(|removed| removed.tile.window().id() == window)
+        {
+            return ScratchpadPlace::Hidden;
+        }
+        for removed in &self.scratchpad_trees {
+            if !removed.contains_window(window) {
+                continue;
+            }
+            let tree = removed.ipc_tree();
+            let root_is_window = matches!(
+                tree.nodes().first(),
+                Some((node, tiling_tree::IpcNodeKind::Leaf))
+                    if tree.window_for_node(*node) == Some(window)
+            );
+            return if root_is_window {
+                ScratchpadPlace::Hidden
+            } else {
+                ScratchpadPlace::InHiddenGroup
+            };
+        }
+        ScratchpadPlace::NotHidden
+    }
+
+    /// Where container `node` stands relative to the hidden scratchpad, read
+    /// from the live tree.
+    pub fn container_scratchpad_place(&self, node: NodeId) -> ScratchpadPlace {
+        for removed in &self.scratchpad_trees {
+            let nodes = removed.ipc_tree().nodes();
+            match nodes.iter().position(|(id, _)| *id == node) {
+                Some(0) => return ScratchpadPlace::Hidden,
+                Some(_) => return ScratchpadPlace::InHiddenGroup,
+                None => {}
+            }
+        }
+        ScratchpadPlace::NotHidden
+    }
+
+    /// The other views in the floating split that holds scratchpad view
+    /// `window`, or nothing when `window` is not a scratchpad view in a split.
+    pub(super) fn scratchpad_split_siblings(&self, window: &W::Id) -> Vec<W::Id> {
+        if !self.scratchpad_windows.contains(window) {
+            return Vec::new();
+        }
+        self.workspaces()
+            .find_map(|(_, _, workspace)| {
+                let floating = workspace.floating();
+                let tree = floating.tree(floating.tree_root_for_window(window)?)?;
+                Some(
+                    tree.windows()
+                        .map(|(_, view)| view.id().clone())
+                        .filter(|id| id != window)
+                        .collect(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// A view leaving a shown scratchpad split for a tiled slot is no
+    /// scratchpad container. The split stays one while it keeps children;
+    /// only a split the move empties is reaped and destroyed, which drops it
+    /// from the scratchpad (`container_reap_empty`, `container_begin_destroy`,
+    /// sway/tree/container.c:495-497, 508-524). `siblings` are the split's
+    /// other views before the move: the first still floating takes over the
+    /// split's place in the scratchpad order.
+    pub(super) fn leave_scratchpad_split(&mut self, window: &W::Id, siblings: &[W::Id]) {
+        let tiled = self
+            .workspaces()
+            .any(|(_, _, ws)| ws.has_window(window) && !ws.is_floating_for_ipc(window));
+        if !tiled {
+            return;
+        }
+        let heir = siblings.iter().find(|sibling| {
+            self.workspaces()
+                .any(|(_, _, ws)| ws.floating_tree_root_for_window(sibling).is_some())
+        });
+        match heir {
+            Some(heir) if !self.scratchpad_windows.contains(heir) => {
+                for id in &mut self.scratchpad_windows {
+                    if id == window {
+                        *id = heir.clone();
+                    }
+                }
+            }
+            _ => self.scratchpad_windows.retain(|id| id != window),
+        }
+    }
+
     /// Returning a container to tiling removes it from the scratchpad
-    /// (sway/tree/container.c:990-994).
+    /// (sway/tree/container.c:990-994). A view inside a floating split is
+    /// still floating: `floating enable` on it is a no-op on the split
+    /// (sway/commands/floating.c:40-51), which keeps its scratchpad place.
     pub(super) fn forget_scratchpad_window_if_tiled(&mut self, window: &W::Id) {
         if !self.scratchpad_windows.contains(window) {
             return;
         }
         let tiled = self
             .workspaces()
-            .any(|(_, _, ws)| ws.has_window(window) && !ws.is_floating(window));
+            .any(|(_, _, ws)| ws.has_window(window) && !ws.is_floating_for_ipc(window));
         if tiled {
             self.scratchpad_windows.retain(|id| id != window);
         }

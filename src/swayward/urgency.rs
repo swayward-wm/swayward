@@ -1,7 +1,29 @@
 use super::*;
 
 impl Swayward {
-    pub(super) fn focus_clears_urgency(&mut self, surface: &WlSurface, changed_workspace: bool) {
+    /// Keyboard focus moved onto `surface`. Sway clears a view's urgency, or
+    /// starts its timer, only when seat focus lands on the view
+    /// (`seat_set_workspace_focus`, sway/sway/input/seat.c:1223-1240). The
+    /// timer runs when the view's output showed another workspace before the
+    /// change (`last_workspace`, seat.c:1158-1161), whatever the keyboard
+    /// focused before.
+    pub(super) fn focus_clears_urgency(&mut self, surface: &WlSurface) {
+        // swayward keeps the keyboard on a view while a split or the
+        // workspace holds seat focus; sway focuses no view then.
+        if !self.seat_focus_is_on_view() {
+            return;
+        }
+        let Some((mapped, _)) = self.layout.find_window_and_output(surface) else {
+            return;
+        };
+        let window = mapped.window.clone();
+        let changed_workspace = self
+            .layout
+            .window_workspace_id(&window)
+            .is_some_and(|workspace| {
+                !self.urgency_active_workspaces.is_empty()
+                    && !self.urgency_active_workspaces.contains(&workspace)
+            });
         let Some((mapped, _)) = self.layout.find_window_and_output_mut(surface) else {
             return;
         };
@@ -28,6 +50,29 @@ impl Swayward {
             )
             .unwrap();
         self.urgency_timers.insert(id, token);
+    }
+
+    /// Whether sway's seat focus would be on a view rather than on a split or
+    /// the workspace itself.
+    fn seat_focus_is_on_view(&self) -> bool {
+        let Some(workspace) = self.layout.active_workspace() else {
+            return true;
+        };
+        !workspace.is_workspace_focused()
+            && !workspace
+                .focused_container_node()
+                .is_some_and(|node| workspace.is_tiling_split(node))
+    }
+
+    /// Records each output's active workspace, the `last_workspace` of the
+    /// next seat focus change (sway/sway/input/seat.c:1158-1161).
+    pub(super) fn record_urgency_active_workspaces(&mut self) {
+        self.urgency_active_workspaces.clear();
+        self.urgency_active_workspaces.extend(
+            self.layout
+                .monitors()
+                .map(|monitor| monitor.active_workspace_ref().id()),
+        );
     }
 
     /// Seat focus reached a view that already held keyboard focus, as after

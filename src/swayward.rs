@@ -422,6 +422,9 @@ pub struct Swayward {
     pub bind_cooldown_timers: HashMap<swayward_config::BindIdentity, RegistrationToken>,
     pub bind_repeat_timer: Option<RegistrationToken>,
     pub keyboard_focus: KeyboardFocus,
+    /// The keyboard focus surface took focus while its workspace itself held the seat focus,
+    /// so its view has not been raised on the seat stack yet.
+    pub keyboard_focus_unraised: bool,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
     pub is_fdo_idle_inhibited: Arc<AtomicBool>,
@@ -489,6 +492,8 @@ pub struct Swayward {
     pub window_mru_ui: WindowMruUi,
     pub pending_mru_commit: Option<PendingMruCommit>,
     pub urgency_timers: HashMap<MappedId, RegistrationToken>,
+    /// Each output's active workspace at the last keyboard focus update.
+    pub urgency_active_workspaces: HashSet<WorkspaceId>,
 
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
     pub pick_color: Option<async_channel::Sender<Option<swayward_ipc::PickedColor>>>,
@@ -1408,7 +1413,9 @@ impl Swayward {
 
             window_mru_ui,
             pending_mru_commit: None,
+            keyboard_focus_unraised: false,
             urgency_timers: HashMap::new(),
+            urgency_active_workspaces: HashSet::new(),
 
             pick_window: None,
             pick_color: None,

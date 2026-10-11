@@ -37,6 +37,7 @@ use workspace::{WorkspaceAddWindowTarget, WorkspaceId};
 
 use self::monitor::Monitor;
 pub use self::monitor::MonitorRenderElement;
+pub use self::scratchpad::ScratchpadPlace;
 use self::workspace::Workspace;
 use self::workspace_naming::{
     initial_workspace_names, sway_identity_from_name, sway_workspace_identity, sway_workspace_num,
@@ -436,6 +437,11 @@ pub struct Layout<W: LayoutElement> {
     /// Sway's `seat->prev_workspace_name`: the workspace the seat focused before
     /// `seat_workspace`, on any output.
     previous_seat_workspace: Option<(WorkspaceId, Option<String>)>,
+    /// The active workspace when the seat was last synced. A command that moves the
+    /// focused view to another workspace without a seat focus change leaves the seat
+    /// behind (`cmd_move_in_direction`, sway/commands/move.c:672-745), so only a
+    /// change of the active workspace after this observation reaches the seat.
+    observed_active_workspace: Option<WorkspaceId>,
 }
 
 #[derive(Debug)]
@@ -467,6 +473,10 @@ pub struct Options {
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
     pub deactivate_unfocused_windows: bool,
+    /// Sway's `popup_during_fullscreen`; `smart` lets a view transient for the
+    /// fullscreen view take focus without leaving fullscreen
+    /// (`container_is_transient_for`, sway/tree/container.c:1566-1571).
+    pub popup_during_fullscreen: swayward_config::misc::PopupDuringFullscreen,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -748,6 +758,7 @@ impl Options {
             disable_resize_throttling: config.debug.disable_resize_throttling,
             disable_transactions: config.debug.disable_transactions,
             deactivate_unfocused_windows: config.debug.deactivate_unfocused_windows,
+            popup_during_fullscreen: config.popup_during_fullscreen,
         }
     }
 
@@ -824,6 +835,7 @@ impl<W: LayoutElement> Layout<W> {
             workspace_configs: Vec::new(),
             seat_workspace: None,
             previous_seat_workspace: None,
+            observed_active_workspace: None,
         }
     }
 
@@ -866,6 +878,7 @@ impl<W: LayoutElement> Layout<W> {
             workspace_configs: config.workspaces.clone(),
             seat_workspace: None,
             previous_seat_workspace: None,
+            observed_active_workspace: None,
         }
     }
 
@@ -1031,6 +1044,7 @@ impl<W: LayoutElement> Layout<W> {
                         .iter()
                         .map(|monitor| monitor.output.clone())
                         .collect::<Vec<_>>();
+                    let mut sticky_refocused = false;
                     for mut workspace in workspaces {
                         let target = workspace
                             .highest_available_output(&enabled)
@@ -1038,6 +1052,15 @@ impl<W: LayoutElement> Layout<W> {
                             .unwrap_or(0);
                         let monitor = &mut monitors[target];
                         if !workspace.has_non_sticky_windows() {
+                            // The seat focus stack still leads with a focused sticky
+                            // floater once evacuate_sticky moved it, so destroying the
+                            // workspace refocuses it on the new workspace
+                            // (sway/sway/tree/output.c:188-203, input/seat.c:242-256).
+                            let focused_sticky = (removed_was_active
+                                && workspace.id() == removed_active_workspace)
+                                .then(|| workspace.active_window().map(|w| w.id().clone()))
+                                .flatten()
+                                .filter(|id| workspace.is_window_sticky(id));
                             let target_workspace = monitor.active_workspace();
                             for removed in workspace.take_sticky_trees() {
                                 target_workspace.add_floating_tree(removed, true);
@@ -1056,6 +1079,12 @@ impl<W: LayoutElement> Layout<W> {
                                     },
                                 );
                             }
+                            if let Some(id) = focused_sticky {
+                                sticky_refocused = true;
+                                if target_workspace.activate_window(&id) {
+                                    active_monitor_idx = target;
+                                }
+                            }
                             continue;
                         }
                         workspace.add_output_priority(&monitor.output);
@@ -1063,16 +1092,60 @@ impl<W: LayoutElement> Layout<W> {
                         let end = monitor.workspaces.len();
                         monitor.attach_workspace(workspace, end, false);
                         monitor.sort_sway_workspaces();
-                        if removed_was_active && id == removed_active_workspace {
-                            // The seat focus stays inside the moved workspace,
-                            // which makes it the target's active workspace.
-                            if let Some(idx) = monitor.idx_of_ws(id) {
-                                monitor.activate_workspace(idx);
-                                monitor.workspace_switch = None;
+                        // An output's active workspace is its child highest in the seat
+                        // focus stack (output_get_active_workspace,
+                        // sway/sway/desktop/output.c:76-86), so a moved workspace focused
+                        // more recently than the target's active one replaces it. The
+                        // removed output's active workspace keeps the seat focus.
+                        let removed_active = removed_was_active && id == removed_active_workspace;
+                        let recent = monitor.idx_of_ws(id).filter(|&idx| {
+                            removed_active
+                                || monitor.workspaces[idx].focus_seq()
+                                    > monitor.active_workspace_ref().focus_seq()
+                        });
+                        if let Some(idx) = recent {
+                            let seq = monitor.workspaces[idx].focus_seq();
+                            monitor.activate_evacuated_workspace(idx);
+                            if !removed_active {
+                                // Evacuation does not focus it: later evacuees compare
+                                // against its old rank.
+                                monitor.workspaces[idx].set_focus_seq(seq);
                             }
+                        }
+                        if removed_active {
                             active_monitor_idx = target;
                         }
                         monitor.reap_empty_workspaces();
+                    }
+
+                    // An empty active workspace on the removed output is destroyed, and the
+                    // seat refocuses the head of its focus stack, which can be a workspace
+                    // evacuated to any surviving output (sway/sway/input/seat.c:242-256).
+                    let active_survived = monitors
+                        .iter()
+                        .any(|monitor| monitor.has_ws(removed_active_workspace));
+                    if removed_was_active && !active_survived && !sticky_refocused {
+                        let head = monitors
+                            .iter()
+                            .enumerate()
+                            .flat_map(|(mon_idx, monitor)| {
+                                let active = monitor.active_workspace_ref().id();
+                                monitor.workspaces.iter().enumerate().filter_map(
+                                    move |(ws_idx, workspace)| {
+                                        (workspace.must_be_kept() || workspace.id() == active)
+                                            .then_some((workspace.focus_seq(), mon_idx, ws_idx))
+                                    },
+                                )
+                            })
+                            .max();
+                        if let Some((_, mon_idx, ws_idx)) = head {
+                            let monitor = &mut monitors[mon_idx];
+                            if monitor.active_workspace_idx != ws_idx {
+                                monitor.activate_evacuated_workspace(ws_idx);
+                                monitor.reap_empty_workspaces();
+                            }
+                            active_monitor_idx = mon_idx;
+                        }
                     }
 
                     MonitorSet::Normal {
@@ -1321,7 +1394,7 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         window: &W::Id,
         transaction: Transaction,
-        transfer: bool,
+        scratchpad: bool,
     ) -> Option<(RemovedTile<W>, Option<WorkspaceId>)> {
         if let Some(index) = self
             .scratchpad
@@ -1390,8 +1463,12 @@ impl<W: LayoutElement> Layout<W> {
                         .find(|workspace| workspace.has_window(window))
                     {
                         let source_workspace = ws.id();
-                        let removed = if transfer {
-                            ws.remove_tile_for_transfer(window, transaction)
+                        if !scratchpad && self.scratchpad_windows.contains(window) {
+                            ws.tiling_mut()
+                                .release_global_fullscreen_before_close(window);
+                        }
+                        let removed = if scratchpad {
+                            ws.remove_tile_for_scratchpad(window, transaction)
                         } else {
                             ws.remove_tile(window, transaction)
                         };
@@ -1450,16 +1527,6 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
         monitor.reap_empty_workspaces();
-    }
-
-    pub fn descendants_added(&mut self, id: &W::Id) -> bool {
-        for ws in self.workspaces_mut() {
-            if ws.descendants_added(id) {
-                return true;
-            }
-        }
-
-        false
     }
 
     pub fn update_window(&mut self, window: &W::Id, serial: Option<Serial>) {
@@ -1803,10 +1870,61 @@ impl<W: LayoutElement> Layout<W> {
         ws_idx == mon.active_workspace_idx
     }
 
+    /// `container_is_transient_for` against the workspace's fullscreen view: only
+    /// under `popup_during_fullscreen smart`, and only when the fullscreen
+    /// container is a view, not a split (sway/tree/container.c:1566-1571). The
+    /// toplevel parent chain is walked as in sway/desktop/xdg_shell.c:237-250.
+    fn is_transient_for_fullscreen(&self, workspace: &Workspace<W>, window: &W::Id) -> bool {
+        if self.options.popup_during_fullscreen
+            != swayward_config::misc::PopupDuringFullscreen::Smart
+        {
+            return false;
+        }
+        // The view holds the mode itself, so the fullscreen container is that view.
+        let Some(fullscreen) = workspace.fullscreen_window().filter(|fullscreen| {
+            workspace
+                .tiling()
+                .node_for_window(fullscreen)
+                .and_then(|node| workspace.tiling().fullscreen_mode(node))
+                .or_else(|| workspace.floating().window_own_fullscreen_mode(fullscreen))
+                .is_some()
+        }) else {
+            return false;
+        };
+        let find = |id: &W::Id| {
+            self.windows()
+                .map(|(_, win)| win)
+                .find(|win| win.id() == id)
+        };
+        let Some(mut current) = find(window) else {
+            return false;
+        };
+        // A parent chain longer than the window count has a cycle.
+        for _ in 0..self.windows().count() {
+            let Some(parent) = self
+                .windows()
+                .map(|(_, win)| win)
+                .find(|candidate| current.is_child_of(candidate))
+            else {
+                return false;
+            };
+            if parent.id() == fullscreen {
+                return true;
+            }
+            current = parent;
+        }
+        false
+    }
+
     pub fn activate_window(&mut self, window: &W::Id) {
+        // A global fullscreen view sway no longer tracks as
+        // `root->fullscreen_global` obstructs nothing
+        // (`container_obstructing_fullscreen_container`,
+        // sway/tree/container.c:570-590).
         let global = self.workspaces().find_map(|(_, _, workspace)| {
-            (workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global))
-                .then(|| workspace.id())
+            (workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global)
+                && !workspace.global_fullscreen_orphaned())
+            .then(|| workspace.id())
         });
         if let Some(workspace_id) = global {
             let target_is_inside = self.workspaces().any(|(_, _, candidate)| {
@@ -1818,21 +1936,25 @@ impl<W: LayoutElement> Layout<W> {
                 }
             }
         }
+        // `container_obstructing_fullscreen_container`: a workspace fullscreen
+        // container, tiled or floating, hides every view outside it except one
+        // transient for it (sway/tree/container.c:570-579).
         let obstructing = self
             .workspaces()
             .find(|(_, _, workspace)| workspace.has_window(window))
-            .and_then(|(_, _, workspace)| {
-                let fullscreen = workspace.tiling().fullscreen_node()?;
-                let target = workspace
-                    .tiling()
-                    .windows()
-                    .find_map(|(id, candidate)| (candidate.id() == window).then_some(id))?;
-                (!workspace.tiling().contains_node(fullscreen, target))
-                    .then_some((workspace.id(), fullscreen))
-            });
-        if let Some((workspace_id, fullscreen)) = obstructing {
+            .filter(|(_, _, workspace)| !workspace.global_fullscreen_orphaned())
+            .filter(|(_, _, workspace)| {
+                workspace.fullscreen_mode().is_some()
+                    && !workspace.fullscreen_contains_window(window)
+                    && !self.is_transient_for_fullscreen(workspace, window)
+            })
+            .map(|(_, _, workspace)| workspace.id());
+        // `container_fullscreen_disable` returns a fullscreen floating view to
+        // the floating layer (sway/commands/focus.c:389-394,
+        // sway/tree/container.c:1246-1258).
+        if let Some(workspace_id) = obstructing {
             if let Some(workspace) = self.workspace_mut(workspace_id) {
-                workspace.tiling_mut().set_node_fullscreen(fullscreen, None);
+                workspace.disable_fullscreen();
             }
         }
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
@@ -2012,6 +2134,13 @@ impl<W: LayoutElement> Layout<W> {
 
         for removed in &mut self.scratchpad {
             f(removed.tile.window_mut(), None);
+        }
+        // A hidden scratchpad split holds views too; `windows()` lists them,
+        // so per-view state such as urgency must reach them as well.
+        for removed in &mut self.scratchpad_trees {
+            for tile in removed.tree.tiles_mut() {
+                f(tile.window_mut(), None);
+            }
         }
 
         match &mut self.monitor_set {
@@ -2309,10 +2438,33 @@ impl<W: LayoutElement> Layout<W> {
         workspace_id: workspace::WorkspaceId,
         id: tiling_tree::NodeId,
     ) -> bool {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return false;
+        // Sway's seat focus takes the node's workspace and output with it
+        // (`seat_set_focus`, sway/input/seat.c:1209-1237), so a criteria focus
+        // on a split elsewhere switches there as a view focus does.
+        let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &mut self.monitor_set
+        else {
+            let Some(workspace) = self.workspace_mut(workspace_id) else {
+                return false;
+            };
+            return workspace.focus_tiling_node(id);
         };
-        workspace.focus_tiling_node(id)
+        for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
+            let Some(workspace_idx) = mon.workspaces.iter().position(|ws| ws.id() == workspace_id)
+            else {
+                continue;
+            };
+            if !mon.workspaces[workspace_idx].focus_tiling_node(id) {
+                return false;
+            }
+            *active_monitor_idx = monitor_idx;
+            mon.switch_workspace(workspace_idx);
+            return true;
+        }
+        false
     }
 
     pub fn set_tiling_node_layout(&mut self, id: tiling_tree::NodeId, layout: tiling_tree::Layout) {
@@ -3499,6 +3651,28 @@ impl<W: LayoutElement> Layout<W> {
         })
     }
 
+    /// See [`workspace::Workspace::adjust_fullscreen_floating_view`]. `None` when `window`
+    /// is not a fullscreen floating view.
+    pub fn adjust_fullscreen_floating_view(
+        &mut self,
+        window: &W::Id,
+        edge: Option<ResizeEdge>,
+        horizontal: bool,
+        amount: i32,
+    ) -> Option<bool> {
+        let automatic_maximum = self.output_layout_size().to_f64();
+        let workspace = self
+            .workspaces_mut()
+            .find(|ws| ws.window_is_fullscreen_floating(window))?;
+        Some(workspace.adjust_fullscreen_floating_view(
+            window,
+            edge,
+            horizontal,
+            amount,
+            automatic_maximum,
+        ))
+    }
+
     /// Sets a floating group root's outer size; see
     /// [`floating_tree::FloatingLayout::set_tree_size`].
     pub fn set_floating_tree_size(
@@ -3940,7 +4114,9 @@ impl<W: LayoutElement> Layout<W> {
             }
 
             let transaction = Transaction::new();
-            let mut removed = ws.remove_tile(&window, transaction);
+            // A cross-output move refocuses like any transfer, not like a close
+            // (sway/commands/move.c:598-608).
+            let mut removed = ws.remove_tile_for_transfer(&window, transaction);
 
             removed.tile.stop_move_animations();
 
@@ -3993,6 +4169,19 @@ impl<W: LayoutElement> Layout<W> {
                 && workspace.active_window().map(|active| active.id()) == Some(window))
             .then(|| workspace.id())
         });
+        let was_focused = self.focus().map(|focus| focus.id()) == Some(window);
+        // The view's box in global coordinates: a move under a fullscreen
+        // container keeps the view's position (sway/commands/move.c:168-174).
+        let source_rect = self.monitors().find_map(|monitor| {
+            monitor.workspaces.iter().find_map(|workspace| {
+                let rect = workspace.tiling().ipc_rect_for_window(window)?;
+                let origin =
+                    monitor.output().current_location().to_f64() + workspace.working_area().loc;
+                Some(Rectangle::new(rect.loc + origin, rect.size))
+            })
+        });
+        let workspace_fullscreen =
+            self.window_own_fullscreen_mode(window) == Some(tiling_tree::FullscreenMode::Workspace);
         self.move_to_output(Some(window), output, None, activate);
         if let Some(source) =
             source.filter(|source| self.window_workspace_id(window) != Some(*source))
@@ -4004,13 +4193,30 @@ impl<W: LayoutElement> Layout<W> {
         // The generic transfer inserts after the destination focus; sway
         // places a directional arrival by edge or by the focus-inactive
         // container (sway/commands/move.c:168-196).
+        let output_origin = output.current_location().to_f64();
         if let Some(workspace) = self
             .workspaces_mut()
             .find(|workspace| workspace.tiling().node_for_window(window).is_some())
         {
+            if workspace_fullscreen {
+                workspace
+                    .tiling_mut()
+                    .place_arrival_at_workspace_end(window);
+                return;
+            }
             workspace
                 .tiling_mut()
                 .place_arrival_from_direction(window, direction);
+            if let Some(rect) = source_rect {
+                let origin = output_origin + workspace.working_area().loc;
+                workspace
+                    .tiling_mut()
+                    .keep_directional_arrival_under_fullscreen(
+                        window,
+                        Rectangle::new(rect.loc - origin, rect.size),
+                        was_focused,
+                    );
+            }
         }
     }
 
@@ -4170,14 +4376,20 @@ impl<W: LayoutElement> Layout<W> {
         if source_was_active {
             // Detaching cancels the workspace animation. Select its settled fallback before
             // reaping so an empty workspace that the interrupted switch left active can go.
+            // Sway shows the output's most recently focused remaining workspace
+            // (`output_get_active_workspace` reads the seat's focus-inactive child,
+            // sway/sway/desktop/output.c:76-86), not its neighbour by index.
+            let monitor = &monitors[current_idx];
             monitors[current_idx].active_workspace_idx = source_replacement
-                .and_then(|id| monitors[current_idx].idx_of_ws(id))
+                .and_then(|id| monitor.idx_of_ws(id))
                 .or_else(|| {
-                    monitors[current_idx]
-                        .workspaces
+                    monitor
+                        .workspace_focus_history
                         .iter()
-                        .rposition(Workspace::must_be_kept)
+                        .filter_map(|id| monitor.idx_of_ws(*id))
+                        .find(|idx| monitor.workspaces[*idx].must_be_kept())
                 })
+                .or_else(|| monitor.workspaces.iter().rposition(Workspace::must_be_kept))
                 .unwrap_or(0);
         }
         monitors[current_idx].reap_empty_workspaces();
@@ -5679,6 +5891,16 @@ impl<W: LayoutElement> Layout<W> {
         let iter_normal = iter_normal.into_iter().flatten();
         let iter_no_outputs = iter_no_outputs.into_iter().flatten();
         iter_normal.chain(iter_no_outputs)
+    }
+
+    /// Pins or unpins every placed view's stored border; see
+    /// [`Tile::pin_sway_csd`].
+    pub fn pin_sway_csd(&mut self, pinned: bool) {
+        for workspace in self.workspaces_mut() {
+            for tile in workspace.tiles_mut() {
+                tile.pin_sway_csd(pinned);
+            }
+        }
     }
 
     pub fn window_center(&self, window: &W::Id) -> Option<Point<i32, Logical>> {

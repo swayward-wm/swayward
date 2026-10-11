@@ -60,6 +60,8 @@ impl<W: LayoutElement> TilingTree<W> {
             focus: None,
             ipc_stale_nodes: HashSet::new(),
             last_entered_by: HashMap::new(),
+            entered_by_departed: HashMap::new(),
+            capped_entry_stamps: HashMap::new(),
             has_had_tile: false,
             empty_representation_layout: None,
             focus_history: Vec::new(),
@@ -78,6 +80,10 @@ impl<W: LayoutElement> TilingTree<W> {
             stale_fullscreen_rects: HashMap::new(),
             unarranged_under_fullscreen: HashMap::new(),
             split_under_fullscreen: HashSet::new(),
+            fullscreen_in_floating: false,
+            unarranged_after_sticky_carry: false,
+            fullscreen_pending_box: None,
+            arrange_epoch: 0,
             interactive_resize: None,
             tab_indicators: HashMap::new(),
             titlebars: Default::default(),
@@ -158,6 +164,154 @@ impl<W: LayoutElement> TilingTree<W> {
         self.has_had_tile = has_had_tile;
     }
 
+    /// What sway left unarranged under this tree's fullscreen container: the views mapped or
+    /// moved under it and the boxes every other node last had. For a fullscreen container
+    /// that leaves the tree for a floating one; pass it to
+    /// [`Self::keep_unarranged_for_floating_fullscreen`] once it has left.
+    pub(in crate::layout) fn hidden_under_fullscreen(&self) -> HiddenUnderFullscreen {
+        let mut boxes = HashMap::new();
+        if let Some(fullscreen) = self.fullscreen_node() {
+            let excluded = self.split_excluded();
+            boxes.extend(
+                self.compute_geometry()
+                    .ipc_nodes
+                    .into_iter()
+                    .filter(|(id, _)| {
+                        *id != self.root
+                            && !excluded.contains(id)
+                            && !self.contains_node(fullscreen, *id)
+                    }),
+            );
+            boxes.extend(self.active_stale_fullscreen_rects());
+        }
+        HiddenUnderFullscreen {
+            mapped: self.mapped_under_fullscreen.clone(),
+            moved: self.moved_under_fullscreen.clone(),
+            boxes,
+        }
+    }
+
+    /// The workspace stays fullscreen while its fullscreen container moves into a floating
+    /// tree, and the arrange that follows reaches only that container
+    /// (sway/tree/arrange.c:310-316), so the tiled nodes keep their boxes until the workspace
+    /// has no fullscreen container left ([`Self::forget_floating_fullscreen`]).
+    pub(in crate::layout) fn keep_unarranged_for_floating_fullscreen(
+        &mut self,
+        hidden: HiddenUnderFullscreen,
+    ) {
+        self.restore_hidden_under_fullscreen(hidden);
+        self.fullscreen_in_floating = true;
+    }
+
+    /// A floating container became the workspace's fullscreen without passing through this
+    /// tree. `arrange_root` then reached only that container (sway/commands/fullscreen.c:55,
+    /// sway/tree/arrange.c:310-316), so every tiled node keeps the box it had until the
+    /// fullscreen ends ([`Self::forget_floating_fullscreen`]).
+    pub(in crate::layout) fn enter_floating_fullscreen(&mut self) {
+        if self.fullscreen_in_floating || self.fullscreen_node().is_some() {
+            return;
+        }
+        let root = self.root;
+        let boxes = self
+            .compute_geometry()
+            .ipc_nodes
+            .into_iter()
+            .filter(|(id, _)| *id != root)
+            .collect();
+        self.restore_hidden_under_fullscreen(HiddenUnderFullscreen {
+            mapped: HashSet::new(),
+            moved: HashMap::new(),
+            boxes,
+        });
+        self.fullscreen_in_floating = true;
+    }
+
+    /// This floating tree's fullscreen container gave the workspace fullscreen to a tiled
+    /// one (`container_set_fullscreen`, sway/tree/container.c:1308-1313). The arrange that
+    /// follows reaches only the new fullscreen container (sway/tree/arrange.c:310-316), so
+    /// every node here keeps the box it had until the workspace fullscreen ends
+    /// ([`Self::forget_floating_fullscreen`]).
+    pub(in crate::layout) fn yield_fullscreen(&mut self) {
+        let Some(fullscreen) = self.fullscreen_node() else {
+            return;
+        };
+        let root = self.root;
+        let boxes = self
+            .compute_geometry()
+            .ipc_nodes
+            .into_iter()
+            .filter(|(id, _)| *id != root)
+            .collect();
+        self.set_node_fullscreen(fullscreen, None);
+        self.restore_hidden_under_fullscreen(HiddenUnderFullscreen {
+            mapped: HashSet::new(),
+            moved: HashMap::new(),
+            boxes,
+        });
+        self.fullscreen_in_floating = true;
+    }
+
+    /// The floating fullscreen container is returning to this tree (`floating disable`). It
+    /// stays fullscreen, and `arrange_workspace` reaches only it
+    /// (sway/commands/floating.c:55, sway/tree/arrange.c:310-316), so the hidden state goes
+    /// back to the tree's own fullscreen: take it here and pass it to
+    /// [`Self::restore_hidden_under_fullscreen`] after the attach.
+    pub(in crate::layout) fn take_floating_fullscreen(&mut self) -> Option<HiddenUnderFullscreen> {
+        if !std::mem::take(&mut self.fullscreen_in_floating) {
+            return None;
+        }
+        Some(HiddenUnderFullscreen {
+            mapped: std::mem::take(&mut self.mapped_under_fullscreen),
+            moved: std::mem::take(&mut self.moved_under_fullscreen),
+            boxes: std::mem::take(&mut self.unarranged_under_fullscreen),
+        })
+    }
+
+    /// The sticky fullscreen floater holding this tree's fullscreen was carried to another
+    /// workspace (see `unarranged_after_sticky_carry`): the tiled nodes keep the boxes in
+    /// `hidden`, taken before it left, and the views mapped or moved under it keep their
+    /// never-arranged boxes.
+    pub(in crate::layout) fn keep_unarranged_after_sticky_carry(
+        &mut self,
+        hidden: HiddenUnderFullscreen,
+    ) {
+        if self.fullscreen_node().is_some() {
+            return;
+        }
+        self.restore_hidden_under_fullscreen(hidden);
+        self.unarranged_after_sticky_carry = true;
+    }
+
+    pub(in crate::layout) fn restore_hidden_under_fullscreen(
+        &mut self,
+        hidden: HiddenUnderFullscreen,
+    ) {
+        let HiddenUnderFullscreen {
+            mut mapped,
+            mut moved,
+            mut boxes,
+        } = hidden;
+        mapped.retain(|id| self.nodes.contains_key(id));
+        moved.retain(|id, _| self.nodes.contains_key(id));
+        boxes.retain(|id, _| self.nodes.contains_key(id));
+        self.mapped_under_fullscreen = mapped;
+        self.moved_under_fullscreen = moved;
+        self.unarranged_under_fullscreen = boxes;
+    }
+
+    /// The floating fullscreen container that took over this tree's fullscreen ended, and
+    /// `cmd_fullscreen` arranged the whole root (sway/commands/fullscreen.c:55), so every
+    /// tiled node has its box, border and percent again.
+    pub(in crate::layout) fn forget_floating_fullscreen(&mut self) {
+        if !std::mem::take(&mut self.fullscreen_in_floating) {
+            return;
+        }
+        self.mapped_under_fullscreen.clear();
+        self.moved_under_fullscreen.clear();
+        self.unarranged_under_fullscreen.clear();
+        self.request_window_sizes();
+    }
+
     pub fn representation_layout(&self) -> Layout {
         let Some(&TreeNode::Split { layout, .. }) =
             self.nodes.get(&self.root).map(|node| &node.value)
@@ -178,7 +332,7 @@ impl<W: LayoutElement> TilingTree<W> {
     /// representation whenever a child is attached or detached or a layout changes below it
     /// (`container_update_representation`, sway/tree/container.c:750-773), so a different
     /// shape means the cached representation was rebuilt.
-    pub(super) fn representation_shape(&self) -> TreeShape {
+    pub(in crate::layout) fn representation_shape(&self) -> TreeShape {
         let mut shape = Vec::new();
         let mut stack = vec![self.root];
         while let Some(id) = stack.pop() {

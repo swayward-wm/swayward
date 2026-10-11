@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs"]
+what = "make `focus_tiling_node` switch the active output and workspace to the split it focuses."
+why = "Sway's `seat_set_focus` on a split moves the seat to the split's workspace and output (sway/input/seat.c:1130-1200), so `[con_mark=...] focus` on a marked split on another workspace switches there as a view focus does. Differential family diff-fam-v3-focus-mark-on-workspace-container, seed 31733."

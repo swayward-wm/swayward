@@ -511,6 +511,7 @@ impl State {
         } else {
             AddWindowTarget::Auto
         };
+        let focus_before_map = self.swayward.layout.pre_map_focus();
         let output = self
             .swayward
             .layout
@@ -586,6 +587,7 @@ impl State {
                 })
                 .unwrap_or_default()
         };
+        let global_fullscreen_before = self.swayward.layout.global_fullscreen_active();
         for command in commands {
             let targeted = format!(
                 "[con_id={}] {command}",
@@ -594,9 +596,40 @@ impl State {
             let _ = crate::command::execute(self, &targeted);
         }
         crate::command::run_for_window(self, mapped_id);
+        if let Some(focus) = focus_before_map {
+            self.swayward
+                .layout
+                .restore_focus_after_map_move(focus, &window);
+        }
+        self.swayward
+            .layout
+            .keep_committed_size_of_mapped_scratchpad_window(&window);
+        // Sway decides focus after running criteria (`view_map`,
+        // sway/tree/view.c:943-945). A rule whose `layout` wrap detached the
+        // global fullscreen view clears `root->fullscreen_global`, so
+        // `should_focus` no longer refuses the new view
+        // (sway/tree/view.c:707-710).
+        if activate == ActivateWindow::Smart
+            && global_fullscreen_before
+            && !self.swayward.layout.global_fullscreen_active()
+            && self.swayward.layout.focus().map(|m| &m.window) != Some(&window)
+            && self
+                .swayward
+                .layout
+                .active_workspace()
+                .is_some_and(|workspace| workspace.has_window(&window))
+        {
+            self.swayward.layout.activate_window(&window);
+        }
         self.swayward
             .layout
             .raise_focus_into_fresh_wrappers(&window);
+        // `view_map` focuses the new view through `seat_set_focus`, whose `set_workspace`
+        // records the workspace the seat leaves, even when a cross-output `move <direction>`
+        // left the seat behind (sway/tree/view.c:943-955, sway/input/seat.c:1098-1113).
+        if self.swayward.layout.focus().map(|m| &m.window) == Some(&window) {
+            self.swayward.layout.sync_seat_workspace();
+        }
     }
 
     fn commit_auxiliary_surface(&mut self, surface: &WlSurface, root_surface: &WlSurface) {

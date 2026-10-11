@@ -15,10 +15,15 @@ impl<W: LayoutElement> Layout<W> {
     /// every focus change: the workspace it leaves becomes `seat->prev_workspace_name`, on
     /// whichever output it is (sway/input/seat.c:1098-1113).
     pub fn sync_seat_workspace(&mut self) {
-        let Some(active) = self.active_workspace() else {
+        let Some(active) = self.active_workspace_mut() else {
             return;
         };
+        // `seat_set_workspace_focus` raw-focuses the workspace, which heads the one seat
+        // focus stack shared by every output (sway/input/seat.c:1185-1187).
+        active.mark_focused();
+        let active = &*active;
         let current = (active.id(), active.sway_name());
+        self.observed_active_workspace = Some(current.0);
         match &mut self.seat_workspace {
             Some(seat) if seat.0 == current.0 => seat.1 = current.1,
             seat => {
@@ -31,18 +36,42 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
-    /// The seat's previous workspace while it still exists, else its last name. A rename
-    /// carries over to the recorded name.
+    /// Syncs the seat only if the active workspace changed since it was last observed, as
+    /// pointer focus and bindings between commands do. A command that left the seat on
+    /// another workspace stays unrecorded until focus actually moves.
+    pub fn sync_seat_workspace_if_moved(&mut self) {
+        let active = self.active_workspace().map(Workspace::id);
+        if active != self.observed_active_workspace {
+            self.sync_seat_workspace();
+        }
+    }
+
+    /// Observes the active workspace without a seat focus change: `move <direction>`
+    /// carries the focused view to another output's workspace, but never calls
+    /// `seat_set_focus`, so `seat->workspace` and `prev_workspace_name` keep their values
+    /// (sway/commands/move.c:277-298, 672-745; sway/input/seat.c:1098-1113).
+    pub fn observe_active_workspace_without_seat_focus(&mut self) {
+        self.observed_active_workspace = self.active_workspace().map(Workspace::id);
+    }
+
+    /// The seat's previous workspace name, with the workspace that now carries it. Sway
+    /// stores `prev_workspace_name` as a string copied when focus leaves a workspace and
+    /// resolves it by name (sway/input/seat.c:1104-1106, sway/tree/workspace.c:526-532),
+    /// so renaming that workspace afterwards does not follow it: `back_and_forth` then
+    /// finds or creates the old name.
     fn previous_seat_workspace(&self) -> Option<(Option<SeatWorkspacePosition>, String)> {
         let (id, name) = self.previous_seat_workspace.as_ref()?;
-        let position = self.workspaces().find_map(|(monitor, index, workspace)| {
-            (workspace.id() == *id)
-                .then(|| (monitor.map(|monitor| monitor.output().clone()), index))
-        });
-        let name = self
-            .workspace(*id)
-            .and_then(Workspace::sway_name)
-            .or_else(|| name.clone())?;
+        let Some(name) = name.clone() else {
+            // A workspace without a sway name is tracked by identity.
+            let position = self.workspaces().find_map(|(monitor, index, workspace)| {
+                (workspace.id() == *id)
+                    .then(|| (monitor.map(|monitor| monitor.output().clone()), index))
+            });
+            let name = self.workspace(*id).and_then(Workspace::sway_name)?;
+            return Some((position, name));
+        };
+        let position =
+            self.find_sway_workspace_position(&crate::command::WorkspaceTarget::Name(name.clone()));
         Some((position, name))
     }
 
@@ -191,6 +220,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn arrange_sway_root(&mut self) {
         for workspace in self.workspaces_mut() {
             workspace.tiling_mut().arrange_root();
+            workspace.sync_floating_arrange();
         }
     }
 
@@ -200,6 +230,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn arrange_active_sway_workspace(&mut self) {
         if let Some(workspace) = self.active_workspace_mut() {
             workspace.tiling_mut().arrange_workspace();
+            workspace.sync_floating_arrange();
         }
     }
 
@@ -210,6 +241,28 @@ impl<W: LayoutElement> Layout<W> {
             .find(|workspace| workspace.has_window(window))
         {
             workspace.tiling_mut().arrange_workspace();
+            workspace.sync_floating_arrange();
+        }
+    }
+
+    /// Records that a command handler ended in `arrange_workspace` on each of `workspaces`, or
+    /// in `arrange_root` when `root` is set (sway/tree/arrange.c:310-316, 349-355), for a
+    /// handler whose layout changes swayward already models: only the reset of a fullscreen
+    /// container's pending box, tiled or in a floating group, is left to record.
+    pub fn note_sway_arrange(&mut self, workspaces: &[WorkspaceId], root: bool) {
+        for workspace in self.workspaces_mut() {
+            if root || workspaces.contains(&workspace.id()) {
+                workspace.tiling_mut().note_workspace_arrange();
+                workspace.sync_floating_arrange();
+            }
+        }
+    }
+
+    /// Lets every workspace's floating groups see the arranges its tiling tree recorded; see
+    /// [`Workspace::sync_floating_arrange`].
+    pub fn sync_floating_arranges(&mut self) {
+        for workspace in self.workspaces_mut() {
+            workspace.sync_floating_arrange();
         }
     }
 
@@ -236,6 +289,16 @@ impl<W: LayoutElement> Layout<W> {
             .map(|(_, _, workspace)| workspace.id());
         if let Some(monitor) = self.active_monitor() {
             monitor.finish_workspace_switch(target);
+        }
+    }
+
+    /// Finishes every output's render-only workspace transition, so the empty
+    /// workspace it was leaving is gone. Sway destroys that workspace inside
+    /// the switch (`workspace_consider_destroy`, sway/sway/input/seat.c:
+    /// 1243-1250), before a later command can see its name as taken.
+    pub fn finish_all_sway_workspace_switches(&mut self) {
+        for monitor in self.monitors_mut() {
+            monitor.finish_workspace_switch(None);
         }
     }
 
@@ -410,14 +473,12 @@ impl<W: LayoutElement> Layout<W> {
                 monitor.sort_sway_workspaces();
             }
         }
-        // Sway's seat keeps a workspace pointer, so a rename carries over to it.
+        // Sway's seat keeps a workspace pointer, so a rename carries over to it. Its
+        // `prev_workspace_name` is a copied string, which a rename leaves alone
+        // (sway/commands/rename.c never touches it).
         let renamed = self.workspace(id).and_then(Workspace::sway_name);
-        for entry in [&mut self.seat_workspace, &mut self.previous_seat_workspace]
-            .into_iter()
-            .flatten()
-            .filter(|entry| entry.0 == id)
-        {
-            entry.1 = renamed.clone();
+        if let Some(entry) = self.seat_workspace.as_mut().filter(|entry| entry.0 == id) {
+            entry.1 = renamed;
         }
         Ok(())
     }
@@ -632,20 +693,7 @@ impl<W: LayoutElement> Layout<W> {
     ) -> Result<(Option<Output>, usize), String> {
         use crate::command::WorkspaceTarget;
 
-        let target_position = match target {
-            WorkspaceTarget::Current => self.active_workspace_position(),
-            WorkspaceTarget::BackAndForth => self.previous_workspace_position(),
-            WorkspaceTarget::Next | WorkspaceTarget::Prev => {
-                let next = target == WorkspaceTarget::Next;
-                self.relative_sway_workspace_position(next)
-            }
-            WorkspaceTarget::NextOnOutput | WorkspaceTarget::PrevOnOutput => {
-                let next = target == WorkspaceTarget::NextOnOutput;
-                self.relative_sway_workspace_position_on_output(next)
-            }
-            _ => self.find_sway_workspace_position(&target),
-        };
-        if let Some(position) = target_position {
+        if let Some(position) = self.existing_sway_workspace_position(&target) {
             Ok(position)
         } else if target == WorkspaceTarget::BackAndForth {
             // `move ... to workspace back_and_forth` falls back to the
@@ -660,6 +708,53 @@ impl<W: LayoutElement> Layout<W> {
             let (output, index) = self.create_sway_workspace(name, number)?;
             Ok((Some(output), index))
         }
+    }
+
+    /// The existing workspace `target` names, without creating one.
+    fn existing_sway_workspace_position(
+        &self,
+        target: &crate::command::WorkspaceTarget,
+    ) -> Option<(Option<Output>, usize)> {
+        use crate::command::WorkspaceTarget;
+
+        match target {
+            WorkspaceTarget::Current => self.active_workspace_position(),
+            WorkspaceTarget::BackAndForth => self.previous_workspace_position(),
+            WorkspaceTarget::Next | WorkspaceTarget::Prev => {
+                self.relative_sway_workspace_position(*target == WorkspaceTarget::Next)
+            }
+            WorkspaceTarget::NextOnOutput | WorkspaceTarget::PrevOnOutput => self
+                .relative_sway_workspace_position_on_output(
+                    *target == WorkspaceTarget::NextOnOutput,
+                ),
+            _ => self.find_sway_workspace_position(target),
+        }
+    }
+
+    /// Whether `move container to workspace <target>` for `window` lands on the window's own
+    /// workspace while that workspace has no tiling children. Sway's destination is then the
+    /// workspace node (`seat_get_focus_inactive_tiling` is NULL, sway/input/seat.c:1374-1378)
+    /// and `container_move_to_workspace` returns early for it (sway/commands/move.c:198-202),
+    /// so even a child of a floating container stays where it is.
+    pub fn move_targets_own_workspace_without_tiling(
+        &self,
+        window: &W::Id,
+        target: &crate::command::WorkspaceTarget,
+        auto_back_and_forth: bool,
+    ) -> bool {
+        let Some((monitor, index, source)) = self
+            .workspaces()
+            .find(|(_, _, workspace)| workspace.has_window(window))
+        else {
+            return false;
+        };
+        if !source.tiling().is_empty() {
+            return false;
+        }
+        let source_output = monitor.map(|monitor| monitor.output().clone());
+        let target =
+            self.resolve_move_workspace_target(source.id(), target.clone(), auto_back_and_forth);
+        self.existing_sway_workspace_position(&target) == Some((source_output, index))
     }
 
     pub(super) fn resolve_move_workspace_target(
@@ -765,12 +860,31 @@ impl<W: LayoutElement> Layout<W> {
                 && self
                     .workspace(target_workspace)
                     .is_some_and(|workspace| !workspace.has_windows()));
+        let follows_moved_view = moved_window_was_focused
+            && moved_window.as_ref().is_some_and(|window| {
+                source_workspace
+                    .and_then(|source| self.workspace(source))
+                    .is_some_and(|source| source.tiling().departing_view_keeps_focus(window))
+            });
         if target_output != source_output {
             let output =
                 target_output.ok_or_else(|| "target workspace has no output".to_owned())?;
             self.move_to_output(window, &output, Some(target_index), ActivateWindow::No);
         } else {
             self.move_to_workspace_id(window, target_workspace, ActivateWindow::No);
+        }
+        if let Some(window) = moved_window.as_ref().filter(|_| follows_moved_view) {
+            self.activate_window(window);
+            if let Some(monitor) = source_workspace.and_then(|source| {
+                self.monitors_mut()
+                    .find(|monitor| monitor.has_ws(source))
+                    .map(|monitor| (monitor, source))
+            }) {
+                let (monitor, source) = monitor;
+                monitor.workspace_switch = None;
+                monitor.consider_destroy_workspace(source);
+            }
+            return Ok(());
         }
         if target_workspace_focused {
             if let Some(workspace) = self.workspace_mut(target_workspace).filter(|workspace| {
@@ -820,22 +934,37 @@ impl<W: LayoutElement> Layout<W> {
         };
         let target =
             &self.resolve_move_workspace_target(source.id(), target.clone(), auto_back_and_forth);
-        if !source.floating().window_root_is_sticky(window) {
+        // A fullscreen floating view lives in swayward's tiling tree but in sway's
+        // `workspace->floating` list, so `container_is_sticky` holds for it too.
+        let fullscreen_floating_sticky =
+            source.is_floating_for_ipc(window) && source.is_window_sticky(window);
+        if !source.floating().window_root_is_sticky(window) && !fullscreen_floating_sticky {
             return Ok(());
         }
         let Some(source_output) = source_monitor.map(|monitor| monitor.output().clone()) else {
             return Ok(());
         };
-        let destination_output = match self.find_sway_workspace_position(target) {
+        // `back_and_forth`, `next`, `current` and the like resolve as
+        // `workspace_by_name` does; a vanished previous workspace is recreated
+        // under its name (sway/commands/move.c:453-468, 498-511).
+        let destination_output = match self.existing_sway_workspace_position(target) {
             Some((output, _)) => output,
-            None => match target {
-                crate::command::WorkspaceTarget::Name(name)
-                | crate::command::WorkspaceTarget::Number(name) => self
-                    .initial_monitor_for_workspace(name)
+            None => {
+                let name = match target {
+                    crate::command::WorkspaceTarget::Name(name)
+                    | crate::command::WorkspaceTarget::Number(name) => name.clone(),
+                    crate::command::WorkspaceTarget::BackAndForth => {
+                        match self.previous_seat_workspace_name() {
+                            Some(name) => name,
+                            None => return Ok(()),
+                        }
+                    }
+                    _ => return Ok(()),
+                };
+                self.initial_monitor_for_workspace(&name)
                     .and_then(|index| self.monitors().nth(index))
-                    .map(|monitor| monitor.output().clone()),
-                _ => return Ok(()),
-            },
+                    .map(|monitor| monitor.output().clone())
+            }
         };
         // The check asks only whether the destination is on the old output,
         // so the current workspace is refused too (sway/commands/move.c:542).

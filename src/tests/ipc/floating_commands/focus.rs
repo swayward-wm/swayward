@@ -820,3 +820,1257 @@ fn focus_layer_commands_keep_fullscreen() {
         );
     }
 }
+
+/// diff-fam-v3-focus-after-kill-in-toggled-split, the family's filed minimal
+/// (oracle state row floated_by_rule_keeps_wrapper_unfocused). `layout toggle all`
+/// on a lone view wraps it in a new split. A view a `for_window` rule floats
+/// while it maps was never the seat focus (criteria run before `view_map`
+/// focuses it, sway/tree/view.c:943-956), so `container_set_floating` does not
+/// raise the old parent (sway/tree/container.c:946-949,969-973). Hiding the
+/// floater then refocuses `seat_get_focus_inactive(ws)`
+/// (sway/tree/root.c:227-229): the tiled view, not the wrapper.
+#[test]
+fn hiding_a_floater_refocuses_the_view_inside_a_fresh_wrapper() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id| {
+        crate::tests::windows::map_window(
+            f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    };
+    map(&mut f, "tiled");
+    for command in [
+        "layout toggle all",
+        r#"for_window [app_id="float"] floating enable"#,
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    map(&mut f, "float");
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let wrapper = &tree["nodes"][1]["nodes"][0]["nodes"][0];
+    assert_eq!(wrapper["focused"], false, "{wrapper:#}");
+    assert_eq!(wrapper["nodes"][0]["app_id"], "tiled");
+    assert_eq!(wrapper["nodes"][0]["focused"], true, "{wrapper:#}");
+}
+
+/// Seat focus after a view leaves, in the first-divergence shapes of
+/// diff-fam-v3-focus-after-kill-in-toggled-split (seeds 30969 31054 31514
+/// 31859 32235). Each case lists the commands and the tree path of the
+/// node sway 1.12 reports focused afterwards.
+/// - 30969: closing the focused view focuses the most recent view under its parent before any
+///   elsewhere (`handle_seat_node_destroy`, sway/input/seat.c:273-286).
+/// - 31054: floating a focused container raises its old parent (`container_set_floating`,
+///   sway/tree/container.c:969-973), so hiding the floater refocuses that split
+///   (sway/tree/root.c:227-229).
+/// - 31514, 31859: closing the focused floater focuses the workspace's most recent view, never a
+///   container (sway/input/seat.c:273-286).
+/// - 31054 later: a view mapped while a floating view has focus is tiled beside the most recent
+///   view under the focus-inactive split (sway/tree/view.c:851-866).
+/// - 32235 later: the new view mapped beside the focused split, so hiding it focuses
+///   `seat_get_focus_inactive(ws)`, which is that split (sway/tree/view.c:849-882,
+///   sway/tree/root.c:128-140).
+/// - 32235: hiding a tiled view reaps its emptied parent first, which raises the view below it, so
+///   the view is refocused, not the grandparent (sway/tree/root.c:114-140,
+///   sway/input/seat.c:273-323).
+#[test]
+fn focus_after_a_view_leaves_matches_sway() {
+    let cases: &[(&str, &[&str], &[usize])] = &[
+        (
+            "30969",
+            &[
+                "map 6",
+                r#"for_window [app_id="7"] split v"#,
+                "map 7",
+                r#"no_focus [app_id="8"]"#,
+                "map 8",
+                "kill",
+            ],
+            &[1, 0],
+        ),
+        (
+            "31054",
+            &[
+                "map 1",
+                "map 2",
+                "layout toggle split",
+                "split toggle",
+                "focus parent; floating toggle",
+                "move scratchpad",
+            ],
+            &[0],
+        ),
+        (
+            "31514",
+            &[
+                "map 2",
+                "layout toggle splitv tabbed",
+                "map 7",
+                "floating enable",
+                "kill",
+            ],
+            &[0, 0],
+        ),
+        (
+            "31859",
+            &[
+                "map 1",
+                "map 2",
+                "splitv",
+                "map 5",
+                "floating enable",
+                "kill",
+            ],
+            &[1, 0],
+        ),
+        (
+            "32235",
+            &[
+                "map 4",
+                "focus parent; split v",
+                "map 5",
+                "layout toggle all",
+                "focus prev",
+                "move scratchpad",
+            ],
+            &[0, 0],
+        ),
+        (
+            "31054 later",
+            &[
+                "map 1",
+                "map 2",
+                "layout toggle split",
+                "split toggle",
+                "focus parent; floating toggle",
+                "map 7",
+            ],
+            &[0, 1],
+        ),
+        // diff-fam-v3-hinted-floater-kill-focus: a more recently focused floater does not
+        // compete while a parent of the closed view still holds a view; the walk only reaches
+        // the workspace, floaters included, after that (sway/input/seat.c:273-286).
+        (
+            "35227",
+            &[
+                "map 1",
+                "map 2",
+                "splitv",
+                "map 5",
+                "map 6",
+                r#"[app_id="5"] floating enable"#,
+                "kill",
+            ],
+            &[1, 0],
+        ),
+        (
+            "33960",
+            &[
+                "map 6",
+                "map 7",
+                "layout toggle",
+                "floating enable",
+                "map 8",
+                "kill",
+            ],
+            &[0, 0],
+        ),
+        (
+            "34760",
+            &[
+                "map hint-parent",
+                "map 7",
+                "floating enable",
+                "map 8",
+                "splitv",
+                r#"no_focus [app_id="9"]"#,
+                "map 9",
+                "kill",
+            ],
+            &[1, 0],
+        ),
+        (
+            "32235 later",
+            &["map 4", "focus parent; split v", "map 5", "move scratchpad"],
+            &[0],
+        ),
+    ];
+    for (seed, steps, focused_path) in cases {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        for step in *steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+                continue;
+            }
+            for outcome in crate::command::execute(f.niri_state(), step) {
+                assert!(outcome.success, "{seed} {step}: {outcome:?}");
+            }
+            f.double_roundtrip(client);
+            let closed = f
+                .client(client)
+                .state
+                .windows
+                .iter()
+                .filter(|window| window.close_requested)
+                .map(|window| window.surface.clone())
+                .collect::<Vec<_>>();
+            for surface in closed {
+                let window = f.client(client).window(&surface);
+                window.close_requested = false;
+                window.attach_null();
+                window.commit();
+            }
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        let mut node = workspace;
+        for index in *focused_path {
+            node = &node["nodes"][*index];
+        }
+        assert_eq!(node["focused"], true, "{seed}: {workspace:#}");
+    }
+}
+
+#[test]
+fn split_of_a_floated_workspace_wrapper_wraps_it_and_keeps_focus_on_it() {
+    // random-v3 seeds 30754 30769 30860 ... (diff-fam-v3-split-floated-workspace-focus; oracle
+    // row split_floated_workspace_wrapper). A floating container has no H/V parent for
+    // `container_split` (`current = L_NONE`, sway/tree/container.c:1516-1518), so `split v` on
+    // a floated group wraps it in a new floating splitv container and gives focus back to the
+    // group (sway/tree/container.c:1542-1560).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("two"),
+            ..Default::default()
+        },
+    );
+    for command in ["focus parent; floating toggle", "split v"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let floating = tree["nodes"][1]["nodes"][0]["floating_nodes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(floating.len(), 1);
+    let wrapper = &floating[0];
+    assert_eq!(wrapper["type"], "floating_con");
+    assert_eq!(wrapper["layout"], "splitv");
+    assert_eq!(wrapper["focused"], false);
+    let group = &wrapper["nodes"][0];
+    assert_eq!(wrapper["focus"], serde_json::json!([group["id"]]));
+    assert_eq!(group["type"], "con");
+    assert_eq!(group["layout"], "splith");
+    assert_eq!(group["focused"], true);
+    assert_eq!(group["nodes"][0]["app_id"], "two");
+    assert_eq!(wrapper["rect"], group["rect"]);
+    swayward.layout.verify_invariants();
+}
+
+#[test]
+fn unfloating_a_split_floated_group_keeps_focus_on_the_inner_group() {
+    // random-v3 seed 32339 (diff-fam-v3-split-floated-workspace-focus). `splitt` wraps the
+    // floated group in a new floating container and leaves focus on the group; `floating toggle`
+    // then tiles the wrapper, and `container_set_floating` leaves the seat focus where it was
+    // (sway/tree/container.c:976-1011).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("three"),
+            ..Default::default()
+        },
+    );
+    for command in [
+        "focus parent",
+        "floating enable",
+        "splitt",
+        "floating toggle",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["floating_nodes"], serde_json::json!([]));
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(wrapper["layout"], "splitv");
+    assert_eq!(wrapper["focused"], false);
+    let group = &wrapper["nodes"][0];
+    assert_eq!(group["layout"], "splith");
+    assert_eq!(group["focused"], true);
+    assert_eq!(group["nodes"][0]["app_id"], "three");
+    assert_eq!(group["nodes"][0]["focused"], false);
+    swayward.layout.verify_invariants();
+}
+
+/// Differential seeds 30869 30982 31027 31038 31081 31141 31237 31247 31381
+/// 31438 31471 31496 31559 31615 31636 31817 31951 32573 32592
+/// (diff-fam-v3-map-after-float-from-split). `layout toggle` on a lone view
+/// wraps the workspace's children in a vertical split
+/// (`workspace_wrap_children`, sway/commands/layout.c:184-189). Floating the
+/// second view of that split raises the old parent split in the focus stack
+/// just below the floated view (sway/tree/container.c:969-974). The next view
+/// maps beside the focus-inactive tiling container's focus-inactive view
+/// (`seat_get_focus_inactive_tiling` then `seat_get_focus_inactive_view`,
+/// sway/tree/view.c:854-866), so it joins the split, not the workspace.
+#[test]
+fn map_after_floating_from_a_split_joins_the_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id| {
+        crate::tests::windows::map_window(
+            f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    };
+    map(&mut f, "a");
+    assert!(crate::command::execute(f.niri_state(), "layout toggle")[0].success);
+    map(&mut f, "b");
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    map(&mut f, "c");
+
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let shape = |node: &serde_json::Value| -> String {
+        fn go(node: &serde_json::Value) -> String {
+            match node["app_id"].as_str() {
+                Some(app_id) => app_id.to_owned(),
+                None => format!(
+                    "{}[{}]",
+                    node["layout"].as_str().unwrap_or_default(),
+                    node["nodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(go)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            }
+        }
+        go(node)
+    };
+    assert_eq!(shape(workspace), "splith[splitv[a,c]]");
+    assert_eq!(workspace["nodes"][0]["nodes"][1]["percent"], 0.5);
+    drop(tree);
+
+    // Sending `c` to the scratchpad focuses the focus-inactive node under its
+    // surviving parent, `a`, not the more recently focused floating view
+    // (`seat_get_focus_inactive(parent)`, sway/tree/root.c:128-140).
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["nodes"][0]["nodes"][0]["focused"], true);
+    assert_eq!(workspace["floating_nodes"][0]["focused"], false);
+}
+
+#[test]
+fn for_window_split_on_a_view_mapped_into_a_floating_group_wraps_it() {
+    // random-v3 seeds 31002 31379 31522 32690 (diff-fam-v3-for-window-split-in-floating-group;
+    // oracle row for_window_split_in_floating_group). A view mapped while a floating group's
+    // child has focus joins that group (sway/tree/view.c:851-871), and a `for_window` split runs
+    // `container_split` on it like on any other container (`do_split`,
+    // sway/commands/split.c:12-33): it has a sibling, so it is wrapped in a new splitv container.
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id| {
+        crate::tests::windows::map_window(
+            f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    };
+    map(&mut f, "first");
+    for command in [
+        "floating enable",
+        "split toggle",
+        r#"for_window [app_id="second"] split v"#,
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    map(&mut f, "second");
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let group = &tree["nodes"][1]["nodes"][0]["floating_nodes"][0];
+    assert_eq!(group["nodes"][0]["app_id"], "first", "{group:#}");
+    let wrapper = &group["nodes"][1];
+    assert_eq!(wrapper["type"], "con", "{group:#}");
+    assert_eq!(wrapper["layout"], "splitv", "{group:#}");
+    assert_eq!(wrapper["focused"], false, "{group:#}");
+    assert_eq!(wrapper["nodes"][0]["app_id"], "second", "{group:#}");
+    assert_eq!(wrapper["nodes"][0]["focused"], true, "{group:#}");
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
+fn criteria_split_on_an_unfocused_standalone_floating_view_keeps_its_stack_slot() {
+    // Oracle row rv_split_unfocused_standalone. `container_split` wraps the view through
+    // `container_replace`, which puts the wrapper in the view's slot in `floating_nodes`
+    // (sway/tree/container.c:1484-1488) rather than raising it, and focus stays put because
+    // the view did not hold it (sway/tree/container.c:1532-1560).
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["a", "b"] {
+        crate::tests::windows::map_window(
+            &mut f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+        let outcome = crate::command::execute(f.niri_state(), "floating enable");
+        assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    }
+    let outcome = crate::command::execute(f.niri_state(), r#"[app_id="^a$"] split v"#);
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let floating = &tree["nodes"][1]["nodes"][0]["floating_nodes"];
+    assert_eq!(floating[0]["layout"], "splitv", "{floating:#}");
+    assert_eq!(floating[0]["focused"], false, "{floating:#}");
+    assert_eq!(floating[0]["nodes"][0]["app_id"], "a", "{floating:#}");
+    assert_eq!(floating[0]["nodes"][0]["focused"], false, "{floating:#}");
+    assert_eq!(floating[1]["app_id"], "b", "{floating:#}");
+    assert_eq!(floating[1]["focused"], true, "{floating:#}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// Workspace focus lists in the first-divergence shapes of parity-f3-focus-order
+/// (oracle row floating_toggle_focus_parent_focus_order). Each case lists the commands
+/// and sway 1.12's workspace `focus` as app ids, most recent first.
+#[test]
+fn workspace_focus_order_matches_sway() {
+    let cases: &[(&str, &[&str], &[&str])] = &[
+        (
+            "31161",
+            &["map 1", "map 2", "floating toggle", "focus parent"],
+            &["2", "1"],
+        ),
+        (
+            "31762",
+            &[
+                "map 1",
+                "floating enable",
+                "map 2",
+                "layout stacking",
+                "focus next",
+            ],
+            &["1", "con"],
+        ),
+        (
+            "15446",
+            &[
+                "map 2",
+                "floating toggle",
+                "map 4",
+                "layout stacking",
+                "focus right",
+            ],
+            &["2", "con"],
+        ),
+        (
+            "31573",
+            &[
+                "map 1",
+                "layout tabbed",
+                "map 2",
+                "map 3",
+                r#"[app_id="^[23]$"] floating enable"#,
+            ],
+            &["3", "con", "2"],
+        ),
+        (
+            "31006",
+            &[
+                "map 1",
+                "map 2",
+                "map 3",
+                "layout tabbed; layout toggle",
+                r#"[app_id="^[23]$"] floating enable"#,
+            ],
+            &["3", "con", "2"],
+        ),
+        (
+            "31852",
+            &[
+                "map 1",
+                "map 2",
+                "map 3",
+                r#"[app_id="^1$"] focus"#,
+                "layout tabbed",
+                "split h",
+                r#"[app_id="^[12]$"] floating enable"#,
+            ],
+            &["1", "2", "con"],
+        ),
+        (
+            "31016",
+            &[
+                "map 1",
+                "map 2",
+                "focus parent; split v",
+                "map 3",
+                "focus next",
+                "split toggle",
+                "floating enable",
+            ],
+            &["2", "con", "3"],
+        ),
+        (
+            "31852 step 9",
+            &[
+                "map 2",
+                "map 4",
+                "split v",
+                r#"[app_id="^2$"] focus"#,
+                "layout tabbed",
+                "split h",
+                r#"[app_id="^[23]$"] floating enable"#,
+                "map 7",
+                "floating enable",
+            ],
+            &["7", "con", "2"],
+        ),
+        (
+            "34139",
+            &[
+                "map 1",
+                "map 2",
+                "splitv",
+                "fullscreen enable",
+                "map 3",
+                "floating enable",
+            ],
+            &["2", "con", "1"],
+        ),
+        (
+            "34158",
+            &[
+                "map 4",
+                "map 5",
+                "split toggle",
+                r#"no_focus [app_id="6"]"#,
+                "map 6",
+                "floating enable",
+            ],
+            &["5", "con", "4"],
+        ),
+        (
+            "31762 before focus",
+            &["map 1", "floating enable", "map 2", "layout stacking"],
+            &["1", "con"],
+        ),
+    ];
+    for (seed, steps, expected) in cases {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        for step in *steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+                continue;
+            }
+            for outcome in crate::command::execute(f.niri_state(), step) {
+                assert!(outcome.success, "{seed} {step}: {outcome:?}");
+            }
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        let children = workspace["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(workspace["floating_nodes"].as_array().unwrap())
+            .collect::<Vec<_>>();
+        let focus = workspace["focus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| {
+                let child = children.iter().find(|child| child["id"] == *id).unwrap();
+                child["app_id"].as_str().unwrap_or("con").to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(focus, *expected, "{seed}: {workspace:#}");
+    }
+}
+
+/// Differential seeds 33759 33780 33794 33812 33823 33824 33845 33857 33895
+/// (diff-fam-v3-hinted-map-focus-parent-order; oracle row
+/// focus_parent_from_floating_child_of_parent). A child toplevel floats at map
+/// (sway/desktop/xdg_shell.c `wants_floating`) and takes focus; `focus parent`
+/// then focuses the workspace and raises no view (sway/commands/focus.c:339-351),
+/// so the dialog stays ahead of its tiled parent in the workspace focus list.
+#[test]
+fn focus_parent_from_a_mapped_dialog_keeps_it_first_in_workspace_focus() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    let parent_surface = parent.surface.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let child = f.client(client).create_window();
+    child.xdg_toplevel.set_app_id("dialog".into());
+    child.set_parent(Some(&parent_toplevel));
+    let child_surface = child.surface.clone();
+    child.commit();
+    f.roundtrip(client);
+    let child = f.client(client).window(&child_surface);
+    child.attach_new_buffer();
+    child.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for outcome in crate::command::execute(f.niri_state(), "focus parent") {
+        assert!(outcome.success, "{outcome:?}");
+    }
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["focused"], true, "{workspace:#}");
+    let tiled = &workspace["nodes"][0];
+    let dialog = &workspace["floating_nodes"][0];
+    assert_eq!(tiled["app_id"], "parent", "{workspace:#}");
+    assert_eq!(dialog["app_id"], "dialog", "{workspace:#}");
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([dialog["id"], tiled["id"]]),
+        "{workspace:#}"
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+/// Differential seeds 32750 32752 32782 ... (diff-fam-v3-floating-focus-after-fullscreen-structure;
+/// oracle row float_split_children_of_focused_wrapper_keeps_tiled_focus). With a split focused,
+/// floating one of its views by criteria leaves the seat focus on the split: `set_focus` is only
+/// true when the floated container is the focus (`container_set_floating`,
+/// sway/tree/container.c:946-949), so the new floater stays unfocused.
+#[test]
+fn criteria_float_from_a_focused_split_keeps_focus_on_the_split() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-diff-1", "fixture-diff-2"] {
+        crate::tests::windows::map_window(
+            &mut f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in [
+        "focus parent; split v",
+        "[app_id=\"^fixture-diff-[23]$\"] floating enable",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let split = &workspace["nodes"][0];
+    assert_eq!(split["type"], "con");
+    assert_eq!(split["focused"], true);
+    assert_eq!(split["nodes"][0]["app_id"], "fixture-diff-1");
+    assert_eq!(split["nodes"][0]["focused"], false);
+    let floater = &workspace["floating_nodes"][0];
+    assert_eq!(floater["app_id"], "fixture-diff-2");
+    assert_eq!(floater["focused"], false);
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([split["id"], floater["id"]])
+    );
+    swayward.layout.verify_invariants();
+}
+
+/// Differential seeds 33491 33531 (diff-fam-v3-floating-toggle-fullscreen-split-chain).
+/// `focus parent` on a fullscreen view is a no-op (`focus_parent`,
+/// sway/commands/focus.c:339-344), and `floating toggle` on a view inside a floating split
+/// operates on the floating root (sway/commands/floating.c:41-47), tiling the whole group.
+#[test]
+fn floating_toggle_of_a_fullscreen_view_in_a_floating_split_tiles_the_group() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("fixture-diff-5"),
+            ..Default::default()
+        },
+    );
+    for command in [
+        "floating enable",
+        "split v",
+        "fullscreen toggle",
+        "focus parent; floating toggle",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+        f.double_roundtrip(client);
+    }
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["floating_nodes"].as_array().unwrap().len(), 0);
+    let split = &workspace["nodes"][0];
+    assert_eq!(split["type"], "con");
+    assert_eq!(split["layout"], "splitv");
+    let view = &split["nodes"][0];
+    assert_eq!(view["app_id"], "fixture-diff-5");
+    assert_eq!(view["fullscreen_mode"], 1);
+    assert_eq!(view["focused"], true);
+    swayward.layout.verify_invariants();
+}
+
+/// Differential seed 33298 (diff-fam-v3-floating-fullscreen-split-focus-parent).
+/// `focus parent` is a no-op on a fullscreen container
+/// (sway/commands/focus.c:342-344), so on a fullscreen floating group root it
+/// keeps the focus there instead of handing it to the workspace, and the
+/// following `split v` wraps that floating root in a new splitv container
+/// (`container_split`, sway/tree/container.c:1508-1563).
+#[test]
+fn focus_parent_keeps_a_fullscreen_floating_group_root_focused() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("fixture-diff-10"),
+            ..Default::default()
+        },
+    );
+    for command in [
+        "focus parent",
+        "floating enable",
+        "fullscreen toggle",
+        "focus parent; split v",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["focused"], false);
+    let outer = &workspace["floating_nodes"][0];
+    assert_eq!(outer["layout"], "splitv");
+    assert_eq!(outer["focused"], false);
+    let inner = &outer["nodes"][0];
+    assert_eq!(inner["type"], "con");
+    assert_eq!(inner["layout"], "splith");
+    assert_eq!(inner["focused"], true);
+    assert_eq!(inner["nodes"][0]["app_id"], "fixture-diff-10");
+    f.swayward().layout.verify_invariants();
+}
+
+/// Review probe for diff-fam-v3-floating-fullscreen-split-focus-parent: the
+/// `focus parent` no-op on a fullscreen container
+/// (sway/commands/focus.c:342-344) also holds for a fullscreen child inside a
+/// floating group, not only for the group root, so the following `split v`
+/// wraps the fullscreen child (`container_split`,
+/// sway/tree/container.c:1508-1563) and leaves the workspace splith. The
+/// output is portrait like the capture's, so the floated group is splitv.
+#[test]
+fn focus_parent_keeps_a_fullscreen_floating_group_child_focused() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    for app_id in ["fixture-1", "fixture-2"] {
+        crate::tests::windows::map_window(
+            &mut f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    }
+    for command in [
+        "focus parent",
+        "floating enable",
+        "focus child",
+        "fullscreen toggle",
+        "focus parent; split v",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    f.double_roundtrip(client);
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["layout"], "splith");
+    assert_eq!(workspace["focused"], false);
+    assert_eq!(workspace["nodes"].as_array().map(Vec::len), Some(0));
+    let group = &workspace["floating_nodes"][0];
+    assert_eq!(group["type"], "floating_con");
+    assert_eq!(group["layout"], "splitv");
+    assert_eq!(group["nodes"][0]["app_id"], "fixture-1");
+    let wrap = &group["nodes"][1];
+    assert_eq!(wrap["type"], "con");
+    assert_eq!(wrap["layout"], "splitv");
+    assert_eq!(wrap["fullscreen_mode"], 1);
+    assert_eq!(wrap["focused"], false);
+    let child = &wrap["nodes"][0];
+    assert_eq!(child["app_id"], "fixture-2");
+    assert_eq!(child["focused"], true);
+    f.swayward().layout.verify_invariants();
+}
+
+/// Differential seeds 33824 33845 (diff-fam-v3-hinted-map-focus-parent-order-residual-1; oracle
+/// row kill_workspace_after_focus_parent_from_dialog). After `focus parent` from a mapped
+/// dialog the workspace holds the seat focus. Closing a tiled view outside that focus only
+/// refreshes focus_inactive and puts the old focus back on top (`handle_seat_node_destroy`,
+/// sway/input/seat.c:316-323), so the workspace stays focused rather than the dialog.
+#[test]
+fn closing_a_view_while_the_workspace_is_focused_keeps_the_workspace_focused() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let doomed = crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("doomed"),
+            ..Default::default()
+        },
+    );
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    let parent_surface = parent.surface.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("dialog"),
+            parent: Some(&parent_toplevel),
+            ..Default::default()
+        },
+    );
+
+    for outcome in crate::command::execute(f.niri_state(), "focus parent") {
+        assert!(outcome.success, "{outcome:?}");
+    }
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&doomed);
+    window.attach_null();
+    window.commit();
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(
+        workspace["nodes"].as_array().unwrap().len(),
+        1,
+        "{workspace:#}"
+    );
+    let tiled = &workspace["nodes"][0];
+    let dialog = &workspace["floating_nodes"][0];
+    assert_eq!(tiled["app_id"], "parent", "{workspace:#}");
+    assert_eq!(dialog["app_id"], "dialog", "{workspace:#}");
+    assert_eq!(workspace["focused"], true, "{workspace:#}");
+    assert_eq!(dialog["focused"], false, "{workspace:#}");
+    assert_eq!(
+        workspace["focus"],
+        serde_json::json!([dialog["id"], tiled["id"]]),
+        "{workspace:#}"
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+/// Workspace focus lists after a move to a workspace or mark, in the first-divergence shapes
+/// of diff-fam-f3-focus-order-residual-2 (random-v3 seeds 31036 31743 31260 31964 32725;
+/// oracle row move_container_focus_order). Each case lists the outputs, the commands, the
+/// workspace to read and sway 1.12's `focus` for it as app ids, most recent first. A focused
+/// view moved under a fullscreen view drops below it (`workspace_focus_fullscreen`,
+/// sway/commands/move.c:96-110); an unfocused one keeps its own place; a view that keeps focus
+/// does not raise the split it joins; and a focused split never raises the view inside it.
+#[test]
+fn moved_container_focus_order_matches_sway() {
+    /// Seed, outputs, steps, workspace name, expected focus.
+    type Case<'a> = (&'a str, u8, &'a [&'a str], &'a str, &'a [&'a str]);
+    let cases: &[Case] = &[
+        (
+            "31036",
+            1,
+            &[
+                "map 2",
+                r#"for_window [app_id="4"] fullscreen enable"#,
+                "map 4",
+                r#"[app_id="^[23]$"] floating enable"#,
+                "[workspace=__focused__] move container to workspace 2",
+            ],
+            "2",
+            &["4", "2"],
+        ),
+        (
+            "31743",
+            2,
+            &[
+                "map 6",
+                "layout stacking",
+                "map 7",
+                "move left 20 px",
+                "[workspace=__focused__] move container to workspace 2",
+            ],
+            "2",
+            &["7", "6"],
+        ),
+        (
+            "31260",
+            1,
+            &[
+                "map 3",
+                "move container to workspace 2",
+                "map 4",
+                r#"for_window [app_id="5"] fullscreen enable"#,
+                "map 5",
+                r#"[workspace="2"] move container to workspace 1"#,
+            ],
+            "1",
+            &["5", "4", "3"],
+        ),
+        (
+            "31964",
+            1,
+            &[
+                "map 3",
+                "move container to workspace 2",
+                "map 4",
+                "map 5",
+                "fullscreen toggle",
+                r#"[workspace="2"] move container to workspace 1"#,
+            ],
+            "1",
+            &["5", "4", "3"],
+        ),
+        (
+            "32725",
+            2,
+            &[
+                "map 5",
+                "mark m",
+                "focus parent; split v",
+                "map 7",
+                "map 9",
+                "move container to mark m",
+            ],
+            "1",
+            &["7", "con"],
+        ),
+    ];
+    for (seed, outputs, steps, workspace_name, expected) in cases {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        if *outputs == 2 {
+            f.add_output_at(2, (1280, 720), Some((1280, 0)));
+        }
+        let client = f.add_client();
+        for step in *steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+                f.double_roundtrip(client);
+                continue;
+            }
+            for outcome in crate::command::execute(f.niri_state(), step) {
+                assert!(outcome.success, "{seed} {step}: {outcome:?}");
+            }
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let workspace = tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|output| output["nodes"].as_array().unwrap())
+            .find(|workspace| workspace["name"] == *workspace_name)
+            .unwrap_or_else(|| panic!("{seed}: no workspace {workspace_name}: {tree:#}"));
+        let children = workspace["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(workspace["floating_nodes"].as_array().unwrap())
+            .collect::<Vec<_>>();
+        let focus = workspace["focus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| {
+                let child = children.iter().find(|child| child["id"] == *id).unwrap();
+                child["app_id"].as_str().unwrap_or("con").to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(focus, *expected, "{seed}: {workspace:#}");
+        f.swayward().layout.verify_invariants();
+    }
+}
+
+/// diff-fam-parity-f2-focused-flag-residual-2 (random-v2 16099; oracle row
+/// fs_move_back_focus): a window moved from another workspace onto a workspace with a
+/// fullscreen view sits behind it, so switching back focuses the fullscreen view, never the
+/// hidden arrival (`workspace_focus_fullscreen`, sway/commands/move.c:96-110, 238;
+/// `seat_set_workspace_focus` refuses an obstructed view, sway/input/seat.c:1148-1151).
+#[test]
+fn switching_back_to_a_fullscreen_workspace_focuses_the_fullscreen_view() {
+    let cases: &[&[&str]] = &[
+        &[
+            "map a",
+            "fullscreen enable",
+            "workspace 3",
+            "map b",
+            "move container to workspace 1",
+            "workspace 1",
+        ],
+        &[
+            "map a",
+            "fullscreen enable",
+            "workspace number 3",
+            "map b",
+            "move container to workspace next",
+            "workspace --no-auto-back-and-forth 1",
+        ],
+    ];
+    for steps in cases {
+        let (mut f, _) = ipc_fixture();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        for step in *steps {
+            if let Some(app_id) = step.strip_prefix("map ") {
+                crate::tests::windows::map_window(
+                    &mut f,
+                    client,
+                    crate::tests::windows::WindowSpec {
+                        app_id: Some(app_id),
+                        ..Default::default()
+                    },
+                );
+                f.double_roundtrip(client);
+                continue;
+            }
+            for outcome in crate::command::execute(f.niri_state(), step) {
+                assert!(outcome.success, "{steps:?} {step}: {outcome:?}");
+            }
+            f.double_roundtrip(client);
+        }
+        let tree = get_tree(&mut f);
+        let focused = find_json_node_with_app_id(&tree, "a").unwrap();
+        assert_eq!(focused["focused"], true, "{steps:?}: {tree:#}");
+        let hidden = find_json_node_with_app_id(&tree, "b").unwrap();
+        assert_eq!(hidden["focused"], false, "{steps:?}: {tree:#}");
+        f.swayward().layout.verify_invariants();
+    }
+}
+
+/// diff-fam-v3-floating-fullscreen-sibling-focus-residual-1, shape A (seeds 34040,
+/// 34638; oracle state row criteria_focus_floater_leaves_fullscreen). A criteria
+/// `focus` on a floater a tiled fullscreen view hides first disables the obstructing
+/// fullscreen, then focuses and raises the floater (sway/commands/focus.c:385-394,
+/// sway/tree/container.c:570-590).
+#[test]
+fn criteria_focus_on_a_floater_under_a_fullscreen_view_leaves_fullscreen() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map = |f: &mut Fixture, app_id| {
+        crate::tests::windows::map_window(
+            f,
+            client,
+            crate::tests::windows::WindowSpec {
+                app_id: Some(app_id),
+                ..Default::default()
+            },
+        );
+    };
+    map(&mut f, "float");
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    f.double_roundtrip(client);
+    map(&mut f, "tiled");
+    for command in ["fullscreen enable", r#"[app_id="float"] focus"#] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        f.double_roundtrip(client);
+    }
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let tiled = &workspace["nodes"][0];
+    let float = &workspace["floating_nodes"][0];
+    assert_eq!(tiled["app_id"], "tiled");
+    assert_eq!(tiled["fullscreen_mode"], 0);
+    assert_eq!(tiled["focused"], false);
+    assert_eq!(float["app_id"], "float");
+    assert_eq!(float["focused"], true);
+    assert_eq!(float["visible"], true);
+}
+
+/// Differential seeds 33979 34040 34058 34434 34638 34801 34868
+/// (diff-fam-v3-floating-fullscreen-sibling-focus; oracle row
+/// unfloat_fullscreen_floater_lands_after_tiled_sibling). Tiling a fullscreen
+/// floating view adds it beside the workspace's focus-inactive tiling container,
+/// here the view mapped under it (`container_set_floating`,
+/// sway/tree/container.c:976-990), so it lands after that view and keeps focus.
+#[test]
+fn unfloating_a_fullscreen_floater_lands_after_the_tiled_view_mapped_under_it() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixed".into());
+    window.set_min_size(300, 200);
+    window.set_max_size(300, 200);
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    f.double_roundtrip(client);
+    crate::tests::windows::map_window(
+        &mut f,
+        client,
+        crate::tests::windows::WindowSpec {
+            app_id: Some("tiled"),
+            ..Default::default()
+        },
+    );
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    f.double_roundtrip(client);
+
+    let tree = get_tree(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(
+        workspace["representation"], "H[tiled fixed]",
+        "{workspace:#}"
+    );
+    let fixed = &workspace["nodes"][1];
+    assert_eq!(fixed["app_id"], "fixed", "{workspace:#}");
+    assert_eq!(fixed["fullscreen_mode"], 1, "{workspace:#}");
+    assert_eq!(fixed["focused"], true, "{workspace:#}");
+    assert_eq!(workspace["nodes"][0]["focused"], false, "{workspace:#}");
+    f.swayward().layout.verify_invariants();
+}

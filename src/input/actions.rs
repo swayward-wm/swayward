@@ -109,7 +109,7 @@ impl State {
 
         // Native bindings move the seat as commands do: sway's `set_workspace` records the
         // previous workspace on every focus change (sway/input/seat.c:1098-1113).
-        self.swayward.layout.sync_seat_workspace();
+        self.swayward.layout.sync_seat_workspace_if_moved();
         self.do_action_unsynced(action);
         self.swayward.layout.sync_seat_workspace();
     }

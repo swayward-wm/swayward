@@ -6,6 +6,20 @@ use super::*;
 /// and the node IDs the floated container was renumbered with.
 pub type FloatingTiledSwap<Id> = (Option<Id>, Vec<(NodeId, NodeId)>);
 
+/// A floating view's stored position, stored size and current box.
+pub type FloatingSwapPlacement = (
+    Option<Point<f64, SizeFrac>>,
+    Option<Size<i32, Logical>>,
+    Rectangle<f64, Logical>,
+);
+
+/// A floating view taken out of its workspace for a cross-workspace swap.
+pub struct FloatingSwapSource<W: LayoutElement> {
+    pub leaf: DetachedSubtree<W>,
+    pub placement: FloatingSwapPlacement,
+    pub focused: bool,
+}
+
 impl<W: LayoutElement> Workspace<W> {
     pub fn add_tile_at_drop(
         &mut self,
@@ -44,18 +58,169 @@ impl<W: LayoutElement> Workspace<W> {
         Some(detached)
     }
 
+    /// Attaches a container moved here by `move container to workspace`.
+    /// Sway's destination is the workspace's focus-inactive tiling container:
+    /// the moved container goes after it when it is a view, or last inside it
+    /// when it is a split, else onto the workspace
+    /// (sway/commands/move.c:516-517, 241-262).
     pub fn attach_tiling_subtree(
         &mut self,
         subtree: DetachedSubtree<W>,
     ) -> (NodeId, Vec<(NodeId, NodeId)>) {
-        self.attach_tiling_subtree_at(subtree, None)
+        let target = self.tiling.focus_inactive_tiling();
+        let mut arrived = Vec::new();
+        subtree.for_each_window(|window| arrived.push(window.id().clone()));
+        let focused_split = subtree.is_focused_split();
+        let attached = self.attach_tiling_subtree_at(subtree, target);
+        // Sway keeps one seat-wide focus stack, so a moved view focused more recently than
+        // the destination's focus-inactive view stays ahead of it there, and a later switch
+        // to the workspace focuses it (`seat_get_focus_inactive`, sway/input/seat.c:1357-1372;
+        // sway/commands/move.c:583-608).
+        for window in &arrived {
+            self.tiling.rank_arrived_window_by_focus_timestamp(window);
+        }
+        // A focused split was the seat focus, above its own views and everything here.
+        if focused_split {
+            self.tiling.set_focus(attached.0);
+        }
+        attached
+    }
+
+    pub fn attach_tiling_subtree_from_direction(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        direction: crate::layout::tiling_tree::Direction,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        if let Some(output) = &self.output {
+            subtree.for_each_window(|window| window.output_enter(output));
+        }
+        self.floating_is_active = FloatingActive::No;
+        self.tiling
+            .attach_subtree_from_direction(subtree, direction)
+    }
+
+    /// Attaches a workspace-fullscreen container a directional move brought
+    /// from another output, last among the workspace's children
+    /// (`container_move_to_workspace`, sway/commands/move.c:198-231).
+    pub fn attach_tiling_subtree_at_workspace_end(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        if let Some(output) = &self.output {
+            subtree.for_each_window(|window| window.output_enter(output));
+        }
+        // `container_handle_fullscreen_reparent` ends the destination's
+        // fullscreen (sway/tree/container.c:1380-1391).
+        self.disable_fullscreen();
+        self.floating_is_active = FloatingActive::No;
+        self.tiling.attach_subtree_at_workspace_end(subtree)
     }
 
     pub fn swap_tiling_nodes(&mut self, first: NodeId, second: NodeId) -> Result<(), &'static str> {
         if self.tiling.contains(first) && self.tiling.contains(second) {
             return self.tiling.swap_nodes(first, second);
         }
+        if self.tiling.contains(first) && self.floating.tree_root_for_node(second).is_some() {
+            return self.swap_tiling_node_with_floating_child(first, second);
+        }
+        if self.tiling.contains(second) && self.floating.tree_root_for_node(first).is_some() {
+            return self.swap_tiling_node_with_floating_child(second, first);
+        }
         self.floating.swap_nodes(first, second)
+    }
+
+    /// Swaps a tiled container with a container inside a floating group on
+    /// this workspace: each takes the other's parent and index, and focus
+    /// follows the container that had it (`swap_places`, `swap_focus`,
+    /// sway/tree/container.c:1718-1798).
+    fn swap_tiling_node_with_floating_child(
+        &mut self,
+        tiled: NodeId,
+        child: NodeId,
+    ) -> Result<(), &'static str> {
+        const NOT_SWAPPABLE: &str = "Can only swap with containers and views";
+        let root = self
+            .floating
+            .tree_root_for_node(child)
+            .ok_or(NOT_SWAPPABLE)?;
+        let tree = self.floating.tree(root).ok_or(NOT_SWAPPABLE)?;
+        if child == root || self.tiling.is_root(tiled) {
+            // A whole floating group swaps through the floating/tiled path.
+            return Err(NOT_SWAPPABLE);
+        }
+        if !tree.fits_at(child, self.tiling.node_height(tiled))
+            || !self.tiling.fits_at(tiled, tree.node_height(child))
+        {
+            return Err(crate::layout::tiling_tree::TOO_DEEP);
+        }
+        let tiled_focus = (!self.floating_is_active.get())
+            .then(|| self.tiling.active_window())
+            .flatten()
+            .filter(|_| {
+                self.tiling
+                    .focus()
+                    .is_some_and(|focus| self.tiling.contains_node(tiled, focus))
+            })
+            .map(|window| window.id().clone());
+        let child_focus = (self.floating_is_active.get())
+            .then(|| self.floating.active_window())
+            .flatten()
+            .filter(|window| {
+                tree.node_for_window(window.id())
+                    .is_some_and(|node| tree.contains_node(child, node))
+            })
+            .map(|window| window.id().clone());
+
+        let tree = self.floating.tree_mut(root).ok_or(NOT_SWAPPABLE)?;
+        tree.pin_ancestor_focus_ranks(child);
+        self.tiling.pin_ancestor_focus_ranks(tiled);
+        let (mut child_subtree, child_slot) =
+            tree.detach_subtree_for_swap(child).ok_or(NOT_SWAPPABLE)?;
+        let Some((mut tiled_subtree, tiled_slot)) = self.tiling.detach_subtree_for_swap(tiled)
+        else {
+            tree.attach_subtree_for_swap(child_subtree, child_slot);
+            return Err(NOT_SWAPPABLE);
+        };
+        tiled_subtree.swap_fullscreen_position(&mut child_subtree);
+        let windows = |subtree: &DetachedSubtree<W>| {
+            let mut ids = Vec::new();
+            subtree.for_each_window(|window| ids.push(window.id().clone()));
+            ids
+        };
+        let to_tiling = windows(&child_subtree);
+        let to_floating = windows(&tiled_subtree);
+
+        // Both trees keep their node IDs unique across the workspace, so the
+        // reinserted subtrees keep their IDs and no container mark moves.
+        self.tiling
+            .attach_subtree_for_swap(child_subtree, tiled_slot);
+        self.tiling.finish_subtree_detach(None);
+        tree.attach_subtree_for_swap(tiled_subtree, child_slot);
+        tree.finish_subtree_detach(None);
+        // swap_places leaves the seat focus stack alone: each arrival keeps
+        // its own place on it rather than the departed container's.
+        for window in to_tiling.iter().rev() {
+            self.tiling.rank_arrived_window_by_focus_timestamp(window);
+        }
+        for window in to_floating.iter().rev() {
+            tree.rank_arrived_window_by_focus_timestamp(window);
+        }
+        if let Some(focus) = tiled_focus {
+            self.tiling.focus_inactive_view_keeping_history();
+            self.floating.adopt_focused_window(&focus);
+            self.floating_is_active = FloatingActive::Yes;
+        } else if let Some(focus) = child_focus {
+            tree.focus_inactive_view_keeping_history();
+            self.tiling.activate_window(&focus);
+            self.floating.focus_tree_view(root);
+            self.floating_is_active = FloatingActive::No;
+        } else {
+            tree.focus_inactive_view_keeping_history();
+            if self.floating.active_window().is_none() {
+                self.floating.focus_tree_view(root);
+            }
+        }
+        Ok(())
     }
 
     /// Swaps a standalone floating view with a tiled container or view on
@@ -89,6 +254,9 @@ impl<W: LayoutElement> Workspace<W> {
                 .tiling
                 .focus()
                 .is_some_and(|focus| self.tiling.contains_node(node, focus));
+        let entry_stamps = self.tiling.ancestor_entry_stamps(node);
+        let stale_ancestors = self.tiling.stale_ancestors(node);
+        let tiled_is_focus = tiled_focused && self.tiling.focus() == Some(node);
         let (mut subtree, slot) = self.detach_tiling_subtree_for_swap(node)?;
         let RemovedTile { mut tile, .. } = self.floating.remove_tile(window, Transaction::new());
         let (floating_pos, floating_size) = (tile.floating_pos, tile.floating_window_size);
@@ -120,7 +288,19 @@ impl<W: LayoutElement> Workspace<W> {
         };
         if floater_focused {
             self.tiling.activate_window(window);
+            // `swap_focus` refocuses the floater, which already has focus, so
+            // `seat_set_focus` returns early and raises none of the arrival's
+            // new ancestors: a wrapper never raised stays at the tail
+            // (sway/tree/container.c:1786-1788, sway/input/seat.c:1131-1134).
+            self.tiling.keep_ipc_stale(stale_ancestors);
             self.floating_is_active = FloatingActive::No;
+        } else if tiled_is_focus && self.tiling.window_parent_is_tabbed_or_stacked(window) {
+            // The focused container left a tabbed or stacked parent, so sway
+            // focuses the arrived view, raising it as the shown tab, then
+            // refocuses the floated container (`swap_focus`,
+            // sway/tree/container.c:1772-1777).
+            self.tiling.activate_window(window);
+            self.floating_is_active = FloatingActive::Yes;
         } else if tiled_focused {
             // The floated container keeps focus, so the next view maps
             // beside the most recently focused tiled view, not the view that
@@ -129,7 +309,102 @@ impl<W: LayoutElement> Workspace<W> {
             self.tiling.focus_inactive_view_keeping_history();
             self.floating_is_active = FloatingActive::Yes;
         }
+        // The arrival does not raise the splits above its new slot: swap_places leaves the
+        // seat stack alone, and `swap_focus` refocusing the focused floater returns early
+        // (sway/tree/container.c:1718-1798, sway/input/seat.c:1131-1134).
+        self.tiling
+            .cap_entry_stamps_for_arrival(window, entry_stamps);
         Some(floated)
+    }
+
+    /// Takes standalone floating view `window` out for a swap with a tiled
+    /// container on another workspace. Returns the view as a detached leaf,
+    /// its floating box, and whether it held this workspace's focus.
+    pub fn take_floating_window_for_swap(
+        &mut self,
+        window: &W::Id,
+    ) -> Option<FloatingSwapSource<W>> {
+        if !self.floating.window_is_floating_root(window) {
+            return None;
+        }
+        let rect = self
+            .floating
+            .tiles_with_offsets()
+            .find(|(tile, _)| tile.window().id() == window)
+            .map(|(tile, pos)| Rectangle::new(pos, tile.tile_size()))?;
+        let focused = self.floating_is_active.get()
+            && self
+                .floating
+                .active_window()
+                .is_some_and(|active| active.id() == window);
+        let RemovedTile { mut tile, .. } = self.floating.remove_tile(window, Transaction::new());
+        if let Some(output) = &self.output {
+            tile.window().output_leave(output);
+        }
+        let placement = (tile.floating_pos, tile.floating_window_size, rect);
+        tile.tiling_parent = None;
+        tile.tiling_focus_rank = None;
+        tile.stop_move_animations();
+        Some(FloatingSwapSource {
+            leaf: DetachedSubtree::from_tile(tile),
+            placement,
+            focused,
+        })
+    }
+
+    /// Floats `subtree` where a swapped-out floating view was, focusing it
+    /// when `focus` is set. Returns the view it floated, when it is a lone
+    /// view, and the node IDs a floated container was renumbered with.
+    pub fn float_swapped_subtree(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        (floating_pos, floating_size, rect): FloatingSwapPlacement,
+        focus: bool,
+    ) -> FloatingTiledSwap<W::Id> {
+        if let Some(output) = &self.output {
+            subtree.for_each_window(|window| window.output_enter(output));
+        }
+        let floated = match subtree.into_tile() {
+            Ok(mut tile) => {
+                tile.floating_pos = floating_pos;
+                tile.floating_window_size = floating_size;
+                tile.tiling_parent = None;
+                tile.tiling_focus_rank = None;
+                tile.stop_move_animations();
+                let id = tile.window().id().clone();
+                self.floating.add_tile(tile, focus);
+                (Some(id), Vec::new())
+            }
+            Err(subtree) => {
+                let (root, remapped) = self.floating.add_tree(*subtree, rect);
+                if focus {
+                    self.floating.focus_tree_view(root);
+                }
+                (None, remapped)
+            }
+        };
+        if focus || self.tiling.is_empty() {
+            self.floating_is_active = FloatingActive::Yes;
+        }
+        floated
+    }
+
+    /// Puts a swapped-in view into the tiled slot a swapped-out container left,
+    /// focusing it when `focus` is set.
+    pub fn tile_swapped_window(
+        &mut self,
+        leaf: DetachedSubtree<W>,
+        window: &W::Id,
+        slot: crate::layout::tiling_tree::DetachedSlot,
+        focus: bool,
+    ) {
+        self.attach_tiling_subtree_for_swap(leaf, slot);
+        self.tiling.finish_subtree_detach(None);
+        self.tiling.rank_arrived_window_by_focus_timestamp(window);
+        if focus {
+            self.tiling.activate_window(window);
+            self.floating_is_active = FloatingActive::No;
+        }
     }
 
     pub fn detach_tiling_subtree_for_swap(
@@ -153,7 +428,22 @@ impl<W: LayoutElement> Workspace<W> {
         if let Some(output) = &self.output {
             subtree.for_each_window(|window| window.output_enter(output));
         }
-        self.tiling.attach_subtree_for_swap(subtree, slot)
+        let mut arrival = None;
+        subtree.for_each_window(|window| arrival = arrival.max(window.focus_timestamp()));
+        let attached = self.tiling.attach_subtree_for_swap(subtree, slot);
+        // swap_places leaves the seat stack alone, so a container focused more
+        // recently than this workspace's focus-inactive floater now heads the
+        // workspace's focus (`swap_places`, sway/tree/container.c:1718-1764;
+        // `focus_inactive_children_iterator`, sway/ipc-json.c:786-807).
+        let floater = self
+            .floating
+            .active_window()
+            .and_then(|window| window.focus_timestamp());
+        if self.floating_is_active == FloatingActive::Yes && arrival.is_some() && arrival > floater
+        {
+            self.floating_is_active = FloatingActive::No;
+        }
+        attached
     }
 
     pub fn attach_tiling_subtree_at(
@@ -167,6 +457,16 @@ impl<W: LayoutElement> Workspace<W> {
         let fullscreen = subtree.has_fullscreen();
         if fullscreen {
             self.disable_fullscreen();
+        }
+        if self.tiling.is_empty() && self.has_non_sticky_floating() {
+            // A wrapper the move created is a new node at the bottom of the
+            // seat's focus stack, so the floaters keep focus priority
+            // (`seat_node_from_node`, sway/input/seat.c:327-350); an existing
+            // container keeps its rank.
+            if !subtree.is_wrapped_workspace() {
+                self.floating_is_active = FloatingActive::No;
+            }
+            return self.tiling.attach_subtree_at_wrapped(subtree, target);
         }
         self.floating_is_active = FloatingActive::No;
         self.tiling.attach_subtree_at(subtree, target)
@@ -188,6 +488,9 @@ impl<W: LayoutElement> Workspace<W> {
                 window.output_leave(output);
             }
         }
+        // `container_detach` refreshes the workspace representation
+        // (sway/tree/container.c:1461-1466).
+        self.tiling.restore_has_had_tile(true);
         self.update_focus_floating_tiling_after_removing(true);
         Some(removed)
     }
@@ -208,8 +511,56 @@ impl<W: LayoutElement> Workspace<W> {
         root
     }
 
+    /// See [`Layout::pre_map_focus`].
+    pub fn pre_map_focus(&self) -> Option<crate::layout::container_commands::PreMapFocus<W::Id>> {
+        use crate::layout::container_commands::PreMapFocus;
+        if self.floating_is_active.get() {
+            let window = self.floating.active_window()?.id().clone();
+            let node = self.floating.focused_tree_node();
+            Some(PreMapFocus::Floating(window, node))
+        } else {
+            self.tiling.focus().map(PreMapFocus::Tiling)
+        }
+    }
+
+    /// See [`Layout::restore_focus_after_map_move`].
+    pub fn restore_pre_map_focus(
+        &mut self,
+        focus: crate::layout::container_commands::PreMapFocus<W::Id>,
+    ) {
+        use crate::layout::container_commands::PreMapFocus;
+        match focus {
+            PreMapFocus::Tiling(node) => {
+                if !self.floating_is_active.get()
+                    && self.tiling.contains(node)
+                    && self.tiling.focus() != Some(node)
+                {
+                    self.tiling.set_focus(node);
+                }
+            }
+            PreMapFocus::Floating(window, node) => {
+                if self.floating.restore_tree_focus(&window, node) {
+                    self.floating_is_active = FloatingActive::Yes;
+                }
+            }
+        }
+    }
+
     pub fn focus_floating_tree_view(&mut self, root: NodeId) {
         self.floating.focus_tree_view(root);
+    }
+
+    /// Focuses the focus-inactive view below `node` in floating group `root`. Returns false
+    /// when `node` is gone or holds no view.
+    pub fn focus_floating_view_in(&mut self, root: NodeId, node: NodeId) -> bool {
+        self.floating.focus_tree_view_in(root, node)
+    }
+
+    /// Hands focus to the floating layer's active window, if any.
+    pub fn activate_floating_layer(&mut self) {
+        if self.floating.active_window().is_some() {
+            self.floating_is_active = FloatingActive::Yes;
+        }
     }
 
     pub fn remove_active_tiling_tile(&mut self) -> Option<Tile<W>> {
@@ -229,6 +580,19 @@ impl<W: LayoutElement> Workspace<W> {
     /// `workspace_switch` does with `seat_get_focus_inactive(ws)`, which only returns the
     /// workspace itself when nothing under it was focused (sway/tree/workspace.c:731-743;
     /// sway/input/seat.c:1357-1372).
+    /// `workspace_switch` hands the seat focus to the workspace's focus-inactive node
+    /// (sway/tree/workspace.c:731-743), and `seat_set_focus` raises every ancestor of it
+    /// (sway/input/seat.c:1178-1190). A wrapper a move created around that view was never
+    /// focused, so the switch is what lifts it above its siblings.
+    pub fn raise_tiling_focus_on_switch(&mut self) {
+        if self.is_workspace_focused() || self.floating_is_active.get() {
+            return;
+        }
+        if let Some(focus) = self.tiling.focus() {
+            self.tiling.set_focus(focus);
+        }
+    }
+
     pub fn focus_inactive_below_workspace(&mut self) {
         if !self.is_workspace_focused() {
             return;
@@ -247,6 +611,11 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn focus_parent(&mut self) -> bool {
+        // A fullscreen container keeps the focus, floating or tiled
+        // (`focus_parent`, sway/commands/focus.c:342-344).
+        if self.focused_container_fullscreen_mode().is_some() {
+            return false;
+        }
         if self.floating_is_active.get() {
             if self.floating.focus_parent() {
                 return true;
@@ -293,12 +662,10 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn focus_child(&mut self) -> bool {
         if self.floating_is_active.get() {
             self.floating.focus_child()
-        } else if self.is_workspace_focused()
-            && self.floating_is_active == FloatingActive::NoButRaised
-        {
-            self.floating_is_active = FloatingActive::Yes;
-            true
         } else {
+            // From the workspace only tiling children are candidates, so a
+            // workspace holding nothing but floating windows keeps its focus
+            // (`seat_get_active_tiling_child`, sway/input/seat.c:1419-1425).
             self.tiling.focus_child()
         }
     }
@@ -323,10 +690,11 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn focused_container_node(&self) -> Option<crate::layout::tiling_tree::NodeId> {
+        // A raised but inactive floating space leaves the tiling focus in charge, so a
+        // focused split stays the seat's focused container (seat_get_focused_container,
+        // sway/input/seat.c:1470-1476).
         if self.floating_is_active.get() {
             self.floating.focused_container_node()
-        } else if self.floating_is_active == FloatingActive::NoButRaised {
-            self.tiling.focus().filter(|id| self.tiling.is_root(*id))
         } else {
             self.focused_tiling_node()
         }
@@ -625,9 +993,7 @@ impl<W: LayoutElement> Workspace<W> {
         layout: crate::layout::tiling_tree::Layout,
     ) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            self.floating
-                .focused_child_tree_mut()
-                .map(|tree| tree.set_focused_layout(layout))
+            self.in_floating_tree_refreshing_representation(|tree| tree.set_focused_layout(layout))
                 .unwrap_or_default()
         } else {
             self.tiling.set_focused_layout(layout)
@@ -635,17 +1001,30 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn split_focused(&mut self, layout: crate::layout::tiling_tree::Layout) {
+        if self.split_fullscreen_floating(layout) {
+            return;
+        }
         if self.floating_is_active.get() {
-            self.floating.split_active(layout);
+            self.split_active_floating(layout);
         } else {
             self.tiling.split_focused(layout);
+            // `workspace_split` moves seat focus from the workspace to the new
+            // container (sway/sway/tree/workspace.c:1071-1076), so the
+            // workspace-focused floating state no longer applies.
+            if self.floating_is_active == FloatingActive::NoButRaised
+                && !self.tiling.root_is_focused()
+            {
+                self.floating_is_active = FloatingActive::No;
+            }
         }
     }
 
     pub fn flatten_focused_parent(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
-        (!self.floating_is_active.get())
-            .then(|| self.tiling.focus())
-            .flatten()
+        if self.floating_is_active.get() {
+            return self.floating.flatten_focused_tree_node();
+        }
+        self.tiling
+            .focus()
             .and_then(|focus| self.tiling.flatten_ancestors(focus))
     }
 
@@ -654,10 +1033,10 @@ impl<W: LayoutElement> Workspace<W> {
         toggle: &swayward_ipc::command::LayoutToggle,
     ) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            self.floating
-                .focused_child_tree_mut()
-                .map(|tree| tree.toggle_focused_layout(toggle))
-                .unwrap_or_default()
+            self.in_floating_tree_refreshing_representation(|tree| {
+                tree.toggle_focused_layout(toggle)
+            })
+            .unwrap_or_default()
         } else {
             self.tiling.toggle_focused_layout(toggle)
         }
@@ -665,9 +1044,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn restore_focused_split_layout(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
         if self.floating_is_active.get() {
-            self.floating
-                .focused_child_tree_mut()?
-                .restore_focused_split_layout()
+            self.in_floating_tree_refreshing_representation(
+                crate::layout::tiling_tree::TilingTree::restore_focused_split_layout,
+            )
+            .flatten()
         } else {
             self.tiling.restore_focused_split_layout()
         }
@@ -675,33 +1055,157 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn toggle_focused_layout_split(&mut self) -> Vec<(NodeId, NodeId)> {
         if self.floating_is_active.get() {
-            self.floating
-                .focused_child_tree_mut()
-                .map(crate::layout::tiling_tree::TilingTree::toggle_focused_layout_split)
-                .unwrap_or_default()
+            self.in_floating_tree_refreshing_representation(
+                crate::layout::tiling_tree::TilingTree::toggle_focused_layout_split,
+            )
+            .unwrap_or_default()
         } else {
             self.tiling.toggle_focused_layout_split()
         }
     }
 
+    /// A split on a fullscreen floating view, which swayward parks in the tiling tree. Sway
+    /// wraps it in a new floating container and moves the fullscreen mode onto that container
+    /// (`container_split` and `container_replace`, sway/tree/container.c:1471-1501), so the
+    /// view leaves fullscreen back into the floating layer, is wrapped there, and the new
+    /// floating root takes the mode. Returns false when the focus is not such a view.
+    fn split_fullscreen_floating(&mut self, layout: crate::layout::tiling_tree::Layout) -> bool {
+        if self.floating_is_active.get() || !self.active_floating_is_fullscreen() {
+            return false;
+        }
+        let Some(window) = self.tiling.active_window().map(|w| w.id().clone()) else {
+            return false;
+        };
+        let mode = self
+            .tiling
+            .node_for_window(&window)
+            .and_then(|node| self.tiling.fullscreen_mode(node));
+        let hidden = self.tiling.hidden_under_fullscreen();
+        self.set_fullscreen_mode(&window, None);
+        if !self.floating.has_window(&window) {
+            return true;
+        }
+        self.tiling.keep_unarranged_for_floating_fullscreen(hidden);
+        self.floating_is_active = FloatingActive::Yes;
+        self.split_active_floating(layout);
+        if let Some(root) = self.floating.tree_root_for_window(&window) {
+            if let Some(tree) = self.floating.tree_mut(root) {
+                tree.set_node_fullscreen(root, mode);
+            }
+        }
+        true
+    }
+
     /// `split toggle` reads `container_parent_layout`, which for a floating root (no parent) is
     /// the workspace layout (sway/tree/container.c:1353-1361, sway/commands/split.c:64-71).
     pub fn toggle_focused_split(&mut self) {
+        use crate::layout::tiling_tree::Layout;
+        if self.active_floating_is_fullscreen() && !self.floating_is_active.get() {
+            let layout = if self.tiling.root_layout() == Some(Layout::SplitV) {
+                Layout::SplitH
+            } else {
+                Layout::SplitV
+            };
+            self.split_fullscreen_floating(layout);
+            return;
+        }
         if !self.floating_is_active.get() {
             self.tiling.toggle_focused_split();
             return;
         }
         if let Some(tree) = self.floating.focused_child_tree_mut() {
             tree.toggle_focused_split();
+            self.tiling.restore_has_had_tile(true);
             return;
         }
-        use crate::layout::tiling_tree::Layout;
         let layout = if self.tiling.root_layout() == Some(Layout::SplitV) {
             Layout::SplitH
         } else {
             Layout::SplitV
         };
+        self.split_active_floating(layout);
+    }
+
+    /// A split in the floating layer. `container_split` always refreshes the representation
+    /// up to the workspace, through `container_update_representation` on the reused parent or
+    /// through `container_replace` and `container_add_sibling` on a new one
+    /// (sway/tree/container.c:750-773,1410-1423,1508-1552), so a workspace that never held a
+    /// tile reports one from then on.
+    fn split_active_floating(&mut self, layout: crate::layout::tiling_tree::Layout) {
         self.floating.split_active(layout);
+        self.tiling.restore_has_had_tile(true);
+    }
+
+    /// Runs a `layout` command in the focused floating tree. A layout that changes refreshes
+    /// the representation up to the workspace (`container_update_representation`,
+    /// sway/commands/layout.c:171-176, sway/tree/container.c:750-773).
+    fn in_floating_tree_refreshing_representation<T>(
+        &mut self,
+        f: impl FnOnce(&mut crate::layout::tiling_tree::TilingTree<W>) -> T,
+    ) -> Option<T> {
+        let tree = self.floating.focused_child_tree_mut()?;
+        let before = tree.representation_shape();
+        let result = f(tree);
+        if tree.representation_shape() != before {
+            self.tiling.restore_has_had_tile(true);
+        }
+        Some(result)
+    }
+
+    /// Runs a criteria `layout` command on `window`'s leaf when the window is a child of a
+    /// floating group: sway operates on its parent there like anywhere else
+    /// (sway/commands/layout.c:121-176). `None` when the window is not in a group below its
+    /// root.
+    pub fn in_floating_window_tree<T>(
+        &mut self,
+        window: &W::Id,
+        f: impl FnOnce(&mut crate::layout::tiling_tree::TilingTree<W>, NodeId) -> T,
+    ) -> Option<T> {
+        let (tree, node) = self.floating.child_tree_for_window_mut(window)?;
+        let before = tree.representation_shape();
+        let result = f(tree, node);
+        if tree.representation_shape() != before {
+            self.tiling.restore_has_had_tile(true);
+        }
+        Some(result)
+    }
+
+    /// See [`Layout::flatten_floating_target`].
+    pub fn flatten_floating_target(
+        &mut self,
+        window: Option<&W::Id>,
+        node: Option<NodeId>,
+    ) -> Option<Vec<(NodeId, NodeId)>> {
+        let node = match (node, window) {
+            (Some(node), _) => node,
+            (None, Some(window)) => {
+                let root = self.floating.tree_root_for_window(window)?;
+                self.floating.tree(root)?.node_for_window(window)?
+            }
+            (None, None) => return None,
+        };
+        self.floating.flatten_tree_node(node)
+    }
+
+    /// See [`Layout::split_floating_target`].
+    pub fn split_floating_target(
+        &mut self,
+        window: Option<&W::Id>,
+        node: Option<NodeId>,
+        layout: Option<crate::layout::tiling_tree::Layout>,
+    ) -> bool {
+        use crate::layout::tiling_tree::Layout;
+        let toggled = if self.tiling.root_layout() == Some(Layout::SplitV) {
+            Layout::SplitH
+        } else {
+            Layout::SplitV
+        };
+        let (layout, toggle) = layout.map_or((toggled, true), |layout| (layout, false));
+        match (node, window) {
+            (Some(node), _) => self.floating.split_tree_node(node, layout, toggle),
+            (None, Some(window)) => self.floating.split_window(window, layout, toggle),
+            (None, None) => false,
+        }
     }
 
     pub fn set_focused_display(&mut self, display: ColumnDisplay) {
@@ -742,7 +1246,10 @@ impl<W: LayoutElement> Workspace<W> {
                 self.floating
                     .set_window_outer_height(window, change, automatic_maximum);
             }
-        } else {
+        } else if !self
+            .floating
+            .set_tree_window_size_sway(window, width, height)
+        {
             self.tiling.set_window_size_sway(window, width, height);
         }
     }
@@ -771,6 +1278,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// Makes the workspace node itself the focused node, without raising it in the tiling
     /// history, so a later switch here still descends to the focus-inactive view.
+    ///
+    /// Carried sticky floaters land here too: the seat still focuses the workspace
+    /// (`seat_set_workspace_focus`, sway/sway/input/seat.c:1209-1221), whether the floater
+    /// sits in the floating space or, fullscreen, in the tiling tree.
     pub(in crate::layout) fn focus_workspace_itself(&mut self) {
         if self.tiling.is_empty() {
             self.floating_is_active = if self.floating.is_empty() {
@@ -780,15 +1291,6 @@ impl<W: LayoutElement> Workspace<W> {
             };
         } else {
             self.floating_is_active = FloatingActive::No;
-            self.tiling.focus_root_keeping_history();
-        }
-    }
-
-    pub(in crate::layout) fn focus_workspace_node(&mut self) {
-        self.floating_is_active = FloatingActive::No;
-        // A carried sticky fullscreen floating view lives in the tiling tree; the seat
-        // still focuses the workspace (`seat_set_workspace_focus`, sway/input/seat.c).
-        if !self.tiling.is_empty() {
             self.tiling.focus_root_keeping_history();
         }
     }
@@ -810,6 +1312,15 @@ impl<W: LayoutElement> Workspace<W> {
         // match elsewhere leaves the seat focus alone.
         let focused = self.floating_is_active.get()
             && self.floating.active_window().map(|active| active.id()) == Some(window);
+        let stamp = self
+            .floating
+            .tiles()
+            .map(Tile::window)
+            .find(|candidate| candidate.id() == window)
+            .and_then(LayoutElement::focus_timestamp);
+        if let Some(stamp) = stamp {
+            self.floating.record_departing_focus(window, stamp);
+        }
         let removed = self.floating.remove_tile(window, Transaction::new());
         let mut tile = removed.tile;
         tile.restore_to_floating = false;
@@ -927,6 +1438,22 @@ impl<W: LayoutElement> Workspace<W> {
         })
     }
 
+    /// `title_format` on a split, tiled or in a floating group: sway stores it on any container
+    /// (sway/commands/title_format.c:14-29).
+    pub fn set_split_title_format(
+        &mut self,
+        id: crate::layout::tiling_tree::NodeId,
+        format: String,
+    ) -> bool {
+        if self.tiling.is_split(id) {
+            return self.tiling.set_title_format(id, format);
+        }
+        self.floating
+            .tree_root_for_node(id)
+            .and_then(|root| self.floating.tree_mut(root))
+            .is_some_and(|tree| tree.set_title_format(id, format))
+    }
+
     pub fn is_tiling_split(&self, id: crate::layout::tiling_tree::NodeId) -> bool {
         self.tiling.is_split(id)
             || self
@@ -955,19 +1482,36 @@ impl<W: LayoutElement> Workspace<W> {
             }
             // Returning a focused container to tiling leaves the seat focus on it
             // (`container_set_floating`, sway/tree/container.c:976-1011).
-            let root_focused = self.floating_is_active.get()
-                && self.floating.focused_container_node() == Some(root);
+            // That holds for a focused container or view below the root too, such as the
+            // group a `split` wrapped in a new floating container: `cmd_floating` walks up
+            // to the root (sway/commands/floating.c:40-46) and `set_focus` is false, so the
+            // seat focus stays where it was.
+            let focused_container = self
+                .floating
+                .focused_tree_node()
+                .filter(|_| self.floating_is_active.get())
+                .filter(|focused| self.floating.tree_root_for_node(*focused) == Some(root));
             let subtree = self.floating.remove_tree(root)?;
             if let Some(output) = &self.output {
                 subtree.for_each_window(|window| window.output_enter(output));
             }
-            if subtree.has_fullscreen() {
+            let hidden = if subtree.has_fullscreen() {
                 self.disable_fullscreen();
-            }
+                self.tiling.take_floating_fullscreen()
+            } else {
+                None
+            };
             self.floating_is_active = FloatingActive::No;
-            let (root, _) = self.tiling.attach_unfloated_subtree(subtree);
-            if root_focused {
-                self.tiling.set_focus(root);
+            let (root, remapped) = self.tiling.attach_unfloated_subtree(subtree);
+            if let Some(hidden) = hidden {
+                self.tiling.restore_hidden_under_fullscreen(hidden);
+            }
+            if let Some(focused) = focused_container {
+                let focused = remapped
+                    .iter()
+                    .find_map(|(old, new)| (*old == focused).then_some(*new))
+                    .unwrap_or(focused);
+                self.tiling.set_focus(focused);
             }
             if self.floating.is_empty() {
                 self.floating_is_active = FloatingActive::No;
@@ -978,8 +1522,17 @@ impl<W: LayoutElement> Workspace<W> {
             return self.tiling.contains(node).then_some(node);
         }
         let whole_workspace = self.tiling.is_root(node);
+        let focused = !self.floating_is_active.get() && self.tiling.focus() == Some(node);
         let (subtree, old_parent) = self.detach_tiling_subtree(node)?;
         self.tiling.finish_subtree_detach(old_parent);
+        // Floating the focused container raises its old parent to the tiling
+        // layer's focus-inactive node (`container_set_floating`,
+        // sway/tree/container.c:969-973).
+        if let Some(parent) = old_parent.filter(|parent| {
+            focused && !self.tiling.is_root(*parent) && self.tiling.contains(*parent)
+        }) {
+            self.tiling.set_focus(parent);
+        }
         if whole_workspace {
             // Floating a focused workspace wraps its children and resets the
             // workspace to splith (sway/commands/floating.c:29-31).
@@ -997,6 +1550,10 @@ impl<W: LayoutElement> Workspace<W> {
         );
         let (root, remapped) = self.floating.add_tree(subtree, rect);
         debug_assert!(remapped.is_empty());
+        // Floating a container detaches it, which clears
+        // `root->fullscreen_global` for good (sway/tree/container.c:941-975
+        // and 1440-1446).
+        self.floating.orphan_tree_global_fullscreen(root);
         self.floating_is_active = FloatingActive::Yes;
         Some(root)
     }

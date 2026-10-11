@@ -18,7 +18,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn global_fullscreen_active(&self) -> bool {
         self.workspaces().any(|(_, _, workspace)| {
             workspace.fullscreen_mode() == Some(tiling_tree::FullscreenMode::Global)
-                && !workspace.tiling().global_fullscreen_orphaned()
+                && !workspace.global_fullscreen_orphaned()
         })
     }
 
@@ -89,6 +89,9 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
         if let Some(workspace) = self.workspace_mut(workspace_id) {
+            if mode == Some(tiling_tree::FullscreenMode::Workspace) {
+                workspace.end_floating_fullscreen_for_tiling();
+            }
             workspace.tiling_mut().set_node_fullscreen(node, mode);
         }
         if mode == Some(tiling_tree::FullscreenMode::Global) {

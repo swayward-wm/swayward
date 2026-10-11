@@ -11,6 +11,10 @@ cargo clippy --all --all-targets -- -D warnings
 cargo test --all
 ./contrib/check-divergence
 ./contrib/coverage-report --check
+./contrib/coverage-report --check-doc
+./contrib/i3-suite-summary --check
+./contrib/test-census --check-doc
+python3 contrib/test-i3-suite-summary.py
 
 base=${FAST_GATE_BASE:-origin/main}
 if git diff --name-only "$base" -- src/layout/ | grep -q .; then

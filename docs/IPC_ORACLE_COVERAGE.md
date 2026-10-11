@@ -25,6 +25,11 @@ For each row, one emitter behavior was changed, `cargo test -p swayward --lib te
 
 ## Coverage matrix
 
+The "Caught: N passed, M failed" tallies are historical: each records one
+mutation run against the IPC test suite as it stood when the row was written,
+which was much smaller than today's. They show that the mutation was caught,
+not the current test count. `contrib/test-census` reports current counts.
+
 | Surface | Mutation | Result | Boundary |
 |---|---|---:|---|
 | `GET_TREE` node schema and values | Change a stable scalar value, node key set, JSON value type, leaf name/layout/orientation, focus/percent, or rectangle beyond 10 px | Caught | The live test normalizes only run- or backend-dependent fields, then compares the whole parsed tree with a sway 1.12 capture. Dynamic IDs are mapped separately by tree position. Rectangles retain a 10 px tolerance and role checks because font metrics differ. The synthetic scratch workspace's `fullscreen_mode` is normalized because sway hard-codes 1 while swayward has no corresponding workspace-fullscreen state. |
@@ -92,8 +97,8 @@ identity.
 `.cache/sway-ipc-oracle/contrib/check-sway-fixture-schema /path/to/sway` requires the checkout to be the
 commit pinned in `sway-ipc/fixtures/schema-version.json` in the pinned oracle. It extracts the
 `GET_OUTPUTS`, output-node, native-view, and output-feature field sets from
-sway's serializers and compares them with representative fixtures. CI clones
-the pinned tag and runs this check, so a target-version bump cannot silently
+sway's serializers and compares them with representative fixtures. CI fetches
+the pinned commit and runs this check, so a target-version bump cannot silently
 reuse stale fixture schemas.
 
 Unsupported message types are now enumerated. `every_message_type_replies_and_leaves_the_connection_usable` walks 0..=13 plus 99, 100, 101, 102, 1000 and `u32::MAX`, and requires each to echo its request type, return parseable JSON, and be an object or array; anything outside sway's supported set must report `success: false`, and type 11 must equal sway's `IPC_SYNC` decline exactly. The connection must still serve a real request afterwards.

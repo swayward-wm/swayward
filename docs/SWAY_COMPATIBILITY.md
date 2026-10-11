@@ -44,7 +44,10 @@ figures quoted here. Markdown is not generated from the TOML.
 queries are in this group:
 
 - `GET_TREE` returns the live nested container tree, including titlebar
-  `deco_rect` values. The oracle includes 14 sway 1.12 tree scenarios.
+  `deco_rect` values. The in-process tests compare it with 14 sway 1.12 tree
+  scenarios captured as fixtures; the oracle's hand-picked corpus holds more,
+  counted in
+  [Reading the i3 suite results](https://github.com/swayward-wm/swayward/blob/main/docs/I3_SUITE_RESULTS.md#use-the-sway-corpus-for-sway-compatibility).
 - `GET_WORKSPACES`, `GET_MARKS`, `GET_BINDING_MODES`, and
   `GET_BINDING_STATE` return live compositor state.
 - `GET_INPUTS` returns the 12 fields sway emits, with keyboard, pointer, and
@@ -164,7 +167,10 @@ and the other user-visible differences.
 
 ## Events
 
-Subscriptions accept all 10 of sway's event family names:
+Subscriptions accept all 10 of sway's event family names. This page counts
+`barconfig_update` and `bar_state_update` separately; the oracle's event corpus
+subscribes to the other nine families, because sway emits no bar events without
+a bar.
 
 - workspace, window, mode, and binding events;
 - initial and requested tick events;

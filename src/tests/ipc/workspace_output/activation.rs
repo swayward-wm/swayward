@@ -555,3 +555,378 @@ fn auto_back_and_forth_returns_to_the_previous_workspace_on_another_output() {
     assert!(outcome.iter().all(|outcome| outcome.success), "{outcome:?}");
     assert_eq!(focused(&mut f), second);
 }
+
+/// `move <direction>` across outputs never calls `seat_set_focus`, so the seat
+/// keeps its workspace and `prev_workspace_name` (sway/sway/commands/move.c:
+/// 277-298, 672-745; sway/sway/input/seat.c:1098-1113). `move container to
+/// workspace back_and_forth` then targets the workspace the view just reached
+/// and leaves it there. A command that changes no seat focus in between, such
+/// as `mark`, does not catch the seat up. Oracle scenario
+/// move_back_and_forth_after_cross_output_move; random-v3 seed 32806.
+#[test]
+fn move_back_and_forth_after_cross_output_move_keeps_the_seat_record() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    run_urgency_commands(
+        &mut f,
+        client,
+        &[
+            "@moved",
+            "focus output right",
+            "focus output left",
+            "move right",
+            "mark --add x",
+            "move container to workspace back_and_forth",
+        ],
+    );
+    let swayward = f.swayward();
+    let workspaces = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let focused = workspaces
+        .iter()
+        .find(|workspace| workspace.focused)
+        .unwrap();
+    assert_eq!(focused.name, "2", "{workspaces:?}");
+    let holding = swayward
+        .layout
+        .workspaces()
+        .find(|(_, _, workspace)| workspace.windows().next().is_some())
+        .and_then(|(_, _, workspace)| workspace.sway_name());
+    assert_eq!(holding.as_deref(), Some("2"));
+}
+
+/// Mapping a focused view calls `seat_set_focus` (`view_map`,
+/// sway/sway/tree/view.c:943-955), whose `set_workspace` catches the seat up
+/// after a cross-output `move right` left it behind (sway/sway/input/seat.c:
+/// 1098-1113). The workspace the seat leaves becomes `prev_workspace_name`, so
+/// both `back_and_forth` forms then target the first output's workspace.
+/// Oracle scenarios move_back_and_forth_after_cross_output_move_and_map and
+/// workspace_back_and_forth_after_cross_output_move_and_map; random-v3 seed
+/// 35164.
+#[test]
+fn back_and_forth_after_cross_output_move_and_map_returns_to_the_first_output() {
+    for (command, focused_name, holder) in [
+        ("move container to workspace back_and_forth", "8", "7"),
+        ("workspace back_and_forth", "7", "8"),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        f.add_output(2, (1280, 720));
+        let client = f.add_client();
+        run_urgency_commands(
+            &mut f,
+            client,
+            &[
+                "workspace 7",
+                "@a",
+                "focus output right",
+                "workspace 8",
+                "@b",
+                "focus output left",
+                "move right",
+                "@c",
+                command,
+            ],
+        );
+        let swayward = f.swayward();
+        let workspaces = describe_workspaces(&swayward.layout, &swayward.global_space);
+        let focused = workspaces
+            .iter()
+            .find(|workspace| workspace.focused)
+            .unwrap();
+        assert_eq!(focused.name, focused_name, "{command}: {workspaces:?}");
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap();
+        let c_on = tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|output| output["nodes"].as_array().unwrap())
+            .find(|workspace| find_json_node_with_app_id(workspace, "c").is_some())
+            .map(|workspace| workspace["name"].clone());
+        assert_eq!(c_on, Some(holder.into()), "{command}");
+    }
+}
+
+/// `move [absolute] position` re-homes a floater onto the workspace of the
+/// output under it through `container_floating_move_to`, which never calls
+/// `seat_set_focus` (sway/sway/tree/container.c:1113-1145; sway/sway/commands/
+/// move.c:775, 831, 917). The seat keeps its workspace and
+/// `prev_workspace_name`, so `move container to workspace back_and_forth`
+/// targets the workspace the floater just reached and leaves it there.
+/// Oracle scenario move_back_and_forth_after_cross_output_floating_move.
+#[test]
+fn move_back_and_forth_after_cross_output_floating_move_keeps_the_seat_record() {
+    for position in [
+        "move absolute position 1500 px 100 px",
+        "move position 1500 px 100 px",
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        f.add_output(2, (1280, 720));
+        let client = f.add_client();
+        run_urgency_commands(
+            &mut f,
+            client,
+            &[
+                "@moved",
+                "focus output right",
+                "focus output left",
+                "floating enable",
+                position,
+                "move container to workspace back_and_forth",
+            ],
+        );
+        let swayward = f.swayward();
+        let holding = swayward
+            .layout
+            .workspaces()
+            .find(|(_, _, workspace)| workspace.windows().next().is_some())
+            .and_then(|(_, _, workspace)| workspace.sway_name());
+        assert_eq!(holding.as_deref(), Some("2"), "{position}");
+    }
+}
+
+fn run_urgency_commands(f: &mut Fixture, client: crate::tests::client::ClientId, steps: &[&str]) {
+    for step in steps {
+        if let Some(app_id) = step.strip_prefix('@') {
+            map_test_window(f, client, app_id);
+        } else {
+            let outcome = crate::command::execute(f.niri_state(), step);
+            assert!(outcome.iter().all(|o| o.success), "{step}: {outcome:?}");
+            f.double_roundtrip(client);
+        }
+    }
+}
+
+/// Sway starts the urgency timer only when the focused view's output showed
+/// another workspace before the focus change (`last_workspace`,
+/// sway/sway/input/seat.c:1158-1161, 1223-1240), not when the previously
+/// focused view sat elsewhere. Focusing across outputs onto a visible
+/// workspace clears at once. Differential seed 31799 (random-v3).
+#[test]
+fn focus_onto_another_outputs_visible_workspace_clears_urgency_at_once() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    run_urgency_commands(
+        &mut f,
+        client,
+        &[
+            "@left",
+            "focus output right",
+            "@right",
+            "focus output left",
+            "[app_id=right] urgent enable",
+        ],
+    );
+    assert!(test_window_is_urgent(&mut f, "right"));
+    run_urgency_commands(&mut f, client, &["focus right"]);
+    assert!(f.swayward().urgency_timers.is_empty());
+    assert!(!test_window_is_urgent(&mut f, "right"));
+}
+
+/// Focusing a view from an empty workspace on the same output switches that
+/// output's workspace, so sway starts the timer and the view stays urgent
+/// for now, even with no previously focused view. Differential seed 32407
+/// (random-v3).
+#[test]
+fn focus_from_an_empty_workspace_on_the_same_output_starts_the_urgency_timer() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    run_urgency_commands(
+        &mut f,
+        client,
+        &[
+            "@target",
+            "workspace number 3",
+            "[app_id=target] urgent enable",
+            "[app_id=target] focus",
+        ],
+    );
+    assert_eq!(f.swayward().urgency_timers.len(), 1);
+    assert!(test_window_is_urgent(&mut f, "target"));
+}
+
+/// `split v` with the workspace focused moves seat focus to the new
+/// container, not to a view (`workspace_split`,
+/// sway/sway/tree/workspace.c:1071-1076), so an urgent view under it stays
+/// urgent. Differential seed 32574 (random-v3).
+#[test]
+fn splitting_a_focused_workspace_with_a_floater_keeps_urgency() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    run_urgency_commands(
+        &mut f,
+        client,
+        &[
+            "focus output right",
+            "@two",
+            "@four",
+            "focus output left",
+            "[app_id=four] urgent enable",
+            "@twelve",
+            "focus next",
+            "floating enable",
+            "focus parent",
+        ],
+    );
+    assert!(test_window_is_urgent(&mut f, "four"));
+    run_urgency_commands(&mut f, client, &["split v"]);
+    assert!(test_window_is_urgent(&mut f, "four"));
+}
+
+/// A sticky floater refuses `move container to workspace back_and_forth` when
+/// the previous workspace was on its own output, even after that workspace
+/// was destroyed: sway names the target from `seat->prev_workspace_name`, and
+/// a workspace it would create there is refused before creation
+/// (sway/commands/move.c:459-468, 498-511). Random-v3 seed 32488
+/// (diff-fam-v3-move-ws-back-and-forth-after-ws-move); oracle scenario
+/// sticky_move_back_and_forth_same_output_refused.
+#[test]
+fn sticky_move_to_back_and_forth_on_the_same_output_is_refused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "sticky");
+    for step in [
+        "floating enable",
+        "sticky enable",
+        "workspace 3",
+        "focus floating",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), step)[0].success,
+            "{step}"
+        );
+    }
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some(
+                "Can't move sticky container to another workspace on the same output".into()
+            ),
+            parse_error: Some(false),
+        }]
+    );
+    let swayward = f.swayward();
+    let names: Vec<_> = describe_workspaces(&swayward.layout, &swayward.global_space)
+        .into_iter()
+        .map(|workspace| workspace.name)
+        .collect();
+    assert!(!names.contains(&"1".to_owned()), "{names:?}");
+    swayward.layout.verify_invariants();
+}
+
+/// `move workspace to output` keeps the seat's focused workspace, so it
+/// records no history: `seat_set_focus` lands on the same workspace and
+/// `set_workspace` returns early (sway/commands/move.c:659-667,
+/// sway/input/seat.c:1098-1102). The previous record survives the move.
+/// Random-v3 seeds 32404, 32453, 32496
+/// (diff-fam-v3-move-ws-back-and-forth-after-ws-move); oracle scenario
+/// move_back_and_forth_after_move_workspace_to_output.
+#[test]
+fn move_workspace_to_output_keeps_the_back_and_forth_record() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    assert!(crate::command::execute(f.niri_state(), "focus output headless-1")[0].success);
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "move workspace to output headless-2")[0].error,
+        None
+    );
+    map_test_window(&mut f, client, "moved");
+    assert_eq!(
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth"),
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("No workspace was previously active.".into()),
+            parse_error: Some(false),
+        }]
+    );
+
+    for step in [
+        "workspace 5",
+        "workspace 1",
+        "move workspace to output headless-1",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), step)[0].success,
+            "{step}"
+        );
+    }
+    assert!(
+        crate::command::execute(f.niri_state(), "move container to workspace back_and_forth")[0]
+            .success
+    );
+    let swayward = f.swayward();
+    let holding: Vec<_> = describe_workspaces(&swayward.layout, &swayward.global_space)
+        .into_iter()
+        .filter(|workspace| workspace.name == "5")
+        .collect();
+    assert_eq!(holding.len(), 1);
+    swayward.layout.verify_invariants();
+}
+
+/// `move workspace to output` detaches the workspace before naming the
+/// replacement for the emptied output (`workspace_move_to_output`,
+/// sway/sway/tree/workspace.c:1131-1161), and `workspace back_and_forth` has
+/// already destroyed the empty workspace it left. The destination's empty
+/// workspace is destroyed only after the replacement is named, so the
+/// replacement takes the name back_and_forth just released. Oracle
+/// scenario move_workspace_after_back_and_forth; random-v3 seed 32264.
+#[test]
+fn move_workspace_after_back_and_forth_reuses_the_released_name() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let swayward = f.swayward();
+    let initial = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let second = initial
+        .iter()
+        .find(|w| w.name == "2")
+        .map(|w| w.output.clone())
+        .unwrap();
+    let other = initial
+        .iter()
+        .find(|w| w.name == "1")
+        .map(|w| w.output.clone())
+        .unwrap();
+    for command in [
+        format!("focus output {second}"),
+        "workspace 4".into(),
+        "workspace 2".into(),
+        "workspace back_and_forth".into(),
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), &command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    let swayward = f.swayward();
+    let before = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let mut names = before.iter().map(|w| w.name.clone()).collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["1", "4"].map(String::from), "{before:?}");
+
+    let outcome =
+        crate::command::execute(f.niri_state(), &format!("move workspace to output {other}"));
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    let swayward = f.swayward();
+    let after = describe_workspaces(&swayward.layout, &swayward.global_space);
+    let left = after.iter().find(|w| w.output == second).unwrap();
+    assert_eq!(left.name, "2", "{after:?}");
+    let focused = after.iter().find(|w| w.focused).unwrap();
+    assert_eq!(focused.name, "4", "{after:?}");
+}

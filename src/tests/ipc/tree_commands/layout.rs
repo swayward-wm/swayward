@@ -535,6 +535,48 @@ fn swapping_across_outputs_into_a_tabbed_parent_shows_the_recently_focused_arriv
     assert_eq!(moved["visible"], true);
 }
 
+// Family diff-fam-v3-move-to-mark-tabbed-two-output-visible, random-v3 seeds
+// 32362 32645 (two outputs). The focused tab moves to a mark on its tabbed
+// sibling. Sway's focus stack is seat-wide and `container_move_to_container`
+// does not touch it, so the moved view stays the most recently focused child
+// and remains the visible tab (sway/commands/move.c:241-275, :596-606;
+// `view_is_visible`, sway/tree/view.c:1180-1193).
+#[test]
+fn moving_the_focused_tab_to_a_marked_sibling_keeps_it_visible() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-1");
+    for command in [
+        "focus output right",
+        "focus output left",
+        "mark m",
+        "layout tabbed",
+        "focus next",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.niri_state().update_keyboard_focus();
+    }
+    map_test_window(&mut f, client, "fixture-7");
+
+    let outcome = crate::command::execute(f.niri_state(), "move container to mark m");
+    assert!(outcome[0].success, "{outcome:?}");
+    f.niri_state().update_keyboard_focus();
+
+    let tree = tree_json(&mut f);
+    let parent = find_json_parent_of_app_id(&tree, "fixture-7").unwrap();
+    assert_eq!(parent["layout"], "tabbed", "{parent}");
+    let nodes = parent["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["app_id"], "fixture-1");
+    assert_eq!(nodes[0]["visible"], false, "{parent}");
+    assert_eq!(nodes[1]["app_id"], "fixture-7");
+    assert_eq!(nodes[1]["visible"], true, "{parent}");
+}
+
 // random-v2 seed 15819 (differential): swapping a fullscreen window with its
 // sibling hands fullscreen to the sibling, and enabling it there focuses the
 // sibling (`container_swap`, sway/tree/container.c:1884-1889;
@@ -702,12 +744,17 @@ fn focus_parent_then_layout_targets_the_parent_of_the_focused_container() {
         .all(|node| node["focused"] == false));
 }
 
+/// Oracle: state scenario focus_child_skips_floating_child
+/// (diff-fam-v3-floating-focus-parent-child). From the workspace `focus child`
+/// considers only tiling children (`seat_get_active_tiling_child`,
+/// sway/input/seat.c:1419-1425): it gives a tiled view back, and a workspace
+/// holding nothing but a floating view keeps its focus.
 #[test]
-fn focus_child_from_workspace_restores_the_floating_child() {
+fn focus_child_from_workspace_skips_floating_children() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let client = f.add_client();
-    for floating in [false, true] {
+    let map = |f: &mut Fixture| {
         let window = f.client(client).create_window();
         window.commit();
         let surface = window.surface.clone();
@@ -716,28 +763,30 @@ fn focus_child_from_workspace_restores_the_floating_child() {
         window.attach_new_buffer();
         window.ack_last_and_commit();
         f.double_roundtrip(client);
-        if floating {
-            assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
-        }
+    };
+    let workspace_focused = |f: &mut Fixture| {
+        f.swayward()
+            .layout
+            .active_workspace()
+            .unwrap()
+            .is_workspace_focused()
+    };
+
+    map(&mut f);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    for command in ["focus parent", "focus child"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+        assert!(workspace_focused(&mut f), "{command}");
     }
-    let floating = f.swayward().layout.focus().unwrap().id();
 
+    map(&mut f);
+    let tiled = f.swayward().layout.focus().unwrap().id();
+    assert!(crate::command::execute(f.niri_state(), "focus floating")[0].success);
+    assert_ne!(f.swayward().layout.focus().unwrap().id(), tiled);
     assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
-    assert!(f
-        .swayward()
-        .layout
-        .active_workspace()
-        .unwrap()
-        .is_workspace_focused());
+    assert!(workspace_focused(&mut f));
     assert!(crate::command::execute(f.niri_state(), "focus child")[0].success);
-
-    assert_eq!(f.swayward().layout.focus().unwrap().id(), floating);
-
-    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "focus tiling")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "focus parent")[0].success);
-    assert!(crate::command::execute(f.niri_state(), "focus child")[0].success);
-    assert_ne!(f.swayward().layout.focus().unwrap().id(), floating);
+    assert_eq!(f.swayward().layout.focus().unwrap().id(), tiled);
 }
 
 #[test]
@@ -1652,6 +1701,62 @@ fn move_wrap_after_resize_keeps_whole_pixel_fractions() {
     );
 }
 
+// random-v2 seed 14473 step 9 (diff-fam-floating-toggle-ppt-resize-residual-1):
+// `resize shrink width` on a view in a splitv resizes its splith ancestor, and
+// sway answers success only if the arrange that follows moved the view's own
+// fraction, compared bitwise (sway/commands/resize.c:273-277). That arrange
+// divides the splitv's fractions by their sum (sway/tree/arrange.c:47-52),
+// which moves an even split of 6 or 7 by an ulp but not one of 3, 5 or 8.
+// Oracle row nested_ppt_shrink_ancestor_reply.
+#[test]
+fn nested_ppt_shrink_reply_follows_the_inner_renormalisation() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-npsa-1");
+    map_app(&mut f, client, "fixture-npsa-2");
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    let mut replies = Vec::new();
+    for (app_ids, probe) in [
+        (&["fixture-npsa-3", "fixture-npsa-4"][..], 3),
+        (&["fixture-npsa-5", "fixture-npsa-6"][..], 5),
+        (&["fixture-npsa-7"][..], 6),
+        (&["fixture-npsa-8"][..], 7),
+        (&["fixture-npsa-9"][..], 8),
+        (&["fixture-npsa-10"][..], 9),
+    ] {
+        for app_id in app_ids {
+            map_app(&mut f, client, app_id);
+        }
+        let outcome = crate::command::execute(f.niri_state(), "resize shrink width 5 ppt");
+        replies.push((probe, outcome[0].success));
+    }
+    assert_eq!(
+        replies,
+        [
+            (3, false),
+            (5, false),
+            (6, true),
+            (7, true),
+            (8, false),
+            (9, true)
+        ]
+    );
+
+    // Seed 14473 itself: seven views mapped into the splitv with no resize
+    // between them, so only the insertion arithmetic decides the ulp.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-diff-1");
+    map_app(&mut f, client, "fixture-diff-2");
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    for app_id in ["4", "5", "6", "7", "8", "9"] {
+        map_app(&mut f, client, &format!("fixture-diff-{app_id}"));
+    }
+    assert!(crate::command::execute(f.niri_state(), "resize shrink width 5 ppt")[0].success);
+}
+
 // random-v2 seed 1071 step 5 (diff-fam-percent-rounding): under a fullscreen
 // view, sway leaves the other children at the whole-pixel boxes they last had
 // over the visible children (`arrange_workspace`, sway/tree/arrange.c:310-316):
@@ -2319,4 +2424,512 @@ fn view_mapped_into_a_fullscreen_split_in_a_layout_wrapper_is_arranged() {
         let view = find_json_node_with_app_id(&tree, app_id).unwrap();
         assert_eq!(view["percent"], 0.5, "{view}");
     }
+}
+
+// Differential family diff-fam-v3-kill-global-fullscreen-focus, seeds 30913,
+// 31521, 31627 and 31703; oracle row kill_orphaned_global_fullscreen_focuses_sibling.
+// The `layout` wrap clears `root->fullscreen_global` (sway/tree/workspace.c:
+// 898-910, sway/tree/container.c:1440-1446), so closing the orphaned view
+// obstructs nothing and the seat refocuses the sibling
+// (sway/input/seat.c:273-315, 1148-1156) rather than staying on the workspace.
+#[test]
+fn closing_orphaned_global_fullscreen_view_focuses_the_sibling() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(
+        &mut f,
+        &["fullscreen toggle global", "layout tabbed", "kill"],
+    );
+    f.double_roundtrip(client);
+    let closed = f
+        .client(client)
+        .state
+        .windows
+        .iter()
+        .filter(|window| window.close_requested)
+        .map(|window| window.surface.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(closed.len(), 1);
+    for surface in closed {
+        f.client(client).window(&surface).destroy_role();
+    }
+    f.double_roundtrip(client);
+
+    let tree = tree_json(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    assert_eq!(workspace["focused"], false, "{workspace}");
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    assert_eq!(one["focused"], true, "{one}");
+    f.swayward().layout.verify_invariants();
+}
+
+fn run_and_close(f: &mut Fixture, client: super::client::ClientId, commands: &[&str]) {
+    for command in commands {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+        let closed = f
+            .client(client)
+            .state
+            .windows
+            .iter()
+            .filter(|window| window.close_requested)
+            .map(|window| window.surface.clone())
+            .collect::<Vec<_>>();
+        for surface in closed {
+            let window = f.client(client).window(&surface);
+            window.close_requested = false;
+            window.destroy_role();
+        }
+        f.double_roundtrip(client);
+    }
+}
+
+// Differential family diff-fam-v3-kill-global-fullscreen-focus, seeds 30913,
+// 31521, 31627 and 31703. Closing a global fullscreen view emits the destroy
+// signal while `root->fullscreen_global` still names it, so the seat refuses
+// every view it obstructs, floating ones included, and the workspace keeps
+// focus (sway/tree/container.c:488-501, sway/input/seat.c:1148-1151). After
+// `split toggle` the wrapper holds the mode (sway/tree/container.c:1471-1501)
+// and `container_reap_empty` destroys it the same way. A scratchpad view
+// drops global fullscreen before the signal (sway/tree/container.c:484-486),
+// so its close refocuses the sibling.
+#[test]
+fn closing_global_fullscreen_keeps_the_workspace_focused_unless_released() {
+    let focused_app = |f: &mut Fixture| {
+        let tree = tree_json(f);
+        let workspace = &tree["nodes"][1]["nodes"][0];
+        let mut focused = Vec::new();
+        for app in ["a", "b"] {
+            if find_json_node_with_app_id(&tree, app).is_some_and(|node| node["focused"] == true) {
+                focused.push(app);
+            }
+        }
+        f.swayward().layout.verify_invariants();
+        (workspace["focused"] == true, focused)
+    };
+
+    for commands in [
+        &[
+            "floating enable",
+            "map:b",
+            "fullscreen toggle global",
+            "kill",
+        ][..],
+        &["map:b", "fullscreen toggle global", "split toggle", "kill"][..],
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        map_app(&mut f, client, "a");
+        for command in commands {
+            if let Some(app) = command.strip_prefix("map:") {
+                map_app(&mut f, client, app);
+            } else {
+                run_and_close(&mut f, client, &[command]);
+            }
+        }
+        assert_eq!(focused_app(&mut f), (true, vec![]), "{commands:?}");
+    }
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "a");
+    run(&mut f, &["move scratchpad"]);
+    map_app(&mut f, client, "b");
+    run_and_close(
+        &mut f,
+        client,
+        &["[app_id=\"a\"] focus", "fullscreen toggle global", "kill"],
+    );
+    assert_eq!(focused_app(&mut f), (false, vec!["b"]));
+}
+
+// Differential family diff-fam-v3-gfs-float-sibling-visible, seeds 30833,
+// 30889, 30897, 30924, 30947, 31008, 31110, 31309, 31982 and 32193; oracle
+// rows global_fullscreen_floating_shows_tiled_sibling and
+// global_fullscreen_for_window_layout_new_view_focus. `floating` on the
+// global fullscreen view detaches it, clearing `root->fullscreen_global`
+// while the view keeps mode 2 (sway/tree/container.c:941-1011 and
+// 1440-1446). The arrange that follows lays the sibling out over the
+// workspace and nothing is hidden (sway/tree/arrange.c:317-321,
+// sway/tree/view.c:1195-1201). A `for_window` layout wrap orphans it the
+// same way before `should_focus` runs, so the new view takes focus
+// (sway/tree/view.c:707-710 and 943-945).
+#[test]
+fn floating_or_rule_layout_wrap_orphans_global_fullscreen() {
+    for commands in [
+        &[
+            "fullscreen enable global",
+            "[app_id=\"^two$\"] floating enable",
+        ][..],
+        &["fullscreen toggle global", "floating toggle"][..],
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        map_app(&mut f, client, "one");
+        map_app(&mut f, client, "two");
+        run(&mut f, commands);
+
+        let tree = tree_json(&mut f);
+        let one = find_json_node_with_app_id(&tree, "one").unwrap();
+        let two = find_json_node_with_app_id(&tree, "two").unwrap();
+        assert_eq!(two["type"], "floating_con", "{two}");
+        assert_eq!(two["fullscreen_mode"], 2, "{two}");
+        assert_eq!(one["percent"], 1.0, "{one}");
+        assert_eq!(one["visible"], true, "{one}");
+        assert!(crate::command::execute(f.niri_state(), "workspace number 3")[0].success);
+    }
+
+    // `splitt` hands global fullscreen to the new split (`container_replace`,
+    // sway/tree/container.c:1471-1501); floating that split orphans it the
+    // same way.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(
+        &mut f,
+        &[
+            "fullscreen enable global",
+            "splitt",
+            "focus parent; floating toggle",
+        ],
+    );
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let split = &workspace["floating_nodes"][0];
+    assert_eq!(split["fullscreen_mode"], 2, "{workspace}");
+    assert_eq!(one["visible"], true, "{one}");
+    // `arrange_floating` lays the group out at its own box
+    // (sway/tree/arrange.c:214-219 and 249-262).
+    assert_eq!(split["rect"]["width"], 640, "{split}");
+    assert_eq!(split["nodes"][0]["rect"]["width"], 640, "{split}");
+
+    // A view floated out of a split leaves it empty for `container_reap_empty`
+    // (sway/tree/container.c:969-975), so its sibling takes the workspace.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(
+        &mut f,
+        &[
+            "split toggle",
+            "fullscreen enable global",
+            "focus parent; floating toggle",
+        ],
+    );
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    assert_eq!(one["percent"], 1.0, "{one}");
+    assert_eq!(one["visible"], true, "{one}");
+
+    // The orphan lets `workspace` switch (sway/commands/workspace.c:175-178),
+    // and a sticky one keeps mode 2 on the new workspace
+    // (sway/input/seat.c:1209-1221, sway/tree/workspace.c:961-972).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle global",
+            "floating enable",
+            "sticky enable",
+            "workspace 4",
+        ],
+    );
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    assert_eq!(one["fullscreen_mode"], 2, "{one}");
+    assert_eq!(one["visible"], true, "{one}");
+    // It sits in the new workspace's floating list, so a view mapped there
+    // takes the whole split.
+    map_app(&mut f, client, "two");
+    let tree = tree_json(&mut f);
+    let two = find_json_node_with_app_id(&tree, "two").unwrap();
+    assert_eq!(two["percent"], 1.0, "{two}");
+    assert_eq!(two["visible"], true, "{two}");
+
+    // With the global view orphaned, floating another tiled view arranges
+    // the workspace's remaining children in full (sway/tree/arrange.c:317-321).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "two");
+    run(&mut f, &["fullscreen toggle global"]);
+    map_app(&mut f, client, "three");
+    map_app(&mut f, client, "four");
+    run(&mut f, &["[app_id=\"^(two|three)$\"] floating enable"]);
+    let tree = tree_json(&mut f);
+    let four = find_json_node_with_app_id(&tree, "four").unwrap();
+    assert_eq!(four["percent"], 1.0, "{four}");
+    assert_eq!(four["visible"], true, "{four}");
+
+    // The floated view joins the top of `ws->floating`
+    // (`workspace_add_floating`, sway/tree/workspace.c:961-972), above a view
+    // floated earlier.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(&mut f, &["floating enable"]);
+    map_app(&mut f, client, "two");
+    run(&mut f, &["fullscreen toggle global", "floating enable"]);
+    let tree = tree_json(&mut f);
+    let floating = &tree["nodes"][1]["nodes"][0]["floating_nodes"];
+    assert_eq!(floating[0]["app_id"], "one", "{floating}");
+    assert_eq!(floating[1]["app_id"], "two", "{floating}");
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle global",
+            "for_window [app_id=\"two\"] layout tabbed",
+        ],
+    );
+    map_app(&mut f, client, "two");
+
+    let tree = tree_json(&mut f);
+    let one = find_json_node_with_app_id(&tree, "one").unwrap();
+    let two = find_json_node_with_app_id(&tree, "two").unwrap();
+    assert_eq!(one["fullscreen_mode"], 2, "{one}");
+    assert_eq!(one["focused"], false, "{one}");
+    assert_eq!(one["visible"], false, "{one}");
+    assert_eq!(two["focused"], true, "{two}");
+    assert_eq!(two["visible"], true, "{two}");
+}
+
+// Differential family diff-fam-v3-gfs-workspace-move-current, random-v3 seeds
+// 32758, 33123 and 33896; oracle row
+// global_fullscreen_split_child_moves_to_new_workspace. After `split h` a
+// fullscreen split wraps the view alone. Moving the view out leaves that
+// parent empty, so sway refocuses the most recent entry on the old workspace
+// (sway/commands/move.c:589-597). That entry is outside the fullscreen split,
+// which obstructs it, so `seat_set_focus` refuses (sway/input/seat.c:1148-1151)
+// and the view keeps focus. Reaping the emptied split then puts the view's new
+// workspace on the focus stack (sway/input/seat.c:304-313), and the old
+// workspace is destroyed.
+#[test]
+fn moving_the_lone_child_of_a_fullscreen_split_follows_it_to_the_new_workspace() {
+    let check = |f: &mut Fixture, app: &str| {
+        let tree = tree_json(f);
+        let output = &tree["nodes"][1];
+        assert_eq!(output["current_workspace"], "3", "{output}");
+        let view = find_json_node_with_app_id(&tree, app).unwrap();
+        assert_eq!(view["focused"], true, "{view}");
+        assert_eq!(view["fullscreen_mode"], 0, "{view}");
+        f.swayward().layout.verify_invariants();
+    };
+
+    // Global fullscreen: workspace 1 is left empty and destroyed.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    run(
+        &mut f,
+        &[
+            "layout tabbed",
+            "fullscreen toggle global",
+            "split h",
+            "move container to workspace number 3",
+        ],
+    );
+    check(&mut f, "one");
+    let tree = tree_json(&mut f);
+    assert_eq!(
+        tree["nodes"][1]["nodes"].as_array().unwrap().len(),
+        1,
+        "{tree}"
+    );
+
+    // Workspace fullscreen beside other views: workspace 1 survives with them.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "one");
+    map_app(&mut f, client, "two");
+    run(&mut f, &["split toggle"]);
+    map_app(&mut f, client, "three");
+    run(
+        &mut f,
+        &[
+            "fullscreen toggle",
+            "split toggle",
+            "move container to workspace number 3",
+        ],
+    );
+    check(&mut f, "three");
+    let tree = tree_json(&mut f);
+    assert_eq!(
+        tree["nodes"][1]["nodes"].as_array().unwrap().len(),
+        2,
+        "{tree}"
+    );
+}
+
+/// Differential family v3-resize-set-ppt-floating-sibling-split (random-v3 seed 32799; oracle
+/// row `floating_focus_parent_split_resize_set_ppt`). With a floater raised and the workspace
+/// focused, `split v` wraps the tiling children and focuses the wrapper
+/// (`workspace_split`, sway/tree/workspace.c:1058-1079). `resize set` then targets that
+/// singleton wrapper, which has no sibling to resize against
+/// (`container_resize_tiled`, sway/commands/resize.c:66-78), so the tiled views keep their
+/// halves rather than the last focused view taking 30 ppt.
+#[test]
+fn resize_set_ppt_after_focus_parent_split_from_floater_resizes_the_wrapper() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    for app_id in ["fixture-6", "fixture-7", "fixture-8"] {
+        map_app(&mut f, client, app_id);
+    }
+    for command in [
+        "floating enable",
+        "focus parent; split v",
+        "resize set width 30 ppt height 40 ppt",
+    ] {
+        for outcome in crate::command::execute(f.niri_state(), command) {
+            assert!(outcome.success, "{command}: {outcome:?}");
+        }
+        f.double_roundtrip(client);
+    }
+
+    let tree = tree_json(&mut f);
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let wrapper = &workspace["nodes"][0];
+    assert_eq!(workspace["layout"], "splitv", "{workspace}");
+    assert_eq!(wrapper["layout"], "splith", "{wrapper}");
+    assert_eq!(wrapper["focused"], true, "{wrapper}");
+    for app_id in ["fixture-6", "fixture-7"] {
+        let view = find_json_node_with_app_id(&tree, app_id).unwrap();
+        assert_eq!(view["percent"], 0.5, "{app_id}: {view}");
+    }
+    f.swayward().layout.verify_invariants();
+}
+
+// Differential family diff-fam-v3-hinted-swap-border-residual-1, random-v3
+// seeds 32071 step 5 and 33750 step 8 (sway-1.12); oracle row
+// tabbed_fullscreen_map_layout_toggle_splitv_tabbed. A tabbed parent gives
+// each view child the whole parent box: the tab bar is not taken from the
+// pending box (`apply_tabbed_layout`, sway/tree/arrange.c), only from the
+// box GET_TREE reports (sway/ipc-json.c:816-825). `layout` under fullscreen
+// arranges only the fullscreen view (sway/tree/arrange.c:310-316), so after
+// `layout toggle splitv tabbed` the hidden view keeps the whole box and
+// reports percent 1 (sway/ipc-json.c:744-755).
+#[test]
+fn layout_toggle_out_of_tabbed_under_fullscreen_keeps_the_whole_box_percent() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fullscreen");
+    run(&mut f, &["layout tabbed", "fullscreen toggle"]);
+    map_app(&mut f, client, "hidden");
+    run(&mut f, &["layout toggle splitv tabbed"]);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "hidden").unwrap();
+    let bar = hidden["deco_rect"]["height"].as_i64().unwrap();
+    assert!(bar > 0, "{hidden}");
+    assert_eq!(rect(hidden, "rect"), [0, bar, 1270, 1408 - bar], "{hidden}");
+    assert_eq!(hidden["percent"], 1.0, "{hidden}");
+}
+
+// Family diff-fam-v3-floated-fullscreen-tiled-sibling-border-percent, declared in
+// docs/KNOWN_DEVIATIONS.md#border-and-percent-of-a-view-mapped-beside-a-fullscreen-container.
+// Random-v3 seed 34235. Sway maps `b` as a sibling without marking it dirty
+// (sway/tree/view.c:896-900, sway/tree/container.c:1410-1423), so floating the fullscreen
+// split leaves calloc's `border none`, width 0 and percent 0.0 on `b`. Swayward reports the
+// configured border and the share of its tiled slot.
+#[test]
+fn floated_fullscreen_split_leaves_the_hidden_sibling_its_configured_border() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "a");
+    run(
+        &mut f,
+        &[
+            "layout tabbed; layout toggle",
+            "focus parent; fullscreen toggle",
+        ],
+    );
+    map_app(&mut f, client, "b");
+    run(&mut f, &["floating toggle"]);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "b").unwrap();
+    let shown = find_json_node_with_app_id(&tree, "a").unwrap();
+    assert_eq!(hidden["visible"], false, "{hidden}");
+    assert_eq!(hidden["border"], "normal", "{hidden}");
+    assert_eq!(
+        hidden["current_border_width"], shown["current_border_width"],
+        "{hidden}"
+    );
+    assert!(
+        hidden["current_border_width"].as_i64().unwrap() > 0,
+        "{hidden}"
+    );
+    assert_eq!(hidden["percent"], 1.0, "{hidden}");
+}
+
+// Family diff-fam-v3-sticky-carry-residual-3, declared in
+// docs/KNOWN_DEVIATIONS.md#content-box-of-an-unarranged-view. `border` on a view sway never
+// arranged runs `view_autoconfigure`, whose fmax clamps the content box to 1x1 inside a 0x0
+// rect (sway/commands/border.c:98, sway/tree/view.c:463-464). Swayward keeps the empty box.
+#[test]
+fn border_on_an_unarranged_view_keeps_an_empty_content_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "a");
+    run(&mut f, &["fullscreen enable", "floating enable"]);
+    map_app(&mut f, client, "b");
+    run(&mut f, &["[app_id=b] border none"]);
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "b").unwrap();
+    assert_eq!(hidden["border"], "none", "{hidden}");
+    assert_eq!(hidden["rect"]["width"], 0, "{hidden}");
+    assert_eq!(hidden["rect"]["height"], 0, "{hidden}");
+    assert_eq!(rect(hidden, "window_rect"), [0, 0, 0, 0], "{hidden}");
+}
+
+// Family parity-f8l-stale-split-share, declared in
+// docs/KNOWN_DEVIATIONS.md#split-shares-changed-under-a-fullscreen-container. Random-v3 seed
+// 32027. `layout tabbed` under fullscreen arranges only the fullscreen view
+// (sway/tree/arrange.c:310-316), so sway still reports the hidden view's splitv share 0.5.
+// Swayward reports the whole-box share the tabbed parent gives it.
+#[test]
+fn layout_tabbed_under_fullscreen_reports_the_tabbed_share() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "a");
+    map_app(&mut f, client, "b");
+    run(
+        &mut f,
+        &["layout toggle split", "fullscreen toggle", "layout tabbed"],
+    );
+
+    let tree = tree_json(&mut f);
+    let hidden = find_json_node_with_app_id(&tree, "a").unwrap();
+    assert_eq!(hidden["visible"], false, "{hidden}");
+    assert_eq!(hidden["percent"], 1.0, "{hidden}");
 }

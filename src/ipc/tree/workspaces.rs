@@ -188,7 +188,7 @@ fn describe_workspace(
         &mut tiled.nodes,
         &mut floating_nodes,
         state.visible,
-        !workspace.tiling().global_fullscreen_orphaned(),
+        !workspace.global_fullscreen_orphaned(),
     );
     let mut node = common_node(CommonNodeContext {
         id: workspace_id(workspace.id().get()),
@@ -398,7 +398,10 @@ fn order_focus(
     if workspace.floating_is_active() || !workspace.tiling().ipc_focus_follows_history() {
         order_by_recency(workspace, focus, nodes, floating_nodes, &focus_timestamps);
     }
-    if workspace.floating_is_active() {
+    // A fullscreen view floated while focused is the seat focus too: sway
+    // raises its old parent and then the view (`container_set_floating`,
+    // sway/tree/container.c:969-973).
+    if workspace.floating_is_active() || workspace.active_floating_is_fullscreen() {
         // The focused floating container heads the seat stack even when it
         // is not on top, as after a move onto a floating mark stacks it
         // below another view (`seat_set_focus`, sway/input/seat.c).
@@ -487,14 +490,51 @@ fn order_by_recency(
                 .find(|mapped| &mapped.window == window)?;
             Some((container_id(node), mapped.focus_timestamp()?))
         })
+        .chain(
+            workspace
+                .tiling()
+                .entered_by_departed()
+                .map(|(node, stamp)| (container_id(node), stamp)),
+        )
+        .fold(std::collections::HashMap::new(), |mut map, (id, stamp)| {
+            let entry = map.entry(id).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+            map
+        });
+    // A floating group keeps its place too after a view focus entered it through leaves it.
+    let departed = workspace
+        .ipc_floating_trees()
+        .filter_map(|(root, _, _)| {
+            Some((
+                container_id(root),
+                workspace.floating_tree_entered_by_departed(root)?,
+            ))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    // A split a view swapped into without raising it keeps its own place on the stack, below
+    // that view's newer focus (`swap_places`, sway/tree/container.c:1718-1764).
+    let capped = workspace
+        .tiling()
+        .capped_entry_stamps()
+        .map(|(node, stamp)| (container_id(node), stamp))
         .collect::<std::collections::HashMap<_, _>>();
     let effective = tiled_ids
         .iter()
-        .map(|id| (*id, timestamp_of(id).max(last_entered.get(id).copied())))
+        .chain(floating_nodes.iter().map(|node| &node.id))
+        .map(|id| {
+            if let Some(stamp) = capped.get(id) {
+                return (*id, Some(*stamp));
+            }
+            let entered = last_entered.get(id).max(departed.get(id)).copied();
+            (*id, timestamp_of(id).max(entered))
+        })
         .collect::<std::collections::HashMap<_, _>>();
     focus.sort_by_key(|id| {
         let timestamp = timestamp_of(id);
-        let rank = match (stale_tiling.contains(id), timestamp.is_some()) {
+        // A container focus entered ranks on the stack even when no view in it holds a
+        // focus time of its own, such as one a departed view raised.
+        let entered = effective.get(id).copied().flatten().is_some();
+        let rank = match (stale_tiling.contains(id), timestamp.is_some() || entered) {
             (false, true) => 2,
             (true, _) => 1,
             (false, false) => 0,
@@ -506,7 +546,8 @@ fn order_by_recency(
 /// A workspace fullscreen container hides every view outside it, across the
 /// tiling and floating layers (`view_is_visible`,
 /// `sway/sway/tree/view.c:1187-1193`). A tiling global fullscreen view a
-/// `layout` wrap orphaned hides nothing (`tiling_fullscreen_hides` false).
+/// `layout` wrap or a `floating` change orphaned hides nothing, in either
+/// layer (`tiling_fullscreen_hides` false).
 fn apply_workspace_visibility(
     layout: NodeLayout,
     focus: &[i64],
@@ -515,12 +556,17 @@ fn apply_workspace_visibility(
     workspace_visible: bool,
     tiling_fullscreen_hides: bool,
 ) {
-    let floating_fullscreen = floating_nodes.iter().any(contains_fullscreen);
+    let floating_fullscreen =
+        tiling_fullscreen_hides && floating_nodes.iter().any(contains_fullscreen);
     let tiling_fullscreen = if !tiling_fullscreen_hides {
         false
     } else if floating_fullscreen {
-        for node in nodes.iter_mut() {
-            set_windows_visible(node, false);
+        // A tiled global fullscreen view beside the floating workspace fullscreen is visible
+        // too (`container_is_fullscreen_or_child`, sway/tree/view.c:1195-1201).
+        if !apply_fullscreen_state(nodes, workspace_visible) {
+            for node in nodes.iter_mut() {
+                set_windows_visible(node, false);
+            }
         }
         false
     } else {
@@ -531,7 +577,10 @@ fn apply_workspace_visibility(
     }
     for node in floating_nodes {
         let shown = !tiling_fullscreen && (!floating_fullscreen || contains_fullscreen(node));
-        set_windows_visible(node, workspace_visible && shown);
+        // A sticky container and its children skip the workspace check: one left on a
+        // hidden workspace by output evacuation still reports visible
+        // (`container_is_sticky_or_child`, sway/sway/tree/view.c:1176-1179).
+        set_windows_visible(node, (workspace_visible || node.sticky) && shown);
         // Inside the floating group that holds the fullscreen view, only that
         // view is visible (`view_is_visible`, sway/tree/view.c:1187-1193).
         if shown && floating_fullscreen && node.fullscreen_mode == 0 {

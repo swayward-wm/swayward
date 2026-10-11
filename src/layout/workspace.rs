@@ -122,9 +122,19 @@ pub struct Workspace<W: LayoutElement> {
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
+
+    /// This workspace's place in sway's one seat focus stack; see [`Self::focus_seq`].
+    focus_seq: i64,
 }
 
 static WORKSPACE_ID_COUNTER: IdCounter = IdCounter::new();
+static WORKSPACE_FOCUS_COUNTER: IdCounter = IdCounter::new();
+
+/// Sway appends a new node to the tail of the seat focus stack (`seat_node_from_node`,
+/// sway/sway/input/seat.c:327-352): below every workspace already there, focused or not.
+fn creation_focus_seq() -> i64 {
+    -(WORKSPACE_FOCUS_COUNTER.next() as i64)
+}
 
 /// Ord follows the monotonic allocation counter, so comparing two ids compares
 /// creation order. The workspace sort relies on that to break ties the way
@@ -276,7 +286,7 @@ impl<W: LayoutElement> Workspace<W> {
         let tiling = TilingTree::new(
             view_size,
             working_area,
-            has_gaps_to_edge(output_area, options.layout.outer_gaps, options.layout.gaps),
+            gaps_to_edge(output_area, working_area),
             scale.fractional_scale(),
             clock.clone(),
             options.clone(),
@@ -317,6 +327,7 @@ impl<W: LayoutElement> Workspace<W> {
             gaps,
             outer_gaps,
             id: WorkspaceId::next(),
+            focus_seq: creation_focus_seq(),
         }
     }
 
@@ -343,7 +354,7 @@ impl<W: LayoutElement> Workspace<W> {
         let tiling = TilingTree::new(
             view_size,
             working_area,
-            has_gaps_to_edge(output_area, options.layout.outer_gaps, options.layout.gaps),
+            gaps_to_edge(output_area, working_area),
             scale.fractional_scale(),
             clock.clone(),
             options.clone(),
@@ -384,6 +395,7 @@ impl<W: LayoutElement> Workspace<W> {
             gaps,
             outer_gaps,
             id: WorkspaceId::next(),
+            focus_seq: creation_focus_seq(),
         }
     }
 
@@ -393,6 +405,23 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn id(&self) -> WorkspaceId {
         self.id
+    }
+
+    /// Rank in sway's seat focus stack, which is one list for every output: higher is
+    /// more recently focused (sway/sway/input/seat.c:1116-1128).
+    pub fn focus_seq(&self) -> i64 {
+        self.focus_seq
+    }
+
+    /// Moves this workspace to the head of the seat focus stack, as `seat_set_raw_focus`
+    /// does (sway/sway/input/seat.c:1116-1128).
+    pub fn mark_focused(&mut self) {
+        self.focus_seq = WORKSPACE_FOCUS_COUNTER.next() as i64;
+    }
+
+    /// Restores a rank saved from [`Self::focus_seq`].
+    pub(super) fn set_focus_seq(&mut self, seq: i64) {
+        self.focus_seq = seq;
     }
 
     pub fn name(&self) -> Option<&String> {
@@ -461,7 +490,7 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.update_config(
             self.view_size,
             self.working_area,
-            has_gaps_to_edge(output_area, options.layout.outer_gaps, options.layout.gaps),
+            gaps_to_edge(output_area, self.working_area),
             self.scale.fractional_scale(),
             options.clone(),
         );
@@ -671,11 +700,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             output_area,
-            has_gaps_to_edge(
-                output_area,
-                self.options.layout.outer_gaps,
-                self.options.layout.gaps,
-            ),
+            gaps_to_edge(output_area, working_area),
         );
     }
 
@@ -753,6 +778,17 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn add_tile(
         &mut self,
+        tile: Tile<W>,
+        target: WorkspaceAddWindowTarget<W>,
+        options: AddTileOptions,
+    ) {
+        let id = tile.window().id().clone();
+        self.add_tile_inner(tile, target, options);
+        self.arrange_after_map(&id);
+    }
+
+    fn add_tile_inner(
+        &mut self,
         mut tile: Tile<W>,
         target: WorkspaceAddWindowTarget<W>,
         options: AddTileOptions,
@@ -779,6 +815,10 @@ impl<W: LayoutElement> Workspace<W> {
                 let activate = activate.map_smart(|| {
                     !self.is_active_pending_fullscreen() || self.tiling.global_fullscreen_orphaned()
                 });
+                // A fullscreen floating container is the workspace's fullscreen too, so a
+                // tiled view mapped under it is not focused (`should_focus`,
+                // sway/tree/view.c:707-710).
+                let floating_fullscreen = self.floating.fullscreen_mode();
 
                 // If the tile is pending maximized or fullscreen, open it in the tiling layout,
                 // where it can enter those states.
@@ -795,20 +835,39 @@ impl<W: LayoutElement> Workspace<W> {
                     // A new view whose focus-inactive container is inside a
                     // floating group joins that group beside it; only a
                     // focused floating root sends it to the tiling layer
-                    // (`view_map`, sway/tree/view.c:849-901).
-                    if activate
-                        && matches!(insert, InsertTarget::Focused)
+                    // (`view_map`, sway/tree/view.c:849-901). The placement ignores
+                    // `should_focus`, so an unfocused (`no_focus`) view joins it too.
+                    if matches!(insert, InsertTarget::Focused)
                         && self.floating_is_active.get()
                         && tile.window().pending_sizing_mode().is_normal()
                         && self.floating.maps_into_focused_group()
                     {
-                        self.floating.add_tile_to_focused_group(tile);
+                        self.floating.add_tile_to_focused_group(tile, activate);
                         return;
+                    }
+                    let activate = activate && floating_fullscreen.is_none();
+                    // Only workspace fullscreen sets `workspace->fullscreen`, which limits the
+                    // map's `arrange_workspace` to the fullscreen container
+                    // (sway/tree/arrange.c:310-316).
+                    if floating_fullscreen
+                        == Some(crate::layout::tiling_tree::FullscreenMode::Workspace)
+                    {
+                        self.tiling.enter_floating_fullscreen();
                     }
                     // A fullscreen floating view stays floating in sway.
                     let has_had_tile = self.tiling.has_had_tile();
                     let keeps_workspace_focus = !activate && self.is_workspace_focused();
                     let id = tile.window().id().clone();
+                    // From a focused floating view the new view is tiled beside the
+                    // most recent view under the focus-inactive tiling container
+                    // (sway/tree/view.c:851-866).
+                    let insert = match insert {
+                        InsertTarget::Focused if self.floating_is_active.get() => self
+                            .tiling
+                            .focus_inactive_view_under_focused_split()
+                            .map_or(insert, InsertTarget::Node),
+                        _ => insert,
+                    };
                     self.tiling.add_tile_with_activation(tile, insert, activate);
                     // An unfocused view leaves a focused workspace focused, even as its first
                     // tiled view (sway/tree/view.c:944-957).
@@ -854,29 +913,11 @@ impl<W: LayoutElement> Workspace<W> {
                 let floating_has_window = self.floating.has_window(next_to);
 
                 if is_floating && tile.window().pending_sizing_mode().is_normal() {
-                    if floating_has_window {
-                        self.floating.add_tile_above(next_to, tile, activate);
-                    } else {
-                        let (next_to_tile, layout) = self
-                            .tiling
-                            .tiles_with_ipc_layouts()
-                            .find(|(tile, _)| tile.window().id() == next_to)
-                            .expect("NextTo parent must be in this workspace's tiling tree");
-                        let layout_pos: Point<f64, Logical> =
-                            layout.tile_pos_in_workspace_view.unwrap_or_default().into();
-
-                        // Position the new tile in the center above the next_to tile. Think a
-                        // dialog opening on top of a window.
-                        let tile_size = tile.tile_size();
-                        let pos = layout_pos
-                            + (next_to_tile.tile_size().to_point() - tile_size.to_point())
-                                .downscale(2.);
-                        let pos = self.floating.clamp_within_working_area(pos, tile_size);
-                        let pos = self.floating.logical_to_size_frac(pos);
-                        tile.floating_pos = Some(pos);
-
-                        self.floating.add_tile(tile, activate);
-                    }
+                    // Sway centres a dialog on the workspace like any other
+                    // floating view, not over its parent
+                    // (`container_floating_resize_and_center`,
+                    // sway/tree/container.c:848-893).
+                    self.floating.add_tile(tile, activate);
 
                     if activate || self.tiling.is_empty() {
                         self.floating_is_active = FloatingActive::Yes;
@@ -947,7 +988,7 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn remove_tile(&mut self, id: &W::Id, transaction: Transaction) -> RemovedTile<W> {
-        self.remove_tile_inner(id, transaction, false)
+        self.remove_tile_inner(id, transaction, None)
     }
 
     /// Removes a window that moves to another workspace or the scratchpad, applying sway's
@@ -957,29 +998,79 @@ impl<W: LayoutElement> Workspace<W> {
         id: &W::Id,
         transaction: Transaction,
     ) -> RemovedTile<W> {
-        self.remove_tile_inner(id, transaction, true)
+        self.remove_tile_inner(id, transaction, Some(false))
     }
 
+    /// Removes a window that moves to the scratchpad; see
+    /// [`TilingTree::remove_tile_for_scratchpad`].
+    pub fn remove_tile_for_scratchpad(
+        &mut self,
+        id: &W::Id,
+        transaction: Transaction,
+    ) -> RemovedTile<W> {
+        self.remove_tile_inner(id, transaction, Some(true))
+    }
+
+    /// `transfer` is `None` for a close, else whether the window moves to the scratchpad.
     fn remove_tile_inner(
         &mut self,
         id: &W::Id,
         transaction: Transaction,
-        transfer: bool,
+        transfer: Option<bool>,
     ) -> RemovedTile<W> {
         let mut from_floating = false;
+        let floating_root = self.floating.window_is_floating_root(id);
+        // Closing a view while the workspace itself holds the seat focus only refreshes
+        // focus_inactive and puts the old focus back on top (`handle_seat_node_destroy`,
+        // sway/input/seat.c:316-323), so the workspace stays focused.
+        let workspace_was_focused = transfer.is_none() && self.is_workspace_focused();
         let removed_focus = self.floating_is_active.get()
             && self
                 .floating
                 .active_window()
                 .is_some_and(|window| window.id() == id);
+        let keeps_workspace_focus = transfer.is_none()
+            && self
+                .tiling
+                .node_for_window(id)
+                .is_some_and(|node| self.tiling.close_keeps_workspace_focus(node));
+        // A focused tiled view moved away hands focus to the focus-inactive
+        // node under its old parent when that parent survives, which is never
+        // a floating view (`seat_get_focus_inactive(old_parent)`,
+        // sway/tree/root.c:128-140, sway/commands/move.c:598-608).
+        // Only sending a view with a parent to the scratchpad leaves the workspace unarranged
+        // (sway/tree/root.c:128-137).
+        let had_parent = transfer == Some(true)
+            && !self.floating.has_window(id)
+            && self
+                .tiling
+                .parent_of_window(id)
+                .is_some_and(|parent| !self.tiling.is_root(parent));
+        let keeps_tiling_focus = transfer.is_some()
+            && !self.floating_is_active.get()
+            && self
+                .tiling
+                .active_window()
+                .is_some_and(|window| window.id() == id)
+            && self.tiling.non_root_parent_for_window(id).is_some();
+        // A focused tiled view's close refocuses inside its parents before any floater
+        // (sway/input/seat.c:273-286).
+        let refocuses_tiled = transfer.is_none()
+            && !self.floating_is_active.get()
+            && !self.floating.has_window(id)
+            && self
+                .tiling
+                .active_tile()
+                .is_some_and(|tile| tile.window().id() == id)
+            && self.tiling.close_refocuses_within_parent(id);
         let removed = if self.floating.has_window(id) {
             from_floating = true;
             self.floating.remove_tile(id, transaction)
         } else {
-            let tile = if transfer {
-                self.tiling.remove_tile_for_transfer(id, transaction)
-            } else {
-                self.tiling.remove_tile(id, transaction)
+            let tile = match transfer {
+                Some(true) => self.tiling.remove_tile_for_scratchpad(id, transaction),
+                Some(false) => self.tiling.remove_tile_for_transfer(id, transaction),
+                None => self.tiling.remove_tile(id, transaction),
             }
             .unwrap();
             let is_floating = tile.restore_to_floating;
@@ -994,16 +1085,50 @@ impl<W: LayoutElement> Workspace<W> {
             removed.tile.window().output_leave(output);
         }
 
+        // Detaching a floater refreshes the workspace representation (`container_detach`,
+        // sway/tree/container.c:1461-1466), so a workspace that only ever held carried or
+        // floating views reports its empty layout from then on.
+        if floating_root || !from_floating && removed.is_floating {
+            self.tiling.restore_has_had_tile(true);
+        }
+        self.arrange_after_removal(had_parent);
         self.update_focus_floating_tiling_after_removing(from_floating);
+        if keeps_tiling_focus && !self.tiling.is_empty() {
+            self.floating_is_active = FloatingActive::No;
+        }
+        if refocuses_tiled && self.floating_is_active == FloatingActive::Yes {
+            self.floating_is_active = FloatingActive::NoButRaised;
+        }
+        // The seat refuses a floating view the closing global fullscreen container still
+        // obstructs, as it does a tiled one (sway/input/seat.c:1148-1151).
+        if keeps_workspace_focus && self.floating_is_active.get() {
+            self.floating_is_active = FloatingActive::NoButRaised;
+        }
+        if workspace_was_focused && !self.is_workspace_focused() {
+            if self.tiling.is_empty() {
+                if !self.floating.is_empty() {
+                    self.floating_is_active = FloatingActive::NoButRaised;
+                }
+            } else {
+                self.floating_is_active = FloatingActive::No;
+                self.tiling.focus_root_keeping_history();
+            }
+        }
         // Removing the focused floating window hands focus to the workspace's
         // focus-inactive node (seat_get_focus_inactive(ws), as in
         // root_scratchpad_hide, sway/tree/root.c:211-229), which is a view
         // whenever the workspace has one. A `focus parent` up to the workspace
         // before the floating window was focused must not leave the tiling
         // focus on the root.
-        if removed_focus && !self.floating_is_active.get() && self.tiling.root_is_focused() {
-            self.tiling.focus_child();
-            while self.tiling.focus_child() {}
+        if removed_focus && !self.floating_is_active.get() && !keeps_workspace_focus {
+            if transfer.is_none() {
+                // Closing it focuses the workspace's most recent view, never a
+                // container (`handle_seat_node_destroy`, sway/input/seat.c:273-286).
+                self.tiling.focus_recent_view();
+            } else if self.tiling.root_is_focused() {
+                self.tiling.focus_child();
+                while self.tiling.focus_child() {}
+            }
         }
 
         removed
@@ -1531,8 +1656,12 @@ impl<W: LayoutElement> Workspace<W> {
         // the workspace focused (`set_focus = focus == container`,
         // sway/tree/container.c:946-949).
         let workspace_focused = self.is_workspace_focused();
-        let target_is_active =
-            !workspace_focused && id.is_none_or(|id| Some(id) == active_id.as_ref());
+        // A named view is the seat focus only when focus sits on the view itself: with a split
+        // focused, `active_window` is that split's focus-inactive view, which sway does not
+        // treat as `focus == container` (sway/tree/container.c:946-949).
+        let focus_is_view = self.floating_is_active.get() || self.tiling.active_tile().is_some();
+        let target_is_active = !workspace_focused
+            && id.is_none_or(|id| focus_is_view && Some(id) == active_id.as_ref());
         let Some(id) = id.cloned().or(active_id) else {
             return;
         };
@@ -1548,7 +1677,11 @@ impl<W: LayoutElement> Workspace<W> {
             .unwrap_or_default();
 
         if self.floating.has_window(&id) {
-            let removed = self.floating.remove_tile(&id, Transaction::new());
+            let mut removed = self.floating.remove_tile(&id, Transaction::new());
+            // The view is tiled now: a later move must not re-float it from the
+            // flag its floating map left behind (`container_move_to_workspace`
+            // tests `container_is_floating`, sway/commands/move.c:204-232).
+            removed.tile.restore_to_floating = false;
             let rank = removed.tile.tiling_focus_rank;
             let parent = removed.tile.tiling_parent;
             if let Some(parent) = parent.filter(|parent| self.tiling.contains(*parent)) {
@@ -1578,17 +1711,36 @@ impl<W: LayoutElement> Workspace<W> {
                     .tiling
                     .tiles()
                     .any(|tile| tile.window().id() == &id && tile.restore_to_floating);
+            // A view a `for_window` rule floats while it maps was never the seat focus:
+            // sway runs criteria before it focuses the view (sway/tree/view.c:943-956),
+            // so `set_focus` is false and the old parent keeps its place.
+            let never_focused = self
+                .tiling
+                .tiles()
+                .any(|tile| tile.window().id() == &id && tile.window().focus_timestamp().is_none());
+            if target_is_active && !was_floating && !never_focused {
+                self.tiling.remember_entries_of_departing(&id);
+            }
             let mut tile = if parent.is_some() {
                 self.tiling.remove_tile_without_transaction(&id).unwrap()
+            } else if target_is_active
+                && !was_floating
+                && !never_focused
+                && self.tiling.float_leaves_workspace_level(&id)
+            {
+                self.tiling.remove_tile_keeping_focus_order(&id).unwrap()
+            } else if target_is_active && !was_floating && !never_focused {
+                self.tiling.remove_tile_reaping_singletons(&id).unwrap()
             } else {
                 self.tiling.remove_tile(&id, Transaction::new()).unwrap()
             };
             // Floating the focused view raises its old parent to the tiling layer's
             // focus-inactive node (`container_set_floating`, sway/tree/container.c:969-973).
-            if let Some(parent) = parent
-                .filter(|parent| target_is_active && !was_floating && self.tiling.contains(*parent))
-            {
-                self.tiling.set_focus(parent);
+            if let Some(parent) = parent.filter(|parent| {
+                target_is_active && !was_floating && !never_focused && self.tiling.contains(*parent)
+            }) {
+                let stamp = tile.window().focus_timestamp();
+                self.tiling.set_focus_raised_by_departed(parent, stamp);
             }
             tile.tiling_focus_rank = rank;
             tile.tiling_parent = parent;
@@ -1597,10 +1749,30 @@ impl<W: LayoutElement> Workspace<W> {
             let natural_size = tile.window().natural_size();
             if tile.floating_window_size.is_none()
                 && tile.window().pending_sizing_mode().is_normal()
-                && natural_size.w > 1
-                && natural_size.h > 1
+                && natural_size.w > 0
+                && natural_size.h > 0
             {
-                tile.floating_window_size = Some(natural_size);
+                // Sway floats the natural size clamped by `floating_minimum_size` and
+                // `floating_maximum_size` alone (`floating_natural_resize`,
+                // sway/tree/container.c:833-847), and keeps that content box until a
+                // commit changes the client's geometry (`handle_commit`,
+                // sway/desktop/xdg_shell.c:313-335). A client still at its map
+                // geometry commits nothing new, so a 1x1 view floats as 75x50.
+                let (minimum, maximum) = crate::layout::floating_tree::floating_constraints(
+                    self.options.layout.floating_minimum_size,
+                    self.options.layout.floating_maximum_size,
+                    self.view_size,
+                );
+                let content = Size::<f64, Logical>::from((
+                    f64::from(natural_size.w).min(maximum.w).max(minimum.w),
+                    f64::from(natural_size.h).min(maximum.h).max(minimum.h),
+                ));
+                if content != natural_size.to_f64() && tile.window().size() == natural_size {
+                    tile.floating_window_size = Some(content.to_i32_round());
+                    tile.set_floating_content(content);
+                } else if natural_size.w > 1 && natural_size.h > 1 {
+                    tile.floating_window_size = Some(natural_size);
+                }
             }
 
             // Come up with a default floating position close to the tile position.
@@ -2011,10 +2183,6 @@ impl<W: LayoutElement> Workspace<W> {
             })
     }
 
-    pub fn descendants_added(&mut self, id: &W::Id) -> bool {
-        self.floating.descendants_added(id)
-    }
-
     pub fn update_window(&mut self, window: &W::Id, serial: Option<Serial>) {
         if !self.floating.update_window(window, serial) {
             self.tiling.update_window(window, serial);
@@ -2053,6 +2221,17 @@ impl<W: LayoutElement> Workspace<W> {
             if self.gapped_working_area(&self.options, output_area) != self.working_area {
                 self.update_config(self.base_options.clone());
             }
+        }
+        self.sync_floating_arrange();
+        // A floating split took the fullscreen mode from a view parked in the tiling tree
+        // (`split_fullscreen_floating`); once it ends, sway arranges the whole workspace.
+        if self.floating.fullscreen_window().is_none() {
+            self.tiling.forget_floating_fullscreen();
+        }
+        // A group that gave the workspace fullscreen to a tiled container is arranged again
+        // once that fullscreen ends.
+        if self.fullscreen_window().is_none() {
+            self.floating.forget_yielded_fullscreen();
         }
         self.tiling
             .refresh(is_active && !self.floating_is_active.get(), is_focused);
@@ -2352,12 +2531,11 @@ pub(crate) fn compute_working_area(output: &Output) -> Rectangle<f64, Logical> {
     layer_map_for_output(output).non_exclusive_zone().to_f64()
 }
 
-fn has_gaps_to_edge(
-    area: Rectangle<f64, Logical>,
-    outer: swayward_config::OuterGaps,
-    inner: f64,
-) -> bool {
-    apply_outer_gaps(area, outer, inner) != area
+/// Sway's `gaps_to_edge` (sway/sway/tree/view.c:344-347) reads the workspace's
+/// `current_gaps`, which `workspace_add_gaps` has already reduced for smart gaps, so it
+/// compares the gapped working area rather than the configured outer gaps.
+fn gaps_to_edge(area: Rectangle<f64, Logical>, working_area: Rectangle<f64, Logical>) -> bool {
+    working_area != area
 }
 
 pub(super) fn apply_outer_gaps(

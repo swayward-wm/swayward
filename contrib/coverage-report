@@ -9,6 +9,10 @@ classification. This tool is the only thing that reads it authoritatively:
     contrib/coverage-report --json       machine-readable
     contrib/coverage-report --gaps       every assertion that is not a pass and
                                          not documented
+    contrib/coverage-report --check-doc [FILE]  exit 1 if the census table in
+                                         the Testing wiki page (or FILE)
+                                         differs from this census
+    contrib/coverage-report --write-doc [FILE]  rewrite that table
 
 Every assertion either passes or is a documented skip. `fail` and `unreached`
 are backlog that must become a pass or a cited skip.
@@ -40,6 +44,16 @@ STRUCTURAL_REASONS = frozenset(
         "x11_dock",
         "x11_ewmh",
     }
+)
+
+# The Testing wiki page embeds the census between these markers.
+DOC = ROOT / "docs" / "wiki" / "Testing-and-Conformance.md"
+DOC_BEGIN = (
+    "<!-- coverage-report generated from tests/i3/coverage.toml; do not edit by hand -->"
+)
+DOC_END = "<!-- end coverage-report -->"
+DOC_BLOCK = re.compile(
+    rf"^{re.escape(DOC_BEGIN)}\n(?P<body>.*?)^{re.escape(DOC_END)}$", re.S | re.M
 )
 
 # Source citations name a line, not just a file.
@@ -269,6 +283,42 @@ def check_unvendored(vendored_names):
     ]
 
 
+def render_doc(data):
+    rows = [
+        ("Files", data["files"]),
+        ("Fully green files", data["green_files"]),
+        ("Declared assertions", data["assertions"]),
+        ("Pass", data["pass"]),
+        ("Documented skip", data["skip_documented"]),
+        ("Fail", data["fail"]),
+        ("Unreached", data["unreached"]),
+    ]
+    lines = ["| Measure | Count |", "|---|---:|"]
+    lines += [f"| {name} | {value:,} |" for name, value in rows]
+    return "\n".join(lines) + "\n"
+
+
+def sync_doc(data, write, path=DOC):
+    """Compare (or rewrite) the generated census block in the Testing page."""
+    text = path.read_text()
+    name = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+    blocks = list(DOC_BLOCK.finditer(text))
+    if len(blocks) != 1:
+        print(f"{name}: needs one generated coverage-report block, "
+              f"found {len(blocks)}")
+        return 1
+    body = render_doc(data)
+    if blocks[0]["body"] == body:
+        return 0
+    if write:
+        start, end = blocks[0].span("body")
+        path.write_text(text[:start] + body + text[end:])
+        return 0
+    print(f"{name}: the coverage-report block differs from the census; "
+          "regenerate with contrib/coverage-report --write-doc")
+    return 1
+
+
 def main():
     doc = load()
     violations = validate(doc)
@@ -326,6 +376,9 @@ def main():
         return
 
     data = census(doc)
+    if "--check-doc" in sys.argv or "--write-doc" in sys.argv:
+        paths = [pathlib.Path(arg).resolve() for arg in sys.argv[1:] if not arg.startswith("--")]
+        sys.exit(sync_doc(data, "--write-doc" in sys.argv, *paths[:1]))
     if "--json" in sys.argv:
         import json
 

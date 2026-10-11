@@ -12,6 +12,11 @@ impl<W: LayoutElement> Workspace<W> {
             .map(|tile| tile.sway_border())
     }
 
+    /// See [`FloatingLayout::use_client_decorations_from_map`].
+    pub fn use_floating_client_decorations_from_map(&mut self, window: &W::Id) {
+        self.floating.use_client_decorations_from_map(window);
+    }
+
     pub fn set_window_border(
         &mut self,
         window: &W::Id,
@@ -42,6 +47,11 @@ impl<W: LayoutElement> Workspace<W> {
         let mut tree = self.tiling.ipc_tree();
         tree.retain_leaves(&|window| !self.is_floating_for_ipc(window));
         tree
+    }
+
+    /// When focus last entered floating group `root` through a view that has since left it.
+    pub fn floating_tree_entered_by_departed(&self, root: NodeId) -> Option<std::time::Duration> {
+        self.floating.tree_entered_by_departed(root)
     }
 
     pub fn ipc_floating_trees(

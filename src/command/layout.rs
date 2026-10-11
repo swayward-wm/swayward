@@ -104,6 +104,9 @@ pub(super) fn split_targeted(
     target: CommandTarget,
     layout: Option<Layout>,
 ) -> Result<(), CommandOutcome> {
+    if let Some(result) = split_floating_targeted(state, target, layout) {
+        return result;
+    }
     let (workspace, node) = tiling_target(state, target, "Unable to split floating windows")?;
     let changed = match layout {
         Some(Layout::SplitH) => state.swayward.layout.split_tiling_node(
@@ -140,6 +143,81 @@ pub(super) fn split_targeted(
     }
     state.swayward.queue_redraw_all();
     Ok(())
+}
+
+/// A criteria `split` naming a container in the floating layer, which sway splits like any
+/// other (`do_split`, sway/commands/split.c:12-33). `None` when the target is not floating.
+fn split_floating_targeted(
+    state: &mut State,
+    target: CommandTarget,
+    layout: Option<Layout>,
+) -> Option<Result<(), CommandOutcome>> {
+    let layout = match layout {
+        Some(Layout::SplitH) => Some(crate::layout::tiling_tree::Layout::SplitH),
+        Some(Layout::SplitV) => Some(crate::layout::tiling_tree::Layout::SplitV),
+        Some(Layout::ToggleSplit) => None,
+        None => return flatten_floating_targeted(state, target),
+        // The rest are parse errors and take the tiling path.
+        _ => return None,
+    };
+    let layout_state = &mut state.swayward.layout;
+    let changed = match target {
+        CommandTarget::Container(workspace, node) => {
+            let in_group = layout_state
+                .workspace(workspace)
+                .is_some_and(|ws| ws.floating().tree_root_for_node(node).is_some());
+            if !in_group {
+                return None;
+            }
+            layout_state.split_floating_target(workspace, None, Some(node), layout)
+        }
+        CommandTarget::Window(window) => {
+            let window = super::mapped_window(state, window)?;
+            let layout_state = &mut state.swayward.layout;
+            let workspace = layout_state.floating_workspace_for_window(&window)?;
+            layout_state.split_floating_target(workspace, Some(&window), None, layout)
+        }
+    };
+    if !changed {
+        return Some(Err(failure("No matching node.")));
+    }
+    state.swayward.queue_redraw_all();
+    Some(Ok(()))
+}
+
+/// A criteria `split none` naming a container in a floating group, which sway flattens like
+/// any other (`do_unsplit`, sway/commands/split.c:35-50). `None` when the target is not in a
+/// group.
+fn flatten_floating_targeted(
+    state: &mut State,
+    target: CommandTarget,
+) -> Option<Result<(), CommandOutcome>> {
+    let layout_state = &mut state.swayward.layout;
+    let remapped = match target {
+        CommandTarget::Container(workspace, node) => {
+            let in_group = layout_state
+                .workspace(workspace)
+                .is_some_and(|ws| ws.floating().tree_root_for_node(node).is_some());
+            if !in_group {
+                return None;
+            }
+            layout_state.flatten_floating_target(workspace, None, Some(node))
+        }
+        CommandTarget::Window(window) => {
+            let window = super::mapped_window(state, window)?;
+            let layout_state = &mut state.swayward.layout;
+            let workspace = layout_state.floating_workspace_for_window(&window)?;
+            layout_state.flatten_floating_target(workspace, Some(&window), None)
+        }
+    };
+    if remapped.is_none() {
+        return Some(Err(failure(
+            "Can only flatten a child container with no siblings",
+        )));
+    }
+    remap_marks(state, remapped);
+    state.swayward.queue_redraw_all();
+    Some(Ok(()))
 }
 
 pub(super) fn fullscreen(state: &mut State, mode: Toggle, global: bool) {
@@ -184,12 +262,35 @@ fn layout_target(
     Ok((workspace, node, container))
 }
 
+/// A criteria `layout` on a view inside a floating group. The view is not floating itself,
+/// so sway runs the command on its parent like on a tiled view
+/// (sway/commands/layout.c:121-176). `None` when the target is not such a view.
+fn floating_group_targeted(
+    state: &mut State,
+    target: CommandTarget,
+    f: impl FnOnce(
+        &mut crate::layout::tiling_tree::TilingTree<crate::window::Mapped>,
+        NodeId,
+    ) -> Option<Vec<(NodeId, NodeId)>>,
+) -> Option<Result<(), CommandOutcome>> {
+    let CommandTarget::Window(window) = target else {
+        return None;
+    };
+    let window = super::mapped_window(state, window)?;
+    let (workspace, remapped) = state.swayward.layout.in_floating_window_tree(&window, f)?;
+    let Some(remapped) = remapped else {
+        return Some(Err(swayward_ipc::command::parse_error(LAYOUT_SYNTAX)));
+    };
+    remap_marks(state, Some((workspace, remapped)));
+    state.swayward.queue_redraw_all();
+    Some(Ok(()))
+}
+
 pub(super) fn targeted(
     state: &mut State,
     target: CommandTarget,
     layout: Layout,
 ) -> Result<(), CommandOutcome> {
-    let (workspace, node, container) = layout_target(state, target)?;
     let layout = match layout {
         Layout::SplitH => crate::layout::tiling_tree::Layout::SplitH,
         Layout::SplitV => crate::layout::tiling_tree::Layout::SplitV,
@@ -197,6 +298,12 @@ pub(super) fn targeted(
         Layout::Stacked => crate::layout::tiling_tree::Layout::Stacked,
         Layout::ToggleSplit => return Err(failure("targeted toggle split is not implemented yet")),
     };
+    if let Some(result) = floating_group_targeted(state, target, |tree, node| {
+        tree.set_target_layout(node, layout)
+    }) {
+        return result;
+    }
+    let (workspace, node, container) = layout_target(state, target)?;
     let changed = if container {
         state
             .swayward
@@ -223,6 +330,11 @@ pub(super) fn toggle_targeted(
     target: CommandTarget,
     toggle: &LayoutToggle,
 ) -> Result<(), CommandOutcome> {
+    if let Some(result) = floating_group_targeted(state, target, |tree, node| {
+        tree.toggle_target_layout(node, toggle)
+    }) {
+        return result;
+    }
     let (workspace, node, container) = layout_target(state, target)?;
     let remapped = state
         .swayward
@@ -240,6 +352,22 @@ pub(super) fn default_targeted(
     state: &mut State,
     target: CommandTarget,
 ) -> Result<(), CommandOutcome> {
+    // `remap_marks` must run even when nothing was restored, so the parse error is
+    // reported after the flatten like on the tiling path.
+    let mut restored = true;
+    if let Some(result) = floating_group_targeted(state, target, |tree, node| {
+        let (ok, remapped) = tree.restore_target_layout(node)?;
+        restored = ok;
+        Some(remapped)
+    }) {
+        return result.and_then(|()| {
+            if restored {
+                Ok(())
+            } else {
+                Err(swayward_ipc::command::parse_error(LAYOUT_SYNTAX))
+            }
+        });
+    }
     let (workspace, node, container) = layout_target(state, target)?;
     let Some((restored, remapped)) = state
         .swayward

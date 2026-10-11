@@ -176,6 +176,33 @@ values and avoid comparing entire replies with snapshots from pre-beta1 builds.
 If a client needs historical behavior, transform the JSON in that client rather
 than asking the compositor to send two protocols under one name.
 
+## Measured against sway-ipc-oracle
+
+These figures are generated from the oracle revision pinned in
+[`tests/oracle.toml`](../tests/oracle.toml), and `fast-gate` fails if they
+differ from its committed results. They are regenerated at the release cut.
+
+<!-- i3-suite-summary:sway-ipc generated from the pinned oracle; do not edit by hand -->
+Oracle [`cd64b835`](https://github.com/swayward-wm/sway-ipc-oracle/tree/cd64b8351f6c427dd8b3533c231c3f0ba42fad12), swayward snapshot `swayward-54c5acd9`. The sway 1.12 column replays sway's own captures as a self-check.
+
+| Corpus | Scope | sway 1.12 self-check | swayward match | swayward mismatch | swayward unstable | swayward n.a. | untriaged mismatches |
+|---|---|---|---:|---:|---:|---:|---:|
+| Hand-picked state scenarios | 78 scenarios, 780 rows | 740 match, 40 n.a. | 749 | 31 | 0 | 0 | 31 |
+| Events | 45 scenarios, 45 rows | 45 match | 44 | 1 | 0 | 0 | 1 |
+| i3-derived states | 418 states, 4,180 rows | 4,180 match† | 4,118† | 62† | 0† | 0† | 62† |
+| Random sequences | 500 seeds × 20 steps | 500 match | 329 | 171 | 0 | 0 | 171 |
+| Command fuzz | 195 cases | 195 match | 195 | 0 | 0 | 0 | 0 |
+| Wire fuzz | 10 cases | 10 match | 6 | 4 | 0 | 0 | 0 |
+
+- sway 1.12, Hand-picked state scenarios: 40 rows not applicable: fixture client unavailable (missing wayland-scanner).
+
+† From a result listed in the oracle's `pending.toml`: it awaits regeneration, and the figure is its last measured value.
+<!-- end i3-suite-summary:sway-ipc -->
+
+The i3 suite is context for where sway differs from i3, not a sway
+compatibility measure. Its outcomes are in
+[Reading the i3 suite results](I3_SUITE_RESULTS.md).
+
 ## The oracle moved out
 
 The unchanged i3 tests, sway captures, calibration tools, and black-box runners

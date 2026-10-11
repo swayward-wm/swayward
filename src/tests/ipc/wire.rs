@@ -466,6 +466,70 @@ fn malformed_frames_do_not_hang_or_wedge_the_server() {
     }
 }
 
+/// Oracle wire-fuzz cases truncated-header, truncated-payload, oversized-length, unknown-type
+/// and event-type-as-request, with the oracle's exact frames (sway-ipc-oracle
+/// `contrib/sway-ipc-run` `wire_fuzz_cases`). Sway leaves each one waiting
+/// (sway/ipc-server.c:201-262, 927-929); swayward declares the difference in
+/// docs/KNOWN_DEVIATIONS.md#malformed-ipc-frames: an incomplete or oversized frame is
+/// disconnected and an unknown or event request type gets a structured failure.
+#[test]
+fn oracle_malformed_frames_disconnect_or_fail_as_declared() {
+    let (mut fixture, socket) = ipc_fixture();
+    fixture.add_output(1, (1920, 1080));
+    fixture.niri_state().ipc_refresh_layout();
+
+    let header = |length: u32, msg_type: u32| {
+        let mut frame = b"i3-ipc".to_vec();
+        frame.extend_from_slice(&length.to_ne_bytes());
+        frame.extend_from_slice(&msg_type.to_ne_bytes());
+        frame
+    };
+    let disconnects: [(&str, Vec<u8>); 3] = [
+        ("truncated-header", b"i3-ipc\x00\x00".to_vec()),
+        (
+            "truncated-payload",
+            [header(10, 0), b"nop".to_vec()].concat(),
+        ),
+        ("oversized-length", header(u32::MAX, 0)),
+    ];
+    for (name, frame) in disconnects {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream.write_all(&frame).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            fixture.dispatch();
+            let mut byte = [0; 1];
+            match stream.read(&mut byte) {
+                Ok(0) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Ok(_) => panic!("{name} unexpectedly received a reply"),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("error reading {name} response: {error}"),
+            }
+            assert!(Instant::now() < deadline, "{name} left the client hanging");
+        }
+    }
+
+    for (name, msg_type) in [
+        ("unknown-type", 0x7fff_ffff),
+        ("event-type-as-request", 1 << 31),
+    ] {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream.write_all(&header(0, msg_type)).unwrap();
+        let (reply_type, reply) = read_ipc_reply(&mut fixture, &mut stream);
+        assert_eq!(reply_type, msg_type, "{name}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap(),
+            serde_json::json!({"success": false, "error": "not implemented"}),
+            "{name}"
+        );
+    }
+}
+
 /// Oracle: command-fuzz newline-separated, newline-trailing and
 /// newline-inside-quotes. Sway rewrites each newline that ends a non-empty
 /// line into `;` before parsing a RUN_COMMAND payload, ignoring quotes

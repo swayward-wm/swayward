@@ -61,6 +61,13 @@ impl<W: LayoutElement> TilingTree<W> {
     /// everything outside it keeps the box it had, and the percent that
     /// implies, until the next full arrange.
     fn arrange_after_resize(&mut self, old: &geometry::Geometry<W::Id>, resized: NodeId) {
+        // A top-level container's `arrange_workspace` also reaches a fullscreen floating
+        // group, which keeps no node here.
+        if self.nodes.get(&resized).and_then(|node| node.parent) == Some(self.root)
+            && self.fullscreen_node().is_none()
+        {
+            self.note_workspace_arrange();
+        }
         let Some(fullscreen) = self
             .fullscreen_node()
             .filter(|id| self.fullscreen_mode(*id) == Some(FullscreenMode::Workspace))
@@ -355,7 +362,53 @@ impl<W: LayoutElement> TilingTree<W> {
             SizeChange::SetFixed(_) | SizeChange::SetProportion(_) => return false,
         };
         let changed = self.resize_adjacent(first, second, delta);
-        changed && first == id
+        changed && self.resized_ancestor_moved(first, id)
+    }
+
+    /// Whether a resize that moved `branch`, `id` or one of its ancestors,
+    /// changed `id`'s own fraction. When it moved an ancestor, sway's
+    /// arrange of the parent divides every linear split below by its
+    /// fraction sum (`apply_horiz_layout`/`apply_vert_layout`,
+    /// sway/tree/arrange.c:47-52), and the command fails "Cannot resize any
+    /// further" unless that moved one of `id`'s fractions, compared bitwise
+    /// (`resize_adjust_tiled`, sway/commands/resize.c:273-277). That is float
+    /// rounding: an even split of 6 drifts an ulp on each pass, one of 8
+    /// does not.
+    fn resized_ancestor_moved(&mut self, branch: NodeId, id: NodeId) -> bool {
+        if branch == id {
+            return true;
+        }
+        let mut moved = false;
+        let mut pending = vec![branch];
+        while let Some(node) = pending.pop() {
+            let Some(Node {
+                value:
+                    TreeNode::Split {
+                        layout,
+                        children,
+                        percents,
+                        ..
+                    },
+                ..
+            }) = self.nodes.get_mut(&node)
+            else {
+                continue;
+            };
+            pending.extend(children.iter().copied());
+            if !matches!(layout, Layout::SplitH | Layout::SplitV) {
+                continue;
+            }
+            let total: f64 = percents.iter().sum();
+            if total.is_nan() || total <= 0. {
+                continue;
+            }
+            for (child, percent) in children.iter().zip(percents.iter_mut()) {
+                let old = *percent;
+                *percent /= total;
+                moved |= *child == id && percent.to_bits() != old.to_bits();
+            }
+        }
+        moved
     }
 
     pub fn set_node_size_sway(
@@ -686,7 +739,7 @@ impl<W: LayoutElement> TilingTree<W> {
                 // sway/commands/resize.c:108-120) and still replies success
                 // (resize_set_tiled, sway/commands/resize.c:285-339).
                 let changed = self.resize_across_siblings(parent_id, branch, delta, true);
-                return changed && branch == id;
+                return changed && self.resized_ancestor_moved(branch, id);
             }
             branch = parent_id;
             parent = *grandparent;

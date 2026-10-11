@@ -142,6 +142,10 @@ pub struct FloatingLayout<W: LayoutElement> {
     /// Scale of the output the space is on (and rounds its sizes to).
     scale: f64,
 
+    /// The workspace tiling tree's arrange epoch last seen; see
+    /// [`Self::sync_workspace_arrange`].
+    seen_arrange_epoch: u64,
+
     /// Clock for driving animations.
     clock: Clock,
 
@@ -195,6 +199,11 @@ struct FloatingTreeEntry<W: LayoutElement> {
     /// (sway/sway/tree/container.c:818-831). Until the next arrange, the
     /// children keep the global rects they had, which GET_TREE reports.
     ipc_anchor: Option<Point<f64, Logical>>,
+    /// When focus last entered this group through a view that has since left it. Sway raises
+    /// the group on the seat's focus stack whenever focus enters a descendant
+    /// (`seat_set_raw_focus`, sway/input/seat.c), and it keeps that place after the view
+    /// leaves.
+    entered_by_departed: Option<std::time::Duration>,
 }
 
 /// A nested floating root detached for scratchpad or workspace transfer.
@@ -397,6 +406,47 @@ pub(super) fn floating_constraints(
     )
 }
 
+/// Sway's `resize_adjust_floating` on a box (sway/commands/resize.c:180-230): the size is
+/// clamped to the floating `(min, max)` constraints, a width or height change keeps the
+/// centre, and LEFT or TOP keeps the opposite edge. `None` when the clamp leaves nothing to
+/// change ("Cannot resize any further").
+pub(super) fn adjust_floating_box(
+    mut rect: Rectangle<f64, Logical>,
+    edge: Option<ResizeEdge>,
+    horizontal: bool,
+    amount: i32,
+    (min, max): (Size<f64, Logical>, Size<f64, Logical>),
+) -> Option<Rectangle<f64, Logical>> {
+    let clamp_grow = |current: f64, min: f64, max: f64| {
+        let grown = current + f64::from(amount);
+        if grown < min {
+            min - current
+        } else if grown > max {
+            max - current
+        } else {
+            f64::from(amount)
+        }
+    };
+    let (grow_w, grow_h) = if horizontal {
+        (clamp_grow(rect.size.w, min.w, max.w), 0.)
+    } else {
+        (0., clamp_grow(rect.size.h, min.h, max.h))
+    };
+    if grow_w == 0. && grow_h == 0. {
+        return None;
+    }
+    match edge {
+        None if horizontal => rect.loc.x -= (grow_w / 2.).trunc(),
+        None => rect.loc.y -= (grow_h / 2.).trunc(),
+        Some(edge) if edge.contains(ResizeEdge::LEFT) => rect.loc.x -= grow_w,
+        Some(edge) if edge.contains(ResizeEdge::TOP) => rect.loc.y -= grow_h,
+        Some(_) => {}
+    }
+    rect.size.w += grow_w;
+    rect.size.h += grow_h;
+    Some(rect)
+}
+
 fn constrain_floating_size(
     mut size: Size<i32, Logical>,
     minimum: swayward_config::FloatingSize,
@@ -445,6 +495,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
             output_area,
             output_loc,
             scale,
+            seen_arrange_epoch: 0,
             clock,
             options,
         }
@@ -906,10 +957,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
         self.entries.is_empty() && self.tree_entries.is_empty()
     }
 
-    pub fn add_tile(&mut self, tile: Tile<W>, activate: bool) {
-        self.add_tile_at(0, tile, activate);
-    }
-
     /// Apply a split command to the active floating container. Sway wraps a
     /// standalone floating view in a new split container (`container_split`,
     /// sway/tree/container.c:1565-1620), so a lone leaf is promoted into a
@@ -922,13 +969,156 @@ impl<W: LayoutElement> FloatingLayout<W> {
         if let Some((idx, _)) = self.tree_entry_for_window(&active) {
             if let Some(entry) = self.tree_entries.get_mut(idx) {
                 entry.tree.split_focused(layout);
+                // Splitting the group root wraps it in a new floating container that takes
+                // its place, and its sticky flag stays on the now-tiled child
+                // (`container_split`, sway/tree/container.c:1542-1552).
+                if let Some(root) = entry
+                    .tree
+                    .resident_root()
+                    .filter(|root| *root != entry.root)
+                {
+                    let old_root = std::mem::replace(&mut entry.root, root);
+                    entry.tree.set_split_sticky(old_root, entry.sticky);
+                    entry.sticky = false;
+                }
             }
             return;
         }
-        let Some(index) = self.idx_of(&active) else {
-            return;
+        self.split_standalone(&active, layout);
+    }
+
+    /// `container_split` on a named container in a floating group, as a criteria
+    /// command runs it (`do_split`, sway/commands/split.c:12-33). With `toggle` the
+    /// layout comes from the parent (`cmd_split`, sway/commands/split.c:64-71); a group
+    /// root's parent layout is the workspace's, which the caller passes as `layout`.
+    pub fn split_tree_node(
+        &mut self,
+        node: NodeId,
+        layout: super::tiling_tree::Layout,
+        toggle: bool,
+    ) -> bool {
+        self.interactive_resize = None;
+        let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.contains(node))
+        else {
+            return false;
         };
-        let FloatingEntry { tile, data, .. } = self.remove_entry(index);
+        if toggle && node != entry.root {
+            entry.tree.toggle_split(node);
+        } else {
+            entry.tree.split(node, layout);
+        }
+        if let Some(root) = entry
+            .tree
+            .resident_root()
+            .filter(|root| *root != entry.root)
+        {
+            let old_root = std::mem::replace(&mut entry.root, root);
+            entry.tree.set_split_sticky(old_root, entry.sticky);
+            entry.sticky = false;
+        }
+        true
+    }
+
+    /// `split none` on `node`, a container below a floating group's root. Sway's
+    /// `container_flatten` replaces each singleton ancestor with `node`, up to and including
+    /// the floating root (sway/commands/split.c:35-50, sway/tree/container.c:526-538,1471-1491):
+    /// a split that takes the root's place becomes the group's root, and a view becomes a
+    /// standalone floater in the root's stack slot and box. `None` when sway refuses, because
+    /// `node` is a floating root or has siblings.
+    pub fn flatten_tree_node(&mut self, node: NodeId) -> Option<Vec<(NodeId, NodeId)>> {
+        let idx = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.tree.contains(node))?;
+        let entry = self.tree_entries.get_mut(idx)?;
+        if node == entry.root {
+            return None;
+        }
+        // A fullscreen view that would become a standalone floater moves into swayward's
+        // parked fullscreen slot, which this path does not model; refuse rather than drop
+        // the mode.
+        if entry.tree.fullscreen_node().is_some()
+            && !entry.tree.is_split(node)
+            && entry.tree.windows().nth(1).is_none()
+        {
+            return None;
+        }
+        self.interactive_resize = None;
+        let remapped = entry.tree.flatten_ancestors(node)?;
+        let Some(root) = entry.tree.resident_root() else {
+            return Some(remapped);
+        };
+        if root == entry.root {
+            return Some(remapped);
+        }
+        if entry.tree.is_split(root) {
+            entry.sticky = entry.tree.is_split_sticky(root);
+            entry.root = root;
+            return Some(remapped);
+        }
+        let entry = self.tree_entries.remove(idx);
+        let mut tree = entry.tree;
+        let Some(mut tile) = tree.remove_tile_node(root) else {
+            return Some(remapped);
+        };
+        tile.set_sway_csd_floating(true);
+        tile.set_border_edges(ResizeEdge::all());
+        tile.set_decorated_box(
+            super::tile::DecoratedCorners::ALL,
+            tile.has_sway_titlebar(),
+            false,
+        );
+        let data = Data::new(self.view_size, self.working_area, &tile, entry.rect.loc);
+        let index = self
+            .entries
+            .iter()
+            .position(|other| other.stamp < entry.stamp)
+            .unwrap_or(self.entries.len());
+        self.insert_entry(
+            index,
+            FloatingEntry {
+                tile,
+                data,
+                stamp: entry.stamp,
+                titlebar: Box::default(),
+            },
+        );
+        Some(remapped)
+    }
+
+    /// [`Self::flatten_tree_node`] on the focused container of the active group.
+    pub fn flatten_focused_tree_node(&mut self) -> Option<Vec<(NodeId, NodeId)>> {
+        let focus = self.active_tree_entry()?.tree.focus()?;
+        self.flatten_tree_node(focus)
+    }
+
+    /// `container_split` on `id`, a view in the floating layer: a group child or root
+    /// splits inside its group, a standalone view becomes a new group.
+    pub fn split_window(
+        &mut self,
+        id: &W::Id,
+        layout: super::tiling_tree::Layout,
+        toggle: bool,
+    ) -> bool {
+        if let Some((_, node)) = self.tree_entry_for_window(id) {
+            return self.split_tree_node(node, layout, toggle);
+        }
+        self.interactive_resize = None;
+        self.split_standalone(id, layout)
+    }
+
+    fn split_standalone(&mut self, id: &W::Id, layout: super::tiling_tree::Layout) -> bool {
+        let Some(index) = self.idx_of(id) else {
+            return false;
+        };
+        let previous_active = self.active_window_id.clone();
+        let active = id.clone();
+        let FloatingEntry {
+            tile, data, stamp, ..
+        } = self.remove_entry(index);
         // Sway's split copies the container's pending box (sway/tree/container.c:1543-1548),
         // which `container_floating_resize_and_center` set when the view floated, before
         // the client commits that size. `data.size` still holds the last committed tile.
@@ -944,18 +1134,37 @@ impl<W: LayoutElement> FloatingLayout<W> {
         tree.add_tile(tile, super::tiling_tree::InsertTarget::Focused);
         tree.split_focused(layout);
         let Some(root) = tree.parent_of_window(&active) else {
-            return;
+            return false;
         };
         let Some((subtree, _)) = tree.detach_subtree(root) else {
-            return;
+            return false;
         };
-        self.add_tree(subtree, rect);
+        // `container_replace` puts the wrapper in the view's slot in `floating_nodes`
+        // (sway/tree/container.c:1484-1488), so the group keeps the view's stamp.
+        self.add_tree_with_stamp(subtree, rect, stamp);
+        // `container_split` moves focus only when the view held it
+        // (sway/tree/container.c:1532-1560).
+        if previous_active.as_ref() != Some(&active) {
+            self.active_window_id = previous_active;
+        }
+        true
     }
 
     pub fn add_tree(
         &mut self,
         subtree: DetachedSubtree<W>,
         rect: Rectangle<f64, Logical>,
+    ) -> (NodeId, Vec<(NodeId, NodeId)>) {
+        let stamp = self.bump_stamp();
+        self.add_tree_with_stamp(subtree, rect, stamp)
+    }
+
+    /// [`Self::add_tree`] at `stamp`'s place in the stack rather than on top.
+    fn add_tree_with_stamp(
+        &mut self,
+        subtree: DetachedSubtree<W>,
+        rect: Rectangle<f64, Logical>,
+        stamp: u64,
     ) -> (NodeId, Vec<(NodeId, NodeId)>) {
         let (tree, root, remapped) = TilingTree::from_detached_subtree(
             self.view_size,
@@ -972,9 +1181,13 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .any(|entry| entry.tree.contains(root)));
         self.active_window_id = tree.active_window().map(|window| window.id().clone());
         let sticky = tree.is_split_sticky(root);
-        let stamp = self.bump_stamp();
+        let index = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.stamp < stamp)
+            .unwrap_or(self.tree_entries.len());
         self.tree_entries.insert(
-            0,
+            index,
             FloatingTreeEntry {
                 stamp,
                 tree,
@@ -983,6 +1196,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 pos: Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc),
                 sticky,
                 ipc_anchor: None,
+                entered_by_departed: None,
             },
         );
         (root, remapped)
@@ -1019,6 +1233,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 pos: Data::logical_to_size_frac_in_working_area(self.working_area, rect.loc),
                 sticky: removed.sticky,
                 ipc_anchor: None,
+                entered_by_departed: None,
             },
         );
         (root, Vec::new())
@@ -1056,7 +1271,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
         })
     }
 
-    fn bump_stamp(&mut self) -> u64 {
+    pub(in crate::layout) fn bump_stamp(&mut self) -> u64 {
         self.next_stamp += 1;
         self.next_stamp
     }
@@ -1132,6 +1347,81 @@ impl<W: LayoutElement> FloatingLayout<W> {
             entry.tree.focus_inactive_leaf_of(root);
             self.active_window_id = entry.tree.active_window().map(|window| window.id().clone());
         }
+    }
+
+    /// Focuses the most recently focused view below `node` in group `root`. Returns false when
+    /// `node` is gone or holds no view.
+    pub fn focus_tree_view_in(&mut self, root: NodeId, node: NodeId) -> bool {
+        let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.root == root)
+        else {
+            return false;
+        };
+        if !entry.tree.contains(node)
+            || !entry
+                .tree
+                .windows()
+                .any(|(id, _)| entry.tree.contains_node(node, id))
+        {
+            return false;
+        }
+        entry.tree.focus_inactive_leaf_of(node);
+        self.active_window_id = entry.tree.active_window().map(|window| window.id().clone());
+        true
+    }
+
+    /// The focused node of the group holding the active view.
+    pub fn focused_tree_node(&self) -> Option<NodeId> {
+        self.active_tree_entry()?.tree.focus()
+    }
+
+    /// Makes `window` active again, with its group focused on `node` when it is in one.
+    /// Returns false when the window or the node is gone.
+    pub fn restore_tree_focus(&mut self, window: &W::Id, node: Option<NodeId>) -> bool {
+        match node {
+            Some(node) => {
+                let Some(entry) = self.tree_entry_with_window_mut(window) else {
+                    return false;
+                };
+                if !entry.tree.contains(node) {
+                    return false;
+                }
+                if entry.tree.focus() != Some(node) {
+                    entry.tree.set_focus(node);
+                }
+            }
+            None if self.idx_of(window).is_none() => return false,
+            None => {}
+        }
+        self.active_window_id = Some(window.clone());
+        true
+    }
+
+    /// Records that focus entered the group holding `window` at `stamp`, before the view leaves
+    /// it.
+    pub fn record_departing_focus(&mut self, window: &W::Id, stamp: std::time::Duration) {
+        if let Some(entry) = self.tree_entry_with_window_mut(window) {
+            entry.entered_by_departed = entry.entered_by_departed.max(Some(stamp));
+        }
+    }
+
+    /// When focus last entered group `root` through a view that has since left it.
+    pub fn tree_entered_by_departed(&self, root: NodeId) -> Option<std::time::Duration> {
+        self.tree_entries
+            .iter()
+            .find(|entry| entry.root == root)
+            .and_then(|entry| entry.entered_by_departed)
+    }
+
+    /// The rectangle of the floating root holding `window`, in workspace view coordinates.
+    pub fn root_rect_for_window(&self, window: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        if let Some(idx) = self.idx_of(window) {
+            let data = &self.entries.get(idx)?.data;
+            return Some(Rectangle::new(data.logical_pos, data.size));
+        }
+        self.tree_entry_with_window(window).map(|entry| entry.rect)
     }
 
     pub fn tree_rect(&self, root: NodeId) -> Option<Rectangle<f64, Logical>> {
@@ -1210,6 +1500,25 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .is_some_and(|entry| entry.tree.focused_leaf_is_only_child_of_resident_root())
     }
 
+    /// A floating group holds a global fullscreen node sway no longer
+    /// tracks as `root->fullscreen_global`.
+    pub fn global_fullscreen_orphaned(&self) -> bool {
+        self.tree_entries
+            .iter()
+            .any(|entry| entry.tree.global_fullscreen_orphaned())
+    }
+
+    /// See [`TilingTree::orphan_global_fullscreen`].
+    pub fn orphan_tree_global_fullscreen(&mut self, root: NodeId) {
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.root == root)
+        {
+            entry.tree.orphan_global_fullscreen();
+        }
+    }
+
     pub fn fullscreen_mode(&self) -> Option<super::tiling_tree::FullscreenMode> {
         self.tree_entries.iter().find_map(|entry| {
             let fullscreen = entry.tree.fullscreen_node()?;
@@ -1274,6 +1583,37 @@ impl<W: LayoutElement> FloatingLayout<W> {
         }
     }
 
+    /// [`TilingTree::yield_fullscreen`] for the group holding the fullscreen.
+    pub fn yield_fullscreen(&mut self) {
+        if let Some(entry) = self
+            .tree_entries
+            .iter_mut()
+            .find(|entry| entry.tree.fullscreen_node().is_some())
+        {
+            entry.tree.yield_fullscreen();
+        }
+    }
+
+    /// The workspace was arranged since `epoch` was last seen (see
+    /// [`TilingTree::arrange_epoch`]), which puts a fullscreen group back at the output box
+    /// (sway/tree/arrange.c:310-316, 349-355).
+    pub fn sync_workspace_arrange(&mut self, epoch: u64) {
+        if std::mem::replace(&mut self.seen_arrange_epoch, epoch) == epoch {
+            return;
+        }
+        for entry in &mut self.tree_entries {
+            entry.tree.forget_fullscreen_pending_box();
+        }
+    }
+
+    /// The workspace has no fullscreen container left, so the next arrange reaches every
+    /// group again.
+    pub fn forget_yielded_fullscreen(&mut self) {
+        for entry in &mut self.tree_entries {
+            entry.tree.forget_floating_fullscreen();
+        }
+    }
+
     pub fn set_window_fullscreen(
         &mut self,
         window: &W::Id,
@@ -1331,18 +1671,23 @@ impl<W: LayoutElement> FloatingLayout<W> {
         })
     }
 
-    /// Maps `tile` into the active floating group beside its focused child.
+    /// Maps `tile` into the active floating group beside its focused child. An unactivated
+    /// tile ranks last and leaves the focus where it was.
     /// Check [`Self::maps_into_focused_group`] first.
-    pub fn add_tile_to_focused_group(&mut self, tile: Tile<W>) {
+    pub fn add_tile_to_focused_group(&mut self, tile: Tile<W>, activate: bool) {
         let id = tile.window().id().clone();
         let Some(entry) = self.active_tree_entry_mut() else {
             warn!("add_tile_to_focused_group: no active floating group");
             return;
         };
-        entry
-            .tree
-            .add_tile_with_activation(tile, super::tiling_tree::InsertTarget::Focused, true);
-        self.active_window_id = Some(id);
+        entry.tree.add_tile_with_activation(
+            tile,
+            super::tiling_tree::InsertTarget::Focused,
+            activate,
+        );
+        if activate {
+            self.active_window_id = Some(id);
+        }
     }
 
     pub fn focused_tree_child(&self) -> bool {
@@ -1363,6 +1708,16 @@ impl<W: LayoutElement> FloatingLayout<W> {
         self.active_tree_entry_mut()
             .filter(|entry| entry.tree.focus().is_some_and(|focus| focus != entry.root))
             .map(|entry| &mut entry.tree)
+    }
+
+    /// The group tree holding `window` below its root, with the window's leaf.
+    pub fn child_tree_for_window_mut(
+        &mut self,
+        window: &W::Id,
+    ) -> Option<(&mut TilingTree<W>, NodeId)> {
+        let (idx, node) = self.tree_entry_for_window(window)?;
+        let entry = self.tree_entries.get_mut(idx)?;
+        (entry.root != node).then_some((&mut entry.tree, node))
     }
 
     pub fn move_focused_tree_child(&mut self, direction: Direction) -> Option<bool> {
@@ -1535,11 +1890,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .collect()
     }
 
-    /// Grows or shrinks a floating group root by `amount` px along `edge`, as
-    /// sway's resize_adjust_floating does (sway/commands/resize.c:180-230):
-    /// the size is clamped to the floating constraints, a width or height
-    /// change keeps the centre, and LEFT or TOP keeps the opposite edge.
-    /// Returns false when nothing changes ("Cannot resize any further").
+    /// Grows or shrinks a floating group root by `amount` px along `edge`; see
+    /// [`adjust_floating_box`]. Returns false when nothing changes ("Cannot resize any
+    /// further").
     pub fn adjust_tree_size(
         &mut self,
         root: NodeId,
@@ -1548,42 +1901,56 @@ impl<W: LayoutElement> FloatingLayout<W> {
         amount: i32,
         automatic_maximum: Size<f64, Logical>,
     ) -> bool {
-        let Some(mut rect) = self.tree_rect(root) else {
+        let Some(idx) = self
+            .tree_entries
+            .iter()
+            .position(|entry| entry.root == root)
+        else {
             return false;
         };
-        let (min, max) = floating_constraints(
+        let constraints = floating_constraints(
             self.options.layout.floating_minimum_size,
             self.options.layout.floating_maximum_size,
             automatic_maximum,
         );
-        let clamp_grow = |current: f64, min: f64, max: f64| {
-            let grown = current + f64::from(amount);
-            if grown < min {
-                min - current
-            } else if grown > max {
-                max - current
-            } else {
-                f64::from(amount)
+        let entry = &mut self.tree_entries[idx];
+        // A fullscreen root's pending box is the output box, or the output layout box for
+        // global fullscreen (sway/tree/arrange.c:310-316, 349-355), so the clamp measures
+        // that. Its floating geometry is sway's saved_* box, which the resize leaves alone
+        // and the unfullscreen restores (sway/tree/container.c:1194-1197).
+        match entry.tree.fullscreen_mode(root) {
+            Some(super::tiling_tree::FullscreenMode::Workspace) => {
+                let current = entry
+                    .tree
+                    .fullscreen_pending_box()
+                    .unwrap_or_else(|| Rectangle::from_size(self.view_size));
+                let Some(rect) =
+                    adjust_floating_box(current, edge, horizontal, amount, constraints)
+                else {
+                    return false;
+                };
+                // The pending box moves and the container is arranged in it, so GET_TREE
+                // reports its children there (sway/commands/resize.c:219-229).
+                entry.tree.set_fullscreen_pending_box(rect);
+                true
             }
-        };
-        let (grow_w, grow_h) = if horizontal {
-            (clamp_grow(rect.size.w, min.w, max.w), 0.)
-        } else {
-            (0., clamp_grow(rect.size.h, min.h, max.h))
-        };
-        if grow_w == 0. && grow_h == 0. {
-            return false;
+            Some(super::tiling_tree::FullscreenMode::Global) => adjust_floating_box(
+                Rectangle::from_size(automatic_maximum),
+                edge,
+                horizontal,
+                amount,
+                constraints,
+            )
+            .is_some(),
+            None => {
+                let Some(rect) =
+                    adjust_floating_box(entry.rect, edge, horizontal, amount, constraints)
+                else {
+                    return false;
+                };
+                self.move_tree(root, rect)
+            }
         }
-        match edge {
-            None if horizontal => rect.loc.x -= (grow_w / 2.).trunc(),
-            None => rect.loc.y -= (grow_h / 2.).trunc(),
-            Some(edge) if edge.contains(ResizeEdge::LEFT) => rect.loc.x -= grow_w,
-            Some(edge) if edge.contains(ResizeEdge::TOP) => rect.loc.y -= grow_h,
-            Some(_) => {}
-        }
-        rect.size.w += grow_w;
-        rect.size.h += grow_h;
-        self.move_tree(root, rect)
     }
 
     /// Sets a floating group root's outer size, keeping its centre, as sway's

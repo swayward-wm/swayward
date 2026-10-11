@@ -5,6 +5,7 @@ pub use swayward_ipc::command::{
 };
 use swayward_ipc::CommandOutcome;
 
+mod arrange;
 mod bindings;
 mod dispatch;
 mod focus;

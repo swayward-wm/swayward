@@ -73,6 +73,9 @@ pub struct Tile<W: LayoutElement> {
     /// The style a CSD view returns to when it is tiled again
     /// (`con->saved_border`, sway/commands/border.c:15-31).
     sway_saved_border: Option<BorderStyle>,
+    /// Set while a swap re-parents the view: sway's `swap_places` never calls
+    /// `container_set_floating`, so the stored border stays as it was.
+    sway_csd_pinned: bool,
     border_edges: ResizeEdge,
     border_visible: bool,
     titlebar_attached: bool,
@@ -164,6 +167,17 @@ pub struct Tile<W: LayoutElement> {
     /// answered a configure, would otherwise paint over its neighbour. `None` outside the tiling
     /// tree and while maximized or fullscreen.
     tiled_content_size: Option<Size<f64, Logical>>,
+
+    /// The content box sway gave this view when it floated, with the committed
+    /// geometry it had then.
+    ///
+    /// Sway floats a view at its natural size clamped by `floating_minimum_size` and
+    /// `floating_maximum_size` (`floating_natural_resize`, sway/tree/container.c:833-847)
+    /// and only takes the client's size again when a commit changes the geometry
+    /// (`handle_commit`, sway/desktop/xdg_shell.c:313-335). A client that keeps its
+    /// geometry therefore stays in the larger box. `None` once the geometry changes or the
+    /// view leaves the floating layer.
+    floating_content: Option<(Size<f64, Logical>, Size<i32, Logical>)>,
 
     /// The view size for the tile's workspace.
     ///
@@ -273,6 +287,7 @@ impl<W: LayoutElement> Tile<W> {
             sway_border: None,
             sway_uses_csd: false,
             sway_saved_border: None,
+            sway_csd_pinned: false,
             border_edges: ResizeEdge::all(),
             border_visible: true,
             titlebar_attached: false,
@@ -301,6 +316,7 @@ impl<W: LayoutElement> Tile<W> {
             unmap_snapshot: None,
             rounded_corner_damage: Default::default(),
             tiled_content_size: None,
+            floating_content: None,
             view_size,
             scale,
             clock,
@@ -372,6 +388,12 @@ impl<W: LayoutElement> Tile<W> {
     pub fn update_window(&mut self) {
         let prev_sizing_mode = self.sizing_mode;
         self.sizing_mode = self.window.sizing_mode();
+        if self
+            .floating_content
+            .is_some_and(|(_, geometry)| geometry != self.window.size())
+        {
+            self.floating_content = None;
+        }
 
         if let Some(animate_from) = self.window.take_animation_snapshot() {
             let params = if let Some(resize) = self.resize_animation.take() {
@@ -1016,12 +1038,22 @@ impl<W: LayoutElement> Tile<W> {
     pub fn tile_expected_or_current_size(&self) -> Size<f64, Logical> {
         let mut size = self.window_expected_or_current_size();
 
-        if self.sizing_mode.is_fullscreen() {
+        // The expected size belongs to the pending state, so the pending
+        // sizing mode decides whether it is a fullscreen size: a view leaving
+        // fullscreen for a floating box keeps its committed fullscreen mode
+        // until the client commits the floating configure, but sway already
+        // holds the floating box (sway/tree/container.c:1246-1258).
+        if self.window.pending_sizing_mode().is_fullscreen() {
             // Normally we'd just return the fullscreen size here, but this makes things a bit
             // nicer if a fullscreen window is bigger than the fullscreen size for some reason.
             size.w = f64::max(size.w, self.view_size.w);
             size.h = f64::max(size.h, self.view_size.h);
             return size;
+        }
+        // The committed mode still hides the titlebar; the pending normal
+        // state draws it.
+        if !self.sizing_mode.is_normal() && self.window.pending_sizing_mode().is_normal() {
+            return self.floating_tile_size_for_window_size(size);
         }
 
         let (left, right, top, bottom) = self.decoration_insets();
@@ -1033,6 +1065,9 @@ impl<W: LayoutElement> Tile<W> {
 
     pub fn window_size(&self) -> Size<f64, Logical> {
         let mut size = self.window.size().to_f64();
+        if let Some(content) = self.floating_content_size() {
+            size = content;
+        }
         if let Some(slot) = self.tiled_slot_size() {
             size.w = f64::min(size.w, slot.w);
             size.h = f64::min(size.h, slot.h);
@@ -1046,6 +1081,9 @@ impl<W: LayoutElement> Tile<W> {
     pub fn window_expected_or_current_size(&self) -> Size<f64, Logical> {
         let size = self.window.expected_size();
         let mut size = size.unwrap_or_else(|| self.window.size()).to_f64();
+        if let Some(content) = self.floating_content_size() {
+            size = content;
+        }
         size = size
             .to_physical_precise_round(self.scale)
             .to_logical(self.scale);
@@ -1162,6 +1200,28 @@ impl<W: LayoutElement> Tile<W> {
         self.tiled_content_size = None;
     }
 
+    /// The floating content box, until [`Self::update_window`] sees the client commit a
+    /// different geometry; see [`Self::floating_content`].
+    fn floating_content_size(&self) -> Option<Size<f64, Logical>> {
+        let (content, _) = self.floating_content?;
+        self.sizing_mode.is_normal().then_some(content)
+    }
+
+    /// Floats the view in `content` until the client commits a different geometry.
+    pub(super) fn set_floating_content(&mut self, content: Size<f64, Logical>) {
+        self.floating_content = Some((content, self.window.size()));
+    }
+
+    /// A floating resize moves the content box on the axes it names, clamped by the
+    /// floating limits only (`resize_set_floating`, sway/commands/resize.c:341-403), so a
+    /// box still held against the client's geometry takes the new size there.
+    pub(super) fn resize_floating_content(&mut self, width: Option<f64>, height: Option<f64>) {
+        if let Some((size, _)) = &mut self.floating_content {
+            size.w = width.unwrap_or(size.w);
+            size.h = height.unwrap_or(size.h);
+        }
+    }
+
     pub fn request_tile_size(
         &mut self,
         mut size: Size<f64, Logical>,
@@ -1172,6 +1232,7 @@ impl<W: LayoutElement> Tile<W> {
         size.w = f64::max(1., size.w - left - right);
         size.h = f64::max(1., size.h - top - bottom);
         self.tiled_content_size = Some(size);
+        self.floating_content = None;
 
         // The size request has to be i32 unfortunately, due to Wayland. We floor here instead of
         // round to avoid situations where proportionally-sized columns don't fit on the screen
@@ -1194,6 +1255,25 @@ impl<W: LayoutElement> Tile<W> {
         size + top + bottom
     }
 
+    /// The decorated size of a floating window with content `size` in the
+    /// normal sizing mode: the border on every edge and, under `border normal`,
+    /// the titlebar on top (`container_set_geometry_from_content`,
+    /// sway/tree/container.c:1018-1039). Unlike `tile_size`, it does not depend
+    /// on the current sizing mode, so a fullscreen view leaving for the
+    /// scratchpad is measured as the floating view it becomes.
+    pub fn floating_tile_size_for_window_size(
+        &self,
+        size: Size<f64, Logical>,
+    ) -> Size<f64, Logical> {
+        let width = self.configured_border_width();
+        let top = if self.has_configured_sway_titlebar() && !self.border.is_off() {
+            super::titlebar::height(self.scale, &self.options.layout.titlebar)
+        } else {
+            width
+        };
+        Size::from((size.w + 2. * width, size.h + top + width))
+    }
+
     pub fn window_width_for_tile_width(&self, size: f64) -> f64 {
         let (left, right, _, _) = self.decoration_insets();
         size - left - right
@@ -1211,6 +1291,7 @@ impl<W: LayoutElement> Tile<W> {
         transaction: Option<Transaction>,
     ) {
         self.tiled_content_size = None;
+        self.floating_content = None;
         self.window.request_size(
             size.to_i32_round(),
             SizingMode::Maximized,
@@ -1221,6 +1302,7 @@ impl<W: LayoutElement> Tile<W> {
 
     pub fn request_fullscreen(&mut self, animate: bool, transaction: Option<Transaction>) {
         self.tiled_content_size = None;
+        self.floating_content = None;
         self.window.request_size(
             self.view_size.to_i32_round(),
             SizingMode::Fullscreen,
@@ -1941,7 +2023,7 @@ impl<W: LayoutElement> Tile<W> {
     /// the matching decoration mode (sway/tree/container.c:955-964, 995-1003).
     /// A view that is not using CSD is left alone.
     pub fn set_sway_csd_floating(&mut self, floating: bool) {
-        if !self.sway_uses_csd {
+        if !self.sway_uses_csd || self.sway_csd_pinned {
             return;
         }
         // A view mapped with CSD may still follow `default_border`; it goes
@@ -1964,6 +2046,12 @@ impl<W: LayoutElement> Tile<W> {
         self.window.request_server_decoration(!floating);
         self.sway_border = border;
         self.update_border_config();
+    }
+
+    /// Keeps the stored border through a re-parent that sway does without
+    /// `container_set_floating` (`swap_places`, sway/tree/container.c:1718-1764).
+    pub fn pin_sway_csd(&mut self, pinned: bool) {
+        self.sway_csd_pinned = pinned;
     }
 
     fn update_border_config(&mut self) {

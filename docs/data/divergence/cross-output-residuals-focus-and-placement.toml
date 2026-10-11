@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs", "src/layout/workspace.rs"]
+what = "A view moved by direction onto another output keeps the seat focus and its box beside a workspace fullscreen container, and floating a workspace-level view leaves the tiling focus order as it was."
+why = "Sway's container_move_to_workspace_from_direction never calls workspace_focus_fullscreen (sway/commands/move.c:168-196), and container_set_floating raises no old parent for a workspace-level view (sway/tree/container.c:969-973). Family diff-fam-v3-cross-output-residuals, oracle rows directional_move_beside_fullscreen_keeps_focus and float_workspace_view_keeps_focus_order."

@@ -6,6 +6,14 @@ use super::*;
 /// Containers a layout command flattened, as `(old, new)` ids in a workspace.
 type Remapped = (WorkspaceId, Vec<(NodeId, NodeId)>);
 
+/// A workspace's focus before a view maps: a tiling node, or the active floating view with
+/// the focused node of its group, if it is in one.
+#[derive(Debug, Clone)]
+pub enum PreMapFocus<Id> {
+    Tiling(NodeId),
+    Floating(Id, Option<NodeId>),
+}
+
 impl<W: LayoutElement> Layout<W> {
     pub fn window_border(
         &self,
@@ -59,6 +67,10 @@ impl<W: LayoutElement> Layout<W> {
     pub fn use_client_decorations_from_map(&mut self, window: &W::Id) {
         for workspace in self.workspaces_mut() {
             let floating = workspace.is_floating(window);
+            if floating {
+                workspace.use_floating_client_decorations_from_map(window);
+                return;
+            }
             if let Some(tile) = workspace
                 .tiles_mut()
                 .find(|tile| tile.window().id() == window)
@@ -242,6 +254,44 @@ impl<W: LayoutElement> Layout<W> {
         true
     }
 
+    /// A criteria `split` on a container in the floating layer: a view standing alone, a
+    /// group child, or a group root (`do_split`, sway/commands/split.c:12-33). `node` names
+    /// a group container, else `window` the view. `layout` of `None` is `split toggle`,
+    /// which reads the parent's layout; a floating root's parent is the workspace
+    /// (`container_parent_layout`, sway/tree/container.c:1353-1361).
+    pub fn split_floating_target(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: Option<&W::Id>,
+        node: Option<NodeId>,
+        layout: Option<tiling_tree::Layout>,
+    ) -> bool {
+        let Some(workspace) = self.workspace_mut(workspace_id) else {
+            return false;
+        };
+        workspace.split_floating_target(window, node, layout)
+    }
+
+    /// A criteria `split none` on a container below a floating group's root, named by `node`
+    /// or by its view `window`; see [`floating_tree::FloatingLayout::flatten_tree_node`].
+    pub fn flatten_floating_target(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: Option<&W::Id>,
+        node: Option<NodeId>,
+    ) -> Option<Remapped> {
+        self.workspace_mut(workspace_id)?
+            .flatten_floating_target(window, node)
+            .map(|remapped| (workspace_id, remapped))
+    }
+
+    /// The workspace holding `window` in its floating layer.
+    pub fn floating_workspace_for_window(&self, window: &W::Id) -> Option<WorkspaceId> {
+        self.workspaces()
+            .find(|(_, _, workspace)| workspace.floating().has_window(window))
+            .map(|(_, _, workspace)| workspace.id())
+    }
+
     pub fn toggle_tiling_node_split(&mut self, workspace_id: WorkspaceId, node: NodeId) -> bool {
         let Some(workspace) = self
             .workspaces_mut()
@@ -269,6 +319,30 @@ impl<W: LayoutElement> Layout<W> {
         true
     }
 
+    /// The active workspace's focused node, recorded before a view maps.
+    pub fn pre_map_focus(&self) -> Option<(WorkspaceId, PreMapFocus<W::Id>)> {
+        let workspace = self.active_workspace()?;
+        Some((workspace.id(), workspace.pre_map_focus()?))
+    }
+
+    /// Sway runs a mapping view's criteria before it focuses the view (`view_map`,
+    /// sway/tree/view.c:943-957), so a `for_window` move takes the view away while the seat
+    /// still focuses what it did before the map, and `move` restores that focus
+    /// (sway/commands/move.c:598-608). Swayward activated the view on insertion, so put the
+    /// workspace's earlier focus back once the view has left it.
+    pub fn restore_focus_after_map_move(
+        &mut self,
+        (workspace_id, focus): (WorkspaceId, PreMapFocus<W::Id>),
+        window: &W::Id,
+    ) {
+        if let Some(workspace) = self
+            .workspace_mut(workspace_id)
+            .filter(|workspace| !workspace.has_window(window))
+        {
+            workspace.restore_pre_map_focus(focus);
+        }
+    }
+
     /// See [`tiling_tree::TilingTree::raise_focus_into_fresh_wrappers`].
     pub fn raise_focus_into_fresh_wrappers(&mut self, window: &W::Id) {
         if let Some(workspace) = self
@@ -279,6 +353,22 @@ impl<W: LayoutElement> Layout<W> {
                 .tiling_mut()
                 .raise_focus_into_fresh_wrappers(window);
         }
+    }
+
+    /// Runs `f` on the floating group tree holding `window` below its root, with the
+    /// window's leaf. See [`Workspace::in_floating_window_tree`].
+    pub fn in_floating_window_tree<T>(
+        &mut self,
+        window: &W::Id,
+        f: impl FnOnce(&mut tiling_tree::TilingTree<W>, NodeId) -> T,
+    ) -> Option<(WorkspaceId, T)> {
+        let workspace = self
+            .workspaces_mut()
+            .find(|workspace| workspace.floating().has_window(window))?;
+        let id = workspace.id();
+        workspace
+            .in_floating_window_tree(window, f)
+            .map(|result| (id, result))
     }
 
     pub fn set_tiling_target_layout(
@@ -326,7 +416,7 @@ impl<W: LayoutElement> Layout<W> {
         format: String,
     ) -> bool {
         self.workspace_mut(workspace_id)
-            .is_some_and(|workspace| workspace.tiling_mut().set_title_format(node, format))
+            .is_some_and(|workspace| workspace.set_split_title_format(node, format))
     }
 
     /// Sway's `floating` command on a fullscreen view: the view changes
