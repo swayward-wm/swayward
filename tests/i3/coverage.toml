@@ -85,8 +85,9 @@ reason_verified = true
 [files."100-fullscreen.t"]
 assertions = 79
 tap_plan = 79
-pass = 72
-reason = "The fresh unchanged run reaches 1..79 with 72 passes and 7 failures. Assertions 7-8 and 14-15 compare fullscreen geometry against the wrong output because the test searches beneath i3's output-level `con` content node, which sway GET_TREE does not serialize. The other three failures retain their native Wayland setup gaps."
+pass = 68
+fail = 4
+reason = "The fresh unchanged run reaches 1..79 with 68 passes and 11 failures. Assertions 30, 31, 34 and 36 follow sway: `workspace <name>` fails with \"Can't switch workspaces while fullscreen global\" while a view is fullscreen global (sway/sway/commands/workspace.c:175-178), so the switch i3 expects at 30-31 and the fresh workspace that 34 and 36 rely on never happen. Assertions 7-8 and 14-15 compare fullscreen geometry against the wrong output because the test searches beneath i3's output-level `con` content node, which sway GET_TREE does not serialize. The other three failures retain their native Wayland setup gaps."
 reason_verified = true
 skip = [
   { n = 7, reason = "The output lookup descends through i3's output-level `con` content node. Sway serializes workspaces directly below each output, so the unchanged lookup cannot identify the workspace's output and compares width against the wrong rectangle.", citation = "tests/i3/t/100-fullscreen.t:24-32,64-70; sway/sway/ipc-json.c:459-499" },
@@ -1009,11 +1010,11 @@ note = "`split h` on a focused stacked container changes its singleton parent ra
 [files."132-move-workspace.t"]
 assertions = 160
 tap_plan = 160
-pass = 155
-fail = 3
+pass = 154
+fail = 4
 reason = "i3_only_semantics"
 reason_verified = true
-note = "Focused and criteria-selected parent containers move as intact subtrees, preserving internal focus and fullscreen state (`sway/commands/move.c:198-238,419-585`). Assertion 160 runs `mark a` with no focused container; sway rejects that command and preserves the globally unique mark on its existing container (`sway/commands/mark.c:20-23,46-58`), so the later criterion still resolves. With the workspace focused, `move workspace X` wraps the workspace's tiling children first and refuses an empty workspace (`cmd_move_container`, sway/commands/move.c:431-436). So assertion 115 (`move workspace <current>` wraps the lone window in a new container instead of being a no-op) and 147/149 (`focus parent` from a lone floating view, then `move workspace`, fails with \"Can't move an empty workspace\") follow sway: pinned sway 1.12 gives the same results by direct IPC. Assertion 148 is the file's own skip after 147."
+note = "Focused and criteria-selected parent containers move as intact subtrees, preserving internal focus and fullscreen state (`sway/commands/move.c:198-238,419-585`). Assertion 160 runs `mark a` with no focused container; sway rejects that command and preserves the globally unique mark on its existing container (`sway/commands/mark.c:20-23,46-58`), so the later criterion still resolves. With the workspace focused, `move workspace X` wraps the workspace's tiling children first and refuses an empty workspace (`cmd_move_container`, sway/commands/move.c:431-436). Assertion 143 follows sway too: `focus parent` then `move workspace` moves workspace_wrap_children's wrapper, which holds only the tiling children, so both floating containers stay on the source workspace (sway/sway/commands/move.c:430-436; sway/sway/tree/workspace.c:898-910). So assertion 115 (`move workspace <current>` wraps the lone window in a new container instead of being a no-op) and 147/149 (`focus parent` from a lone floating view, then `move workspace`, fails with \"Can't move an empty workspace\") follow sway: pinned sway 1.12 gives the same results by direct IPC. Assertion 148 is the file's own skip after 147."
 [[files."132-move-workspace.t".skip]]
 n = 148
 desc = "floating node count after moving a workspace that does not exist"
@@ -1692,10 +1693,11 @@ citation = "tests/i3/t/168-regress-fullscreen-restart.t:26-32; src/tests/i3_conf
 [files."169-border-toggle.t"]
 assertions = 20
 tap_plan = 20
-pass = 12
+pass = 6
+fail = 6
 reason = "i3_only_semantics"
 reason_verified = true
-note = "Fresh measurement: 12 pass, 8 documented skip. Assertions 3-4 use i3's legacy `border 1pixel` spelling, which sway rejects. Assertions 6, 8, 10, 12, 14 and 16 expect i3's width reset (0 for none, 2 for normal, 1 for pixel); sway keeps the stored thickness across style changes without a width and reports it whatever the style (`sway/sway/commands/border.c:90-92`; `sway/sway/ipc-json.c:760-761`). Captured from pinned sway as oracle scenario border_thickness_survives_style_changes."
+note = "Fresh measurement: 6 pass, 8 documented skip, 6 fail. Assertions 9, 11, 13, 15, 17 and 19 follow sway's border_toggle for a view with an xdg-decoration object: normal -> csd, which a tiled view reports as `normal` because it never stores B_CSD, then csd -> none, none -> pixel, pixel -> normal (sway/sway/commands/border.c:15-57). The adapter window binds xdg-decoration in server-side mode to stand in for the oracle's X11 windows, so the toggle passes through csd where i3 cycles normal -> none -> pixel. Without the decoration object the same six assertions pass. Assertions 3-4 use i3's legacy `border 1pixel` spelling, which sway rejects. Assertions 6, 8, 10, 12, 14 and 16 expect i3's width reset (0 for none, 2 for normal, 1 for pixel); sway keeps the stored thickness across style changes without a width and reports it whatever the style (`sway/sway/commands/border.c:90-92`; `sway/sway/ipc-json.c:760-761`). Captured from pinned sway as oracle scenario border_thickness_survives_style_changes."
 [[files."169-border-toggle.t".skip]]
 n = 3
 desc = "legacy `border 1pixel` reports pixel style"
@@ -1778,10 +1780,11 @@ note = "The deprecated `new_window` and `new_float` aliases map to per-window in
 [files."176-workspace-baf.t"]
 assertions = 26
 tap_plan = 26
-pass = 25
+pass = 22
+fail = 3
 reason = "compositor_restart"
 reason_verified = true
-note = "Fresh measurement reaches 1..26: every comparison reports `ok`, but assertion 23 runs only after swayward rejects `restart`, so it does not prove that back-and-forth state survives compositor replacement. Assertions 1-22 and 24-26 remain genuine passes. The rename fixes are unchanged."
+note = "Fresh measurement reaches 1..26: every comparison reports `ok`, but assertion 23 runs only after swayward rejects `restart`, so it does not prove that back-and-forth state survives compositor replacement. Assertions 1-22 remain genuine passes. Assertions 24-26 follow sway: the seat records the previous workspace by name (sway/sway/input/seat.c:1104-1106) and rename never updates it, so back_and_forth after `rename workspace 1 to 3` resolves or creates workspace `1` (sway/sway/tree/workspace.c:526-532; sway/sway/commands/workspace.c:216-222), where i3 follows the renamed workspace. The rename fixes are unchanged."
 [[files."176-workspace-baf.t".skip]]
 n = 23
 desc = "back-and-forth state survives compositor restart"
@@ -4477,10 +4480,11 @@ citation = "sway/sway/commands/move.c:994-1024"
 [files."316-drag-container.t"]
 assertions = 17
 tap_plan = 17
-pass = 9
+pass = 8
+fail = 1
 reason = "The centre-drop defect is fixed: cross-workspace drags now exchange the source and target like sway. That exposes the previously vacuous move-event assertion: sway swaps without emitting a move event. The eight skips require i3-only Shift cancellation, event emission, focus preservation, fullscreen dragging, or floating-wrapper tree shape."
 reason_verified = true
-note = "Fresh measurement after removing assertion interception: 9 pass, 8 documented skip. Raw TAP runs the real comparisons; each retained skip has an assertion-level sway citation below."
+note = "Fresh measurement after removing assertion interception: 8 pass, 8 documented skip, 1 fail. Assertion 2 follows sway: `floating enable` centres the view at its natural size (container_floating_resize_and_center, sway/sway/tree/container.c:864-894), so the floater is no longer at the X11 rect [30, 30, 50, 50] the test opens it with, the drag starting at (40, 40) misses it, and focus stays on the first workspace. Raw TAP runs the real comparisons; each retained skip has an assertion-level sway citation below."
 [[files."316-drag-container.t".skip]]
 n = 4
 desc = "Shift-modified drag onto an empty workspace does nothing"

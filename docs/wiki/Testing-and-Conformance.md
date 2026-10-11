@@ -200,9 +200,9 @@ itemized.
 | Files | 242 |
 | Fully green files | 94 |
 | Declared assertions | 3,171 |
-| Pass | 1,890 |
+| Pass | 1,875 |
 | Documented skip | 891 |
-| Fail | 334 |
+| Fail | 349 |
 | Unreached | 56 |
 <!-- end coverage-report -->
 
