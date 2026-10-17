@@ -226,9 +226,10 @@ impl MoveGrab {
                     .layout
                     .workspaces()
                     .find_map(|(_, _, ws)| {
-                        ws.windows()
-                            .any(|w| w.window == self.window)
-                            .then(|| ws.is_floating(&self.window))
+                        ws.windows().any(|w| w.window == self.window).then(|| {
+                            ws.is_floating(&self.window)
+                                || ws.floating_tree_root_for_window(&self.window).is_some()
+                        })
                     })
                     .unwrap_or(false);
 

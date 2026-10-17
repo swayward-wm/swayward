@@ -120,6 +120,9 @@ pub struct FloatingLayout<W: LayoutElement> {
     /// Ongoing interactive resize.
     interactive_resize: Option<InteractiveResize<W>>,
 
+    /// Ongoing pointer resize of a floating group root.
+    tree_resize: Option<TreeResize<W>>,
+
     /// Windows in the closing animation, each with the front-to-back index in `entries` it
     /// closed at. Sway keeps a destroying view's saved buffer in its own scene tree, so the
     /// closing window stays in its stack slot (`view_save_buffer`, sway/tree/view.c:1268-1287,
@@ -204,6 +207,20 @@ struct FloatingTreeEntry<W: LayoutElement> {
     /// (`seat_set_raw_focus`, sway/input/seat.c), and it keeps that place after the view
     /// leaves.
     entered_by_departed: Option<std::time::Duration>,
+}
+
+/// A pointer resize of a floating group root, sway's `seatop_resize_floating_event`
+/// (sway/input/seatop_resize_floating.c:12-19) on the toplevel ancestor.
+#[derive(Debug)]
+struct TreeResize<W: LayoutElement> {
+    /// The view the drag started on.
+    window: W::Id,
+    root: NodeId,
+    edges: ResizeEdge,
+    /// The root's box when the drag started.
+    original: Rectangle<f64, Logical>,
+    /// The automatic floating maximum, the output layout box.
+    automatic_maximum: Size<f64, Logical>,
 }
 
 /// A nested floating root detached for scratchpad or workspace transfer.
@@ -489,6 +506,7 @@ impl<W: LayoutElement> FloatingLayout<W> {
             next_stamp: 0,
             active_window_id: None,
             interactive_resize: None,
+            tree_resize: None,
             closing_windows: Vec::new(),
             view_size,
             working_area,

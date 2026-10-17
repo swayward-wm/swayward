@@ -130,6 +130,13 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .tree
             .remove_tile(id, transaction)
             .expect("floating tree window must remain present until removal");
+        if self
+            .tree_resize
+            .as_ref()
+            .is_some_and(|resize| &resize.window == id)
+        {
+            self.tree_resize = None;
+        }
         if self.tree_entries[tree_idx].tree.is_empty() {
             self.tree_entries.remove(tree_idx);
         }

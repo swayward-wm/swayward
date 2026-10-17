@@ -2072,7 +2072,39 @@ impl<W: LayoutElement> Workspace<W> {
         self.tiling.window_under(pos)
     }
 
+    /// The floating-group view under `pos`, with its tile, the tile's position and the
+    /// group root.
+    fn floating_group_tile_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(&Tile<W>, Point<f64, Logical>, NodeId)> {
+        let (window, _) = self.window_under(pos)?;
+        let root = self.floating.tree_root_for_window(window.id())?;
+        let (tile, tile_pos, _) = self
+            .floating
+            .tree(root)?
+            .tiles_with_render_positions()
+            .find(|(tile, _, visible)| *visible && tile.window().id() == window.id())?;
+        Some((tile, tile_pos, root))
+    }
+
     pub fn resize_edges_under(&self, pos: Point<f64, Logical>) -> Option<ResizeEdge> {
+        // A modifier resize on a view in a floating group picks the quadrant of the
+        // toplevel floating ancestor (sway/input/seatop_default.c:476-487).
+        if let Some((_, _, root)) = self.floating_group_tile_under(pos) {
+            let rect = self.floating.tree_rect(root)?;
+            let mut edges = if pos.x > rect.loc.x + rect.size.w / 2. {
+                ResizeEdge::RIGHT
+            } else {
+                ResizeEdge::LEFT
+            };
+            edges |= if pos.y > rect.loc.y + rect.size.h / 2. {
+                ResizeEdge::BOTTOM
+            } else {
+                ResizeEdge::TOP
+            };
+            return Some(edges);
+        }
         self.tiles_with_render_positions()
             .find_map(|(tile, tile_pos, visible)| {
                 // This logic should be consistent with window_under() in when it returns Some vs.
@@ -2112,6 +2144,25 @@ impl<W: LayoutElement> Workspace<W> {
     /// from any border edge, tiled windows only from an edge shared with a
     /// sibling.
     pub fn border_resize_edges_under(&self, pos: Point<f64, Logical>) -> Option<(&W, ResizeEdge)> {
+        // A view in a floating group is not floating itself (`container_is_floating`,
+        // sway/tree/container.c:1041-1050), so only an edge it shares with a sibling inside
+        // the group resizes. The group's outer edges are external: a container without a
+        // view has no border to grab (sway/tree/container.c:47,88-94), so they resize nothing.
+        if let Some((tile, tile_pos, root)) = self.floating_group_tile_under(pos) {
+            let pos_within_tile = pos - tile_pos;
+            if !matches!(tile.hit(pos_within_tile)?, HitType::Activate { .. }) {
+                return None;
+            }
+            let edges = tile.border_edges_at(pos_within_tile);
+            let window = tile.window();
+            let tree = self.floating.tree(root)?;
+            let resizable = if self.floating.window_is_tree_root(window.id()) {
+                !edges.is_empty()
+            } else {
+                tree.is_internal_edge(window.id(), edges)
+            };
+            return resizable.then_some((window, edges));
+        }
         let (tile, pos_within_tile, hit) =
             self.tiles_with_render_positions()
                 .find_map(|(tile, tile_pos, visible)| {
@@ -2411,6 +2462,17 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> bool {
         self.floating
             .adjust_tree_size(root, edge, horizontal, amount, automatic_maximum)
+    }
+
+    /// See [`FloatingLayout::tree_root_resize_begin`].
+    pub fn floating_tree_resize_begin(
+        &mut self,
+        window: W::Id,
+        edges: ResizeEdge,
+        automatic_maximum: Size<f64, Logical>,
+    ) -> bool {
+        self.floating
+            .tree_root_resize_begin(window, edges, automatic_maximum)
     }
 
     pub fn set_floating_tree_size(

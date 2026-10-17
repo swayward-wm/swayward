@@ -107,8 +107,12 @@ impl XdgShellHandler for State {
         };
 
         // Sway accepts client move requests only for non-fullscreen floating
-        // views (`sway/sway/desktop/xdg_shell.c:430-437`).
-        if !mapped.is_floating() || mapped.pending_sizing_mode().is_fullscreen() {
+        // views (`sway/sway/desktop/xdg_shell.c:430-437`); a view inside a
+        // floating group is not floating (sway/tree/container.c:1041-1050).
+        if !mapped.is_floating()
+            || mapped.pending_sizing_mode().is_fullscreen()
+            || self.swayward.layout.is_floating_group_child(&mapped.window)
+        {
             return;
         }
 
@@ -202,8 +206,9 @@ impl XdgShellHandler for State {
         };
 
         // Sway accepts client resize requests only for floating views
-        // (`sway/sway/desktop/xdg_shell.c:445-451`).
-        if !mapped.is_floating() {
+        // (`sway/sway/desktop/xdg_shell.c:445-451`), not a view inside a
+        // floating group (sway/tree/container.c:1041-1050).
+        if !mapped.is_floating() || self.swayward.layout.is_floating_group_child(&mapped.window) {
             return;
         }
 

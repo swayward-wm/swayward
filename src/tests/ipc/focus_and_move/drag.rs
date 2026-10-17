@@ -423,6 +423,93 @@ fn floating_modifier_none_disables_the_drag() {
     key_event(&mut f, 133, false);
 }
 
+/// Two real clients in a split floated as one group, `focus parent; floating enable`.
+fn floating_group_drag_fixture() -> Fixture {
+    let mut config = swayward_config::Config::default();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        commit_configured_size(&mut f, client, &surface);
+    }
+    for command in ["focus parent", "floating enable"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    f.double_roundtrip(client);
+    f
+}
+
+/// The group root's box and the second view's box, in workspace coordinates.
+fn floating_group_rects(
+    f: &mut Fixture,
+) -> (
+    smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+    smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+) {
+    let workspace = f.swayward().layout.active_workspace().unwrap();
+    let root = workspace.floating().tree_roots().next().unwrap();
+    let tree = workspace.floating().tree(root).unwrap();
+    let windows = tree.windows().map(|(id, _)| id).collect::<Vec<_>>();
+    assert_eq!(windows.len(), 2, "the group keeps both views");
+    let second = tree.geometry(windows[1]).unwrap();
+    (workspace.floating().tree_rect(root).unwrap(), second)
+}
+
+/// Hardware smoke 2026-10-17: Super+drag on a view inside a floating group did nothing.
+/// Sway moves and modifier-resizes the toplevel floating ancestor of the view under the
+/// cursor (`seatop_begin_move_floating(seat, container_toplevel_ancestor(cont))` and
+/// `seatop_begin_resize_floating(seat, floater, edge)`, sway/input/seatop_default.c:459-487).
+#[test]
+fn floating_modifier_drag_on_a_group_child_moves_and_resizes_the_group() {
+    const LEFT: u32 = 0x110;
+    const RIGHT: u32 = 0x111;
+    const SUPER: u32 = 133;
+    let mut f = floating_group_drag_fixture();
+    let (group, second) = floating_group_rects(&mut f);
+    // The middle of the second view, inside its client surface.
+    let start = second.loc + second.size.downscale(2.).to_point();
+
+    pointer_motion_absolute(&mut f, start.x, start.y);
+    key_event(&mut f, SUPER, true);
+    pointer_button(&mut f, LEFT, true);
+    pointer_motion_absolute(&mut f, start.x + 40., start.y + 25.);
+    pointer_motion_absolute(&mut f, start.x + 60., start.y + 30.);
+    pointer_button(&mut f, LEFT, false);
+    let (moved, moved_second) = floating_group_rects(&mut f);
+    assert_eq!(
+        moved.loc,
+        group.loc + smithay::utils::Point::from((60., 30.))
+    );
+    assert_eq!(moved.size, group.size);
+    assert_eq!(moved_second.size, second.size);
+
+    // Super+right in the bottom-right quadrant of the group resizes it from that corner,
+    // and the children keep their equal split.
+    let start = start + smithay::utils::Point::from((60., 130.));
+    pointer_motion_absolute(&mut f, start.x, start.y);
+    pointer_button(&mut f, RIGHT, true);
+    pointer_motion_absolute(&mut f, start.x + 100., start.y + 50.);
+    pointer_button(&mut f, RIGHT, false);
+    key_event(&mut f, SUPER, false);
+    let (resized, resized_second) = floating_group_rects(&mut f);
+    assert_eq!(resized.loc, moved.loc);
+    assert_eq!(
+        resized.size,
+        moved.size + smithay::utils::Size::from((100., 50.))
+    );
+    assert_eq!(resized_second.size.w, resized.size.w / 2.);
+}
+
 #[test]
 fn mouse_warping_output_warps_when_focus_crosses_outputs() {
     // The other half of `output`: the pointer is not on the newly focused

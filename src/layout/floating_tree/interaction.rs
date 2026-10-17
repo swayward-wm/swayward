@@ -2,6 +2,20 @@ use super::*;
 
 impl<W: LayoutElement> FloatingLayout<W> {
     pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
+        if let Some((idx, node)) = self.tree_entry_for_window(&window) {
+            // A view inside a group is not floating, so its border drag is a tiled resize
+            // among its siblings (sway/input/seatop_default.c:396-411,
+            // sway/input/seatop_resize_tiling.c:106-149). A view that is itself the group
+            // root is the floating container; `Layout::interactive_resize_begin` sends it to
+            // `tree_root_resize_begin` with the output layout box.
+            if self.tree_entries[idx].root == node {
+                return false;
+            }
+            return self.tree_entries[idx]
+                .tree
+                .interactive_resize_begin(window, edges);
+        }
+
         if self.interactive_resize.is_some() {
             return false;
         }
@@ -27,11 +41,128 @@ impl<W: LayoutElement> FloatingLayout<W> {
         true
     }
 
+    /// Starts resizing the floating group holding `window` from `edges`, as sway's
+    /// modifier resize does on the toplevel ancestor (sway/input/seatop_default.c:476-487).
+    pub fn tree_root_resize_begin(
+        &mut self,
+        window: W::Id,
+        edges: ResizeEdge,
+        automatic_maximum: Size<f64, Logical>,
+    ) -> bool {
+        // One pointer holds one grab, so a new resize replaces any stale one.
+        let Some(root) = self.tree_root_for_window(&window) else {
+            return false;
+        };
+        let Some(original) = self.tree_rect(root) else {
+            return false;
+        };
+        // An edge of NONE resizes from the bottom-right corner
+        // (sway/input/seatop_resize_floating.c:176).
+        let edges = if edges.is_empty() {
+            ResizeEdge::BOTTOM_RIGHT
+        } else {
+            edges
+        };
+        self.tree_resize = Some(TreeResize {
+            window,
+            root,
+            edges,
+            original,
+            automatic_maximum,
+        });
+        true
+    }
+
+    /// Sway's floating resize motion (sway/input/seatop_resize_floating.c:35-146) on a group
+    /// root. A container without a view has no border (`container_create` zeroes it,
+    /// sway/tree/container.c:47) and no view constraints, so only the floating limits clamp
+    /// it. The resident tree then rearranges the children at their split ratios, as
+    /// `arrange_container` does (sway/tree/arrange.c:249-262).
+    fn tree_root_resize_update(&mut self, delta: Point<f64, Logical>) -> bool {
+        let Some(resize) = &self.tree_resize else {
+            return false;
+        };
+        let Some(current) = self.tree_rect(resize.root) else {
+            self.tree_resize = None;
+            return false;
+        };
+        let edges = resize.edges;
+        let original = resize.original;
+        let root = resize.root;
+        let (min, max) = floating_constraints(
+            self.options.layout.floating_minimum_size,
+            self.options.layout.floating_maximum_size,
+            resize.automatic_maximum,
+        );
+
+        let mut moved = delta;
+        if edges == ResizeEdge::TOP || edges == ResizeEdge::BOTTOM {
+            moved.x = 0.;
+        }
+        if edges == ResizeEdge::LEFT || edges == ResizeEdge::RIGHT {
+            moved.y = 0.;
+        }
+        let grow_w = if edges.contains(ResizeEdge::LEFT) {
+            -moved.x
+        } else {
+            moved.x
+        };
+        let grow_h = if edges.contains(ResizeEdge::TOP) {
+            -moved.y
+        } else {
+            moved.y
+        };
+        let width = (original.size.w + grow_w).min(max.w).max(min.w).max(1.);
+        let height = (original.size.h + grow_h).min(max.h).max(min.h).max(1.);
+        let grow_w = width - original.size.w;
+        let grow_h = height - original.size.h;
+        let grow_x = if edges.contains(ResizeEdge::LEFT) {
+            -grow_w
+        } else if edges.contains(ResizeEdge::RIGHT) {
+            0.
+        } else {
+            -grow_w / 2.
+        };
+        let grow_y = if edges.contains(ResizeEdge::TOP) {
+            -grow_h
+        } else if edges.contains(ResizeEdge::BOTTOM) {
+            0.
+        } else {
+            -grow_h / 2.
+        };
+
+        // Sway applies each change as an int step from the current box
+        // (sway/input/seatop_resize_floating.c:128-142).
+        let step = |target: f64, current: f64| current + (target - current).trunc();
+        let rect = Rectangle::new(
+            Point::from((
+                step(original.loc.x + grow_x, current.loc.x),
+                step(original.loc.y + grow_y, current.loc.y),
+            )),
+            Size::from((step(width, current.size.w), step(height, current.size.h))),
+        );
+        if rect != current {
+            self.move_tree(root, rect);
+        }
+        true
+    }
+
     pub fn interactive_resize_update(
         &mut self,
         window: &W::Id,
         delta: Point<f64, Logical>,
     ) -> bool {
+        if self
+            .tree_resize
+            .as_ref()
+            .is_some_and(|resize| &resize.window == window)
+        {
+            return self.tree_root_resize_update(delta);
+        }
+        if let Some(entry) = self.tree_entry_with_window_mut(window) {
+            return entry.tree.interactive_resize_update(window, delta);
+        }
+
         let Some(resize) = &self.interactive_resize else {
             return false;
         };
@@ -77,6 +208,21 @@ impl<W: LayoutElement> FloatingLayout<W> {
     }
 
     pub fn interactive_resize_end(&mut self, window: Option<&W::Id>) {
+        if let Some(window) = window {
+            if self
+                .tree_resize
+                .as_ref()
+                .is_some_and(|resize| &resize.window == window)
+            {
+                self.tree_resize = None;
+                return;
+            }
+            if let Some(entry) = self.tree_entry_with_window_mut(window) {
+                entry.tree.interactive_resize_end(Some(window));
+                return;
+            }
+        }
+
         let Some(resize) = &self.interactive_resize else {
             return;
         };

@@ -412,6 +412,8 @@ pub struct Layout<W: LayoutElement> {
     scratchpad_windows: Vec<W::Id>,
     /// Ongoing interactive move.
     interactive_move: Option<InteractiveMoveState<W>>,
+    /// Ongoing pointer move of a floating group, started from one of its views.
+    floating_group_move: Option<FloatingGroupMove<W>>,
     /// Ongoing drag-and-drop operation.
     dnd: Option<DndData<W>>,
     /// Clock for driving animations.
@@ -523,6 +525,18 @@ struct InteractiveMoveData<W: LayoutElement> {
     /// config overrides for the workspace where the move originated from. As soon as the window
     /// moves over some different workspace though, this override will reset.
     pub(self) workspace_config: Option<(WorkspaceId, swayward_config::LayoutPart)>,
+}
+
+/// A pointer move of a floating group. Sway moves the toplevel floating ancestor of the
+/// view under the cursor, keeping the cursor's offset into it
+/// (`seatop_begin_move_floating(seat, container_toplevel_ancestor(cont))`,
+/// sway/input/seatop_default.c:459-463, and sway/input/seatop_move_floating.c:37-42,58-70).
+#[derive(Debug)]
+struct FloatingGroupMove<W: LayoutElement> {
+    /// The view the drag started on; the group is looked up through it.
+    window: W::Id,
+    /// Cursor position minus the group root's position, in workspace coordinates.
+    pointer_offset: Point<f64, Logical>,
 }
 
 #[derive(Debug)]
@@ -825,6 +839,7 @@ impl<W: LayoutElement> Layout<W> {
             scratchpad_trees: VecDeque::new(),
             scratchpad_windows: Vec::new(),
             interactive_move: None,
+            floating_group_move: None,
             dnd: None,
             clock,
             update_render_elements_time: Duration::ZERO,
@@ -868,6 +883,7 @@ impl<W: LayoutElement> Layout<W> {
             scratchpad_trees: VecDeque::new(),
             scratchpad_windows: Vec::new(),
             interactive_move: None,
+            floating_group_move: None,
             dnd: None,
             clock,
             update_render_elements_time: Duration::ZERO,
@@ -1415,6 +1431,14 @@ impl<W: LayoutElement> Layout<W> {
                 self.scratchpad_trees.remove(index);
             }
             return Some((removed, None));
+        }
+
+        if self
+            .floating_group_move
+            .as_ref()
+            .is_some_and(|move_| &move_.window == window)
+        {
+            self.floating_group_move = None;
         }
 
         if let Some(state) = &self.interactive_move {
@@ -3618,8 +3642,10 @@ impl<W: LayoutElement> Layout<W> {
     /// Whether `window` sits inside a floating group rather than being a
     /// floating root itself.
     pub fn is_floating_group_child(&self, window: &W::Id) -> bool {
-        self.workspaces()
-            .any(|(_, _, ws)| ws.floating_tree_root_for_window(window).is_some())
+        self.workspaces().any(|(_, _, ws)| {
+            ws.floating_tree_root_for_window(window).is_some()
+                && !ws.floating().window_is_tree_root(window)
+        })
     }
 
     /// The floating group root `node` names on `workspace_id`, if it is one.
@@ -4662,7 +4688,7 @@ impl<W: LayoutElement> Layout<W> {
         output: &Output,
         start_pos_within_output: Point<f64, Logical>,
     ) -> bool {
-        if self.interactive_move.is_some() {
+        if self.interactive_move.is_some() || self.floating_group_move.is_some() {
             return false;
         }
 
@@ -4679,6 +4705,24 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         let zoom = mon.overview_zoom();
+
+        // A view inside a floating group moves the whole group; a fullscreen one or one
+        // inside a fullscreen container does not move (`is_fullscreen_or_child`,
+        // sway/input/seatop_default.c:459-463).
+        if let Some(root) = ws.floating_tree_root_for_window(&window_id) {
+            if ws.fullscreen_contains_window(&window_id) {
+                return false;
+            }
+            let Some(rect) = ws.floating().tree_rect(root) else {
+                return false;
+            };
+            let pointer = (start_pos_within_output - ws_geo.loc).downscale(zoom);
+            self.floating_group_move = Some(FloatingGroupMove {
+                window: window_id,
+                pointer_offset: pointer - rect.loc,
+            });
+            return true;
+        }
 
         let is_floating = ws.is_floating(&window_id);
         let Some((tile, tile_offset, _visible)) = ws
@@ -4726,6 +4770,14 @@ impl<W: LayoutElement> Layout<W> {
         output: Output,
         pointer_pos_within_output: Point<f64, Logical>,
     ) -> bool {
+        if self
+            .floating_group_move
+            .as_ref()
+            .is_some_and(|move_| &move_.window == window)
+        {
+            return self.floating_group_move_update(window, output, pointer_pos_within_output);
+        }
+
         let Some(state) = self.interactive_move.take() else {
             return false;
         };
@@ -4968,6 +5020,62 @@ impl<W: LayoutElement> Layout<W> {
         true
     }
 
+    /// Places the group holding `window` under the cursor, as sway's pointer motion does
+    /// (`container_floating_move_to(e->con, cursor->x - e->dx, cursor->y - e->dy)`,
+    /// sway/input/seatop_move_floating.c:37-42). Sway hands the group to the output under
+    /// its centre when the drag ends (sway/input/seatop_move_floating.c:11-19,
+    /// sway/tree/container.c:1113-1145); swayward keeps no global floating coordinates, so the
+    /// group follows the cursor's output as soon as the cursor reaches it. Returns false when
+    /// the window has left every floating group, which ends the drag.
+    fn floating_group_move_update(
+        &mut self,
+        window: &W::Id,
+        output: Output,
+        pointer_pos_within_output: Point<f64, Logical>,
+    ) -> bool {
+        let Some(pointer_offset) = self
+            .floating_group_move
+            .as_ref()
+            .map(|move_| move_.pointer_offset)
+        else {
+            return false;
+        };
+        let in_group = |ws: &Workspace<W>| ws.floating_tree_root_for_window(window).is_some();
+        let Some(on_output) = self
+            .monitors()
+            .find(|mon| mon.workspaces.iter().any(in_group))
+            .map(|mon| mon.output() == &output)
+        else {
+            self.floating_group_move = None;
+            return false;
+        };
+        if !on_output {
+            self.move_to_output(Some(window), &output, None, ActivateWindow::Yes);
+        }
+        let Some((ws_id, ws_geo, zoom)) = self.monitor_for_output(&output).and_then(|mon| {
+            mon.workspaces_with_render_geo_cull(false)
+                .find(|(ws, _)| in_group(ws))
+                .map(|(ws, geo)| (ws.id(), geo, mon.overview_zoom()))
+        }) else {
+            self.floating_group_move = None;
+            return false;
+        };
+        let Some(ws) = self.workspace_mut(ws_id) else {
+            return false;
+        };
+        let loc = (pointer_pos_within_output - ws_geo.loc).downscale(zoom) - pointer_offset;
+        // The keyboard `move position` path on the group root (`move_floating_window`
+        // positions the entry holding the view).
+        let area = ws.floating().working_area();
+        ws.move_floating_window(
+            Some(window),
+            PositionChange::SetFixed(loc.x - area.loc.x),
+            PositionChange::SetFixed(loc.y - area.loc.y),
+            false,
+        );
+        true
+    }
+
     fn finish_starting_interactive_move(&mut self, window: &W::Id) -> bool {
         let Some(InteractiveMoveState::Starting { window_id, .. }) = &self.interactive_move else {
             return false;
@@ -5007,6 +5115,15 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn interactive_move_end(&mut self, window: &W::Id) {
+        if self
+            .floating_group_move
+            .as_ref()
+            .is_some_and(|move_| &move_.window == window)
+        {
+            self.floating_group_move = None;
+            return;
+        }
+
         if self.finish_starting_interactive_move(window) {
             return;
         }
@@ -5324,7 +5441,31 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Starts a pointer resize of the floating group holding `window` from `edges`, sway's
+    /// modifier resize on the toplevel ancestor (sway/input/seatop_default.c:476-487). False
+    /// when `window` is not in a floating group or the group is fullscreen.
+    pub fn floating_group_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
+        let automatic_maximum = self.output_layout_size().to_f64();
+        let Some(workspace) = self
+            .workspaces_mut()
+            .find(|ws| ws.floating_tree_root_for_window(&window).is_some())
+        else {
+            return false;
+        };
+        if workspace.fullscreen_contains_window(&window) {
+            return false;
+        }
+        workspace.floating_tree_resize_begin(window, edges, automatic_maximum)
+    }
+
     pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
+        // A view that is a group root by itself is the floating container.
+        if self
+            .workspaces()
+            .any(|(_, _, ws)| ws.floating().window_is_tree_root(&window))
+        {
+            return self.floating_group_resize_begin(window, edges);
+        }
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
