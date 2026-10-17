@@ -5022,11 +5022,11 @@ impl<W: LayoutElement> Layout<W> {
 
     /// Places the group holding `window` under the cursor, as sway's pointer motion does
     /// (`container_floating_move_to(e->con, cursor->x - e->dx, cursor->y - e->dy)`,
-    /// sway/input/seatop_move_floating.c:37-42). Sway hands the group to the output under
-    /// its centre when the drag ends (sway/input/seatop_move_floating.c:11-19,
-    /// sway/tree/container.c:1113-1145); swayward keeps no global floating coordinates, so the
-    /// group follows the cursor's output as soon as the cursor reaches it. Returns false when
-    /// the window has left every floating group, which ends the drag.
+    /// sway/input/seatop_move_floating.c:37-42). On every motion sway re-homes the group to
+    /// the output nearest its centre (sway/tree/container.c:1113-1145); swayward keeps no
+    /// global floating coordinates, so the group follows the cursor's output instead, and it
+    /// also activates that output. Returns false when the window has left every floating
+    /// group, which ends the drag.
     fn floating_group_move_update(
         &mut self,
         window: &W::Id,
