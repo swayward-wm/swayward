@@ -72,7 +72,7 @@ jobs:
       - run: cargo test --all --exclude swayward-visual-tests --release
       - name: Upload proptest failure seeds
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: proptest-regressions-${{ github.run_id }}-${{ github.run_attempt }}
           path: proptest-regressions/
@@ -160,6 +160,9 @@ jobs:
       - run: ./contrib/command-census --check
       - run: ./contrib/coverage-report --unvendored
       - run: ./contrib/coverage-report --check
+      - run: ./contrib/coverage-report --check-doc
+      - run: ./contrib/i3-suite-summary --check
+      - run: ./contrib/test-census --check-doc
       - name: oracle's swayward i3 snapshot validates
         run: |
           oracle=.cache/sway-ipc-oracle

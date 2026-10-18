@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs"]
+what = "Mapping or removing a view records a workspace arrange, and `refresh` lets the floating groups catch up, so a fullscreen floating group's moved pending box resets."
+why = "sway's `view_map` and `view_unmap` end in `arrange_workspace` (sway/sway/tree/view.c:931-940, 1001-1006), which puts the fullscreen container back at the output box (sway/sway/tree/arrange.c:310-316)."

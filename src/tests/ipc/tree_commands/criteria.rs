@@ -132,6 +132,57 @@ fn split_none_flattens_every_singleton_ancestor() {
         .verify_invariants(None);
 }
 
+/// diff-fam-v3-split-none-floating-group: a view alone in a floating split
+/// has a parent with one child, so sway's `container_flatten` replaces the
+/// floating root with the view (sway/commands/split.c:35-50,
+/// sway/tree/container.c:526-538,1471-1491), which floats on its own again in
+/// the root's box.
+#[test]
+fn split_none_flattens_a_floating_group_root_into_its_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "only");
+
+    for command in ["floating enable", "split toggle"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    let tree_json = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &swayward.marks_by_window,
+            &swayward.marks_by_container,
+        ))
+        .unwrap()
+    };
+    let tree = tree_json(&mut f);
+    let group = find_json_parent_of_app_id(&tree, "only").unwrap();
+    assert_eq!(group["type"], "floating_con");
+    let group_rect = group["rect"].clone();
+
+    let outcome = crate::command::execute(f.niri_state(), "split none");
+    assert!(outcome[0].success, "{outcome:?}");
+
+    let tree = tree_json(&mut f);
+    let parent = find_json_parent_of_app_id(&tree, "only").unwrap();
+    assert_eq!(parent["type"], "workspace");
+    let view = &parent["floating_nodes"][0];
+    assert_eq!(view["app_id"], "only");
+    assert_eq!(view["type"], "floating_con");
+    assert_eq!(view["focused"], true);
+    assert_eq!(view["rect"]["x"], group_rect["x"]);
+    let workspace = f.swayward().layout.active_workspace().unwrap();
+    assert!(workspace.floating().tree_roots().next().is_none());
+    workspace.verify_invariants(None);
+
+    // The view is a floating root now, which sway refuses to flatten.
+    let outcome = crate::command::execute(f.niri_state(), "split none");
+    assert!(!outcome[0].success, "{outcome:?}");
+}
+
 #[test]
 fn criteria_split_none_flattens_the_matched_singleton_parent() {
     let mut f = Fixture::new();

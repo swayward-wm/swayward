@@ -93,11 +93,11 @@ fn directional(
         }
         return None;
     }
-    let workspace_focused = state
-        .swayward
-        .layout
-        .active_workspace()
-        .is_some_and(|workspace| workspace.is_workspace_focused());
+    // sway's `focus_wrapping workspace` keeps a container inside its workspace, but the
+    // workspace node itself, empty or focused, still crosses to the adjacent output
+    // (sway/commands/focus.c:211-213, 436-450).
+    let workspace_focused =
+        super::targeted::focused_node(state) == swayward_ipc::command::FocusedNode::Nothing;
     let changed = local(&mut state.swayward.layout, local_wrap);
     if changed {
         state.swayward.queue_redraw_all();
@@ -126,15 +126,13 @@ pub(super) fn parent(state: &mut State) {
 }
 
 pub(super) fn child(state: &mut State) {
-    let before = seat_focused_view(state);
     state.swayward.layout.focus_child();
-    refocus_clears_urgency(state, before);
     state.swayward.queue_redraw_all();
 }
 
 /// The view holding sway's seat focus: none while a split or the workspace
 /// itself is focused, even though the keyboard stays on a view.
-fn seat_focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
+pub(super) fn seat_focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
     match super::targeted::focused_node(state) {
         swayward_ipc::command::FocusedNode::View => match super::targeted::focused_target(state)? {
             CommandTarget::Window(id) => Some(id),
@@ -147,7 +145,10 @@ fn seat_focused_view(state: &State) -> Option<crate::window::mapped::MappedId> {
 /// Seat focus moved onto the keyboard-focused view from its parent or
 /// workspace. No keyboard focus change follows, so clear its urgency here
 /// as sway's seat focus change does (sway/sway/input/seat.c:1223-1240).
-fn refocus_clears_urgency(state: &mut State, before: Option<crate::window::mapped::MappedId>) {
+pub(super) fn refocus_clears_urgency(
+    state: &mut State,
+    before: Option<crate::window::mapped::MappedId>,
+) {
     let Some(after) = seat_focused_view(state) else {
         return;
     };

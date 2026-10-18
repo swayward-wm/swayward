@@ -30,6 +30,40 @@ impl State {
             .set_cursor_image(CursorImageStatus::Named(edges.cursor_icon()));
     }
 
+    fn begin_floating_group_resize(
+        &mut self,
+        pointer: &PointerHandle<State>,
+        window: Window,
+        edges: ResizeEdge,
+        location: Point<f64, Logical>,
+        button_code: u32,
+        serial: Serial,
+    ) {
+        self.swayward.layout.activate_window(&window);
+        if !self
+            .swayward
+            .layout
+            .floating_group_resize_begin(window.clone(), edges)
+        {
+            return;
+        }
+        let start_data = PointerGrabStartData {
+            focus: None,
+            button: button_code,
+            location,
+        };
+        let grab = ResizeGrab::new(AnyStartData::Pointer(start_data), window);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+        let icon = if edges.is_empty() {
+            ResizeEdge::BOTTOM_RIGHT
+        } else {
+            edges
+        };
+        self.swayward
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::Named(icon.cursor_icon()));
+    }
+
     pub(in crate::input) fn gap_resize_edges_under_pointer(
         &self,
         pointer: &PointerHandle<State>,
@@ -63,7 +97,11 @@ impl State {
             .swayward
             .layout
             .border_resize_edges_under(output, pos)?;
-        (&mapped.window == window).then_some((mapped.is_floating(), edges))
+        // A view in a floating group is not floating, so it gets the tiled cursor
+        // (`container_is_floating`, sway/input/cursor.c:160-170).
+        let floating =
+            mapped.is_floating() && !self.swayward.layout.is_floating_group_child(window);
+        (&mapped.window == window).then_some((floating, edges))
     }
 
     pub(in crate::input) fn on_pointer_button<I: InputBackend>(
@@ -219,7 +257,10 @@ impl State {
             if let Some(mapped) = self.swayward.window_under_cursor() {
                 let window = mapped.window.clone();
 
-                let is_tiling = !mapped.is_floating();
+                // A view in a floating group is floating-or-child in sway: it moves and
+                // modifier-resizes the whole group (sway/input/seatop_default.c:459-487).
+                let in_floating_group = self.swayward.layout.is_floating_group_child(&window);
+                let is_tiling = !mapped.is_floating() && !in_floating_group;
                 let on_titlebar =
                     self.swayward
                         .pointer_contents
@@ -257,6 +298,7 @@ impl State {
                     button,
                     drag_policy,
                     is_tiling,
+                    in_floating_group,
                     mapped.pending_sizing_mode().is_fullscreen(),
                     on_titlebar,
                     is_overview_open,
@@ -321,8 +363,19 @@ impl State {
                             .resize_edges_under(output, pos_within_output)
                             .unwrap_or(ResizeEdge::empty());
                         // Sway has no double-click gesture here: every press
-                        // resizes from the corner under the pointer.
-                        if !edges.is_empty() {
+                        // resizes from the corner under the pointer. A view in a floating
+                        // group resizes the group root from the root's quadrant
+                        // (sway/input/seatop_default.c:476-487).
+                        if in_floating_group {
+                            self.begin_floating_group_resize(
+                                &pointer,
+                                window.clone(),
+                                edges,
+                                location,
+                                button_code,
+                                serial,
+                            );
+                        } else if !edges.is_empty() {
                             self.begin_edge_resize(
                                 &pointer,
                                 window.clone(),

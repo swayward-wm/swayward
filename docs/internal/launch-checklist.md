@@ -200,15 +200,16 @@ Regenerate the published i3 summary from the final oracle checkout:
 
 ```sh
 cd "$SWAYWARD"
-./contrib/i3-suite-summary "$ORACLE_WORKTREE"
 ./contrib/fetch-oracle
+./contrib/i3-suite-summary --write
+./contrib/i3-suite-summary --check
 ./contrib/coverage-report --check
 ./contrib/check-internal-links
 ./contrib/check-divergence
 git diff --check
 ```
 
-Gate: the summary names `$ORACLE_SHA`, all public links use the final snapshot name, and coverage reports zero violations. Commit this as one swayward commit. Do not push from a worker worktree; the integrator cherry-picks it.
+Gate: every generated block names `$ORACLE_SHA`, all public links use the final snapshot name, and coverage reports zero violations. Commit this as one swayward commit. Do not push from a worker worktree; the integrator cherry-picks it.
 
 ## 8. Prepare the release metadata commit
 

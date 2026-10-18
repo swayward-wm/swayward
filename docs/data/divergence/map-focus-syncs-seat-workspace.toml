@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/handlers/compositor.rs"]
+what = "after a map that focuses the new view, the map handler syncs the seat's workspace, so the workspace the seat leaves becomes the back_and_forth target."
+why = "sway focuses a mapped view through seat_set_focus, whose set_workspace records prev_workspace_name even when a cross-output 'move right' left the seat behind (sway/tree/view.c:943-955, sway/input/seat.c:1098-1113); oracle state scenarios move_back_and_forth_after_cross_output_move_and_map and workspace_back_and_forth_after_cross_output_move_and_map, random-v3 seed 35164."

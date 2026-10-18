@@ -957,3 +957,260 @@ fn layout_change_after_fullscreening_a_floating_group_child_keeps_the_group_root
         verify_layout_windows_reachable_once(&layout);
     }
 }
+
+/// `focus parent; floating enable` on a horizontal split of views 1 and 2,
+/// with view 1 focused, and the group root.
+fn floated_split() -> (Layout<TestWindow>, tiling_tree::NodeId) {
+    floated_split_with_options(Options::default())
+}
+
+fn floated_split_with_options(options: Options) -> (Layout<TestWindow>, tiling_tree::NodeId) {
+    let layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+            Op::FocusWindow(1),
+            Op::FocusParent,
+            Op::ToggleFocusedContainerFloating,
+        ],
+    );
+    let root = layout
+        .active_workspace()
+        .unwrap()
+        .floating_tree_root_for_window(&1)
+        .unwrap();
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .floating_tree_root_for_window(&2),
+        Some(root)
+    );
+    layout.verify_invariants();
+    (layout, root)
+}
+
+fn group_rect(layout: &Layout<TestWindow>, root: tiling_tree::NodeId) -> Rectangle<f64, Logical> {
+    layout
+        .active_workspace()
+        .unwrap()
+        .floating()
+        .tree_rect(root)
+        .unwrap()
+}
+
+fn group_child_rect(
+    layout: &Layout<TestWindow>,
+    root: tiling_tree::NodeId,
+    window: usize,
+) -> Rectangle<f64, Logical> {
+    let tree = layout
+        .active_workspace()
+        .unwrap()
+        .floating()
+        .tree(root)
+        .unwrap();
+    tree.geometry(tree.node_for_window(&window).unwrap())
+        .unwrap()
+}
+
+/// Sway moves the toplevel floating ancestor of the view under the cursor and keeps the
+/// cursor's offset into it (sway/input/seatop_default.c:459-463,
+/// sway/input/seatop_move_floating.c:37-42,58-70).
+#[test]
+fn pointer_move_on_a_floating_group_child_moves_the_group() {
+    let (mut layout, root) = floated_split();
+    let output = layout.outputs().next().unwrap().clone();
+    let before = group_rect(&layout, root);
+    let second_before = group_child_rect(&layout, root, 2);
+    let start = before.loc + Point::from((10., 10.));
+
+    // The drag starts on view 2, the right child.
+    assert!(layout.interactive_move_begin(2, &output, start));
+    assert!(layout.interactive_move_update(
+        &2,
+        Point::from((50., 30.)),
+        output.clone(),
+        start + Point::from((50., 30.)),
+    ));
+    assert!(layout.interactive_move_update(
+        &2,
+        Point::from((20., 5.)),
+        output,
+        start + Point::from((70., 35.)),
+    ));
+    layout.verify_invariants();
+    layout.interactive_move_end(&2);
+    layout.verify_invariants();
+
+    let after = group_rect(&layout, root);
+    assert_eq!(after.loc, before.loc + Point::from((70., 35.)));
+    assert_eq!(after.size, before.size);
+    let second_after = group_child_rect(&layout, root, 2);
+    assert_eq!(
+        second_after.loc,
+        second_before.loc + Point::from((70., 35.))
+    );
+    assert_eq!(second_after.size, second_before.size);
+    // The group stays one floating container holding both views.
+    let workspace = layout.active_workspace().unwrap();
+    assert_eq!(workspace.floating_tree_root_for_window(&1), Some(root));
+    assert_eq!(workspace.floating_tree_root_for_window(&2), Some(root));
+    assert!(layout.interactive_move.is_none());
+    assert!(layout.floating_group_move.is_none());
+}
+
+/// A single floating view keeps the niri interactive move, which detaches its tile.
+#[test]
+fn pointer_move_on_a_single_floating_window_keeps_the_detaching_move() {
+    let mut params = TestWindowParams::new(1);
+    params.is_floating = true;
+    let mut layout = check_ops([Op::AddOutput(1), Op::AddWindow { params }]);
+    let output = layout.outputs().next().unwrap().clone();
+
+    assert!(layout.interactive_move_begin(1, &output, Point::from((100., 100.))));
+    assert!(layout.floating_group_move.is_none());
+    assert!(layout.interactive_move_update(
+        &1,
+        Point::from((50., 0.)),
+        output,
+        Point::from((150., 100.)),
+    ));
+    assert!(matches!(
+        layout.interactive_move,
+        Some(InteractiveMoveState::Moving(_))
+    ));
+    layout.interactive_move_end(&1);
+    layout.verify_invariants();
+}
+
+/// Sway's modifier resize resizes the toplevel ancestor from the edge the cursor's
+/// quadrant picks (sway/input/seatop_default.c:476-487), and `arrange_container` lays the
+/// children out at their split ratios (sway/tree/arrange.c:249-262).
+#[test]
+fn modifier_resize_on_a_floating_group_child_resizes_the_root() {
+    let (mut layout, root) = floated_split();
+    let before = group_rect(&layout, root);
+
+    assert!(layout.floating_group_resize_begin(1, ResizeEdge::BOTTOM_RIGHT));
+    assert!(layout.interactive_resize_update(&1, Point::from((100., 50.))));
+    layout.verify_invariants();
+    let after = group_rect(&layout, root);
+    assert_eq!(after.loc, before.loc);
+    assert_eq!(after.size, before.size + Size::from((100., 50.)));
+    // Both children keep half the width each.
+    let first = group_child_rect(&layout, root, 1);
+    let second = group_child_rect(&layout, root, 2);
+    assert_eq!(first.size.w, second.size.w);
+    assert_eq!(first.size.h, after.size.h);
+    layout.interactive_resize_end(&1);
+
+    // From the top-left the opposite corner stays put.
+    let before = after;
+    assert!(layout.floating_group_resize_begin(2, ResizeEdge::TOP_LEFT));
+    assert!(layout.interactive_resize_update(&2, Point::from((40., 20.))));
+    layout.interactive_resize_end(&2);
+    layout.verify_invariants();
+    let after = group_rect(&layout, root);
+    assert_eq!(after.loc, before.loc + Point::from((40., 20.)));
+    assert_eq!(after.size, before.size - Size::from((40., 20.)));
+}
+
+/// Options with a 4 px border, so a test window, which has no input region, is hit on its
+/// border.
+fn bordered() -> Options {
+    let mut options = Options::default();
+    options.layout.border.off = false;
+    options.layout.border.width = 4.;
+    options
+}
+
+/// The rendered position and size of view `window`'s tile in group `root`.
+fn group_tile(
+    layout: &Layout<TestWindow>,
+    root: tiling_tree::NodeId,
+    window: usize,
+) -> Rectangle<f64, Logical> {
+    let tree = layout
+        .active_workspace()
+        .unwrap()
+        .floating()
+        .tree(root)
+        .unwrap();
+    tree.tiles_with_render_positions()
+        .find(|(tile, _, _)| tile.window().id() == &window)
+        .map(|(tile, pos, _)| Rectangle::new(pos, tile.tile_size()))
+        .unwrap()
+}
+
+/// The modifier-resize edge comes from the group root's quadrant, not the view's
+/// (sway/input/seatop_default.c:479-481).
+#[test]
+fn modifier_resize_edge_on_a_floating_group_uses_the_root_quadrant() {
+    let (layout, root) = floated_split_with_options(bordered());
+    let second = group_tile(&layout, root, 2);
+    let workspace = layout.active_workspace().unwrap();
+    // The top-left corner of the right child is in the top-right quadrant of the group.
+    let pos = second.loc + Point::from((1., 1.));
+    assert_eq!(workspace.window_under(pos).unwrap().0.id(), &2);
+    assert_eq!(
+        workspace.resize_edges_under(pos),
+        Some(ResizeEdge::TOP_RIGHT)
+    );
+}
+
+/// A view inside a floating group is not floating (`container_is_floating`,
+/// sway/tree/container.c:1041-1050), so a border drag on it is a tiled resize against
+/// its sibling (sway/input/seatop_default.c:396-411, sway/input/seatop_resize_tiling.c),
+/// and an edge with no sibling past it resizes nothing (`edge_is_external`,
+/// sway/input/seatop_default.c:39-75,111-118).
+#[test]
+fn border_resize_on_a_floating_group_child_resizes_inside_the_group() {
+    let (mut layout, root) = floated_split();
+    let before = group_rect(&layout, root);
+    let first_before = group_child_rect(&layout, root, 1);
+    let second_before = group_child_rect(&layout, root, 2);
+
+    assert!(!layout.interactive_resize_begin(1, ResizeEdge::LEFT));
+    assert!(!layout.interactive_resize_begin(1, ResizeEdge::TOP));
+
+    assert!(layout.interactive_resize_begin(1, ResizeEdge::RIGHT));
+    assert!(layout.interactive_resize_update(&1, Point::from((60., 0.))));
+    layout.interactive_resize_end(&1);
+    layout.verify_invariants();
+
+    assert_eq!(group_rect(&layout, root), before);
+    let first = group_child_rect(&layout, root, 1);
+    let second = group_child_rect(&layout, root, 2);
+    assert_eq!(first.size.w, first_before.size.w + 60.);
+    assert_eq!(second.size.w, second_before.size.w - 60.);
+    assert_eq!(second.loc.x, second_before.loc.x + 60.);
+}
+
+/// Only a group view's internal border is a resize edge; the group's outer edges are
+/// external to the view and the group container has no border of its own
+/// (sway/tree/container.c:88-94, sway/input/seatop_default.c:111-118).
+#[test]
+fn border_resize_edges_of_a_floating_group_are_the_internal_ones() {
+    let (layout, root) = floated_split_with_options(bordered());
+    let first = group_tile(&layout, root, 1);
+    let workspace = layout.active_workspace().unwrap();
+    let mid_y = first.loc.y + first.size.h / 2.;
+
+    // The right border of the left view, shared with the right view.
+    let (window, edges) = workspace
+        .border_resize_edges_under(Point::from((first.loc.x + first.size.w - 1., mid_y)))
+        .unwrap();
+    assert_eq!(window.id(), &1);
+    assert_eq!(edges, ResizeEdge::RIGHT);
+    // The left border of the left view is the group's outer edge.
+    let outer = Point::from((first.loc.x + 1., mid_y));
+    assert_eq!(workspace.window_under(outer).unwrap().0.id(), &1);
+    assert!(workspace.border_resize_edges_under(outer).is_none());
+}

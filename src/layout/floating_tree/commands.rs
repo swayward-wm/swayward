@@ -2,7 +2,7 @@ use super::*;
 use crate::layout::tiling_tree::Layout as TreeLayout;
 
 impl<W: LayoutElement> FloatingLayout<W> {
-    pub(super) fn add_tile_at(&mut self, mut idx: usize, mut tile: Tile<W>, activate: bool) {
+    pub fn add_tile(&mut self, mut tile: Tile<W>, activate: bool) {
         tile.update_config(self.view_size, self.scale, self.options.clone());
         tile.set_sway_csd_floating(true);
         tile.set_border_edges(ResizeEdge::all());
@@ -48,22 +48,24 @@ impl<W: LayoutElement> FloatingLayout<W> {
             self.active_window_id = Some(win.id().clone());
         }
 
-        // Make sure the tile isn't inserted below its parent.
-        for (i, tile_above) in self
-            .entries
-            .iter()
-            .map(|entry| &entry.tile)
-            .enumerate()
-            .take(idx)
-        {
-            if win.is_child_of(tile_above.window()) {
-                idx = i;
-                break;
-            }
-        }
-
         let pos = if tile.floating_pos.is_some() {
             self.stored_or_default_tile_pos(&tile).unwrap()
+        } else if tile.window().pending_sizing_mode().is_normal() {
+            // Sway centres the natural size clamped by `floating_minimum_size` and
+            // `floating_maximum_size` alone, not by the client's size hints
+            // (`floating_natural_resize`, sway/tree/container.c:833-847): a view that
+            // maps at 1x1 is centred as 75x50.
+            let natural = floating_size.unwrap_or_else(|| tile.window().natural_size());
+            let (minimum, maximum) = floating_constraints(
+                self.options.layout.floating_minimum_size,
+                self.options.layout.floating_maximum_size,
+                self.view_size,
+            );
+            let content = Size::from((
+                f64::from(natural.w).min(maximum.w).max(minimum.w),
+                f64::from(natural.h).min(maximum.h).max(minimum.h),
+            ));
+            self.centered_content_tile_pos(&tile, content)
         } else if size.w > 1 && size.h > 1 {
             self.centered_content_tile_pos(&tile, size.to_f64())
         } else {
@@ -72,14 +74,12 @@ impl<W: LayoutElement> FloatingLayout<W> {
         };
 
         let data = Data::new(self.view_size, self.working_area, &tile, pos);
-        // A new root goes on top; one kept below its parent shares the parent's
-        // place relative to groups.
-        let stamp = match idx.checked_sub(1).and_then(|above| self.entries.get(above)) {
-            Some(above) => above.stamp,
-            None => self.bump_stamp(),
-        };
+        // A new root goes on top. Sway has no transient stacking: a dialog
+        // takes its place in `workspace->floating` like any other container
+        // (`container_set_floating`, sway/tree/container.c:941-954).
+        let stamp = self.bump_stamp();
         self.insert_entry(
-            idx,
+            0,
             FloatingEntry {
                 tile,
                 data,
@@ -87,8 +87,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
                 titlebar: Box::default(),
             },
         );
-
-        self.bring_up_descendants_of(idx);
     }
 
     /// Sway centers a floating view's content box, not its decorated container, on the
@@ -116,57 +114,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
         content_loc - Point::from((side, top))
     }
 
-    pub fn add_tile_above(&mut self, above: &W::Id, mut tile: Tile<W>, activate: bool) {
-        let (idx, above_rect) = if let Some(idx) = self.idx_of(above) {
-            let data = self.entries[idx].data;
-            (idx, Rectangle::new(data.logical_pos, data.size))
-        } else if let Some((idx, _)) = self.tree_entry_for_window(above) {
-            (idx.min(self.entries.len()), self.tree_entries[idx].rect)
-        } else {
-            return;
-        };
-
-        let tile_size = tile.tile_size();
-        let pos =
-            above_rect.loc + (above_rect.size.to_point() - tile_size.to_point()).downscale(2.);
-        let pos = self.clamp_within_working_area(pos, tile_size);
-        tile.floating_pos = Some(self.logical_to_size_frac(pos));
-
-        self.add_tile_at(idx, tile, activate);
-    }
-
-    fn bring_up_descendants_of(&mut self, idx: usize) {
-        let tile = &self.entries[idx].tile;
-        let win = tile.window();
-
-        // We always maintain the correct stacking order, so walking descendants back to front
-        // should give us all of them.
-        let mut descendants: Vec<usize> = Vec::new();
-        for (i, tile_below) in self
-            .entries
-            .iter()
-            .map(|entry| &entry.tile)
-            .enumerate()
-            .skip(idx + 1)
-            .rev()
-        {
-            let win_below = tile_below.window();
-            if win_below.is_child_of(win)
-                || descendants
-                    .iter()
-                    .any(|idx| win_below.is_child_of(self.entries[*idx].tile.window()))
-            {
-                descendants.push(i);
-            }
-        }
-
-        // Now, descendants is in back-to-front order, and repositioning them in the front-to-back
-        // order will preserve the subsequent indices and work out right.
-        for (offset, descendant_idx) in descendants.into_iter().rev().enumerate() {
-            self.raise_window(descendant_idx, idx + offset);
-        }
-    }
-
     pub fn remove_tile(
         &mut self,
         id: &W::Id,
@@ -183,6 +130,13 @@ impl<W: LayoutElement> FloatingLayout<W> {
             .tree
             .remove_tile(id, transaction)
             .expect("floating tree window must remain present until removal");
+        if self
+            .tree_resize
+            .as_ref()
+            .is_some_and(|resize| &resize.window == id)
+        {
+            self.tree_resize = None;
+        }
         if self.tree_entries[tree_idx].tree.is_empty() {
             self.tree_entries.remove(tree_idx);
         }
@@ -263,11 +217,22 @@ impl<W: LayoutElement> FloatingLayout<W> {
         true
     }
 
+    /// Makes `id` the active floating view without touching its group's focus
+    /// stack, for a view that arrived already holding seat focus: sway's
+    /// `seat_set_focus` returns early for the focused node, so its new
+    /// ancestors are not raised (sway/input/seat.c:1146-1150).
+    pub fn adopt_focused_window(&mut self, id: &W::Id) -> bool {
+        if !self.contains(id) {
+            return false;
+        }
+        self.active_window_id = Some(id.clone());
+        true
+    }
+
     pub fn activate_window(&mut self, id: &W::Id) -> bool {
         if let Some(idx) = self.idx_of(id) {
             self.raise_window(idx, 0);
             self.active_window_id = Some(id.clone());
-            self.bring_up_descendants_of(0);
             return true;
         }
         let Some((idx, _)) = self.tree_entry_for_window(id) else {
@@ -495,17 +460,39 @@ impl<W: LayoutElement> FloatingLayout<W> {
         style: swayward_ipc::command::BorderStyle,
         width: Option<u16>,
     ) -> bool {
+        self.change_decorations_keeping_content(id, |tile| {
+            tile.set_sway_border(style, width, true).is_ok()
+        })
+    }
+
+    /// See [`Tile::use_client_decorations_from_map`]. A floating root keeps the content
+    /// box it was centred on: sway marks the view CSD before `container_set_floating`
+    /// centres it (sway/tree/view.c:904-911, sway/tree/container.c:955-968).
+    pub fn use_client_decorations_from_map(&mut self, id: &W::Id) -> bool {
+        self.change_decorations_keeping_content(id, |tile| {
+            tile.use_client_decorations_from_map(true);
+            true
+        })
+    }
+
+    /// Runs `change` on the floating root `id` and moves the container so the content
+    /// stays put, as sway keeps a floating view's content box and moves the container
+    /// around it (`container_set_geometry_from_content`, sway/commands/border.c:94-96,
+    /// sway/tree/container.c:1018-1039). Returns what `change` returned, or false
+    /// when `id` is not a floating root.
+    fn change_decorations_keeping_content(
+        &mut self,
+        id: &W::Id,
+        change: impl FnOnce(&mut Tile<W>) -> bool,
+    ) -> bool {
         let Some(index) = self.idx_of(id) else {
             return false;
         };
         let entry = &mut self.entries[index];
         let content_before = entry.tile.window_loc();
-        let changed = entry.tile.set_sway_border(style, width, true).is_ok();
+        let changed = change(&mut entry.tile);
         if changed {
             entry.data.update(&entry.tile);
-            // Sway keeps a floating view's content box and moves the container around
-            // it (`container_set_geometry_from_content`, sway/commands/border.c:94-96,
-            // sway/tree/container.c:1018-1039).
             if entry.tile.sizing_mode().is_normal() {
                 let shift = entry.tile.window_loc() - content_before;
                 let pos = entry.data.logical_pos - shift;
@@ -580,6 +567,20 @@ impl<W: LayoutElement> FloatingLayout<W> {
             max_size,
         );
         win.request_size_once(win_size, animate);
+        let held = f64::from(
+            constrain_floating_size(
+                Size::from((win_width, win_width)),
+                self.options.layout.floating_minimum_size,
+                self.options.layout.floating_maximum_size,
+                automatic_maximum.to_f64(),
+                Size::default(),
+                Size::default(),
+            )
+            .w,
+        );
+        tile.resize_floating_content(Some(held), None);
+        let entry = &mut self.entries[idx];
+        entry.data.update(&entry.tile);
         current_window != win_size.w
     }
 
@@ -605,7 +606,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
             ),
             change => change,
         };
+        let before = self.entries[idx].tile.tile_expected_or_current_size();
         self.set_window_width(Some(id), change, true, automatic_maximum);
+        self.recenter_after_resize_set(idx, before);
     }
 
     pub fn set_window_outer_height(
@@ -632,7 +635,48 @@ impl<W: LayoutElement> FloatingLayout<W> {
             ),
             change => change,
         };
+        let before = self.entries[idx].tile.tile_expected_or_current_size();
         self.set_window_height(Some(id), change, true, automatic_maximum);
+        self.recenter_after_resize_set(idx, before);
+    }
+
+    /// Sway's `resize set` on a floating view moves the container by half the growth, so
+    /// the box keeps its centre (`con->pending.x -= grow_width / 2`, integer division,
+    /// sway/commands/resize.c:360-362 and :381-383).
+    fn recenter_after_resize_set(&mut self, idx: usize, before: Size<f64, Logical>) {
+        let entry = &mut self.entries[idx];
+        if !entry.tile.sizing_mode().is_normal() {
+            return;
+        }
+        let after = entry.tile.tile_expected_or_current_size();
+        let shift = Point::from((
+            ((after.w - before.w).trunc() / 2.).trunc(),
+            ((after.h - before.h).trunc() / 2.).trunc(),
+        ));
+        if shift != Point::from((0., 0.)) {
+            let pos = entry.data.logical_pos - shift;
+            entry.data.set_logical_pos(pos);
+        }
+    }
+
+    /// `resize set` on a view inside a floating group resizes it as a tiled
+    /// child of the group, converting ppt against the group's splits
+    /// (`resize_set_tiled`, sway/commands/resize.c:286-336, reached because
+    /// `container_is_floating` is false for the child, resize.c:523).
+    /// Returns false when `window` is not inside a group.
+    pub fn set_tree_window_size_sway(
+        &mut self,
+        window: &W::Id,
+        width: Option<SizeChange>,
+        height: Option<SizeChange>,
+    ) -> bool {
+        let Some((idx, _)) = self.tree_entry_for_window(window) else {
+            return false;
+        };
+        self.tree_entries[idx]
+            .tree
+            .set_window_size_sway(window, width, height);
+        true
     }
 
     pub fn resize_window_edge(
@@ -741,6 +785,20 @@ impl<W: LayoutElement> FloatingLayout<W> {
             max_size,
         );
         win.request_size_once(win_size, animate);
+        let held = f64::from(
+            constrain_floating_size(
+                Size::from((win_height, win_height)),
+                self.options.layout.floating_minimum_size,
+                self.options.layout.floating_maximum_size,
+                automatic_maximum.to_f64(),
+                Size::default(),
+                Size::default(),
+            )
+            .h,
+        );
+        tile.resize_floating_content(None, Some(held));
+        let entry = &mut self.entries[idx];
+        entry.data.update(&entry.tile);
         current_window != win_size.h
     }
 
@@ -1044,15 +1102,6 @@ impl<W: LayoutElement> FloatingLayout<W> {
         let new_pos =
             center_preferring_top_left_in_area(self.working_area, self.entries[idx].data.size);
         self.move_to(idx, new_pos, true);
-    }
-
-    pub fn descendants_added(&mut self, id: &W::Id) -> bool {
-        let Some(idx) = self.idx_of(id) else {
-            return false;
-        };
-
-        self.bring_up_descendants_of(idx);
-        true
     }
 
     pub fn update_window(&mut self, id: &W::Id, serial: Option<Serial>) -> bool {

@@ -600,6 +600,7 @@ impl<W: LayoutElement> Monitor<W> {
         if self.workspaces.is_empty() {
             self.add_sway_workspace_at(0, name, number, layout_config);
             self.active_workspace_idx = 0;
+            self.workspaces[0].mark_focused();
             let id = self.workspaces[0].id();
             self.workspace_focus_history
                 .retain(|candidate| *candidate != id);
@@ -619,10 +620,28 @@ impl<W: LayoutElement> Monitor<W> {
         self.activate_workspace_with_anim_config(idx, None);
     }
 
+    /// Makes `idx` active without a seat workspace focus change, so sticky windows stay
+    /// where they are: output evacuation re-parents workspaces but never runs
+    /// `seat_set_workspace_focus`'s sticky move (sway/sway/tree/output.c:205-253,
+    /// input/seat.c:1209-1220).
+    pub(super) fn activate_evacuated_workspace(&mut self, idx: usize) {
+        self.activate_workspace_inner(idx, None, false);
+        self.workspace_switch = None;
+    }
+
     pub fn activate_workspace_with_anim_config(
         &mut self,
         idx: usize,
         config: Option<swayward_config::Animation>,
+    ) {
+        self.activate_workspace_inner(idx, config, true);
+    }
+
+    fn activate_workspace_inner(
+        &mut self,
+        idx: usize,
+        config: Option<swayward_config::Animation>,
+        move_sticky: bool,
     ) {
         // Preserving velocity is tracked by mu task layout-workspace-switch-velocity.
         let current_idx = self.workspace_render_idx();
@@ -637,10 +656,13 @@ impl<W: LayoutElement> Monitor<W> {
             self.workspaces[prev_active_idx].reset_empty_tiling_layout();
         }
         self.active_workspace_idx = idx;
+        self.workspaces[idx].mark_focused();
         let active = self.active_workspace_ref().id();
         self.workspace_focus_history.retain(|id| *id != active);
         self.workspace_focus_history.insert(0, active);
-        self.move_sticky_to_active_workspace(prev_active_idx);
+        if move_sticky {
+            self.move_sticky_to_active_workspace(prev_active_idx);
+        }
 
         let config = config.unwrap_or(self.options.animations.workspace_switch.0);
 
@@ -798,6 +820,15 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
         let sticky_trees = self.workspaces[old_idx].take_sticky_trees();
+        // Only an orphaned global fullscreen view lets the switch happen
+        // (sway/commands/workspace.c:175-178); it keeps mode 2 on the way.
+        let orphaned_global = {
+            let source = &self.workspaces[old_idx];
+            source
+                .global_fullscreen_orphaned()
+                .then(|| source.fullscreen_window().cloned())
+                .flatten()
+        };
         let sticky = self.workspaces[old_idx].take_sticky_tiles();
         let target = &mut self.workspaces[self.active_workspace_idx];
         let target_was_empty = !target.has_windows();
@@ -814,8 +845,13 @@ impl<W: LayoutElement> Monitor<W> {
                 },
             );
         }
+        if let Some(window) = orphaned_global {
+            target
+                .tiling_mut()
+                .arrive_orphaned_global_fullscreen(&window);
+        }
         if target_was_empty {
-            target.focus_workspace_node();
+            target.focus_workspace_itself();
         }
     }
 
@@ -1314,17 +1350,10 @@ impl<W: LayoutElement> Monitor<W> {
         self.previous_workspace_id
     }
 
-    pub(crate) fn workspace_focus_history(&self) -> impl Iterator<Item = WorkspaceId> + '_ {
-        self.workspace_focus_history.iter().copied()
-    }
-
     pub fn finish_workspace_switch(&mut self, target: Option<WorkspaceId>) {
         let Some(WorkspaceSwitch::Animation(_)) = self.workspace_switch else {
             return;
         };
-        if !self.active_workspace_ref().has_windows() {
-            return;
-        }
         self.workspace_switch = None;
         if let Some(previous) = self.previous_workspace_id.filter(|id| Some(*id) != target) {
             self.consider_destroy_workspace(previous);

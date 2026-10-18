@@ -107,8 +107,12 @@ impl XdgShellHandler for State {
         };
 
         // Sway accepts client move requests only for non-fullscreen floating
-        // views (`sway/sway/desktop/xdg_shell.c:430-437`).
-        if !mapped.is_floating() || mapped.pending_sizing_mode().is_fullscreen() {
+        // views (`sway/sway/desktop/xdg_shell.c:430-437`); a view inside a
+        // floating group is not floating (sway/tree/container.c:1041-1050).
+        if !mapped.is_floating()
+            || mapped.pending_sizing_mode().is_fullscreen()
+            || self.swayward.layout.is_floating_group_child(&mapped.window)
+        {
             return;
         }
 
@@ -202,8 +206,9 @@ impl XdgShellHandler for State {
         };
 
         // Sway accepts client resize requests only for floating views
-        // (`sway/sway/desktop/xdg_shell.c:445-451`).
-        if !mapped.is_floating() {
+        // (`sway/sway/desktop/xdg_shell.c:445-451`), not a view inside a
+        // floating group (sway/tree/container.c:1041-1050).
+        if !mapped.is_floating() || self.swayward.layout.is_floating_group_child(&mapped.window) {
             return;
         }
 
@@ -950,21 +955,5 @@ impl XdgShellHandler for State {
     fn title_changed(&mut self, toplevel: ToplevelSurface) {
         self.update_window_rules(&toplevel);
         self.refresh_formatted_title(&toplevel);
-    }
-
-    fn parent_changed(&mut self, toplevel: ToplevelSurface) {
-        let Some(parent) = toplevel.parent() else {
-            return;
-        };
-
-        if let Some((mapped, output)) = self.swayward.layout.find_window_and_output_mut(&parent) {
-            let output = output.cloned();
-            let window = mapped.window.clone();
-            if self.swayward.layout.descendants_added(&window) {
-                if let Some(output) = output {
-                    self.swayward.queue_redraw(&output);
-                }
-            }
-        }
     }
 }

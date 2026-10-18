@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs"]
+what = "Layout::detach_window, the close path, drops the closing window from the scratchpad order, or hands its place to a surviving sibling in its shown floating split."
+why = "Sway removes a destroyed container from root->scratchpad (`container_begin_destroy`, sway/tree/container.c:495-497) and a split outlives a closed child. Swayward pruned only hidden scratchpad windows, so a closed shown view stayed in the order and plain `scratchpad show` acted on it and showed nothing. Oracle rows scratchpad_show_after_closing_shown_view, scratchpad_show_group_after_closing_shown_view, scratchpad_shown_group_child_close_keeps_group and scratchpad_split_view_close_keeps_group."

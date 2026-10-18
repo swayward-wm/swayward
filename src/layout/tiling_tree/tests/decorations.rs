@@ -594,3 +594,67 @@ fn tab_strips_leave_only_outer_bottom_corners_on_split_children() {
         );
     }
 }
+
+#[test]
+fn clipped_window_follows_the_border_inner_arc() {
+    // The border owns the box's outer radius and the shader cuts its inner arc
+    // at `outer - width`. The window must be clipped to that inner arc; clipping
+    // it to the outer radius left a background crescent at every corner.
+    let configured = swayward_config::CornerRadius::from(6.);
+    let square = swayward_config::CornerRadius::default();
+    let add = |t: &mut TilingTree<TestWindow>, id: usize, style, width| {
+        let window = TestWindow::with_rules(
+            id,
+            ResolvedWindowRules {
+                geometry_corner_radius: Some(configured),
+                clip_to_geometry: Some(true),
+                ..Default::default()
+            },
+        );
+        let size = t.view_size();
+        let clock = t.clock().clone();
+        let mut tile = Tile::new(window, size, 1., clock, Rc::new(Options::default()));
+        tile.set_sway_border(style, width, false).unwrap();
+        t.add_tile(tile, InsertTarget::Focused)
+    };
+
+    // A 3px pixel border: the outline keeps the configured 6, the window gets 3.
+    let mut t = tree((1200., 800.), 0.);
+    let id = add(&mut t, 1, BorderStyle::Pixel, Some(3));
+    t.update_render_elements(true, crate::layout::RenderLayer::Normal);
+    let tile = t.tile(id).unwrap();
+    assert_eq!(tile.decoration_corner_radii().0, Some(configured));
+    assert_eq!(
+        tile.window_clip_radius_for_test(),
+        swayward_config::CornerRadius::from(3.)
+    );
+
+    // A border at least as wide as the radius leaves the window square.
+    let mut t = tree((1200., 800.), 0.);
+    let id = add(&mut t, 1, BorderStyle::Pixel, Some(8));
+    t.update_render_elements(true, crate::layout::RenderLayer::Normal);
+    assert_eq!(t.tile(id).unwrap().window_clip_radius_for_test(), square);
+
+    // No border: nothing wraps the window, so it keeps the configured radius.
+    let mut t = tree((1200., 800.), 0.);
+    let id = add(&mut t, 1, BorderStyle::None, None);
+    t.update_render_elements(true, crate::layout::RenderLayer::Normal);
+    assert_eq!(
+        t.tile(id).unwrap().window_clip_radius_for_test(),
+        configured
+    );
+
+    // A titlebar squares the top corners; only the bottom ones are inset.
+    let mut t = tree((1200., 800.), 0.);
+    let id = add(&mut t, 1, BorderStyle::Normal, Some(2));
+    t.update_render_elements(true, crate::layout::RenderLayer::Normal);
+    assert_eq!(
+        t.tile(id).unwrap().window_clip_radius_for_test(),
+        swayward_config::CornerRadius {
+            top_left: 0.,
+            top_right: 0.,
+            bottom_right: 4.,
+            bottom_left: 4.,
+        }
+    );
+}

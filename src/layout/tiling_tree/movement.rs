@@ -46,6 +46,19 @@ impl<W: LayoutElement> TilingTree<W> {
             }
         }
         self.swap_fullscreen_modes(first, second);
+        // A fullscreen floating view's place is in the floating list, so the
+        // view that takes it floats (`swap_places`,
+        // sway/tree/container.c:1747-1760).
+        let floating = |tree: &Self, id| tree.tile(id).map(|tile| tile.restore_to_floating);
+        if let (Some(first_floating), Some(second_floating)) =
+            (floating(self, first), floating(self, second))
+        {
+            for (id, value) in [(first, second_floating), (second, first_floating)] {
+                if let Some(tile) = self.tile_mut(id) {
+                    tile.restore_to_floating = value;
+                }
+            }
+        }
         self.trade_box_with_hidden_view(first, second);
         self.trade_box_with_hidden_view(second, first);
         if let Some(other) = raise_after_swap {
@@ -244,9 +257,20 @@ impl<W: LayoutElement> TilingTree<W> {
                 .then(|| self.transfer_focus_target(None, Some(old_parent)))
                 .flatten()
                 .filter(|(target, _)| Some(*target) != self.focus);
+            // When the moved view keeps focus, `seat_set_focus` returns early and the splits
+            // it joined are not raised (sway/commands/move.c:598-608,
+            // sway/input/seat.c:1131-1134): each keeps the place its own views gave it.
+            let entry_stamps = if target.is_none() && self.tile(id).is_some() {
+                self.ancestor_entry_stamps_excluding(id)
+            } else {
+                Vec::new()
+            };
             self.reap_empty_from(old_parent);
             self.compact_tree();
             self.resolve_transfer_focus(target);
+            if let Some(window) = self.tile(id).map(|tile| tile.window().id().clone()) {
+                self.cap_entry_stamps_for_arrival(&window, entry_stamps);
+            }
         } else {
             self.reap_empty_from(old_parent);
             self.compact_tree();
@@ -255,6 +279,27 @@ impl<W: LayoutElement> TilingTree<W> {
         self.animate_geometry_changes(old, None);
         self.request_window_sizes();
         true
+    }
+
+    /// [`Self::move_subtree_to_node`] while the seat focus is outside this
+    /// tree, on a floating view. Sway only refocuses when the seat focus
+    /// itself moved and otherwise never touches the seat stack
+    /// (sway/commands/move.c:598-608), so this tree's focus and history stay
+    /// as they were.
+    pub fn move_subtree_to_node_keeping_focus(&mut self, id: NodeId, destination: NodeId) -> bool {
+        let focus = self.focus;
+        let history = self.focus_history.clone();
+        let moved = self.move_subtree_to_node(id, destination);
+        if moved {
+            self.focus_history = history
+                .into_iter()
+                .filter(|node| self.nodes.contains_key(node))
+                .collect();
+            self.focus = focus
+                .filter(|focus| self.nodes.contains_key(focus))
+                .or_else(|| self.focused_leaf_in(self.root));
+        }
+        moved
     }
 
     pub fn move_direction(&mut self, id: NodeId, direction: Direction) -> bool {
@@ -668,9 +713,36 @@ impl<W: LayoutElement> TilingTree<W> {
     /// `container_move_to_container_from_direction`. Focus is untouched; the
     /// caller's transfer already decided it.
     pub fn place_arrival_from_direction(&mut self, window: &W::Id, direction: Direction) {
+        if let Some(id) = self.node_for_window(window) {
+            self.place_node_from_direction(id, direction);
+        }
+    }
+
+    /// Places `window`, which just arrived as a workspace-fullscreen view, last
+    /// among the workspace's children: sway moves it with
+    /// `container_move_to_workspace`, whose `workspace_add_tiling` appends
+    /// (sway/commands/move.c:198-231, 286-292). Focus is untouched.
+    pub fn place_arrival_at_workspace_end(&mut self, window: &W::Id) {
         let Some(id) = self.node_for_window(window) else {
             return;
         };
+        let focus = self.focus;
+        if let Some(old_parent) = self.detach_subtree_only(id) {
+            let end = self.split_len(self.root).unwrap_or(0);
+            self.insert_child_at(self.root, id, end);
+            self.reap_empty_from(old_parent);
+            if focus.is_some_and(|focus| self.nodes.contains_key(&focus)) {
+                self.focus = focus;
+            }
+        }
+        // `container_handle_fullscreen_reparent` arranges only the fullscreen
+        // container (sway/tree/container.c:1380-1391, sway/tree/arrange.c:310-316),
+        // so the residents keep their boxes.
+        self.mark_fullscreen_arrived_and_relayout();
+    }
+
+    /// [`Self::place_arrival_from_direction`] for any attached node.
+    pub(super) fn place_node_from_direction(&mut self, id: NodeId, direction: Direction) {
         let focus = self.focus;
         // Park the arrival at workspace level so the destination search below
         // cannot descend into it.

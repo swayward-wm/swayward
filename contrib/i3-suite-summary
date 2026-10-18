@@ -1,21 +1,72 @@
 #!/usr/bin/env python3
-"""Summarize sway's and swayward's published oracle snapshots."""
+"""Summarize the pinned oracle's swayward results and generate the doc blocks.
+
+    contrib/i3-suite-summary [ORACLE]                 print the summary
+    contrib/i3-suite-summary [ORACLE] --write [FILE...]  rewrite generated blocks
+    contrib/i3-suite-summary [ORACLE] --check [FILE...]  exit 1 if a block is stale
+
+FILE defaults to every published doc that embeds a block (DOCS below).
+
+ORACLE defaults to .cache/sway-ipc-oracle (./contrib/fetch-oracle). --write and
+--check require it to be checked out at the commit in tests/oracle.toml, so
+every generated figure comes from committed results at the pin.
+
+A generated block sits between
+
+    <!-- i3-suite-summary:NAME generated from the pinned oracle; do not edit by hand -->
+    <!-- end i3-suite-summary:NAME -->
+
+NAME is `i3-suite` (swayward's i3-suite outcomes) or `sway-ipc` (the sway IPC
+corpora). --check fails when a block differs from its rendering, when a file
+has no block, or when a block name is unknown.
+
+The i3-suite figures use the oracle's stable filter (contrib/validate): every
+assertion of a file listed in i3/flaky.toml counts as `flaky`, every assertion
+listed for the compositor in i3/unstable.toml counts as `unstable`, and the
+rest count as their recorded outcome. The six columns sum to the suite size.
+Each table covers one compositor; sway appears only as the sway IPC reference.
+Cells from a result listed in the oracle's pending.toml carry a dagger.
+"""
 
 import argparse
 import collections
+import importlib.util
+import re
 import subprocess
-from pathlib import Path
+import sys
 import tomllib
+from pathlib import Path
 
-
-# Files reviewed in m6_coverage_real_defects for native-Wayland/X11 premise gaps.
-X11_REVIEWED_FILES = {
-    "141-resize.t",
-    "189-floating-constraints.t",
-    "232-cmd-move-criteria.t",
-    "243-move-to-mark.t",
-    "319-gaps.t",
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_ORACLE = ROOT / ".cache" / "sway-ipc-oracle"
+ORACLE_URL = "https://github.com/swayward-wm/sway-ipc-oracle"
+RAW = ["pass", "skip", "fail", "unreached", "unstable", "flaky"]
+DAGGER = "†"
+PENDING_NOTE = (
+    f"{DAGGER} From a result listed in the oracle's `pending.toml`: it awaits "
+    "regeneration, and the figure is its last measured value."
+)
+CORPORA = {
+    "": "Hand-picked state scenarios",
+    "events": "Events",
+    "i3-derived": "i3-derived states",
+    "random": "Random sequences",
+    "command-fuzz": "Command fuzz",
+    "wire-fuzz": "Wire fuzz",
 }
+# Published docs that embed generated blocks; --write and --check default to these.
+DOCS = [
+    "docs/I3_SUITE_RESULTS.md",
+    "docs/wiki/Testing-and-Conformance.md",
+    "docs/RELEASE-NOTES-beta1.md",
+]
+BEGIN = "<!-- i3-suite-summary:{} generated from the pinned oracle; do not edit by hand -->"
+END = "<!-- end i3-suite-summary:{} -->"
+BLOCK = re.compile(
+    r"^<!-- i3-suite-summary:(?P<name>[a-z0-9-]+) generated from the pinned oracle; "
+    r"do not edit by hand -->\n(?P<body>.*?)^<!-- end i3-suite-summary:(?P=name) -->$",
+    re.S | re.M,
+)
 
 
 def load(path):
@@ -23,124 +74,368 @@ def load(path):
         return tomllib.load(file)
 
 
-def assertions(result):
-    scope = set()
-    passed = set()
-    for name, row in result["files"].items():
-        total = row.get("tap_plan")
-        if not isinstance(total, int):
-            total = row.get("source_assertions", row["assertions"])
-        scope.update((name, number) for number in range(1, total + 1))
-        passed.update((name, number) for number in row.get("pass_assertions", []))
-    return scope, passed
+def n(value):
+    return f"{value:,}"
 
 
-def newest_swayward_snapshot(oracle):
-    candidates = list((oracle / "i3/results").glob("swayward-*.toml"))
-    if not candidates:
-        raise SystemExit("no i3/results/swayward-*.toml snapshots found")
-    return max(candidates, key=lambda path: (load(path)["run"].get("date", ""), path.name))
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("oracle", type=Path, help="sway-ipc-oracle checkout")
-    parser.add_argument(
-        "--swayward",
-        help="swayward snapshot label (default: newest recorded run date)",
-    )
-    args = parser.parse_args()
-
-    swayward_path = (
-        args.oracle / "i3/results" / f"{args.swayward}.toml"
-        if args.swayward
-        else newest_swayward_snapshot(args.oracle)
-    )
-    if not swayward_path.exists():
-        parser.error(f"snapshot does not exist: {swayward_path}")
-    label = swayward_path.stem
-    sway = load(args.oracle / "i3/results/sway-1.12.toml")
-    swayward = load(swayward_path)
-    sway_scope, sway_pass = assertions(sway)
-    swayward_scope, swayward_pass = assertions(swayward)
-    scope = sway_scope | swayward_scope
-    sway_nonpass = scope - sway_pass
-    swayward_nonpass = scope - swayward_pass
-    swayward_only = swayward_nonpass - sway_nonpass
-    sway_only = sway_nonpass - swayward_nonpass
-    both = sway_nonpass & swayward_nonpass
-    reviewed_x11 = {row for row in swayward_only if row[0] in X11_REVIEWED_FILES}
-    sway_pass_after_x11_filter = sway_pass - reviewed_x11
-    shared_pass_after_x11_filter = sway_pass_after_x11_filter & swayward_pass
-
-    classification_path = args.oracle / "i3/classifications" / f"{label}.toml"
-    if not classification_path.exists():
-        parser.error(f"classification does not exist: {classification_path}")
-    classifications = load(classification_path)["classification"]
-    reasons = {
-        (row["file"], row["assertion"]): row["reason"] for row in classifications
-    }
-    reason_counts = collections.Counter(
-        reasons.get(row, "unclassified") for row in swayward_only
-    )
-    findings = sum(
-        count
-        for reason, count in reason_counts.items()
-        if reason.startswith("swayward_") and reason.endswith("_finding")
-    )
-    satellite = sum(
-        count
-        for reason, count in reason_counts.items()
-        if reason.startswith("xwayland_satellite_")
-    )
-
+def git_head(oracle):
     # A linked worktree has a .git text file, so ask Git rather than reading it.
-    commit = subprocess.run(
-        ["git", "-C", args.oracle, "rev-parse", "HEAD"],
+    return subprocess.run(
+        ["git", "-C", oracle, "rev-parse", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
 
-    print(f"oracle commit: {commit}")
-    print(f"swayward snapshot: {label} ({swayward['run']['commit']})")
-    print(f"assertions in comparison: {len(scope):,}")
-    print(f"sway passes: {len(sway_pass):,}")
-    print(f"swayward passes: {len(swayward_pass):,}")
-    print(f"sway non-passes: {len(sway_nonpass):,}")
-    print(f"swayward non-passes: {len(swayward_nonpass):,}")
-    print(f"non-passes shared by both: {len(both):,}")
-    print(f"swayward-only non-passes: {len(swayward_only):,}")
-    print(f"sway-only non-passes: {len(sway_only):,}")
-    print(f"reviewed X11 boundary in five largest gap files: {len(reviewed_x11):,}")
-    print(
-        "sway-passed assertions after that X11 filter: "
-        f"{len(sway_pass_after_x11_filter):,}"
-    )
-    print(
-        "also passed by swayward after that X11 filter: "
-        f"{len(shared_pass_after_x11_filter):,} "
-        f"({len(shared_pass_after_x11_filter) / len(sway_pass_after_x11_filter):.0%})"
-    )
-    filtered = len(swayward_only - reviewed_x11)
-    print(f"swayward-only after that X11 filter: {filtered:,}")
-    print(f"classification: satellite families: {satellite:,}")
-    print(f"classification: swayward finding families: {findings:,}")
-    other = len(swayward_only) - satellite - findings
-    print(f"classification: other or unclassified: {other:,}")
 
+def pinned_commit():
+    text = (ROOT / "tests" / "oracle.toml").read_text()
+    return tomllib.loads(text)["commit"]
+
+
+class Oracle:
+    def __init__(self, path, swayward=None):
+        self.path = path
+        self.commit = git_head(path)
+        self.pins = load(path / "pins.toml")
+        self.snapshot = swayward or self.pins["snapshot"]["swayward"]
+        self.reference = self.pins["snapshot"]["sway"]
+        pending = path / "pending.toml"
+        self.pending = (
+            {row["path"] for row in load(pending).get("pending", [])}
+            if pending.exists()
+            else set()
+        )
+        result = path / "i3" / "results" / f"{self.snapshot}.toml"
+        if not result.exists():
+            raise SystemExit(f"snapshot does not exist: {result}")
+
+    def mark(self, relative):
+        return DAGGER if relative in self.pending else ""
+
+    def i3_result(self):
+        return f"i3/results/{self.snapshot}.toml"
+
+    def stable_outcomes(self, compositor, name):
+        """The oracle's stable filter: one raw outcome per assertion."""
+        files = load(self.path / "i3" / "results" / f"{name}.toml")["files"]
+        unstable = {
+            (item["file"], number)
+            for item in load(self.path / "i3" / "unstable.toml").get("unstable", [])
+            if item["compositor"] == compositor
+            for number in item["assertions"]
+        }
+        counts = collections.Counter()
+        for file, entry in files.items():
+            if entry.get("flaky"):
+                counts["flaky"] += entry["assertions"]
+                continue
+            seen = set()
+            for outcome in ("pass", "skip", "fail", "unreached"):
+                for number in entry.get(f"{outcome}_assertions", []):
+                    seen.add(number)
+                    counts["unstable" if (file, number) in unstable else outcome] += 1
+            if seen != set(range(1, entry["assertions"] + 1)):
+                raise SystemExit(f"{name}: {file} outcomes do not cover its assertions")
+        total = sum(entry["assertions"] for entry in files.values())
+        if sum(counts.values()) != total:
+            raise SystemExit(f"{name}: stable outcomes do not sum to {total}")
+        return counts, total
+
+    def review(self):
+        path = self.path / "i3" / "classifications" / f"{self.snapshot}.toml"
+        rows = load(path)["classification"]
+        verified = sum(row.get("reason_verified") is True for row in rows)
+        unclassified = sum(row.get("reason") == "unclassified" for row in rows)
+        return len(rows), verified, unclassified
+
+    def buckets(self):
+        """swayward's bucket row, when the oracle ships contrib/i3_buckets.py."""
+        path = self.path / "contrib" / "i3_buckets.py"
+        if not path.exists():
+            return None
+        spec = importlib.util.spec_from_file_location("i3_buckets", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _, snaps = module.snapshots()
+        snap = snaps["swayward"]
+        counts = collections.Counter(snap.bucket.values())
+        mark = module.dagger(snap)
+        return [(bucket, n(counts[bucket]) + mark) for bucket in module.BUCKETS]
+
+    def corpus(self, name, suffix):
+        stem = f"{name}-{suffix}" if suffix else name
+        relative = f"sway-ipc/results/{stem}.toml"
+        path = self.path / relative
+        if not path.exists():
+            return None
+        doc = load(path)
+        rows = doc.get("result", [])
+        verdicts = collections.Counter(
+            row["verdict"].replace(" ", "_") for row in rows
+        )
+        run = doc["run"]
+        for verdict, count in verdicts.items():
+            if run.get(verdict, count) != count:
+                raise SystemExit(f"{relative}: [run] {verdict} disagrees with its rows")
+        reasons = collections.Counter(
+            row.get("reason", "no reason recorded")
+            for row in rows
+            if row["verdict"].replace(" ", "_") == "not_applicable"
+        )
+        return {
+            "relative": relative,
+            "doc": doc,
+            "verdicts": verdicts,
+            "reasons": reasons,
+            "mark": self.mark(relative),
+        }
+
+    def corpora(self):
+        found = {
+            path.stem.removeprefix(self.snapshot).lstrip("-")
+            for path in (self.path / "sway-ipc" / "results").glob(f"{self.snapshot}*.toml")
+            if path.stem == self.snapshot or path.stem.startswith(f"{self.snapshot}-")
+        }
+        known = [suffix for suffix in CORPORA if suffix in found]
+        return known + sorted(found - set(CORPORA))
+
+    def untriaged(self, suffix, result):
+        """Measured mismatches with no triage row, by the oracle's rule."""
+        stem = f"{self.snapshot}-{suffix}" if suffix else self.snapshot
+        measured = set()
+        for row in result["doc"].get("result", []):
+            if row["verdict"] != "mismatch":
+                continue
+            if "seed" in row or "seeds" in row:
+                measured.update(row.get("seeds") or [row["seed"]])
+            elif "case" in row:
+                measured.add(row["case"])
+            else:
+                measured.add(f"{row['scenario']}.{row['request']}")
+        path = self.path / "sway-ipc" / "classifications" / f"{stem}.toml"
+        if not path.exists():
+            return len(measured)
+        doc = load(path)
+        triaged = set(doc.get("basis", {}).get("match", []))
+        for row in doc.get("classification", []):
+            for key in ("case", "rows", "seeds"):
+                value = row.get(key)
+                triaged.update(value if isinstance(value, list) else [value] if value else [])
+        return len(measured - triaged)
+
+
+def scope(suffix, result):
+    run, rows = result["doc"]["run"], result["doc"].get("result", [])
+    if "seeds" in run:
+        return f"{n(run['seeds'])} seeds × {run['steps']} steps"
+    if "cases" in run:
+        return f"{n(run['cases'])} cases"
+    scenarios = {row["scenario"] for row in rows}
+    noun = "states" if suffix == "i3-derived" else "scenarios"
+    return f"{n(len(scenarios))} {noun}, {n(len(rows))} rows"
+
+
+def render_i3_suite(oracle):
+    counts, total = oracle.stable_outcomes("swayward", oracle.snapshot)
+    mark = oracle.mark(oracle.i3_result())
+    commit = oracle.pins["swayward"][:8]
+    rows, verified, unclassified = oracle.review()
+    review_mark = mark
+    lines = [
+        f"Oracle [`{oracle.commit[:8]}`]({ORACLE_URL}/tree/{oracle.commit}), swayward "
+        f"snapshot `{oracle.snapshot}` (`{commit}`), stable filter over "
+        f"{n(total)} assertions:",
+        "",
+        "| " + " | ".join(RAW) + " | total |",
+        "|" + " ---: |" * (len(RAW) + 1),
+        "| " + " | ".join(n(counts[outcome]) + mark for outcome in RAW) + f" | {n(total)} |",
+        "",
+    ]
+    buckets = oracle.buckets()
+    if buckets is not None:
+        lines += [
+            "Interpretive buckets from the oracle's `contrib/i3_buckets.py`:",
+            "",
+            "| " + " | ".join(name for name, _ in buckets) + " |",
+            "|" + " ---: |" * len(buckets),
+            "| " + " | ".join(cell for _, cell in buckets) + " |",
+            "",
+        ]
+    lines.append(
+        f"Review: {n(rows)}{review_mark} non-pass rows are classified; "
+        f"{n(verified)}{review_mark} verified, {n(rows - verified)}{review_mark} "
+        f"unverified, {n(unclassified)}{review_mark} of them unclassified."
+    )
+    if mark:
+        lines += ["", PENDING_NOTE]
+    return "\n".join(lines)
+
+
+def render_sway_ipc(oracle):
+    reference = oracle.reference
+    version = reference.removeprefix("sway-")
+    lines = [
+        f"Oracle [`{oracle.commit[:8]}`]({ORACLE_URL}/tree/{oracle.commit}), swayward "
+        f"snapshot `{oracle.snapshot}`. The sway {version} column replays sway's own "
+        "captures as a self-check.",
+        "",
+        f"| Corpus | Scope | sway {version} self-check | swayward match | swayward mismatch "
+        "| swayward unstable | swayward n.a. | untriaged mismatches |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
+    ]
+    notes, pending = [], []
+    for suffix in oracle.corpora():
+        result = oracle.corpus(oracle.snapshot, suffix)
+        sway = oracle.corpus(reference, suffix)
+        label = CORPORA.get(suffix, suffix)
+        mark = result["mark"]
+        if mark:
+            pending.append(result["relative"])
+        if sway is None:
+            self_check = "not measured"
+        else:
+            v = sway["verdicts"]
+            parts = [f"{n(v['match'])} match"]
+            for key, word in (("mismatch", "mismatch"), ("unstable", "unstable"),
+                              ("not_applicable", "n.a.")):
+                if v[key]:
+                    parts.append(f"{n(v[key])} {word}")
+            self_check = ", ".join(parts) + sway["mark"]
+            if sway["mark"]:
+                pending.append(sway["relative"])
+            for reason, count in sorted(sway["reasons"].items()):
+                notes.append(f"- sway {version}, {label}: {n(count)} rows not applicable: {reason}.")
+        v = result["verdicts"]
+        for reason, count in sorted(result["reasons"].items()):
+            notes.append(f"- swayward, {label}: {n(count)} rows not applicable: {reason}.")
+        cells = [n(v[key]) + mark for key in ("match", "mismatch", "unstable", "not_applicable")]
+        untriaged = n(oracle.untriaged(suffix, result)) + mark
+        lines.append(
+            f"| {label} | {scope(suffix, result)} | {self_check} | " + " | ".join(cells)
+            + f" | {untriaged} |"
+        )
+    if notes:
+        lines += [""] + notes
+    if pending:
+        lines += ["", PENDING_NOTE]
+    return "\n".join(lines)
+
+
+RENDERERS = {"i3-suite": render_i3_suite, "sway-ipc": render_sway_ipc}
+
+
+def rewrite(text, oracle, path):
+    """Return (new text, problems) with every generated block re-rendered."""
+    problems = []
+    found = list(BLOCK.finditer(text))
+    if not found:
+        problems.append(f"{path}: no generated i3-suite-summary block")
+    rendered = {}
+
+    def replace(match):
+        name = match["name"]
+        if name not in RENDERERS:
+            problems.append(f"{path}: unknown generated block {name!r}")
+            return match[0]
+        if name not in rendered:
+            rendered[name] = RENDERERS[name](oracle)
+        body = rendered[name] + "\n"
+        if match["body"] != body:
+            problems.append(f"{path}: generated block {name!r} differs from the pinned oracle")
+        return BEGIN.format(name) + "\n" + body + END.format(name)
+
+    return BLOCK.sub(replace, text), problems
+
+
+def display(path):
+    path = Path(path).resolve()
+    return path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+
+
+def summary(oracle):
+    print(f"oracle commit: {oracle.commit}")
+    print(f"swayward snapshot: {oracle.snapshot} ({oracle.pins['swayward']})")
+    for compositor, name in oracle.pins["snapshot"].items():
+        # The oracle pins compositors (swayfx, scroll, ...) that only have
+        # sway IPC results; the i3 suite runs against some of them only.
+        if not (oracle.path / "i3" / "results" / f"{name}.toml").exists():
+            continue
+        counts, total = oracle.stable_outcomes(compositor, name)
+        mark = oracle.mark(f"i3/results/{name}.toml")
+        figures = ", ".join(f"{counts[outcome]:,} {outcome}" for outcome in RAW)
+        print(f"i3 suite, {name}{mark}: {figures} (of {total:,})")
+    rows, verified, unclassified = oracle.review()
+    print(
+        f"classification: {rows:,} non-pass rows, {verified:,} verified, "
+        f"{unclassified:,} unclassified"
+    )
     print("sway IPC corpora:")
-    results = (args.oracle / "sway-ipc/results").glob(f"{label}*.toml")
-    for path in sorted(results):
-        result = load(path)
-        counts = collections.Counter(row["verdict"] for row in result["result"])
+    for suffix in oracle.corpora():
+        result = oracle.corpus(oracle.snapshot, suffix)
+        v = result["verdicts"]
         print(
-            "  "
-            f"{path.stem.removeprefix(label).lstrip('-') or 'hand-picked'}: "
-            f"{counts['match']:,} match, {counts['mismatch']:,} mismatch, "
-            f"{counts['not_applicable']:,} not applicable"
+            f"  {suffix or 'hand-picked'}{result['mark']}: {v['match']:,} match, "
+            f"{v['mismatch']:,} mismatch, {v['unstable']:,} unstable, "
+            f"{v['not_applicable']:,} not applicable, "
+            f"{oracle.untriaged(suffix, result):,} untriaged"
         )
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("oracle", type=Path, nargs="?", default=DEFAULT_ORACLE,
+                        help="sway-ipc-oracle checkout (default: .cache/sway-ipc-oracle)")
+    parser.add_argument("--swayward", help="swayward snapshot label (default: pins.toml)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--write", nargs="*", type=Path, metavar="FILE",
+                      help="rewrite generated blocks (default: the published docs)")
+    mode.add_argument("--check", nargs="*", type=Path, metavar="FILE",
+                      help="fail on a stale generated block (default: the published docs)")
+    args = parser.parse_args()
+
+    if not (args.oracle / "pins.toml").exists():
+        raise SystemExit(f"{args.oracle} is not an oracle checkout; run ./contrib/fetch-oracle")
+    oracle = Oracle(args.oracle, args.swayward)
+    files = args.write if args.write is not None else args.check
+    if files is None:
+        summary(oracle)
+        return 0
+    writing = args.write is not None
+    files = files or [ROOT / path for path in DOCS]
+    if args.swayward and args.swayward != oracle.pins["snapshot"]["swayward"]:
+        parser.error("--write and --check use the pinned swayward snapshot")
+    pin = pinned_commit()
+    if oracle.commit != pin:
+        print(
+            f"{args.oracle} is at {oracle.commit}, but tests/oracle.toml pins {pin}; "
+            "run ./contrib/fetch-oracle",
+            file=sys.stderr,
+        )
+        return 2
+    failed = False
+    for path in files:
+        text = path.read_text()
+        new, problems = rewrite(text, oracle, display(path))
+        if writing:
+            unknown = [p for p in problems if "differs" not in p]
+            if unknown:
+                print("\n".join(unknown), file=sys.stderr)
+                failed = True
+            elif new != text:
+                path.write_text(new)
+        elif problems:
+            print("\n".join(problems), file=sys.stderr)
+            failed = True
+    if failed and not writing:
+        print(
+            "regenerate with ./contrib/i3-suite-summary --write",
+            file=sys.stderr,
+        )
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

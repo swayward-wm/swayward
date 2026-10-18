@@ -65,12 +65,25 @@ impl<W: LayoutElement> TilingTree<W> {
         else {
             return;
         };
-        let percent = 1. / (children.len() + 1) as f64;
-        for existing in percents.iter_mut() {
-            *existing *= 1. - percent;
-        }
+        // A new child has no fraction; the next arrange gives it the average
+        // of the others and divides every fraction by the sum, in child order
+        // (`apply_horiz_layout`/`apply_vert_layout`, sway/tree/arrange.c:22-52).
+        // The same float operations matter: a `resize` reply compares the
+        // fractions bitwise (sway/commands/resize.c:273-277).
+        let existing: f64 = percents.iter().sum();
+        let percent = if percents.is_empty() || existing <= 0. {
+            1.
+        } else {
+            existing / percents.len() as f64
+        };
         children.insert(index.min(children.len()), child);
         percents.insert(index.min(percents.len()), percent);
+        let total: f64 = percents.iter().sum();
+        if total > 0. {
+            for share in percents.iter_mut() {
+                *share /= total;
+            }
+        }
         self.nodes
             .get_mut(&child)
             .expect("invariant: the validated inserted child remains in the arena")

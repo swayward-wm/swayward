@@ -12,6 +12,183 @@ impl<W: LayoutElement> TilingTree<W> {
             .filter_map(|(node, leaf)| Some((*node, self.tile(*leaf)?.window().id())))
     }
 
+    /// Each container a departing view raised, with that view's focus time.
+    pub fn entered_by_departed(&self) -> impl Iterator<Item = (NodeId, std::time::Duration)> + '_ {
+        self.entered_by_departed
+            .iter()
+            .map(|(node, stamp)| (*node, *stamp))
+    }
+
+    /// Each container whose seat-stack time a swap capped below an arrival's focus time, while
+    /// no view inside it has been focused since.
+    pub fn capped_entry_stamps(&self) -> impl Iterator<Item = (NodeId, std::time::Duration)> + '_ {
+        self.capped_entry_stamps
+            .iter()
+            .filter(|(node, (_, arrival))| {
+                self.leaf_ids_in(**node).into_iter().all(|leaf| {
+                    self.tile(leaf)
+                        .and_then(|tile| tile.window().focus_timestamp())
+                        .is_none_or(|stamp| stamp <= *arrival)
+                })
+            })
+            .map(|(node, (stamp, _))| (*node, *stamp))
+    }
+
+    /// Each split above `node` with the newest focus time of a view inside it: the time
+    /// sway last raised the split, since focusing a view raises its ancestors
+    /// (`seat_set_workspace_focus`, sway/input/seat.c:1178-1190).
+    pub(crate) fn ancestor_entry_stamps(&self, node: NodeId) -> Vec<(NodeId, std::time::Duration)> {
+        let mut stamps = Vec::new();
+        let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
+        while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            // A wrapper sway never raised stays at the tail of the stack, below every stamp.
+            if self.ipc_stale_nodes.contains(&ancestor) {
+                parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+                continue;
+            }
+            let newest = self
+                .leaf_ids_in(ancestor)
+                .into_iter()
+                .filter_map(|leaf| self.tile(leaf)?.window().focus_timestamp())
+                .max();
+            if let Some(stamp) = newest {
+                stamps.push((ancestor, stamp));
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        stamps
+    }
+
+    /// As [`Self::ancestor_entry_stamps`], ignoring `node`'s own views: the times the splits
+    /// above `node` had before it arrived among them.
+    pub(crate) fn ancestor_entry_stamps_excluding(
+        &self,
+        node: NodeId,
+    ) -> Vec<(NodeId, std::time::Duration)> {
+        let moved = self.leaf_ids_in(node);
+        let mut stamps = Vec::new();
+        let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
+        while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            let newest = self
+                .leaf_ids_in(ancestor)
+                .into_iter()
+                .filter(|leaf| !moved.contains(leaf))
+                .filter_map(|leaf| self.tile(leaf)?.window().focus_timestamp())
+                .max();
+            if let Some(stamp) = newest {
+                stamps.push((ancestor, stamp));
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        stamps
+    }
+
+    /// The ancestors of `node` sway never raised: wrappers still at the tail of its focus
+    /// stack (`seat_node_from_node`, sway/input/seat.c:327-349).
+    pub(crate) fn stale_ancestors(&self, node: NodeId) -> Vec<NodeId> {
+        let mut stale = Vec::new();
+        let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
+        while let Some(ancestor) = parent {
+            if self.ipc_stale_nodes.contains(&ancestor) {
+                stale.push(ancestor);
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        stale
+    }
+
+    /// Leaves `nodes` at the tail of the focus stack after a refocus that sway skips.
+    pub(crate) fn keep_ipc_stale(&mut self, nodes: Vec<NodeId>) {
+        self.ipc_stale_nodes.extend(
+            nodes
+                .into_iter()
+                .filter(|node| self.nodes.contains_key(node)),
+        );
+    }
+
+    /// Keeps each split in `stamps` at its own seat-stack time after `window` swapped into
+    /// it without raising it. A split was raised just before the view inside it that was
+    /// focused then (parents first, sway/input/seat.c:1178-1190), so it ranks just below
+    /// that view.
+    pub(crate) fn cap_entry_stamps_for_arrival(
+        &mut self,
+        window: &W::Id,
+        stamps: Vec<(NodeId, std::time::Duration)>,
+    ) {
+        let Some(arrival) = self
+            .node_for_window(window)
+            .and_then(|leaf| self.tile(leaf))
+            .and_then(|tile| tile.window().focus_timestamp())
+        else {
+            return;
+        };
+        for (ancestor, stamp) in stamps {
+            if arrival > stamp && self.nodes.contains_key(&ancestor) {
+                let capped = stamp.saturating_sub(std::time::Duration::from_nanos(1));
+                self.capped_entry_stamps.insert(ancestor, (capped, arrival));
+            }
+        }
+    }
+
+    /// Focus the container `parent` that a departing view focused at `stamp` raised.
+    pub fn set_focus_raised_by_departed(
+        &mut self,
+        parent: NodeId,
+        stamp: Option<std::time::Duration>,
+    ) {
+        if !self.nodes.contains_key(&parent) {
+            return;
+        }
+        self.set_focus_id(Some(parent));
+        if let Some(stamp) = stamp {
+            let entry = self.entered_by_departed.entry(parent).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+        }
+    }
+
+    /// Records that the focused split, and every split above it, held the seat focus at
+    /// `stamp`. `seat_set_focus` on a split raises it and its parents but no view inside it
+    /// (sway/input/seat.c:1178-1190), so the split ranks as recent as that.
+    pub fn record_focused_split_entry(&mut self, stamp: std::time::Duration) {
+        let Some(focus) = self
+            .focus
+            .filter(|focus| *focus != self.root && self.is_split(*focus))
+        else {
+            return;
+        };
+        let mut node = Some(focus);
+        while let Some(id) = node.filter(|id| *id != self.root) {
+            let entry = self.entered_by_departed.entry(id).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+            node = self.nodes.get(&id).and_then(|node| node.parent);
+        }
+    }
+
+    /// Keeps the seat-stack place of every container `window`'s focus last raised as the
+    /// view leaves for the floating layer: leaving raises none of them, so each still ranks
+    /// at that view's focus time (`container_set_floating`, sway/tree/container.c:951-975).
+    pub fn remember_entries_of_departing(&mut self, window: &W::Id) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        let Some(stamp) = self
+            .tile(id)
+            .and_then(|tile| tile.window().focus_timestamp())
+        else {
+            return;
+        };
+        let entered = self
+            .last_entered_by
+            .iter()
+            .filter(|(_, leaf)| **leaf == id)
+            .map(|(node, _)| *node)
+            .collect::<Vec<_>>();
+        for node in entered {
+            let entry = self.entered_by_departed.entry(node).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+        }
+    }
+
     pub fn focus_rank_for_window(&self, window: &W::Id) -> Option<usize> {
         let node = self.node_for_window(window)?;
         self.focus_history
@@ -27,9 +204,36 @@ impl<W: LayoutElement> TilingTree<W> {
         self.nodes.get(&id)?.parent
     }
 
+    /// Whether `window`'s parent, the workspace root included, is tabbed or
+    /// stacked (`container_parent_layout`, sway/tree/container.c).
+    pub fn window_parent_is_tabbed_or_stacked(&self, window: &W::Id) -> bool {
+        self.parent_of_window(window)
+            .and_then(|parent| self.split_layout(parent))
+            .is_some_and(|layout| matches!(layout, Layout::Tabbed | Layout::Stacked))
+    }
+
     pub fn non_root_parent_for_window(&self, window: &W::Id) -> Option<NodeId> {
         self.parent_of_window(window)
             .filter(|parent| *parent != self.root && self.split_len(*parent).is_some_and(|n| n > 1))
+    }
+
+    /// Whether floating `window` leaves no old parent: it sits at workspace
+    /// level, or in a chain of singleton splits that `container_reap_empty`
+    /// destroys up to the workspace. The seat-node destroy handler then only
+    /// re-raises the current focus (sway/input/seat.c:273-320), so nothing
+    /// else on the stack moves.
+    pub fn float_leaves_workspace_level(&self, window: &W::Id) -> bool {
+        let mut parent = self.parent_of_window(window);
+        while let Some(id) = parent {
+            if id == self.root {
+                return true;
+            }
+            if self.split_len(id) != Some(1) {
+                return false;
+            }
+            parent = self.nodes.get(&id).and_then(|node| node.parent);
+        }
+        false
     }
 
     pub fn restore_focus_rank(&mut self, window: &W::Id, rank: usize) {
@@ -86,6 +290,26 @@ impl<W: LayoutElement> TilingTree<W> {
             // sway/tree/container.c:1426-1438).
             self.focus = Some(leaf);
             self.ipc_focus_follows_history = false;
+        }
+    }
+
+    /// Gives every split above `node` its own focus entry at the rank it has
+    /// now, so a view swapped in below it does not raise it. Sway's seat stack
+    /// holds the split itself, and a swap that keeps focus on the focused node
+    /// leaves the stack alone (`seat_set_focus` returns early,
+    /// sway/input/seat.c:1146-1150).
+    pub(crate) fn pin_ancestor_focus_ranks(&mut self, node: NodeId) {
+        let mut parent = self.nodes.get(&node).and_then(|node| node.parent);
+        while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            if !self.focus_history.contains(&ancestor) {
+                let rank = self
+                    .focus_history
+                    .iter()
+                    .position(|entry| self.contains_node(ancestor, *entry))
+                    .unwrap_or(self.focus_history.len());
+                self.focus_history.insert(rank, ancestor);
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
         }
     }
 
@@ -253,6 +477,27 @@ impl<W: LayoutElement> TilingTree<W> {
         }
     }
 
+    /// The most recent view under the focused container, when that is a split
+    /// below the root: where sway maps a view while a floating view has focus
+    /// (`seat_get_focus_inactive_tiling`, then `seat_get_focus_inactive_view`,
+    /// sway/tree/view.c:851-866).
+    pub fn focus_inactive_view_under_focused_split(&self) -> Option<NodeId> {
+        self.focus
+            .filter(|focus| *focus != self.root && self.is_split(*focus))
+            .and_then(|focus| self.focused_leaf_in(focus))
+    }
+
+    /// Focuses the most recent view, or the first one when none was focused.
+    pub fn focus_recent_view(&mut self) {
+        let target = self
+            .fullscreen_node()
+            .and_then(|fullscreen| self.focused_leaf_in(fullscreen))
+            .or_else(|| self.focused_leaf_in(self.root));
+        if target.is_some() {
+            self.set_focus_id(target);
+        }
+    }
+
     /// Focuses the root without raising it in the focus history.
     pub fn focus_root_keeping_history(&mut self) {
         self.focus = Some(self.root);
@@ -260,6 +505,38 @@ impl<W: LayoutElement> TilingTree<W> {
 
     pub fn focus_root(&mut self) {
         self.set_focus_id(Some(self.root));
+    }
+
+    /// Raises the focused `window`'s non-root parent, then the view, as sway's
+    /// `seat_set_raw_focus` pair does (sway/tree/container.c:969-973).
+    pub fn raise_parent_then_focused(&mut self, window: &W::Id) {
+        let Some(id) = self
+            .node_for_window(window)
+            .filter(|id| self.focus == Some(*id))
+        else {
+            return;
+        };
+        let Some(parent) = self
+            .nodes
+            .get(&id)
+            .and_then(|node| node.parent)
+            .filter(|parent| *parent != self.root)
+        else {
+            return;
+        };
+        self.focus_history
+            .retain(|candidate| *candidate != id && *candidate != parent);
+        self.focus_history.insert(0, parent);
+        self.focus_history.insert(0, id);
+        // The view's own focus time ranks the raised parent in the IPC focus list, as when a
+        // tiled view floats (`set_focus_raised_by_departed`).
+        if let Some(stamp) = self
+            .tile(id)
+            .and_then(|tile| tile.window().focus_timestamp())
+        {
+            let entry = self.entered_by_departed.entry(parent).or_insert(stamp);
+            *entry = (*entry).max(stamp);
+        }
     }
 
     pub fn set_focus(&mut self, id: NodeId) {
@@ -272,6 +549,11 @@ impl<W: LayoutElement> TilingTree<W> {
     /// fresh wrapper. Sway runs a mapped view's criteria before it focuses
     /// the view (`view_map`, sway/tree/view.c:943-956), so a container a
     /// `for_window` command wrapped the view in is raised with it.
+    ///
+    /// A `for_window [...] split` wraps the still unfocused view, so
+    /// `container_split` raises nothing (sway/tree/container.c:1532-1560); the
+    /// later focus raises the new split and then each outer ancestor, leaving
+    /// the outermost highest (sway/input/seat.c:1179-1191).
     pub fn raise_focus_into_fresh_wrappers(&mut self, window: &W::Id) {
         let Some(focus) = self
             .focus
@@ -283,9 +565,29 @@ impl<W: LayoutElement> TilingTree<W> {
             .ipc_stale_nodes
             .iter()
             .any(|wrapper| self.contains_node(*wrapper, focus))
+            || !self.ancestors_ranked_outermost_first(focus)
         {
             self.set_focus_id(Some(focus));
         }
+    }
+
+    /// Whether `id`'s non-root ancestors rank in the focus history as
+    /// `set_focus_id` leaves them: the outermost first.
+    fn ancestors_ranked_outermost_first(&self, id: NodeId) -> bool {
+        let rank = |node: NodeId| self.focus_history.iter().position(|entry| *entry == node);
+        let mut inner = self.nodes.get(&id).and_then(|node| node.parent);
+        while let Some(child) = inner.filter(|node| *node != self.root) {
+            let outer = self.nodes.get(&child).and_then(|node| node.parent);
+            if let Some(parent) = outer.filter(|node| *node != self.root) {
+                if let (Some(inner_rank), Some(outer_rank)) = (rank(child), rank(parent)) {
+                    if inner_rank < outer_rank {
+                        return false;
+                    }
+                }
+            }
+            inner = outer;
+        }
+        true
     }
 
     pub fn contains(&self, id: NodeId) -> bool {
@@ -506,7 +808,21 @@ impl<W: LayoutElement> TilingTree<W> {
 
     fn focus_direction_inner(&mut self, dir: Direction, allow_wrap: bool) -> bool {
         let next = self.directional_focus_target(dir, allow_wrap);
-        self.set_focus_id(next.or(self.focus));
+        // From a view beside a workspace fullscreen container (one moved there
+        // from another output), `seat_set_workspace_focus` refuses a target the
+        // fullscreen container hides, so focus stays put
+        // (sway/input/seat.c:1148-1151, sway/tree/container.c:570-590).
+        let obstructed = next.is_some_and(|next| {
+            self.fullscreen_node().is_some_and(|fullscreen| {
+                self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
+                    && !self.contains_node(fullscreen, next)
+            })
+        });
+        // No target leaves the seat stack alone, so a wrapper never focused stays at its
+        // tail (`if (next_focus)`, sway/commands/focus.c:461-468).
+        if !obstructed && next.is_some() {
+            self.set_focus_id(next);
+        }
         next.is_some()
     }
 
@@ -748,6 +1064,7 @@ impl<W: LayoutElement> TilingTree<W> {
             self.focus_history
                 .retain(|candidate| *candidate != id && !ancestors.contains(candidate));
             for ancestor in ancestors {
+                self.capped_entry_stamps.remove(&ancestor);
                 self.focus_history.insert(0, ancestor);
                 if self.tile(id).is_some() {
                     self.last_entered_by.insert(ancestor, id);

@@ -423,6 +423,93 @@ fn floating_modifier_none_disables_the_drag() {
     key_event(&mut f, 133, false);
 }
 
+/// Two real clients in a split floated as one group, `focus parent; floating enable`.
+fn floating_group_drag_fixture() -> Fixture {
+    let mut config = swayward_config::Config::default();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    for _ in 0..2 {
+        let window = f.client(client).create_window();
+        let surface = window.surface.clone();
+        window.commit();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        commit_configured_size(&mut f, client, &surface);
+    }
+    for command in ["focus parent", "floating enable"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    f.double_roundtrip(client);
+    f
+}
+
+/// The group root's box and the second view's box, in workspace coordinates.
+fn floating_group_rects(
+    f: &mut Fixture,
+) -> (
+    smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+    smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+) {
+    let workspace = f.swayward().layout.active_workspace().unwrap();
+    let root = workspace.floating().tree_roots().next().unwrap();
+    let tree = workspace.floating().tree(root).unwrap();
+    let windows = tree.windows().map(|(id, _)| id).collect::<Vec<_>>();
+    assert_eq!(windows.len(), 2, "the group keeps both views");
+    let second = tree.geometry(windows[1]).unwrap();
+    (workspace.floating().tree_rect(root).unwrap(), second)
+}
+
+/// Hardware smoke 2026-10-17: Super+drag on a view inside a floating group did nothing.
+/// Sway moves and modifier-resizes the toplevel floating ancestor of the view under the
+/// cursor (`seatop_begin_move_floating(seat, container_toplevel_ancestor(cont))` and
+/// `seatop_begin_resize_floating(seat, floater, edge)`, sway/input/seatop_default.c:459-487).
+#[test]
+fn floating_modifier_drag_on_a_group_child_moves_and_resizes_the_group() {
+    const LEFT: u32 = 0x110;
+    const RIGHT: u32 = 0x111;
+    const SUPER: u32 = 133;
+    let mut f = floating_group_drag_fixture();
+    let (group, second) = floating_group_rects(&mut f);
+    // The middle of the second view, inside its client surface.
+    let start = second.loc + second.size.downscale(2.).to_point();
+
+    pointer_motion_absolute(&mut f, start.x, start.y);
+    key_event(&mut f, SUPER, true);
+    pointer_button(&mut f, LEFT, true);
+    pointer_motion_absolute(&mut f, start.x + 40., start.y + 25.);
+    pointer_motion_absolute(&mut f, start.x + 60., start.y + 30.);
+    pointer_button(&mut f, LEFT, false);
+    let (moved, moved_second) = floating_group_rects(&mut f);
+    assert_eq!(
+        moved.loc,
+        group.loc + smithay::utils::Point::from((60., 30.))
+    );
+    assert_eq!(moved.size, group.size);
+    assert_eq!(moved_second.size, second.size);
+
+    // Super+right in the bottom-right quadrant of the group resizes it from that corner,
+    // and the children keep their equal split.
+    let start = start + smithay::utils::Point::from((60., 130.));
+    pointer_motion_absolute(&mut f, start.x, start.y);
+    pointer_button(&mut f, RIGHT, true);
+    pointer_motion_absolute(&mut f, start.x + 100., start.y + 50.);
+    pointer_button(&mut f, RIGHT, false);
+    key_event(&mut f, SUPER, false);
+    let (resized, resized_second) = floating_group_rects(&mut f);
+    assert_eq!(resized.loc, moved.loc);
+    assert_eq!(
+        resized.size,
+        moved.size + smithay::utils::Size::from((100., 50.))
+    );
+    assert_eq!(resized_second.size.w, resized.size.w / 2.);
+}
+
 #[test]
 fn mouse_warping_output_warps_when_focus_crosses_outputs() {
     // The other half of `output`: the pointer is not on the newly focused
@@ -548,6 +635,318 @@ fn floating_rejects_hidden_scratchpad_window_without_panicking() {
         outcome[0].error.as_deref(),
         Some("Can't change floating on hidden scratchpad container")
     );
+    // Differential seeds 30470 and 30479 (v3): sway refuses with CMD_INVALID
+    // (sway/commands/floating.c:35-38), so the reply sets `parse_error`.
+    assert_eq!(outcome[0].parse_error, Some(true));
+}
+
+// Differential seed 31583 (v3): a view inside a hidden scratchpad group is
+// not a scratchpad container, so sway walks to the group root, which already
+// counts as floating, and `floating enable` succeeds without a change
+// (sway/commands/floating.c:35-50, sway/tree/container.c:942-944).
+#[test]
+fn floating_enable_on_view_in_hidden_scratchpad_group_is_a_no_op() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for app_id in ["one", "two"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    for command in ["focus parent", "move scratchpad"] {
+        assert!(crate::command::execute(f.niri_state(), command)[0].success);
+    }
+    assert_eq!(f.swayward().layout.scratchpad_trees().count(), 1);
+    let before = get_tree(&mut f);
+    let outcome =
+        crate::command::execute(f.niri_state(), r#"[app_id="^(one|two)$"] floating enable"#);
+    assert_eq!(outcome.len(), 1);
+    assert!(outcome[0].success, "{outcome:?}");
+    assert_eq!(get_tree(&mut f), before);
+    let disable = crate::command::execute(f.niri_state(), r#"[app_id="^two$"] floating disable"#);
+    assert_eq!(disable[0].parse_error, Some(true), "{disable:?}");
+}
+
+/// Two views in a tabbed split marked `z`, the split focused. With `hide`
+/// the split is hidden in the scratchpad as one group.
+fn marked_tabbed_group(hide: bool) -> Fixture {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    for app_id in ["one", "two"] {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    }
+    let hide = hide.then_some("move scratchpad");
+    for command in [
+        "layout tabbed",
+        "focus parent",
+        "[con_id=__focused__] mark --add z",
+    ]
+    .into_iter()
+    .chain(hide)
+    {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    assert_eq!(
+        f.swayward().layout.scratchpad_trees().count(),
+        usize::from(hide.is_some())
+    );
+    f
+}
+
+/// What sway answers for the last command of a comma list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatingReply {
+    Success,
+    /// CMD_INVALID "Can't change floating on hidden scratchpad container"
+    /// (sway/commands/floating.c:35-38).
+    HiddenScratchpad,
+}
+
+// Sway resolves `floating`'s target from the live tree when the handler runs
+// (sway/commands/floating.c:35-50), and a comma list keeps its criteria
+// matches, so an earlier command in the list decides what `floating` sees:
+//
+// - A hidden group's root is the scratchpad container itself, so any mode is CMD_INVALID. A view
+//   inside it is not (sway/tree/container.c:1696-1698): sway walks to the root, which counts as
+//   floating, so `enable` is a no-op. `disable` and `toggle` then tile a root with no workspace and
+//   crash sway 1.12, so swayward keeps refusing them (no sway reply to match).
+// - `scratchpad show` puts the group on the workspace, so the root and its views are a plain
+//   floating container (sway/commands/scratchpad.c:108-126).
+// - `move scratchpad` on a tiled view hides that view alone; on the split it floats and hides the
+//   whole group (sway/commands/move.c:935-947). Either way the matched container is now hidden.
+//
+// Oracle rows: state scenarios floating_hidden_scratchpad_is_invalid,
+// floating_enable_in_hidden_scratchpad_group,
+// floating_hidden_scratchpad_group_root_is_invalid,
+// floating_hidden_scratchpad_group_root_after_show and
+// floating_hidden_scratchpad_chain_matrix.
+#[test]
+fn floating_resolves_hidden_scratchpad_when_the_handler_runs() {
+    use FloatingReply::{HiddenScratchpad, Success};
+    let view = r#"[app_id="^two$"]"#;
+    let root = r#"[con_mark="z"]"#;
+    // (criteria, start hidden, prefix, mode, sway's reply to `floating`)
+    #[rustfmt::skip]
+    let matrix = [
+        (view, true, "", "enable", Success),
+        (view, true, "", "disable", HiddenScratchpad),
+        (view, true, "", "toggle", HiddenScratchpad),
+        (root, true, "", "enable", HiddenScratchpad),
+        (root, true, "", "disable", HiddenScratchpad),
+        (root, true, "", "toggle", HiddenScratchpad),
+        (view, true, "scratchpad show", "enable", Success),
+        (view, true, "scratchpad show", "disable", Success),
+        (view, true, "scratchpad show", "toggle", Success),
+        (root, true, "scratchpad show", "enable", Success),
+        (root, true, "scratchpad show", "disable", Success),
+        (root, true, "scratchpad show", "toggle", Success),
+        (view, false, "move scratchpad", "enable", HiddenScratchpad),
+        (view, false, "move scratchpad", "disable", HiddenScratchpad),
+        (view, false, "move scratchpad", "toggle", HiddenScratchpad),
+        (root, false, "move scratchpad", "enable", HiddenScratchpad),
+        (root, false, "move scratchpad", "disable", HiddenScratchpad),
+        (root, false, "move scratchpad", "toggle", HiddenScratchpad),
+    ];
+    for (criteria, hidden, prefix, mode, expected) in matrix {
+        let mut f = marked_tabbed_group(hidden);
+        let command = if prefix.is_empty() {
+            format!("{criteria} floating {mode}")
+        } else {
+            format!("{criteria} {prefix}, floating {mode}")
+        };
+        let before = get_tree(&mut f);
+        let replies = crate::command::execute(f.niri_state(), &command);
+        let replies_len = usize::from(!prefix.is_empty()) + 1;
+        assert_eq!(replies.len(), replies_len, "{command}: {replies:?}");
+        assert!(
+            replies[..replies_len - 1].iter().all(|reply| reply.success),
+            "{command}: {replies:?}"
+        );
+        let last = replies.last().unwrap();
+        match expected {
+            Success => assert!(last.success, "{command}: {replies:?}"),
+            HiddenScratchpad => {
+                assert!(!last.success, "{command}: {replies:?}");
+                assert_eq!(last.parse_error, Some(true), "{command}: {replies:?}");
+                assert_eq!(
+                    last.error.as_deref(),
+                    Some("Can't change floating on hidden scratchpad container"),
+                    "{command}"
+                );
+            }
+        }
+        let layout = &f.swayward().layout;
+        let hidden_windows = layout.scratchpad_windows().count();
+        match (prefix, criteria == root, mode) {
+            // A refused or no-op `floating` leaves the hidden group alone.
+            ("", ..) => assert_eq!(get_tree(&mut f), before, "{command}"),
+            ("scratchpad show", ..) => assert_eq!(hidden_windows, 0, "{command}"),
+            // The view alone, or the whole group, stays hidden.
+            ("move scratchpad", false, _) => assert_eq!(hidden_windows, 1, "{command}"),
+            ("move scratchpad", true, _) => {
+                assert_eq!(hidden_windows, 2, "{command}");
+                assert_eq!(layout.scratchpad_trees().count(), 1, "{command}");
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// A floating group `r` = H[one, `z` = V[two, three]], built as sway builds
+/// it from a workspace (`floating enable` on the workspace wraps its
+/// children, sway/commands/floating.c:28-33). With `hide` the group is hidden
+/// in the scratchpad.
+fn marked_nested_group(hide: bool) -> Fixture {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let open = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    open(&mut f, "one");
+    open(&mut f, "two");
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    open(&mut f, "three");
+    let hide = hide.then_some("move scratchpad");
+    for command in [
+        "focus parent",
+        "[con_id=__focused__] mark --add z",
+        "focus parent",
+        "floating enable",
+        "[con_id=__focused__] mark --add r",
+    ]
+    .into_iter()
+    .chain(hide)
+    {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let layout = &f.swayward().layout;
+    assert_eq!(
+        layout.scratchpad_trees().count(),
+        usize::from(hide.is_some())
+    );
+    f
+}
+
+// The same handler-time resolution for every container a nested floating
+// group holds: its root `r`, a non-root split `z` and a view inside `z`.
+// Only the root is a scratchpad container; `z` and its views walk up to it
+// (sway/commands/floating.c:35-46, sway/tree/container.c:1696-1698), and
+// `move scratchpad` or `scratchpad show` on any of them acts on the whole
+// group (sway/commands/move.c:935-947, sway/commands/scratchpad.c:108-126).
+//
+// Oracle rows: the chain matrix rows cited above, and for the split and view
+// inside the group rv4_inner_split_move_enable, rv4_inner_split_hidden_enable
+// and rv4_view_in_group_move_enable (sway 1.12-88869399: success).
+#[test]
+fn floating_resolves_nested_scratchpad_group_when_the_handler_runs() {
+    use FloatingReply::{HiddenScratchpad, Success};
+    let root = r#"[con_mark="r"]"#;
+    let split = r#"[con_mark="z"]"#;
+    let view = r#"[app_id="^three$"]"#;
+    // A refused `disable`/`toggle` on a split or view inside a hidden group
+    // crashes sway 1.12; swayward refuses it like the root.
+    let inside = |mode: &str| match mode {
+        "enable" => Success,
+        _ => HiddenScratchpad,
+    };
+    for criteria in [root, split, view] {
+        for mode in ["enable", "disable", "toggle"] {
+            let hidden_reply = if criteria == root {
+                HiddenScratchpad
+            } else {
+                inside(mode)
+            };
+            for (hidden, prefix, expected) in [
+                (true, "", hidden_reply),
+                (true, "scratchpad show", Success),
+                (false, "move scratchpad", hidden_reply),
+            ] {
+                let mut f = marked_nested_group(hidden);
+                let command = if prefix.is_empty() {
+                    format!("{criteria} floating {mode}")
+                } else {
+                    format!("{criteria} {prefix}, floating {mode}")
+                };
+                let before = get_tree(&mut f);
+                let replies = crate::command::execute(f.niri_state(), &command);
+                let replies_len = usize::from(!prefix.is_empty()) + 1;
+                assert_eq!(replies.len(), replies_len, "{command}: {replies:?}");
+                assert!(
+                    replies[..replies_len - 1].iter().all(|reply| reply.success),
+                    "{command}: {replies:?}"
+                );
+                let last = replies.last().unwrap();
+                match expected {
+                    Success => assert!(last.success, "{command}: {replies:?}"),
+                    HiddenScratchpad => {
+                        assert!(!last.success, "{command}: {replies:?}");
+                        assert_eq!(last.parse_error, Some(true), "{command}: {replies:?}");
+                        assert_eq!(
+                            last.error.as_deref(),
+                            Some("Can't change floating on hidden scratchpad container"),
+                            "{command}"
+                        );
+                    }
+                }
+                let layout = &f.swayward().layout;
+                let hidden_windows = layout.scratchpad_windows().count();
+                let groups = layout.scratchpad_trees().count();
+                match prefix {
+                    "" => assert_eq!(get_tree(&mut f), before, "{command}"),
+                    "scratchpad show" => {
+                        assert_eq!(hidden_windows, 0, "{command}");
+                        // Shown, the group is a plain floating container:
+                        // `enable` keeps it floating, `disable` and `toggle`
+                        // tile all three views.
+                        let tiled = f
+                            .swayward()
+                            .layout
+                            .active_workspace()
+                            .unwrap()
+                            .tiling()
+                            .tiles()
+                            .count();
+                        let want = if mode == "enable" { 0 } else { 3 };
+                        assert_eq!(tiled, want, "{command}");
+                    }
+                    _ => {
+                        assert_eq!((hidden_windows, groups), (3, 1), "{command}");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]

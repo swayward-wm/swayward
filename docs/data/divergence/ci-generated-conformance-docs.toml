@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = [".github/workflows/ci.yml"]
+what = "run `coverage-report --check-doc`, `i3-suite-summary --check` and `test-census --check-doc` so the Testing wiki census, proptest seed table and the generated oracle tables match their sources."
+why = "Hand-typed conformance figures drifted on 14 figures; the published tables are now generated from tests/i3/coverage.toml, proptest-regressions/ and the pinned oracle's committed results, and CI rejects a hand edit."

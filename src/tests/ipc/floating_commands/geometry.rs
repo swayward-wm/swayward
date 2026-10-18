@@ -295,11 +295,20 @@ fn move_position_uses_workspace_coordinates_and_rejects_absolute_ppt() {
     }
 }
 
-/// Oracle: floating_window_ppt_resize_rejected. A floating view resizes only
-/// in px or unitless amounts; a ppt-only resize is refused and leaves the
-/// window alone (sway/commands/resize.c:523-537). Differential seed 1136.
+/// Oracle: floating_window_ppt_resize_rejected and floating_toggle_ppt_resize.
+/// A floating view resizes only in px or unitless amounts; a ppt-only resize
+/// is refused and leaves the window alone (sway/commands/resize.c:523-537),
+/// whether `floating enable` or `floating toggle` floated it. Differential
+/// seed 1136; family diff-fam-floating-toggle-ppt-resize, random-v2 seeds
+/// 13089, 13561, 14434, 14557, 14661, 17858.
 #[test]
 fn ppt_only_resize_of_a_floating_window_is_refused() {
+    for float in ["floating enable", "floating toggle"] {
+        ppt_only_resize_of_a_floating_window_is_refused_after(float);
+    }
+}
+
+fn ppt_only_resize_of_a_floating_window_is_refused_after(float: &str) {
     let mut f = Fixture::new();
     f.add_output(1, (1000, 800));
     let client = f.add_client();
@@ -311,7 +320,7 @@ fn ppt_only_resize_of_a_floating_window_is_refused() {
     window.attach_new_buffer();
     window.ack_last_and_commit();
     f.double_roundtrip(client);
-    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    assert!(crate::command::execute(f.niri_state(), float)[0].success);
 
     let rect = |f: &mut Fixture| {
         f.niri_state().ipc_refresh_layout();
@@ -333,13 +342,13 @@ fn ppt_only_resize_of_a_floating_window_is_refused() {
         "resize grow left 5 ppt",
     ] {
         let outcome = crate::command::execute(f.niri_state(), command);
-        assert!(!outcome[0].success, "{command}: {outcome:?}");
+        assert!(!outcome[0].success, "{float}; {command}: {outcome:?}");
         assert_eq!(
             outcome[0].error.as_deref(),
             Some("Floating containers cannot use ppt measurements"),
-            "{command}"
+            "{float}; {command}"
         );
-        assert_eq!(rect(&mut f), before, "{command}");
+        assert_eq!(rect(&mut f), before, "{float}; {command}");
     }
 }
 
@@ -485,15 +494,34 @@ fn move_position_centers_on_root_and_pointer() {
     assert_eq!(absolute["y"], 75);
 
     assert!(crate::command::execute(f.niri_state(), "move absolute position center")[0].success);
+    // The root box is the output at (100, 50) sized 1000x800. A client that
+    // commits 1x1 floats at floating_minimum_size (floating_natural_resize,
+    // sway/tree/container.c:833-847), so centre whatever box it reports.
     let centered = rect(&mut f);
-    assert_eq!(centered["x"], 600);
-    assert_eq!(centered["y"], 450);
+    let int = |key: &str| centered[key].as_i64().unwrap();
+    assert!(
+        (int("x") - (100 + (1000 - int("width")) / 2)).abs() <= 1,
+        "{centered}"
+    );
+    assert!(
+        (int("y") - (50 + (800 - int("height")) / 2)).abs() <= 1,
+        "{centered}"
+    );
 
     f.niri_state().move_cursor((300., 250.).into());
     assert!(crate::command::execute(f.niri_state(), "move position pointer")[0].success);
+    // Sway centres the container on the cursor (cmd_move_to_position_pointer,
+    // sway/commands/move.c:755-756).
     let pointer = rect(&mut f);
-    assert_eq!(pointer["x"], 300);
-    assert_eq!(pointer["y"], 250);
+    let int = |key: &str| pointer[key].as_i64().unwrap();
+    assert!(
+        (int("x") - (300 - int("width") / 2)).abs() <= 1,
+        "{pointer}"
+    );
+    assert!(
+        (int("y") - (250 - int("height") / 2)).abs() <= 1,
+        "{pointer}"
+    );
 }
 
 #[test]
@@ -1164,4 +1192,1176 @@ fn output_rescale_keeps_floating_position_and_client_size() {
         "configures since the rescale repeat the old size: {stale:?}"
     );
     assert_eq!(rect(&mut f), (290, 87, width - 34));
+}
+
+fn run_split_wrap_commands(f: &mut Fixture, client: super::client::ClientId, commands: &[&str]) {
+    for command in commands {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+        f.double_roundtrip(client);
+    }
+}
+
+/// Differential family floating-fullscreen-split-wrap (random-v2 seed 16849): `splith` on a
+/// fullscreen floating view wraps it in a new floating split that takes over the fullscreen
+/// mode (`container_split` and `container_replace`, sway/tree/container.c:1471-1501).
+#[test]
+fn split_wraps_a_fullscreen_floating_view_and_moves_the_mode() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &["fullscreen toggle", "floating enable", "splith"],
+    );
+
+    let tree = tree_json(&mut f);
+    let split = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(split["layout"], "splith", "{split}");
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    assert_eq!(split["border"], "none", "{split}");
+    let view = &split["nodes"][0];
+    assert_eq!(view["fullscreen_mode"], 0, "{view}");
+    assert_eq!(view["focused"], true, "{view}");
+}
+
+/// The same split with a view mapped under the fullscreen one. Sway only re-arranges the
+/// fullscreen container (sway/tree/arrange.c:310-316), so the tiled view keeps calloc's
+/// `border none`, empty box and zero percent. Oracle row:
+/// floating_fullscreen_split_wraps_over_tiled.
+#[test]
+fn split_wrap_of_a_fullscreen_floating_view_leaves_the_tiled_view_unarranged() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(&mut f, client, &["floating enable", "splith"]);
+
+    let tree = tree_json(&mut f);
+    let split = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(split["layout"], "splith", "{split}");
+    assert_eq!(split["fullscreen_mode"], 1, "{split}");
+    let tiled = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(tiled["border"], "none", "{tiled}");
+    assert_eq!(tiled["current_border_width"], 0, "{tiled}");
+    assert_eq!(tiled["percent"], 0.0, "{tiled}");
+    assert_eq!(tiled["rect"]["width"], 0, "{tiled}");
+    assert_eq!(tiled["rect"]["height"], 0, "{tiled}");
+
+    // Ending the fullscreen arranges the whole workspace again.
+    run_split_wrap_commands(&mut f, client, &["focus parent", "fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(tiled["percent"], 1.0, "{tiled}");
+    assert_eq!(tiled["rect"]["width"], 1280, "{tiled}");
+}
+
+/// Random-v2 seed 16849: the tiled view mapped beside the view before it went fullscreen
+/// keeps the half box it had. The split arranges only the fullscreen container
+/// (sway/tree/arrange.c:310-316), so its percent stays 0.5.
+#[test]
+fn split_wrap_of_a_fullscreen_floating_view_keeps_the_tiled_sibling_box() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle", "floating enable"]);
+    let tree = tree_json(&mut f);
+    let before = find_json_node_with_app_id(&tree, "fixture-1")
+        .unwrap()
+        .clone();
+    run_split_wrap_commands(&mut f, client, &["splith"]);
+
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(before["percent"], 0.5, "{before}");
+    assert_eq!(tiled["percent"], 0.5, "{tiled}");
+    assert_eq!(tiled["rect"], before["rect"], "{tree}");
+
+    run_split_wrap_commands(&mut f, client, &["focus parent", "fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let tiled = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(tiled["percent"], 1.0, "{tiled}");
+}
+
+/// The two hidden kinds together, as random-v3 seeds 31204 and 31633 reach them: a view
+/// mapped under the fullscreen keeps its empty box, and a tiled view keeps the box it had
+/// when the fullscreen began, whether that was half the workspace or all of it.
+#[test]
+fn split_wrap_of_a_fullscreen_floating_view_keeps_mapped_and_tiled_boxes() {
+    for (setup, split, percent) in [
+        (&["fullscreen toggle"][..], "splith", 0.5),
+        (&["floating enable", "fullscreen enable"][..], "splitt", 1.0),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1270, 1408));
+        let client = f.add_client();
+        map_app(&mut f, client, "fixture-1");
+        map_app(&mut f, client, "fixture-2");
+        run_split_wrap_commands(&mut f, client, setup);
+        map_app(&mut f, client, "fixture-3");
+        if percent == 0.5 {
+            run_split_wrap_commands(&mut f, client, &["floating enable"]);
+        }
+        run_split_wrap_commands(&mut f, client, &[split]);
+
+        let tree = tree_json(&mut f);
+        let tiled = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+        assert_eq!(tiled["percent"], percent, "{setup:?} {tiled}");
+        assert_eq!(tiled["border"], "normal", "{setup:?} {tiled}");
+        let mapped = find_json_node_with_app_id(&tree, "fixture-3").unwrap();
+        assert_eq!(mapped["percent"], 0.0, "{setup:?} {mapped}");
+        assert_eq!(mapped["border"], "none", "{setup:?} {mapped}");
+    }
+}
+
+/// Ending the floating fullscreen arranges the whole root (sway/commands/fullscreen.c:55), so
+/// the view mapped under it gets its box, border and percent at once, and keeps them through
+/// the next command. Oracle rows: rv2_unfs, rv3_unfs_focus.
+#[test]
+fn fullscreen_disable_of_a_floating_fullscreen_split_arranges_the_mapped_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "floating enable",
+            "splith",
+            "focus parent",
+            "fullscreen disable",
+        ],
+    );
+
+    let assert_arranged = |tree: &serde_json::Value| {
+        let mapped = find_json_node_with_app_id(tree, "fixture-2").unwrap();
+        assert_eq!(mapped["border"], "normal", "{mapped}");
+        assert_ne!(mapped["current_border_width"], 0, "{mapped}");
+        assert_eq!(mapped["percent"], 1.0, "{mapped}");
+        assert_eq!(mapped["rect"]["width"], 1270, "{mapped}");
+    };
+    assert_arranged(&tree_json(&mut f));
+    run_split_wrap_commands(&mut f, client, &["[app_id=fixture-2] focus"]);
+    assert_arranged(&tree_json(&mut f));
+}
+
+/// Differential family low_medium_medium_medium_diff_fam (oracle row rv4_otherfs): a tiled
+/// view under a fullscreen floating split taking `fullscreen enable` ends the floating split's
+/// fullscreen (`container_set_fullscreen`, sway/tree/container.c:1308-1313) and the arrange
+/// gives the tiled view its border.
+#[test]
+fn tiled_fullscreen_enable_under_a_floating_fullscreen_split_takes_the_fullscreen() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "floating enable",
+            "splith",
+            "[app_id=fixture-2] fullscreen enable",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let split = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(split["fullscreen_mode"], 0, "{tree}");
+    let floating = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(floating["focused"], false, "{floating}");
+    assert_eq!(floating["visible"], false, "{floating}");
+    let tiled = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(tiled["fullscreen_mode"], 1, "{tiled}");
+    assert_eq!(tiled["focused"], true, "{tiled}");
+    assert_eq!(tiled["visible"], true, "{tiled}");
+    assert_eq!(tiled["border"], "normal", "{tiled}");
+    assert_ne!(tiled["current_border_width"], 0, "{tiled}");
+    assert_eq!(tiled["percent"], 1.0, "{tiled}");
+}
+
+/// `floating disable` moves the fullscreen split back into the tiling tree, still fullscreen,
+/// and `arrange_workspace` reaches only it (sway/commands/floating.c:55,
+/// sway/tree/arrange.c:310-316). The view mapped under it stays unarranged and the tiled
+/// sibling keeps its half box. Oracle row: rv2_floatdis.
+#[test]
+fn floating_disable_of_a_fullscreen_split_leaves_the_mapped_view_unarranged() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+    map_app(&mut f, client, "fixture-3");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "floating enable",
+            "splith",
+            "focus parent",
+            "floating disable",
+        ],
+    );
+
+    let tree = tree_json(&mut f);
+    let mapped = find_json_node_with_app_id(&tree, "fixture-3").unwrap();
+    assert_eq!(mapped["border"], "none", "{tree}");
+    assert_eq!(mapped["current_border_width"], 0, "{mapped}");
+    assert_eq!(mapped["percent"], 0.0, "{mapped}");
+    assert_eq!(mapped["rect"]["width"], 0, "{mapped}");
+    let tiled = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(tiled["percent"], 0.5, "{tiled}");
+    assert_eq!(tiled["border"], "normal", "{tiled}");
+
+    // The tiled fullscreen split then ends like any other, arranging the whole workspace.
+    // Oracle row: rv3_floatdis_unfs.
+    run_split_wrap_commands(&mut f, client, &["fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let mapped = find_json_node_with_app_id(&tree, "fixture-3").unwrap();
+    assert_eq!(mapped["border"], "normal", "{tree}");
+    assert_ne!(mapped["current_border_width"], 0, "{mapped}");
+    assert_ne!(mapped["percent"], 0.0, "{mapped}");
+}
+
+/// After the split, a command that ends or moves the floating fullscreen leaves the tiled
+/// views arranged with their own border (sway/commands/move.c, sway/commands/fullscreen.c:55).
+/// Oracle rows: rv2_movews, rv2_splitv_twice, rv3_scratch; rv2_kill covers `kill`, which the
+/// harness client does not act on.
+#[test]
+fn ending_a_floating_fullscreen_split_arranges_the_mapped_view() {
+    for exit in [
+        &["focus parent", "move container to workspace 2"][..],
+        &["focus parent", "fullscreen toggle"][..],
+        &["focus parent", "move scratchpad"][..],
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1270, 1408));
+        let client = f.add_client();
+        map_app(&mut f, client, "fixture-1");
+        map_app(&mut f, client, "fixture-2");
+        run_split_wrap_commands(&mut f, client, &["fullscreen toggle"]);
+        map_app(&mut f, client, "fixture-3");
+        run_split_wrap_commands(&mut f, client, &["floating enable", "splith"]);
+        run_split_wrap_commands(&mut f, client, exit);
+
+        let tree = tree_json(&mut f);
+        for app_id in ["fixture-1", "fixture-3"] {
+            let tiled = find_json_node_with_app_id(&tree, app_id).unwrap();
+            assert_eq!(tiled["border"], "normal", "{exit:?} {tiled}");
+            assert_ne!(tiled["current_border_width"], 0, "{exit:?} {tiled}");
+            assert_eq!(tiled["percent"], 0.5, "{exit:?} {tiled}");
+        }
+    }
+}
+
+/// Differential family v3-floating-split-rect-after-resize (random-v3 seeds 30850, 31123,
+/// 31297, 32283; oracle row `floating_resize_ppt_split_keeps_rect`): `resize set` on a
+/// floating view moves the container by half the growth (`con->pending.x -= grow_width / 2`,
+/// sway/commands/resize.c:360-362, :381-383), so the box keeps its centre and a later split
+/// wraps the moved box.
+#[test]
+fn floating_resize_set_keeps_the_centre_and_split_wraps_it() {
+    let mut config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    let surface = f.client(client).create_window().surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size(696, 491);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+    f.double_roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let floating = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        find_json_node(&tree, "floating_con", false)
+            .unwrap()
+            .clone()
+    };
+    let before = floating(&mut f);
+    let int = |node: &Value, key: &str| node["rect"][key].as_i64().unwrap();
+    let (x, y, w, h) = (
+        int(&before, "x"),
+        int(&before, "y"),
+        int(&before, "width"),
+        int(&before, "height"),
+    );
+    assert_eq!(w, 700, "{before}");
+
+    // 30 ppt of 1270 is 381, 40 ppt of 1408 is 563; the client has not committed yet.
+    assert!(
+        crate::command::execute(f.niri_state(), "resize set width 30 ppt height 40 ppt")[0].success
+    );
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    let expected = serde_json::json!({
+        "x": x - (381 - w) / 2,
+        "y": y - (563 - h) / 2,
+        "width": 381,
+        "height": 563,
+    });
+    let split = floating(&mut f);
+    assert_eq!(split["layout"], "splitv", "{split}");
+    assert_eq!(split["rect"], expected, "{before}\n{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    assert_eq!(int(child, "x"), expected["x"].as_i64().unwrap(), "{child}");
+    assert_eq!(
+        int(child, "y"),
+        expected["y"].as_i64().unwrap() + titlebar,
+        "{child}"
+    );
+}
+
+#[test]
+fn floating_move_to_another_output_rehomes_like_sway() {
+    let mut config = swayward_config::Config::default();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_named_output_at("left-head".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("right-head".into(), (1280, 720), Some((1280, 0)));
+    f.niri_focus_output(2);
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "floating enable")[0].success);
+
+    let home = |f: &mut Fixture| {
+        f.niri_state().ipc_refresh_layout();
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let outputs = tree["nodes"].as_array().unwrap();
+        let (output, rect) = outputs
+            .iter()
+            .find_map(|output| {
+                let workspace = output["nodes"].as_array()?.iter().find(|workspace| {
+                    !workspace["floating_nodes"].as_array().unwrap().is_empty()
+                })?;
+                Some((
+                    output["name"].as_str().unwrap().to_owned(),
+                    workspace["floating_nodes"][0]["rect"].clone(),
+                ))
+            })
+            .unwrap();
+        (
+            output,
+            rect["x"].as_i64().unwrap(),
+            rect["y"].as_i64().unwrap(),
+        )
+    };
+
+    assert_eq!(home(&mut f).0, "right-head");
+    assert!(
+        crate::command::execute(f.niri_state(), "move absolute position 10 px 20 px")[0].success
+    );
+    let (output, x, _) = home(&mut f);
+    assert_eq!((output.as_str(), x), ("left-head", 10));
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        "left-head"
+    );
+
+    assert!(crate::command::execute(f.niri_state(), "move right 1500 px")[0].success);
+    let (output, x, _) = home(&mut f);
+    assert_eq!((output.as_str(), x), ("right-head", 1510));
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        "right-head"
+    );
+}
+
+#[test]
+fn fullscreen_floater_move_absolute_position_crosses_output_like_sway() {
+    let mut f = Fixture::new();
+    f.add_named_output_at("left-head".into(), (1280, 720), Some((0, 0)));
+    f.add_named_output_at("right-head".into(), (1280, 720), Some((1280, 0)));
+    f.niri_focus_output(2);
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "fullscreen toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "floating toggle")[0].success);
+    assert!(crate::command::execute(f.niri_state(), "move position 10 px 20 px")[0].success);
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        "right-head"
+    );
+    assert!(
+        crate::command::execute(f.niri_state(), "move absolute position 10 px 20 px")[0].success
+    );
+    assert_eq!(
+        f.swayward().layout.active_output().unwrap().name(),
+        "left-head"
+    );
+    let focused = f.swayward().layout.focus().unwrap().window.clone();
+    assert!(f.swayward().layout.fullscreen_mode(&focused).is_some());
+    assert!(
+        !crate::command::execute(f.niri_state(), "move absolute position 10 ppt 20 px")[0].success
+    );
+}
+
+#[test]
+fn view_mapped_under_a_fullscreen_floating_group_keeps_the_group_focused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &["focus parent", "floating toggle", "fullscreen enable"],
+    );
+    map_app(&mut f, client, "fixture-2");
+
+    let tree = tree_json(&mut f);
+    let group = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(group["fullscreen_mode"], 1, "{tree:#}");
+    assert_eq!(group["focused"], true, "{tree:#}");
+    let mapped = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(mapped["focused"], false, "{mapped}");
+    assert_eq!(mapped["percent"], 0.0, "{mapped}");
+    assert_eq!(mapped["border"], "normal", "{mapped}");
+    assert_eq!(mapped["rect"]["width"], 0, "{mapped}");
+}
+
+#[test]
+fn fullscreen_rule_view_mapped_under_a_fullscreen_floating_group_takes_focus_and_fullscreen() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[r#"for_window [app_id="fixture-2"] fullscreen enable"#],
+    );
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &["focus parent", "floating toggle", "fullscreen enable"],
+    );
+    let held_rect = {
+        let tree = tree_json(&mut f);
+        find_json_node_with_app_id(&tree, "fixture-1").unwrap()["rect"].clone()
+    };
+    map_app(&mut f, client, "fixture-2");
+
+    let tree = tree_json(&mut f);
+    let group = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(group["fullscreen_mode"], 0, "{tree:#}");
+    assert_eq!(group["focused"], false, "{tree:#}");
+    let held = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_eq!(held["visible"], false, "{held}");
+    // Arranging the workspace reaches only the new fullscreen view
+    // (sway/tree/arrange.c:310-316), so the group's child keeps its fullscreen box.
+    assert_eq!(held["rect"], held_rect, "{held}");
+    let mapped = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(mapped["focused"], true, "{mapped}");
+    assert_eq!(mapped["fullscreen_mode"], 1, "{mapped}");
+    assert_eq!(mapped["visible"], true, "{mapped}");
+    assert_eq!(mapped["percent"], 1.0, "{mapped}");
+    f.swayward().layout.verify_invariants();
+
+    run_split_wrap_commands(&mut f, client, &["fullscreen disable"]);
+    let tree = tree_json(&mut f);
+    let group = find_json_node(&tree, "floating_con", false).unwrap();
+    let held = find_json_node_with_app_id(&tree, "fixture-1").unwrap();
+    assert_ne!(held["rect"], held_rect, "{held}");
+    assert_eq!(held["rect"]["width"], group["rect"]["width"], "{tree:#}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// Differential family diff-fam-v3-global-fs-map-under-floating-fs: a
+/// `for_window ... fullscreen enable global` view mapped under a fullscreen floating group.
+/// `container_set_fullscreen(GLOBAL)` leaves the group's workspace fullscreen alone
+/// (sway/tree/container.c:1316-1323), `should_focus` accepts a global fullscreen view first
+/// (sway/tree/view.c:703-705), and `arrange_root` lays out only `root->fullscreen_global`
+/// (sway/tree/arrange.c:347-353), so the new view takes focus and the whole output while the
+/// group stays workspace fullscreen.
+/// Oracle row: floating_fullscreen_group_map_global_rule.
+#[test]
+fn global_fullscreen_rule_view_mapped_under_a_fullscreen_floating_group_takes_the_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[r#"for_window [app_id="fixture-2"] fullscreen enable global"#],
+    );
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &["focus parent", "floating toggle", "fullscreen enable"],
+    );
+    map_app(&mut f, client, "fixture-2");
+
+    let tree = tree_json(&mut f);
+    let group = find_json_node(&tree, "floating_con", false).unwrap();
+    assert_eq!(group["fullscreen_mode"], 1, "{tree:#}");
+    assert_eq!(group["focused"], false, "{tree:#}");
+    let mapped = find_json_node_with_app_id(&tree, "fixture-2").unwrap();
+    assert_eq!(mapped["focused"], true, "{mapped}");
+    assert_eq!(mapped["fullscreen_mode"], 2, "{mapped}");
+    assert_eq!(mapped["visible"], true, "{mapped}");
+    assert_eq!(mapped["percent"], 1.0, "{mapped}");
+    assert_eq!(mapped["rect"]["width"], 1280, "{mapped}");
+    assert_eq!(mapped["rect"]["height"], 720, "{mapped}");
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
+fn ppt_only_resize_of_a_fullscreen_floating_window_is_refused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in ["fullscreen toggle", "floating toggle"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "resize shrink width 5 ppt");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Floating containers cannot use ppt measurements")
+    );
+}
+
+/// The oracle harness config with one 1270x1408 output and a server-side
+/// decorated client that commits a 696x491 buffer when it maps.
+fn scratchpad_rect_fixture() -> (Fixture, super::client::ClientId) {
+    let mut config = swayward_config::Config::parse_mem(
+        r#"layout { default-border "normal" width=2; default-floating-border "normal" width=2; border { on; width 2; }; }"#,
+    )
+    .unwrap();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1270, 1408));
+    let client = f.add_client();
+    (f, client)
+}
+
+fn map_natural_window(f: &mut Fixture, client: super::client::ClientId, app_id: &str) {
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id(app_id.into());
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.set_size(696, 491);
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+}
+
+/// Asserts `rect` against `(x, y, width, height)`, allowing the x origin to round
+/// either way: the default scratchpad box is centred at a half pixel (315.5), which
+/// sway reports truncated.
+fn assert_rect_near(rect: &Value, (x, y, w, h): (i64, i64, i64, i64), context: &Value) {
+    let int = |key: &str| rect[key].as_i64().unwrap();
+    assert!(
+        (int("x") - x).abs() <= 1,
+        "x {} vs {x}: {context}",
+        int("x")
+    );
+    assert_eq!(
+        (int("y"), int("width"), int("height")),
+        (y, w, h),
+        "{context}"
+    );
+}
+
+fn floating_con_json(f: &mut Fixture) -> Value {
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    find_json_node(&tree, "floating_con", false)
+        .unwrap()
+        .clone()
+}
+
+/// Differential family v3-scratchpad-show-rect (random-v3 seeds 31690, 32687; oracle row
+/// `scratchpad_rule_show_uses_natural_size`): a `for_window` rule that moves a mapping view
+/// to the scratchpad gives it the default scratchpad box, centred
+/// (`root_scratchpad_add_container`, sway/tree/root.c:114-119), but the map commit's
+/// `handle_commit` runs after the criteria and resizes the hidden floating view to its
+/// committed geometry while keeping the content origin (`view_update_size`,
+/// sway/desktop/xdg_shell.c:319-326, sway/tree/view.c:1026-1031).
+#[test]
+fn for_window_move_scratchpad_keeps_the_committed_size() {
+    let (mut f, client) = scratchpad_rect_fixture();
+    let rule = r#"for_window [app_id="^fixture-ssr-1$"] move scratchpad"#;
+    assert!(crate::command::execute(f.niri_state(), rule)[0].success);
+    map_natural_window(&mut f, client, "fixture-ssr-1");
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "split h")[0].success);
+    f.double_roundtrip(client);
+
+    let split = floating_con_json(&mut f);
+    assert_eq!(split["layout"], "splith", "{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    // The default box has 635x1056 content: the container is 639 wide and
+    // 1058 + titlebar high, centred on the 1270x1408 workspace. The committed
+    // 696x491 content then keeps that content origin.
+    let x = (1270 - 639) / 2;
+    let y = (1408 - (1058 + titlebar)) / 2;
+    assert_rect_near(&split["rect"], (x, y, 700, 493 + titlebar), &split);
+    assert_rect_near(&child["rect"], (x, y + titlebar, 700, 493), child);
+}
+
+/// Differential family v3-scratchpad-show-rect (random-v3 seeds 31529, 32562; oracle row
+/// `scratchpad_tabbed_criteria_focus_split_rect`): a tabbed view sent to the scratchpad is
+/// sized and centred as a floating container with its own titlebar
+/// (`container_floating_set_default_size`, `container_floating_move_to_center`,
+/// sway/tree/container.c:896-917, 1147-1156), not as the tab whose titlebar its parent drew.
+#[test]
+fn tabbed_view_moved_to_scratchpad_centres_its_own_titlebar() {
+    let (mut f, client) = scratchpad_rect_fixture();
+    assert!(crate::command::execute(f.niri_state(), "layout tabbed")[0].success);
+    map_natural_window(&mut f, client, "fixture-ssr-2");
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    f.double_roundtrip(client);
+    assert!(
+        crate::command::execute(f.niri_state(), r#"[app_id="^fixture-ssr-2$"] focus"#)[0].success
+    );
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "splitv")[0].success);
+    f.double_roundtrip(client);
+
+    let split = floating_con_json(&mut f);
+    assert_eq!(split["layout"], "splitv", "{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    let x = (1270 - 639) / 2;
+    let y = (1408 - (1058 + titlebar)) / 2;
+    assert_rect_near(&split["rect"], (x, y, 639, 1058 + titlebar), &split);
+    assert_rect_near(&child["rect"], (x, y + titlebar, 639, 1058), child);
+}
+
+/// Differential family v3-scratchpad-show-rect (random-v3 seed 31529): a view a `for_window`
+/// rule made fullscreen leaves fullscreen as it enters the scratchpad (sway/tree/root.c:109-112),
+/// so its default box is centred with the floating titlebar and border it gets back
+/// (sway/tree/root.c:114-119), and a split before the client commits that box wraps it rather
+/// than the last committed fullscreen size (sway/tree/container.c:1543-1548). No oracle row:
+/// pinned sway's capture of this shape varies run to run with when foot snaps to its cell grid.
+#[test]
+fn fullscreen_view_moved_to_scratchpad_centres_its_floating_box() {
+    let (mut f, client) = scratchpad_rect_fixture();
+    let rule = r#"for_window [app_id="^fixture-ssr-3$"] fullscreen enable"#;
+    assert!(crate::command::execute(f.niri_state(), rule)[0].success);
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixture-ssr-3".into());
+    let surface = window.surface.clone();
+    f.client(client).decorate_last_window(
+        smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    );
+    f.client(client).window(&surface).commit();
+    f.roundtrip(client);
+    // Like foot, the client takes every configured size and picks 696x491
+    // when it is left to choose.
+    let follow = |f: &mut Fixture| {
+        let window = f.client(client).window(&surface);
+        let (serial, configure) = window.configures_received.last().unwrap();
+        if window.last_acked_configure == Some(*serial) {
+            return;
+        }
+        let (w, h) = configure.size;
+        let (w, h) = if w > 0 && h > 0 { (w, h) } else { (696, 491) };
+        window.attach_new_buffer();
+        window.set_size(w as u16, h as u16);
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    follow(&mut f);
+    // The rule's fullscreen configure; the client commits it.
+    follow(&mut f);
+    assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+    f.double_roundtrip(client);
+    // The split arrives before the client commits the floating size, while
+    // its last commit is still the fullscreen one.
+    assert!(crate::command::execute(f.niri_state(), "scratchpad show")[0].success);
+    f.double_roundtrip(client);
+    assert!(crate::command::execute(f.niri_state(), "splith")[0].success);
+    f.double_roundtrip(client);
+    follow(&mut f);
+
+    let split = floating_con_json(&mut f);
+    assert_eq!(split["layout"], "splith", "{split}");
+    let child = &split["nodes"][0];
+    let titlebar = child["deco_rect"]["height"].as_i64().unwrap();
+    let x = (1270 - 639) / 2;
+    let y = (1408 - (1058 + titlebar)) / 2;
+    assert_rect_near(&split["rect"], (x, y, 639, 1058 + titlebar), &split);
+    assert_rect_near(&child["rect"], (x, y + titlebar, 639, 1058), child);
+}
+
+/// A fullscreen floater's pending box is the output's (sway/tree/arrange.c:310-316), so
+/// growing it in px runs into the automatic floating maximum, the output layout box
+/// (sway/tree/container.c:797-814), and sway answers "Cannot resize any further"
+/// (sway/commands/resize.c:216-218). Differential seed 32614.
+#[test]
+fn px_grow_of_a_fullscreen_floating_container_cannot_resize_further() {
+    px_grow_of_fullscreen_floater_cannot_resize_further("focus parent; floating toggle");
+}
+
+#[test]
+fn px_grow_of_a_fullscreen_floating_view_cannot_resize_further() {
+    px_grow_of_fullscreen_floater_cannot_resize_further("floating toggle");
+}
+
+fn px_grow_of_fullscreen_floater_cannot_resize_further(float: &str) {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in [float, "fullscreen toggle"] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+
+    let outcome = crate::command::execute(f.niri_state(), "resize grow left 20 px");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Cannot resize any further")
+    );
+    let outcome = crate::command::execute(f.niri_state(), "resize grow height 20 px");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Cannot resize any further")
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+/// A global fullscreen container's pending box is the output layout box
+/// (sway/tree/arrange.c:349-355), which is also the automatic floating maximum
+/// (sway/tree/container.c:797-814), so a px grow of a floated split finds no
+/// room and sway answers "Cannot resize any further" (sway/commands/resize.c:216-218).
+/// Differential family diff-fam-v3-resize-floated-gfs-split-px, seeds 33784, 33929.
+/// Oracle row: global_fullscreen_floated_split_px_resize_rejected.
+#[test]
+fn px_grow_of_a_global_fullscreen_floated_split_cannot_resize_further() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "focus parent; split v",
+            "floating toggle",
+            "fullscreen enable global",
+        ],
+    );
+    let before = tree_json(&mut f);
+
+    for command in ["resize grow width 10 px", "resize grow up 10 px"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert_eq!(
+            outcome,
+            [swayward_ipc::CommandOutcome {
+                success: false,
+                error: Some("Cannot resize any further".into()),
+                parse_error: Some(true),
+            }],
+            "{command}"
+        );
+    }
+    f.double_roundtrip(client);
+    let after = tree_json(&mut f);
+    let group = find_json_node(&after, "floating_con", false).unwrap();
+    assert_eq!(group["fullscreen_mode"], 2, "{after:#}");
+    assert_eq!(
+        group["rect"],
+        find_json_node(&before, "floating_con", false).unwrap()["rect"]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+/// After a view leaves, a workspace whose floating dialog was focused earlier keeps the
+/// tiling space active with the dialog raised. Its focused split is still sway's
+/// `handler_context.container`, so `resize` acts on the split: with no parallel
+/// sibling sway answers "Cannot resize any further" (sway/commands/resize.c:46-63,
+/// 271-276) rather than resizing a view inside it.
+/// Differential family diff-fam-v3-resize-floated-gfs-split-px, seed 33929.
+/// Oracle row: raised_floater_focused_split_resize_rejected.
+#[test]
+fn resize_after_move_out_targets_the_focused_split_beside_a_raised_floater() {
+    let mut f = Fixture::new();
+    f.add_output(1, (720, 1280));
+    let client = f.add_client();
+    // A fixed-size dialog with a parent: the parent tiles, the dialog floats.
+    let parent = f.client(client).create_window();
+    parent.xdg_toplevel.set_app_id("parent".into());
+    let parent_surface = parent.surface.clone();
+    let parent_toplevel = parent.xdg_toplevel.clone();
+    parent.commit();
+    f.roundtrip(client);
+    let parent = f.client(client).window(&parent_surface);
+    parent.attach_new_buffer();
+    parent.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let dialog = f.client(client).create_window();
+    dialog.xdg_toplevel.set_app_id("dialog".into());
+    dialog.set_min_size(400, 300);
+    dialog.set_max_size(400, 300);
+    dialog.set_parent(Some(&parent_toplevel));
+    let dialog_surface = dialog.surface.clone();
+    dialog.commit();
+    f.roundtrip(client);
+    let dialog = f.client(client).window(&dialog_surface);
+    dialog.attach_new_buffer();
+    dialog.ack_last_and_commit();
+    f.double_roundtrip(client);
+    map_app(&mut f, client, "fixture-2");
+    run_split_wrap_commands(&mut f, client, &["layout tabbed; layout toggle"]);
+    map_app(&mut f, client, "fixture-3");
+    run_split_wrap_commands(
+        &mut f,
+        client,
+        &[
+            "layout toggle split",
+            "move up",
+            "move container to workspace number 3",
+        ],
+    );
+    let before = tree_json(&mut f);
+
+    let outcome = crate::command::execute(f.niri_state(), "resize grow width 10 px or 5 ppt");
+    assert_eq!(
+        outcome,
+        [swayward_ipc::CommandOutcome {
+            success: false,
+            error: Some("Cannot resize any further".into()),
+            parse_error: Some(true),
+        }]
+    );
+    f.double_roundtrip(client);
+    assert_eq!(tree_json(&mut f), before);
+    f.swayward().layout.verify_invariants();
+}
+
+/// Family diff-fam-v3-resize-floated-fullscreen-px-residual-1: a px shrink of a fullscreen
+/// floating container moves its pending box off the output box and arranges its children
+/// there (sway/commands/resize.c:180-230); the next workspace arrange puts it back
+/// (sway/tree/arrange.c:310-316). Oracle row fullscreen_floating_group_px_shrink_shifts_children.
+#[test]
+fn px_shrink_of_a_fullscreen_floating_container_moves_its_children() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in [
+        "focus parent; floating toggle",
+        "fullscreen toggle",
+        "resize shrink left 20 px",
+    ] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 20, "{child}");
+    assert_eq!(child["rect"]["width"], 980, "{child}");
+    // Shrinking the moved box again measures it, not the output box.
+    assert!(crate::command::execute(f.niri_state(), "resize shrink width 20 px")[0].success);
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 30, "{child}");
+    assert_eq!(child["rect"]["width"], 960, "{child}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// Mapping a view onto the workspace arranges it (`view_map`, sway/tree/view.c:931-940), and
+/// `arrange_workspace` puts the fullscreen floating container back at the output box
+/// (sway/tree/arrange.c:310-316), so the shrink's moved pending box is gone.
+/// Oracle row ro1_fs_group_shrink_then_window.
+#[test]
+fn mapping_a_view_resets_a_shrunk_fullscreen_floating_container() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    for command in [
+        "focus parent; floating toggle",
+        "fullscreen toggle",
+        "resize shrink left 20 px",
+    ] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 20, "{child}");
+
+    map_app(&mut f, client, "fixture-2");
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 0, "{child}");
+    assert_eq!(child["rect"]["width"], 1000, "{child}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// A fullscreen floating view's pending box is the output box, so a px shrink succeeds and a
+/// grow on a single output meets the automatic floating maximum (sway/commands/resize.c:180-230).
+/// Oracle row fullscreen_floating_view_px_resize.
+#[test]
+fn px_shrink_of_a_fullscreen_floating_view_succeeds() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in ["floating toggle", "fullscreen toggle"] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let outcome = crate::command::execute(f.niri_state(), "resize grow left 20 px");
+    assert_eq!(
+        outcome[0].error.as_deref(),
+        Some("Cannot resize any further")
+    );
+    for command in ["resize shrink width 20 px", "resize shrink up 20 px"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    f.swayward().layout.verify_invariants();
+}
+
+/// With two outputs the automatic floating maximum is the output layout box, wider than the
+/// fullscreen output, so a px grow succeeds (sway/tree/container.c:797-814). Oracle rows
+/// fullscreen_floating_group_px_grow_two_outputs, fullscreen_floating_view_px_grow_two_outputs.
+#[test]
+fn px_grow_of_a_fullscreen_floater_succeeds_beside_a_second_output() {
+    for float in ["focus parent; floating toggle", "floating toggle"] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1000, 800));
+        f.add_output(2, (1000, 800));
+        let client = f.add_client();
+        let window = f.client(client).create_window();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        for command in [float, "fullscreen toggle", "resize grow left 20 px"] {
+            for reply in crate::command::execute(f.niri_state(), command) {
+                assert!(reply.success, "{float}: {command}: {reply:?}");
+            }
+        }
+        f.swayward().layout.verify_invariants();
+    }
+}
+
+/// `swap` of two views whose parent is the workspace ends in `arrange_node(workspace)`, an
+/// `arrange_workspace` (sway/commands/swap.c:92-103), which puts the fullscreen floating
+/// container back at the output box (sway/tree/arrange.c:310-316). Oracle row
+/// ro3a_fs_group_shrink_then_x.
+#[test]
+fn swapping_workspace_level_views_resets_a_shrunk_fullscreen_floating_container() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-g");
+    assert!(
+        crate::command::execute(f.niri_state(), "focus parent; floating toggle")
+            .iter()
+            .all(|reply| reply.success)
+    );
+    map_app(&mut f, client, "fixture-t1");
+    map_app(&mut f, client, "fixture-t2");
+    for command in [
+        "[app_id=\"^fixture-g$\"] focus",
+        "focus parent",
+        "fullscreen toggle",
+        "resize shrink left 20 px",
+    ] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 20, "{child}");
+
+    let command = "[app_id=\"^fixture-t2$\"] mark m; \
+                   [app_id=\"^fixture-t1$\"] swap container with mark m";
+    for reply in crate::command::execute(f.niri_state(), command) {
+        assert!(reply.success, "{command}: {reply:?}");
+    }
+    let child = floating_con_json(&mut f)["nodes"][0].clone();
+    assert_eq!(child["rect"]["x"], 0, "{child}");
+    assert_eq!(child["rect"]["width"], 1000, "{child}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// `workspace_switch` arranges the workspace it shows (sway/tree/workspace.c:731-743), which
+/// puts a resized fullscreen floating container back at the output box
+/// (sway/tree/arrange.c:310-316). Oracle row review_o5_fs_group_set_then_arrange, which
+/// moves the box with `resize set` and a px grow; a px shrink moves it here.
+#[test]
+fn switching_workspaces_away_and_back_resets_a_resized_fullscreen_floating_container() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1000, 800));
+    let client = f.add_client();
+    map_app(&mut f, client, "fixture-1");
+    map_app(&mut f, client, "fixture-2");
+    for command in [
+        "focus parent",
+        "floating enable",
+        "fullscreen toggle",
+        "resize shrink left 20 px",
+    ] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let group = floating_con_json(&mut f);
+    assert_eq!(group["nodes"][0]["rect"]["x"], 20, "{group}");
+
+    for command in ["workspace 2", "workspace 1"] {
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+    }
+    let group = floating_con_json(&mut f);
+    assert_eq!(group["rect"]["x"], 0, "{group}");
+    assert_eq!(group["rect"]["width"], 1000, "{group}");
+    assert_eq!(group["nodes"][0]["rect"]["x"], 0, "{group}");
+    assert_eq!(group["nodes"][1]["rect"]["x"], 500, "{group}");
+    assert_eq!(group["nodes"][1]["rect"]["width"], 500, "{group}");
+    f.swayward().layout.verify_invariants();
+}
+
+/// Each of these handlers ends in `arrange_workspace` or `arrange_root` on the workspace
+/// (sway/commands/fullscreen.c:55, move.c:712-736, resize.c:166-170), so the fullscreen
+/// floating container's moved pending box is gone afterwards (sway/tree/arrange.c:310-316).
+#[test]
+fn workspace_arranging_commands_reset_a_shrunk_fullscreen_floating_container() {
+    for command in [
+        "[app_id=\"^fixture-t1$\"] fullscreen disable",
+        "[app_id=\"^fixture-t1$\"] move right",
+        "[app_id=\"^fixture-t1$\"] resize grow width 10 px",
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1000, 800));
+        let client = f.add_client();
+        map_app(&mut f, client, "fixture-g");
+        crate::command::execute(f.niri_state(), "focus parent; floating toggle");
+        map_app(&mut f, client, "fixture-t1");
+        map_app(&mut f, client, "fixture-t2");
+        for setup in [
+            "[app_id=\"^fixture-g$\"] focus",
+            "focus parent",
+            "fullscreen toggle",
+            "resize shrink left 20 px",
+        ] {
+            for reply in crate::command::execute(f.niri_state(), setup) {
+                assert!(reply.success, "{setup}: {reply:?}");
+            }
+        }
+        for reply in crate::command::execute(f.niri_state(), command) {
+            assert!(reply.success, "{command}: {reply:?}");
+        }
+        let child = floating_con_json(&mut f)["nodes"][0].clone();
+        assert_eq!(child["rect"]["x"], 0, "{command}: {child}");
+        assert_eq!(child["rect"]["width"], 1000, "{command}: {child}");
+        f.swayward().layout.verify_invariants();
+    }
 }

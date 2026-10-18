@@ -117,9 +117,20 @@ impl<W: LayoutElement> TilingTree<W> {
             HashMap::new()
         };
         self.fullscreen_tile_slot = false;
+        self.fullscreen_pending_box = None;
         self.orphaned_global_fullscreen = None;
         self.fullscreen_arrived = false;
-        if replaced_unrelated {
+        // A wrapper a failed move left unarranged keeps the empty-box layout
+        // too: `arrange_workspace` reaches only the new workspace fullscreen
+        // container (sway/tree/arrange.c:310-316).
+        let keeps_unarranged_wrapper = fullscreen == Some(FullscreenMode::Workspace)
+            && self.unarranged_wrappers.iter().any(|wrapper| {
+                self.nodes
+                    .get(&id)
+                    .and_then(|node| node.parent)
+                    .is_some_and(|parent| parent == *wrapper)
+            });
+        if replaced_unrelated || keeps_unarranged_wrapper {
             // A `layout` wrapper's subtree keeps the empty-box layout
             // `arrange_container(wrapper)` gave it; only the new fullscreen
             // container is arranged again.
@@ -151,6 +162,13 @@ impl<W: LayoutElement> TilingTree<W> {
             self.pre_layout_ipc_rects.clear();
         }
         if let Some(fullscreen) = fullscreen {
+            // The arrange that follows always reaches the new fullscreen container
+            // (sway/tree/arrange.c:310-316 and 347-353), even when a floating container keeps
+            // the workspace fullscreen beside a new global one
+            // (`container_set_fullscreen`, sway/tree/container.c:1316-1323).
+            self.mapped_under_fullscreen.remove(&id);
+            self.moved_under_fullscreen.remove(&id);
+            self.unarranged_under_fullscreen.remove(&id);
             self.set_pending_fullscreen(id, Some(fullscreen));
             if self.focus != Some(id) {
                 self.set_focus_id(self.focused_leaf_in(id));
@@ -207,6 +225,8 @@ impl<W: LayoutElement> TilingTree<W> {
     /// Without a workspace fullscreen container it arranges the tiling children, which gives a
     /// wrapper a failed move left unarranged its box (sway/tree/arrange.c:317-321).
     pub fn arrange_workspace(&mut self) {
+        self.forget_unarranged_after_sticky_carry();
+        self.note_workspace_arrange();
         let Some(id) = self.fullscreen_node() else {
             self.unarranged_wrappers.clear();
             self.wrapper_arranged_boxes.clear();
@@ -219,6 +239,15 @@ impl<W: LayoutElement> TilingTree<W> {
             self.fullscreen_tile_slot = false;
             self.fullscreen_rearranged = true;
             self.forget_wrapper_boxes_in(id);
+        }
+    }
+
+    /// Any arrange of this workspace lays out the nodes a sticky carry left unarranged.
+    pub(super) fn forget_unarranged_after_sticky_carry(&mut self) {
+        if std::mem::take(&mut self.unarranged_after_sticky_carry) {
+            self.mapped_under_fullscreen.clear();
+            self.moved_under_fullscreen.clear();
+            self.unarranged_under_fullscreen.clear();
         }
     }
 
@@ -243,12 +272,68 @@ impl<W: LayoutElement> TilingTree<W> {
     /// container gets the root or output box again (sway/tree/arrange.c:310-316
     /// and 340-361).
     pub fn arrange_root(&mut self) {
+        self.forget_unarranged_after_sticky_carry();
+        self.note_workspace_arrange();
         let Some(id) = self.fullscreen_node() else {
             return;
         };
         self.fullscreen_tile_slot = false;
         self.fullscreen_rearranged = true;
         self.forget_wrapper_boxes_in(id);
+    }
+
+    /// See `fullscreen_pending_box`.
+    pub fn fullscreen_pending_box(&self) -> Option<Rectangle<f64, Logical>> {
+        self.fullscreen_pending_box
+    }
+
+    /// Moves the fullscreen node's pending box, as `resize_adjust_floating` does, and
+    /// arranges the fullscreen subtree in it (sway/commands/resize.c:219-229).
+    pub fn set_fullscreen_pending_box(&mut self, rect: Rectangle<f64, Logical>) {
+        if self.fullscreen_node().is_none() {
+            return;
+        }
+        self.fullscreen_pending_box = Some(rect);
+        self.request_window_sizes();
+    }
+
+    /// Counts the arranges of this tree's workspace; see `arrange_epoch`.
+    pub fn arrange_epoch(&self) -> u64 {
+        self.arrange_epoch
+    }
+
+    /// Records an `arrange_workspace` or `arrange_root` reaching this tree's workspace, which
+    /// puts any fullscreen container back at the output box (sway/tree/arrange.c:310-316,
+    /// 349-355). Floating groups follow through `arrange_epoch`.
+    pub fn note_workspace_arrange(&mut self) {
+        self.arrange_epoch = self.arrange_epoch.wrapping_add(1);
+        self.forget_fullscreen_pending_box();
+    }
+
+    /// Whether mapping `window` arranges the workspace. `view_map` arranges the parent when
+    /// the view has one, else the workspace, and the workspace for a fullscreen view
+    /// (sway/tree/view.c:931-940). A view mapped onto the workspace, or wrapped there by
+    /// `workspace_layout` (`workspace_add_tiling`, sway/tree/workspace.c:948-951), has none.
+    pub fn view_map_arranges_workspace(&self, window: &W::Id) -> bool {
+        let Some(id) = self.node_for_window(window) else {
+            return false;
+        };
+        if self.fullscreen_node() == Some(id) {
+            return true;
+        }
+        let Some(parent) = self.parent_of_node(id) else {
+            return false;
+        };
+        parent == self.root
+            || (self.parent_of_node(parent) == Some(self.root) && self.split_len(parent) == Some(1))
+    }
+
+    /// An arrange puts the fullscreen node back at the output box
+    /// (sway/tree/arrange.c:310-316, 349-355).
+    pub fn forget_fullscreen_pending_box(&mut self) {
+        if self.fullscreen_pending_box.take().is_some() {
+            self.request_window_sizes();
+        }
     }
 
     /// Whether this tree holds a global fullscreen container
@@ -360,6 +445,80 @@ impl<W: LayoutElement> TilingTree<W> {
         boxes
     }
 
+    /// `floating disable` on the fullscreen floating view `window`, which this
+    /// tree parks at the workspace level. Sway detaches it and adds it beside
+    /// the workspace's focus-inactive tiling container, or last inside it when
+    /// that is a split, else last on the workspace, without touching the seat
+    /// focus (`container_set_floating`, sway/tree/container.c:976-994).
+    pub fn place_unfloated_fullscreen(&mut self, window: &W::Id) {
+        let Some(id) = self
+            .node_for_window(window)
+            .filter(|id| self.nodes.get(id).and_then(|node| node.parent) == Some(self.root))
+        else {
+            return;
+        };
+        let reference = self.focus_history.iter().copied().find(|candidate| {
+            *candidate != self.root
+                && self.nodes.contains_key(candidate)
+                && self.contains_node(self.root, *candidate)
+                && !self.contains_node(id, *candidate)
+                && !self.is_floating_fullscreen(*candidate)
+        });
+        self.move_subtree_to_node_keeping_focus(id, reference.unwrap_or(self.root));
+    }
+
+    /// `floating enable|disable` on the global fullscreen node `window`.
+    /// `container_set_floating` detaches it, which clears
+    /// `root->fullscreen_global`, and neither `workspace_add_floating` nor
+    /// `container_add_sibling` restores it, while the view keeps
+    /// `FULLSCREEN_GLOBAL` (sway/tree/container.c:941-1011, 1380-1391 and
+    /// 1440-1446). `cmd_floating` then arranges the workspace like any other
+    /// (sway/commands/floating.c:53-56, sway/tree/arrange.c:317-321): a
+    /// floating view takes no share of the split, a tiled one reports its
+    /// slot.
+    pub fn orphan_global_fullscreen_on_floating(&mut self, window: &W::Id, floating: bool) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        if self.fullscreen_node() != Some(id) || !self.orphan_global_fullscreen() {
+            return;
+        }
+        self.fullscreen_arrived = floating;
+        self.fullscreen_tile_slot = !floating;
+        self.request_window_sizes();
+    }
+
+    /// `window` arrived as a global fullscreen view sway no longer tracks as
+    /// `root->fullscreen_global`: `workspace_add_floating` keeps its mode 2
+    /// and restores nothing (sway/tree/workspace.c:961-972), so it stays
+    /// orphaned here.
+    pub fn arrive_orphaned_global_fullscreen(&mut self, window: &W::Id) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        if self.fullscreen_mode(id).is_none() {
+            return;
+        }
+        self.set_pending_fullscreen(id, Some(FullscreenMode::Global));
+        self.orphaned_global_fullscreen = Some(id);
+        // It sits in `ws->floating`, so it takes no share of the split.
+        self.fullscreen_arrived = true;
+        self.request_window_sizes();
+    }
+
+    /// Record this tree's global fullscreen node as orphaned (see
+    /// `orphaned_global_fullscreen`). Returns false when there is none.
+    pub fn orphan_global_fullscreen(&mut self) -> bool {
+        let Some(id) = self
+            .fullscreen_node()
+            .filter(|_| self.has_global_fullscreen())
+        else {
+            return false;
+        };
+        self.orphaned_global_fullscreen = Some(id);
+        true
+    }
+
     pub fn mark_fullscreen_arrived(&mut self) {
         if self.fullscreen_node().is_some() {
             self.fullscreen_arrived = true;
@@ -383,6 +542,46 @@ impl<W: LayoutElement> TilingTree<W> {
                 .find_map(|(id, mode)| (mode.fullscreen == Some(wanted)).then_some(*id))
         };
         find(FullscreenMode::Global).or_else(|| find(FullscreenMode::Workspace))
+    }
+
+    /// Whether focus stays on the focused `window` when it leaves this tree
+    /// for another workspace. An emptied old parent sends sway's refocus to the
+    /// most recent entry on the old workspace (sway/commands/move.c:589-597).
+    /// Focusing the view put its ancestors on the seat's stack outermost first
+    /// (sway/input/seat.c:1178-1190), so that entry is the outermost ancestor.
+    /// When that ancestor is outside the fullscreen container, the fullscreen
+    /// container obstructs it and `seat_set_focus` refuses
+    /// (sway/input/seat.c:1148-1151). The moved view keeps focus, and reaping
+    /// the emptied containers puts its new workspace on the stack
+    /// (sway/input/seat.c:304-313).
+    pub fn departing_view_keeps_focus(&self, window: &W::Id) -> bool {
+        let (Some(leaf), Some(fullscreen)) = (self.node_for_window(window), self.fullscreen_node())
+        else {
+            return false;
+        };
+        if fullscreen == leaf
+            || self.global_fullscreen_orphaned()
+            || !self.contains_node(fullscreen, leaf)
+        {
+            return false;
+        }
+        let Some(parent) = self
+            .parent_of_node(leaf)
+            .filter(|parent| *parent != self.root)
+        else {
+            return false;
+        };
+        if self.split_len(parent) != Some(1) {
+            return false;
+        }
+        let mut outermost = parent;
+        while let Some(next) = self
+            .parent_of_node(outermost)
+            .filter(|next| *next != self.root)
+        {
+            outermost = next;
+        }
+        !self.contains_node(fullscreen, outermost)
     }
 
     pub fn fullscreen_mode(&self, id: NodeId) -> Option<FullscreenMode> {

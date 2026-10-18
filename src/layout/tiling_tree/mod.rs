@@ -234,6 +234,33 @@ impl<W: LayoutElement> DetachedSubtree<W> {
         self.node.has_fullscreen()
     }
 
+    /// Whether the moved container itself, a split rather than a view, held the focus.
+    pub fn is_focused_split(&self) -> bool {
+        self.root_focused
+            && !self.wrapped_workspace
+            && !matches!(self.node, DetachedNode::Leaf { .. })
+    }
+
+    pub fn is_wrapped_workspace(&self) -> bool {
+        self.wrapped_workspace
+    }
+
+    /// Trades whether two swapped views count as floating. A fullscreen
+    /// floating view stays in the workspace's floating list in sway, so the
+    /// view that takes its place there floats (`swap_places`,
+    /// sway/tree/container.c:1747-1760), while swayward keeps it in the tiling
+    /// tree marked `restore_to_floating`.
+    pub fn trade_floating_flag(&mut self, other: &mut Self) {
+        if let (DetachedNode::Leaf { tile: first, .. }, DetachedNode::Leaf { tile: second, .. }) =
+            (&mut self.node, &mut other.node)
+        {
+            std::mem::swap(
+                &mut first.restore_to_floating,
+                &mut second.restore_to_floating,
+            );
+        }
+    }
+
     /// Swaps which subtree root holds fullscreen, clearing fullscreen everywhere below the roots.
     pub fn swap_fullscreen_position(&mut self, other: &mut Self) {
         let first = self.node.fullscreen();
@@ -289,6 +316,14 @@ pub enum IpcNode<I> {
         /// fullscreen, overriding the ones derived from `rect`.
         unarranged: Option<UnarrangedIpc>,
     },
+}
+
+/// [`TilingTree::hidden_under_fullscreen`]: the views mapped and moved under a fullscreen
+/// container, and the boxes the other nodes keep.
+pub(in crate::layout) struct HiddenUnderFullscreen {
+    mapped: HashSet<NodeId>,
+    moved: HashMap<NodeId, Rectangle<f64, Logical>>,
+    boxes: HashMap<NodeId, Rectangle<f64, Logical>>,
 }
 
 /// The boxes of a leaf sway left unarranged beside a fullscreen container,
@@ -467,6 +502,8 @@ macro_rules! side_tables {
             ("focus_history", $($ref)+ $tree.focus_history as $($ref)+ dyn SideTable),
             ("ipc_stale_nodes", $($ref)+ $tree.ipc_stale_nodes),
             ("last_entered_by", $($ref)+ $tree.last_entered_by),
+            ("entered_by_departed", $($ref)+ $tree.entered_by_departed),
+            ("capped_entry_stamps", $($ref)+ $tree.capped_entry_stamps),
             ("pending_modes", $($ref)+ $tree.pending_modes),
             ("mapped_under_fullscreen", $($ref)+ $tree.mapped_under_fullscreen),
             ("moved_under_fullscreen", $($ref)+ $tree.moved_under_fullscreen),
@@ -485,7 +522,7 @@ macro_rules! side_tables {
 use side_tables;
 
 /// Every node with its split layout (`None` for a leaf), depth first.
-type TreeShape = Vec<(NodeId, Option<Layout>)>;
+pub(in crate::layout) type TreeShape = Vec<(NodeId, Option<Layout>)>;
 
 #[derive(Debug)]
 pub struct TilingTree<W: LayoutElement> {
@@ -498,6 +535,16 @@ pub struct TilingTree<W: LayoutElement> {
     /// which outlives that leaf moving away (`seat_set_raw_focus`,
     /// sway/input/seat.c).
     last_entered_by: HashMap<NodeId, NodeId>,
+    /// The focus time of a view that raised each container as it left the tree: floating the
+    /// focused view raises its old parent (`container_set_floating`,
+    /// sway/tree/container.c:969-973), so the container ranks as recent as that view. A split
+    /// that held the seat focus itself also ranks as recent as that focus.
+    entered_by_departed: HashMap<NodeId, std::time::Duration>,
+    /// The seat-stack time of each container a view swapped into without raising it: the
+    /// arrival's older focus does not raise the container (`swap_places` leaves the stack
+    /// alone, sway/tree/container.c:1718-1764), so it ranks where it was until focus next
+    /// enters it. Each entry holds the capped time and the arrival's focus time.
+    capped_entry_stamps: HashMap<NodeId, (std::time::Duration, std::time::Duration)>,
     has_had_tile: bool,
     empty_representation_layout: Option<Layout>,
     focus_history: Vec<NodeId>,
@@ -517,7 +564,8 @@ pub struct TilingTree<W: LayoutElement> {
     /// `arrange_container(parent)` gives it the slot's pending box until the
     /// next workspace arrange restores the output box.
     fullscreen_tile_slot: bool,
-    /// A global fullscreen node a `layout` wrap detached. Detaching clears
+    /// A global fullscreen node a `layout` wrap or a `floating` change
+    /// detached. Detaching clears
     /// `root->fullscreen_global` and reattaching does not restore it, while
     /// the node keeps `FULLSCREEN_GLOBAL` (sway/tree/workspace.c:898-910,
     /// sway/tree/container.c:1440-1446), so sway no longer hides or blocks
@@ -567,6 +615,26 @@ pub struct TilingTree<W: LayoutElement> {
     /// (sway/tree/container.c, sway/commands/split.c:24-29,
     /// sway/tree/arrange.c:310-316), so its parent never sets them.
     split_under_fullscreen: HashSet<NodeId>,
+    /// The workspace's fullscreen container left this tree for a floating one (`split` on a
+    /// fullscreen floating view). Sway arranges only that container
+    /// (sway/tree/arrange.c:310-316), so `mapped_under_fullscreen`,
+    /// `moved_under_fullscreen` and `unarranged_under_fullscreen` keep applying until it ends.
+    fullscreen_in_floating: bool,
+    /// A sticky fullscreen floater left for another workspace. Sway moves it with
+    /// `container_detach` and `workspace_add_floating` only (sway/input/seat.c:1209-1221),
+    /// so nothing arranges this workspace: `mapped_under_fullscreen`, `moved_under_fullscreen`
+    /// and `unarranged_under_fullscreen` keep the boxes the tiled nodes had under it until the
+    /// next arrange.
+    unarranged_after_sticky_carry: bool,
+    /// The fullscreen node's pending box after a px resize, output-local. Sway's
+    /// `resize_adjust_floating` moves a fullscreen floater's pending box away from the
+    /// output box and arranges it there (sway/commands/resize.c:219-229); the next arrange
+    /// of the workspace or root puts it back (sway/tree/arrange.c:310-316, 349-355).
+    fullscreen_pending_box: Option<Rectangle<f64, Logical>>,
+    /// Bumped by every arrange of this tree's workspace (`note_workspace_arrange`). The
+    /// workspace's floating layout compares it to drop its groups' pending boxes, which the
+    /// same `arrange_workspace` resets (sway/tree/arrange.c:310-316).
+    arrange_epoch: u64,
     interactive_resize: Option<InteractiveResize<W::Id>>,
     tab_indicators: HashMap<NodeId, TabIndicator>,
     titlebars: super::titlebar::TitlebarRenderer,

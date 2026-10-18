@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/tile.rs"]
+what = "a window clipped with `clip-to-geometry` is cut to the border's inner arc (configured radius minus border width, per wrapped corner) instead of the full configured radius, which now belongs only to the decorated box's outermost decoration."
+why = "Niri expands the border by the window radius; swayward gives the configured radius to the outermost decoration of the box (the border, when there is one) but kept clipping the window to it too. The border shader cuts its inner edge at `outer - width` (src/render_helpers/shaders/border.frag), so the two arcs disagreed and the wallpaper showed through a crescent at every bordered corner. Sway has no corner radius, so there is no oracle row; the decorations unit test `clipped_window_follows_the_border_inner_arc` is the evidence."

@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs"]
+what = "make `activate_window` leave any workspace fullscreen that hides the target, including a floater's, unless the target is transient for the fullscreen view under `popup_during_fullscreen smart`; carry `popup_during_fullscreen` in layout `Options`."
+why = "Sway's `focus` disables the container `container_obstructing_fullscreen_container` returns before focusing (sway/commands/focus.c:385-394, sway/tree/container.c:570-590). Swayward only did so for a tiled target, so `[app_id=X] focus` on a floater left it hidden behind a fullscreen view."

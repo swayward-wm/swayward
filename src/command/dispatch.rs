@@ -4,11 +4,11 @@ use swayward_ipc::{criteria, CommandOutcome};
 use super::settings::execute_global_setting;
 use super::targeted::{
     execute_targeted, focused_con_id, mark_focused, matching_targets, set_client_colors,
-    unmark_focused, unmark_target,
+    unmark_focused, unmark_target, Match,
 };
 use super::{
     bindings, failure, focus, gaps, layout, movement, output, rules, scratchpad, session, success,
-    window, workspace, Command, CommandTarget, ParsedCommand,
+    window, workspace, Command, ParsedCommand,
 };
 use crate::swayward::State;
 
@@ -26,7 +26,7 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
     let mut retained_targets = None;
     let mut outcomes = Vec::new();
     // Focus may have moved since the last command (pointer, bindings).
-    state.swayward.layout.sync_seat_workspace();
+    state.swayward.layout.sync_seat_workspace_if_moved();
     for parsed in parsed {
         let outcome = match parsed {
             Ok(parsed) => {
@@ -38,9 +38,34 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
                 // (sway/sway/tree/container.c:1850-1869).
                 let saved = matches!(parsed.command, Command::Swap(_))
                     .then(|| state.swayward.layout.seat_back_and_forth());
+                // `move <direction>` never calls `seat_set_focus`, so the seat keeps
+                // its workspace and `prev_workspace_name` even when the view crosses
+                // outputs (sway/sway/commands/move.c:277-298, 672-745). Nor does
+                // `move [absolute] position|center|mouse`, which re-homes a floater
+                // through `container_floating_move_to` (sway/sway/tree/container.c:
+                // 1113-1145; sway/sway/commands/move.c:775, 831, 917).
+                let keeps_seat = matches!(
+                    parsed.command,
+                    Command::MoveDirection { .. } | Command::MovePosition(_)
+                );
+                // Sway clears a view's urgency in `seat_set_focus` whichever
+                // command moves seat focus onto it (sway/sway/input/seat.c:
+                // 1223-1240). When seat focus returns from a split or the
+                // workspace to the view that kept keyboard focus, no keyboard
+                // focus change follows, so clear it here.
+                let seat_view_before = focus::seat_focused_view(state);
+                let focus_before = seat_focus(state);
                 let outcome = execute_one(state, parsed, &mut retained_targets);
+                focus::refocus_clears_urgency(state, seat_view_before);
                 match saved {
                     Some(saved) => state.swayward.layout.restore_seat_back_and_forth(saved),
+                    // Only `seat_set_focus` moves `seat->workspace`
+                    // (sway/sway/input/seat.c:1098-1113, 1195), so a command
+                    // that changes no focus leaves a stale seat workspace alone.
+                    None if keeps_seat || seat_focus(state) == focus_before => state
+                        .swayward
+                        .layout
+                        .observe_active_workspace_without_seat_focus(),
                     None => state.swayward.layout.sync_seat_workspace(),
                 }
                 outcome
@@ -56,8 +81,31 @@ pub fn execute(state: &mut State, input: &str) -> Vec<CommandOutcome> {
             break;
         }
     }
+    // A command that arranged a workspace through its tiling tree also put its fullscreen
+    // floating group back at the output box (sway/tree/arrange.c:310-316).
+    state.swayward.layout.sync_floating_arranges();
     state.ipc_commit_workspace_transaction();
     outcomes
+}
+
+/// The seat's focused workspace and node, to tell whether a command changed
+/// seat focus.
+fn seat_focus(
+    state: &State,
+) -> (
+    Option<crate::layout::workspace::WorkspaceId>,
+    swayward_ipc::command::FocusedNode,
+    Option<super::CommandTarget>,
+) {
+    (
+        state
+            .swayward
+            .layout
+            .active_workspace()
+            .map(|workspace| workspace.id()),
+        super::targeted::focused_node(state),
+        super::targeted::focused_target(state),
+    )
 }
 
 /// Whether an outcome is sway's CMD_INVALID, which ends a command list.
@@ -243,7 +291,7 @@ fn run_focused(state: &mut State, command: Command) -> super::HandlerResult {
 fn execute_one(
     state: &mut State,
     parsed: ParsedCommand,
-    retained_targets: &mut Option<Vec<CommandTarget>>,
+    retained_targets: &mut Option<Vec<Match>>,
 ) -> CommandOutcome {
     let targets = match parsed.criteria.as_deref() {
         Some(raw) => match criteria::Criteria::parse(raw, focused_con_id(state)) {
@@ -275,8 +323,8 @@ fn execute_one(
             return for_each_match(targets, |_| execute_global_setting(state, option));
         }
         if let Command::Unmark(identifier) = &parsed.command {
-            for target in targets {
-                unmark_target(state, target, identifier.as_deref());
+            for found in targets {
+                unmark_target(state, found.target, identifier.as_deref());
             }
             return success();
         }
@@ -284,17 +332,41 @@ fn execute_one(
         // already on the seat stack when the next match runs: after `move` refocuses the old
         // workspace (sway/commands/move.c:598-608) that view ranks as recently focused even
         // if the next match moves it too.
-        return for_each_match(targets, |target| {
-            let outcome = execute_targeted(state, &parsed.command, target);
+        return for_each_match(targets, |found| {
+            let outcome = match &parsed.command {
+                Command::Floating(mode) => match window::floating(state, found.subject(), *mode) {
+                    Ok(()) => {
+                        state.ipc_refresh_layout();
+                        success()
+                    }
+                    Err(outcome) => outcome,
+                },
+                command => {
+                    let arrange = super::arrange::before(state, command, Some(found.target));
+                    let outcome = execute_targeted(state, command, found.target);
+                    if let Some(arrange) = arrange.filter(|_| outcome.success) {
+                        super::arrange::after(state, arrange);
+                    }
+                    outcome
+                }
+            };
             state.update_keyboard_focus();
             outcome
         });
     }
 
+    let arrange = super::arrange::before(
+        state,
+        &parsed.command,
+        super::targeted::focused_target(state),
+    );
     let action = match run_focused(state, parsed.command) {
         Ok(action) => action,
         Err(outcome) => return outcome,
     };
+    if let Some(arrange) = arrange {
+        super::arrange::after(state, arrange);
+    }
 
     if let Some(action) = action {
         state.do_action(action, false);

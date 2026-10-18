@@ -1,10 +1,10 @@
 use wayland_client::protocol::wl_output::Transform;
 
 use super::client::{ClientId, OutputConfigurationResult};
+use super::Fixture;
 use smithay::reexports::wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_head_v1::ZwlrOutputHeadV1, zwlr_output_manager_v1::ZwlrOutputManagerV1,
 };
-use super::Fixture;
 
 fn output_manager_fixture() -> (
     Fixture,

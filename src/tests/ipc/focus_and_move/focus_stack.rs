@@ -463,6 +463,66 @@ fn focus_stack_view_moved_by_for_window_leaves_the_empty_destination_focused() {
     );
 }
 
+/// A `for_window` rule moves a mapping view before `should_focus` runs, so the view never had
+/// seat focus and `move` restores the seat's current focus, here the focused workspace
+/// (sway/tree/view.c:943-957; sway/commands/move.c:598-608). Seeds 31083, 30926.
+#[test]
+fn focus_stack_view_moved_by_for_window_keeps_the_focused_workspace_focused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "stays");
+    run_focus_commands(
+        &mut f,
+        &[
+            "focus parent",
+            r#"for_window [app_id="moved"] move container to workspace 2"#,
+        ],
+    );
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(
+        find_json_node(&tree, "workspace", true).unwrap()["name"],
+        "1"
+    );
+    map_test_window(&mut f, client, "moved");
+    let tree = focus_stack_tree(&mut f);
+    assert!(find_json_node(&tree, "con", true).is_none());
+    assert_eq!(
+        find_json_node(&tree, "workspace", true).unwrap()["name"],
+        "1"
+    );
+}
+
+/// The same holds when the focus before the map is a floating container or a floating view:
+/// the moved view never took focus, so the seat keeps the floating node. Seed 30926.
+#[test]
+fn focus_stack_view_moved_by_for_window_keeps_the_focused_floating_node_focused() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "floater");
+    run_focus_commands(
+        &mut f,
+        &[
+            "floating enable",
+            r#"for_window [app_id="^moved"] move container to workspace 2"#,
+        ],
+    );
+    map_test_window(&mut f, client, "moved-1");
+    let tree = focus_stack_tree(&mut f);
+    assert_eq!(
+        find_json_node(&tree, "floating_con", true).unwrap()["app_id"],
+        "floater"
+    );
+
+    run_focus_commands(&mut f, &["split v", "focus parent"]);
+    map_test_window(&mut f, client, "moved-2");
+    let tree = focus_stack_tree(&mut f);
+    let focused = find_json_node(&tree, "floating_con", true).unwrap();
+    assert!(focused["app_id"].is_null(), "{focused}");
+    assert_eq!(focused["nodes"][0]["app_id"], "floater");
+}
+
 /// A directional move across outputs leaves the seat's focus alone (sway/commands/move.c:
 /// 277-298, 715-744). Focusing the view had raised its workspace right below it
 /// (sway/input/seat.c:1178-1190), so once it leaves, the workspace node heads that
@@ -556,4 +616,76 @@ fn focus_stack_split_on_split_focused_workspace_refreshes_the_representation() {
     assert_eq!(workspace["layout"], "splith");
     assert_eq!(workspace["representation"], "H[V[one]]");
     assert_eq!(workspace["nodes"][0]["focused"], true);
+}
+
+/// A criteria focus on a split on another workspace moves the seat there: sway's seat focus
+/// switches the workspace with the node (`seat_set_workspace_focus`,
+/// sway/input/seat.c:1130-1200), and the empty workspace it left is destroyed.
+/// Differential seed 31733.
+#[test]
+fn focus_stack_criteria_focus_on_marked_split_switches_workspace() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_focus_window(&mut f, client, "one");
+    run_focus_commands(
+        &mut f,
+        &[
+            "layout stacking",
+            "focus parent",
+            "mark n",
+            "workspace 2",
+            "[con_mark=\"n\"] focus",
+        ],
+    );
+    let tree = focus_stack_tree(&mut f);
+    let output = &tree["nodes"][1];
+    assert_eq!(output["current_workspace"], "1");
+    assert_eq!(output["nodes"].as_array().unwrap().len(), 1);
+    let workspace = focus_stack_workspace(&tree);
+    assert_eq!(workspace["nodes"][0]["marks"][0], "n");
+    assert_eq!(workspace["nodes"][0]["focused"], true);
+    assert_eq!(workspace["nodes"][0]["nodes"][0]["focused"], false);
+}
+
+/// A focused view moved off its workspace hands focus to the focus-inactive node of its old
+/// parent, which is the split it left when that split was focused on its own
+/// (`seat_get_focus_inactive(old_parent)`, sway/commands/move.c:598-608). The rule holds when
+/// the destination is on another output, and when the moved view is the workspace's
+/// fullscreen container. Family parity-f2-focused-flag, seeds 15806 and 32093.
+#[test]
+fn focus_stack_move_to_workspace_refocuses_the_focused_old_parent() {
+    for (layout, moved_fullscreen, move_command) in [
+        ("split h", false, "move container to workspace 2"),
+        (
+            "layout stacking",
+            true,
+            "move container to workspace number 3",
+        ),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        f.add_output_at(2, (1280, 720), Some((1280, 0)));
+        let client = f.add_client();
+        map_focus_window(&mut f, client, "one");
+        let commands: &[&str] = if moved_fullscreen {
+            &[layout, "focus parent"]
+        } else {
+            &["focus parent", layout]
+        };
+        run_focus_commands(&mut f, commands);
+        map_test_window(&mut f, client, "two");
+        if moved_fullscreen {
+            run_focus_commands(&mut f, &["fullscreen enable"]);
+        }
+        run_focus_commands(&mut f, &[move_command]);
+
+        let tree = focus_stack_tree(&mut f);
+        let workspace = focus_stack_workspace(&tree);
+        assert_eq!(workspace["name"], "1", "{move_command}");
+        let split = &workspace["nodes"][0];
+        assert_eq!(split["focused"], true, "{move_command}: {split}");
+        assert_eq!(split["nodes"][0]["app_id"], "one", "{move_command}");
+        assert_eq!(split["nodes"][0]["focused"], false, "{move_command}");
+    }
 }

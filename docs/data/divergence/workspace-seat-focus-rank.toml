@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/workspace.rs", "src/layout/monitor.rs", "src/layout/monitor/workspace_moves.rs", "src/layout/sway_workspace.rs"]
+what = "give each workspace a rank in one seat-wide focus stack, raised whenever the seat or a monitor focuses it, and order an output's IPC `focus` list by it instead of a per-monitor history."
+why = "Sway's output `focus` comes from the single seat focus stack (ipc_json_describe_node, sway/sway/ipc-json.c:786-835), so workspaces evacuated by `output disable` (sway/sway/tree/output.c:205-253) keep their recency among the surviving output's; new nodes join at the stack's tail (sway/sway/input/seat.c:327-352)."

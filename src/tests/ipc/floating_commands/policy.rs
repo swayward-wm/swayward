@@ -570,6 +570,64 @@ fn criteria_focus_from_a_focused_workspace_clears_the_views_urgency() {
     assert!(!test_window_is_urgent(&mut f, "only"));
 }
 
+/// `workspace N` naming the workspace already focused runs sway's
+/// `workspace_switch`, which moves seat focus from the workspace back onto
+/// its focus-inactive view and clears that view's urgency
+/// (sway/sway/tree/workspace.c:731-743, sway/sway/input/seat.c:1223-1240).
+/// Differential seed 31428 (random-v3).
+#[test]
+fn switching_to_the_focused_workspace_clears_the_views_urgency() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("only".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "focus parent; [app_id=only] urgent enable");
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    assert!(test_window_is_urgent(&mut f, "only"));
+
+    let outcome = crate::command::execute(f.niri_state(), "workspace --no-auto-back-and-forth 1");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(!test_window_is_urgent(&mut f, "only"));
+}
+
+/// `focus tiling` from a focused workspace also lands seat focus on the
+/// view that kept keyboard focus, and clears its urgency. Differential seed
+/// 31339 (random-v3).
+#[test]
+fn focus_tiling_from_a_focused_workspace_clears_the_views_urgency() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("only".into());
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let outcome =
+        crate::command::execute(f.niri_state(), "focus parent; [app_id=only] urgent enable");
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    assert!(test_window_is_urgent(&mut f, "only"));
+
+    let outcome = crate::command::execute(f.niri_state(), "focus tiling");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(!test_window_is_urgent(&mut f, "only"));
+}
+
 #[test]
 fn scratchpad_show_remaps_floating_center_between_asymmetric_outputs() {
     let mut f = Fixture::new();
@@ -1145,6 +1203,110 @@ fn floating_nodes_list_groups_and_windows_in_one_stacking_order() {
     assert!(floating[1].focused);
 }
 
+/// Family diff-fam-v3-hinted-map-focus-order: sway has no transient stacking,
+/// so floating a parent appends it after its already floating dialog
+/// (`container_set_floating` -> `workspace_add_floating`,
+/// sway/tree/container.c:941-954, sway/tree/workspace.c:961-971) and GET_TREE
+/// lists the dialog first. Oracle row hinted_child_map_then_float_parent_order.
+#[test]
+fn floating_a_parent_stacks_it_above_its_dialog() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+    let map = |f: &mut Fixture, app_id: &str, parent: Option<&XdgToplevel>| {
+        let window = f.client(client).create_window();
+        window.set_title(app_id);
+        window.set_parent(parent);
+        let toplevel = window.xdg_toplevel.clone();
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+        toplevel
+    };
+    let parent = map(&mut f, "parent", None);
+    map(&mut f, "dialog", Some(&parent));
+    map(&mut f, "tiled", None);
+    for command in ["focus left", "floating enable"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let floating = &tree.nodes[1].nodes[0].floating_nodes;
+    let order = floating
+        .iter()
+        .map(|node| (node.name.as_deref(), node.focused))
+        .collect::<Vec<_>>();
+    assert_eq!(order, [(Some("dialog"), false), (Some("parent"), true)]);
+}
+
+/// Family diff-fam-v3-hinted-map-focus-order, random-v3 seed 33875: sway
+/// centres a dialog on the workspace like any other floating view
+/// (`container_floating_resize_and_center`, sway/tree/container.c:848-893),
+/// not over its parent, so from the dialog `focus right` reaches a floater
+/// centred right of the workspace centre and raises it
+/// (`node_get_in_direction_floating`, sway/commands/focus.c:226-258, 457-470).
+#[test]
+fn dialog_maps_centred_on_the_workspace_not_over_its_parent() {
+    use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let map =
+        |f: &mut Fixture, title: &str, size: Option<(u16, u16)>, parent: Option<&XdgToplevel>| {
+            let window = f.client(client).create_window();
+            window.set_title(title);
+            if let Some((w, h)) = size {
+                window.set_size(w, h);
+            }
+            window.set_parent(parent);
+            let toplevel = window.xdg_toplevel.clone();
+            window.commit();
+            let surface = window.surface.clone();
+            f.roundtrip(client);
+            let window = f.client(client).window(&surface);
+            window.attach_new_buffer();
+            window.ack_last_and_commit();
+            f.double_roundtrip(client);
+            toplevel
+        };
+    map(&mut f, "floater", Some((700, 466)), None);
+    let reply = crate::command::execute(f.niri_state(), "floating enable");
+    assert!(reply[0].success, "{reply:?}");
+    map(&mut f, "tiled", None, None);
+    let parent = map(&mut f, "parent", None, None);
+    map(&mut f, "dialog", None, Some(&parent));
+
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let dialog = &tree.nodes[1].nodes[0].floating_nodes[1];
+    assert_eq!(dialog.name.as_deref(), Some("dialog"));
+    // Sway centres the 75x50 natural box on the workspace, then the 1x1 commit
+    // keeps its content origin, (1280-75)/2 and (720-50)/2 (floating_natural_resize and
+    // container_floating_resize_and_center, sway/tree/container.c:833-894). The
+    // parent tiles in the right half, so a dialog over it would sit near x=960.
+    assert_eq!(
+        (dialog.rect.x, dialog.rect.y),
+        (602, 335),
+        "the dialog is centred on the workspace, not over its parent: {:?}",
+        dialog.rect
+    );
+
+    let reply = crate::command::execute(f.niri_state(), "focus right");
+    assert!(reply[0].success, "{reply:?}");
+    let tree: swayward_ipc::Node = serde_json::from_value(get_tree(&mut f)).unwrap();
+    let order = tree.nodes[1].nodes[0]
+        .floating_nodes
+        .iter()
+        .map(|node| (node.name.as_deref(), node.focused))
+        .collect::<Vec<_>>();
+    assert_eq!(order, [(Some("dialog"), false), (Some("floater"), true)]);
+}
+
 /// A window mapped while a floating group's child is focused joins that group
 /// beside the child; with the group root itself focused it tiles instead
 /// (`view_map`, sway/tree/view.c:849-901). Random oracle seeds 290 and 330.
@@ -1303,6 +1465,49 @@ fn moving_a_sticky_floating_container_on_its_output_is_refused() {
     }
     for command in [
         "move container to workspace 3",
+        "move container to workspace 1",
+    ] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert_eq!(
+            reply[0].error.as_deref(),
+            Some("Can't move sticky container to another workspace on the same output"),
+            "{command}"
+        );
+    }
+    let swayward = f.swayward();
+    let names = swayward
+        .layout
+        .workspaces()
+        .filter_map(|(_, _, workspace)| workspace.sway_name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["1"], "no workspace was created");
+}
+
+/// Oracle: sticky_fullscreen_floating_move_to_workspace_refused. A fullscreen
+/// floating view stays in sway's `workspace->floating` list, so
+/// `container_is_sticky` still holds and the move is refused like any sticky
+/// floater's (sway/commands/move.c:498-511, 542-546), although swayward keeps
+/// the fullscreen view in the tiling tree. Diff family
+/// diff-fam-v3-sticky-fullscreen-move-to-workspace.
+#[test]
+fn moving_a_sticky_fullscreen_floating_view_on_its_output_is_refused() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for command in ["floating enable", "sticky enable", "fullscreen enable"] {
+        let reply = crate::command::execute(f.niri_state(), command);
+        assert!(reply[0].success, "{command}: {reply:?}");
+    }
+    for command in [
+        "move container to workspace number 3",
         "move container to workspace 1",
     ] {
         let reply = crate::command::execute(f.niri_state(), command);
@@ -1806,4 +2011,355 @@ fn resize_of_a_fullscreen_split_wrapper_changes_nothing() {
     let after = parent_of_p6(&get_tree(&mut f));
     assert_eq!(after["percent"], before["percent"]);
     assert_eq!(after["rect"], before["rect"]);
+}
+
+#[test]
+fn moving_a_floated_workspace_wrapper_child_to_its_own_workspace_tiles_it() {
+    // random-v3 seed 30236 (diff-fam-v3-floating-wrapper-child-move-same-ws). `focus parent;
+    // floating toggle` on a one-view workspace floats a wrapper holding the view
+    // (workspace_wrap_children, sway/commands/floating.c). The view is a child, not floating
+    // (`container_is_floating`, sway/tree/container.c:1041-1049), so moving it to its own
+    // workspace adds it beside the focus-inactive tiling view (`container_move_to_container`,
+    // sway/commands/move.c:241-261) and the emptied wrapper is reaped (move.c:609-611).
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "six");
+    let outcome = crate::command::execute(f.niri_state(), "focus parent; floating toggle");
+    assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+    map_app(&mut f, client, "nine");
+    for command in [
+        r#"[app_id="six"] focus"#,
+        "move --no-auto-back-and-forth container to workspace 1",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    assert_eq!(
+        workspace_shapes(&mut f),
+        [(
+            "1".to_owned(),
+            vec!["nine".to_owned(), "six".to_owned()],
+            vec![]
+        )]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+#[test]
+fn moving_a_floated_wrapper_child_to_its_own_workspace_without_tiling_keeps_it() {
+    // random-v3 seed 30236, shrunk (diff-fam-v3-floating-wrapper-child-move-same-ws; oracle row
+    // floated_wrapper_child_move_to_empty_tiling_workspace). With no tiling view the destination
+    // is the workspace node (`seat_get_focus_inactive_tiling` is NULL,
+    // sway/input/seat.c:1374-1378), and `container_move_to_workspace` returns early for the
+    // child's own workspace (sway/commands/move.c:198-202): the wrapper keeps the view.
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_app(&mut f, client, "six");
+    for command in [
+        "focus parent; floating toggle",
+        r#"[app_id="six"] focus"#,
+        "move --no-auto-back-and-forth container to workspace 1",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+    }
+    assert_eq!(
+        workspace_shapes(&mut f),
+        [("1".to_owned(), vec![], vec!["splith[six]".to_owned()])]
+    );
+    f.swayward().layout.verify_invariants();
+}
+
+fn focused_app_id(f: &mut Fixture) -> Option<String> {
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    fn focused(node: &serde_json::Value) -> Option<String> {
+        if node["focused"] == true {
+            return Some(node["app_id"].as_str().unwrap_or("<container>").to_owned());
+        }
+        ["nodes", "floating_nodes"]
+            .iter()
+            .flat_map(|key| node[*key].as_array().into_iter().flatten())
+            .find_map(focused)
+    }
+    focused(&tree)
+}
+
+#[test]
+fn moving_a_focused_floating_group_child_to_its_own_workspace_refocuses_the_group() {
+    // random-v3 seed 30236 (diff-fam-v3-floating-wrapper-child-move-same-ws; oracle rows
+    // floated_wrapper_child_move_to_current_workspace_focus{,_split}). The child tiles beside
+    // the focus-inactive tiling view, and focus goes to the old parent's focus-inactive view
+    // (`seat_get_focus_inactive(old_parent)`, sway/commands/move.c:589-597): the sibling left in
+    // the floating group. After `split h` the old parent is the emptied split, which holds no
+    // view, so focus falls back to the workspace's focus-inactive node, the moved view.
+    for (split, focused) in [(false, "five"), (true, "six")] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        map_app(&mut f, client, "five");
+        map_app(&mut f, client, "six");
+        let outcome = crate::command::execute(f.niri_state(), "focus parent; floating toggle");
+        assert!(outcome.iter().all(|o| o.success), "{outcome:?}");
+        map_app(&mut f, client, "nine");
+        let commands = [
+            r#"[app_id="six"] focus"#,
+            "split h",
+            "move --no-auto-back-and-forth container to workspace 1",
+        ];
+        for command in commands.into_iter().filter(|c| split || *c != "split h") {
+            let outcome = crate::command::execute(f.niri_state(), command);
+            assert!(outcome[0].success, "{command}: {outcome:?}");
+        }
+        assert_eq!(
+            workspace_shapes(&mut f),
+            [(
+                "1".to_owned(),
+                vec!["nine".to_owned(), "six".to_owned()],
+                vec!["splith[five]".to_owned()]
+            )],
+            "split: {split}"
+        );
+        assert_eq!(
+            focused_app_id(&mut f).as_deref(),
+            Some(focused),
+            "split: {split}"
+        );
+        // The workspace's focus list keeps the floating group where focus last entered it,
+        // ahead of `nine` (sway's seat focus stack, sway/ipc-json.c:786-807).
+        assert_eq!(
+            workspace_focus_order(&mut f),
+            if split {
+                ["six", "splith[five]", "nine"]
+            } else {
+                ["splith[five]", "six", "nine"]
+            },
+            "split: {split}"
+        );
+        f.swayward().layout.verify_invariants();
+    }
+}
+
+fn workspace_focus_order(f: &mut Fixture) -> Vec<String> {
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &swayward.marks_by_window,
+        &swayward.marks_by_container,
+    ))
+    .unwrap();
+    let workspace = &tree["nodes"][1]["nodes"][0];
+    let children = ["nodes", "floating_nodes"]
+        .iter()
+        .flat_map(|key| workspace[*key].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
+    workspace["focus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            let child = children.iter().find(|child| child["id"] == *id).unwrap();
+            match child["app_id"].as_str() {
+                Some(app_id) => app_id.to_owned(),
+                None => format!(
+                    "{}[{}]",
+                    child["layout"].as_str().unwrap_or_default(),
+                    child["nodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|n| n["app_id"].as_str().unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn criteria_floating_enable_with_fullscreen_keeps_match_order() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let open = |f: &mut Fixture, app_id: &str| {
+        let window = f.client(client).create_window();
+        window.xdg_toplevel.set_app_id(app_id.into());
+        window.commit();
+        let surface = window.surface.clone();
+        f.roundtrip(client);
+        let window = f.client(client).window(&surface);
+        window.attach_new_buffer();
+        window.ack_last_and_commit();
+        f.double_roundtrip(client);
+    };
+    open(&mut f, "two");
+    assert!(crate::command::execute(f.niri_state(), "fullscreen enable")[0].success);
+    open(&mut f, "three");
+    let outcome = crate::command::execute(
+        f.niri_state(),
+        r#"[app_id="^(two|three)$"] floating enable"#,
+    );
+    assert!(outcome[0].success, "{outcome:?}");
+
+    f.niri_state().ipc_refresh_layout();
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(crate::ipc::tree::describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let floating = tree["nodes"][1]["nodes"][0]["floating_nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            (
+                node["app_id"].as_str().unwrap().to_owned(),
+                node["fullscreen_mode"].as_i64().unwrap(),
+                node["focused"].as_bool().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        floating,
+        [("two".to_owned(), 1, true), ("three".to_owned(), 0, false)],
+        "{}",
+        tree["nodes"][1]["nodes"][0]
+    );
+}
+
+/// Criteria urgency reaches a view inside a split hidden in the scratchpad
+/// (`view_set_urgent`, sway/sway/tree/view.c:1205-1228): a wrapped workspace
+/// and a floating split, each sent to the scratchpad.
+/// Differential seeds 30910 and 31090.
+#[test]
+fn urgent_command_marks_a_view_in_a_hidden_scratchpad_split() {
+    for (setup, target) in [
+        (&["focus parent; fullscreen toggle"][..], "only"),
+        (&["floating enable", "splitv"][..], "inner"),
+    ] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let client = f.add_client();
+        let add = |f: &mut Fixture, app_id: &str| {
+            let window = f.client(client).create_window();
+            window.xdg_toplevel.set_app_id(app_id.into());
+            window.commit();
+            let surface = window.surface.clone();
+            f.roundtrip(client);
+            let window = f.client(client).window(&surface);
+            window.attach_new_buffer();
+            window.ack_last_and_commit();
+            f.double_roundtrip(client);
+        };
+        add(&mut f, "only");
+        for command in setup {
+            let outcome = crate::command::execute(f.niri_state(), command);
+            assert!(outcome.iter().all(|o| o.success), "{command}: {outcome:?}");
+        }
+        if target == "inner" {
+            add(&mut f, "inner");
+        }
+        assert!(crate::command::execute(f.niri_state(), "move scratchpad")[0].success);
+        let outcome = crate::command::execute(
+            f.niri_state(),
+            &format!("focus parent; [app_id={target}] urgent enable"),
+        );
+        assert!(outcome[1].success, "{outcome:?}");
+        assert!(test_window_is_urgent(&mut f, target), "{setup:?}");
+    }
+}
+
+/// A fixed-size view tiled by `floating disable` moves to another workspace
+/// as a tiled container: `container_move_to_workspace` branches on
+/// `container_is_floating` (sway/sway/commands/move.c:204-232), never on the
+/// view's size hints. Differential family
+/// diff-fam-v3-floating-disable-move-to-workspace, seeds 31866 and 32007;
+/// oracle row floating_disabled_fixed_view_moves_tiled.
+#[test]
+fn a_tiled_fixed_size_view_moves_to_a_workspace_tiled() {
+    let (mut f, _) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.xdg_toplevel.set_app_id("fixed".into());
+    window.set_min_size(400, 300);
+    window.set_max_size(400, 300);
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in ["floating disable", "move container to workspace 2"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        f.double_roundtrip(client);
+    }
+
+    let tree = get_tree(&mut f);
+    let workspace = tree["nodes"][1]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ws| ws["name"] == "2")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        workspace["floating_nodes"].as_array().unwrap().len(),
+        0,
+        "{workspace:#}"
+    );
+    assert_eq!(workspace["nodes"][0]["app_id"], "fixed", "{workspace:#}");
+    assert_eq!(workspace["representation"], "H[fixed]", "{workspace:#}");
+}
+
+/// Oracle: state scenario title_format_on_floated_workspace_wrapper
+/// (diff-fam-v3-title-format-floated-workspace, seed 33395). `floating enable`
+/// with the workspace focused floats a wrapper of its children
+/// (sway/commands/floating.c:28-33); `title_format` then sets the wrapper's
+/// format like any container's (sway/commands/title_format.c:14-29).
+#[test]
+fn title_format_applies_to_a_floated_workspace_wrapper() {
+    let (mut f, socket) = ipc_fixture();
+    f.add_output(1, (1280, 720));
+    let client = f.add_client();
+    map_test_window(&mut f, client, "fixture-tff-1");
+    for command in [
+        "focus parent",
+        "floating enable",
+        "title_format [%app_id] %title",
+    ] {
+        assert_eq!(
+            crate::command::execute(f.niri_state(), command),
+            [swayward_ipc::CommandOutcome {
+                success: true,
+                error: None,
+                parse_error: None,
+            }],
+            "{command}"
+        );
+    }
+    f.niri_state().refresh_and_flush_clients();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let tree = query_ipc(&mut f, &mut stream, MessageType::GetTree);
+    let workspace = find_json_parent_of_app_id(&tree, "fixture-tff-1").unwrap();
+    assert_eq!(workspace["type"], "floating_con");
+    assert_eq!(workspace["focused"], true);
 }

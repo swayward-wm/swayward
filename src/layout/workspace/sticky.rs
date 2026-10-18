@@ -12,7 +12,13 @@ impl<W: LayoutElement> Workspace<W> {
                 .tiles()
                 .all(|tile| tile.is_sticky && self.is_floating_for_ipc(tile.window().id()));
         (!self.tiling.is_empty() && !only_sticky_fullscreen_floating)
-            || self.floating.tiles().any(|tile| !tile.is_sticky)
+            || self.has_non_sticky_floating()
+    }
+
+    /// Whether a floater that does not follow the visible workspace lives
+    /// here (`workspace_is_empty`, sway/sway/tree/workspace.c:752-764).
+    pub fn has_non_sticky_floating(&self) -> bool {
+        self.floating.tiles().any(|tile| !tile.is_sticky)
             || self
                 .floating
                 .tree_roots()
@@ -87,8 +93,18 @@ impl<W: LayoutElement> Workspace<W> {
             .chain(fullscreen_floating)
             .map(|tile| tile.window().id().clone())
             .collect::<Vec<_>>();
-        ids.iter()
+        let carries_fullscreen = self
+            .tiling
+            .fullscreen_window()
+            .is_some_and(|window| ids.contains(window));
+        let hidden = carries_fullscreen.then(|| self.tiling.hidden_under_fullscreen());
+        let removed = ids
+            .iter()
             .map(|id| self.remove_tile(id, Transaction::new()))
-            .collect()
+            .collect();
+        if let Some(hidden) = hidden {
+            self.tiling.keep_unarranged_after_sticky_carry(hidden);
+        }
+        removed
     }
 }

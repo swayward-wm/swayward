@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/tile.rs", "src/layout/workspace.rs", "src/layout/floating_tree/commands.rs"]
+what = "floating a tiled view whose map geometry is below floating_minimum_size holds the clamped content box (75x50 by default) until the client commits a different geometry, and a floating resize moves that held box on the named axis clamped by the floating limits only."
+why = "Sway's floating_natural_resize clamps the natural size by floating_minimum/maximum_size, not the client's size hints (sway/tree/container.c:833-847), and only a commit that changes the geometry resizes a floating view (handle_commit, sway/desktop/xdg_shell.c:313-335); resize_set_floating clamps by the floating limits (sway/commands/resize.c:341-403). niri sized the floating tile from the committed buffer, so a 1x1 client floated at 1x1."

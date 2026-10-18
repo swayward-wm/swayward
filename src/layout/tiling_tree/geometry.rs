@@ -38,6 +38,9 @@ struct AssignContext<'a, W: LayoutElement> {
     hide_edge_borders: HideEdgeBorders,
     smart_borders: SmartBorders,
     draw_uncovered_top_border: bool,
+    /// A floating group's internal root, a container sway does not have. Its one child is
+    /// the group's floating container, which is not a sway split child.
+    floating_group_root: Option<NodeId>,
 }
 
 struct Assignment {
@@ -70,6 +73,11 @@ pub(crate) struct GeometryInput<'a, W: LayoutElement> {
     pub smart_borders: SmartBorders,
     pub visible_leaves: &'a HashSet<NodeId>,
     pub draw_uncovered_top_border: bool,
+    /// The tree is a floating group (`TilingTree::resident_root`).
+    pub floating_group: bool,
+    /// The fullscreen container's box when it is not the output box
+    /// (`TilingTree::fullscreen_pending_box`).
+    pub fullscreen_box: Option<Rectangle<f64, Logical>>,
 }
 
 pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry<W::Id> {
@@ -87,6 +95,7 @@ pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry
         hide_edge_borders: input.hide_edge_borders,
         smart_borders: input.smart_borders,
         draw_uncovered_top_border: input.draw_uncovered_top_border,
+        floating_group_root: input.floating_group.then_some(input.root),
     };
     let mut result = Geometry::default();
     assign(
@@ -105,7 +114,10 @@ pub(crate) fn compute<W: LayoutElement>(input: GeometryInput<'_, W>) -> Geometry
     result.tiled_ipc_nodes = result.ipc_nodes.clone();
     if let Some(fullscreen_root) = input.fullscreen.iter().copied().next() {
         context.fullscreen = input.fullscreen;
-        apply_fullscreen_pass(&context, fullscreen_root, input.view_size, &mut result);
+        let rect = input
+            .fullscreen_box
+            .unwrap_or_else(|| Rectangle::from_size(input.view_size));
+        apply_fullscreen_pass(&context, fullscreen_root, rect, &mut result);
     }
     result.drop_titlebars(|id| input.mapped_under_fullscreen.contains(&id));
     result.border_visible.extend(
@@ -132,14 +144,14 @@ fn workspace_area<W: LayoutElement>(input: &GeometryInput<'_, W>) -> Rectangle<f
 fn apply_fullscreen_pass<W: LayoutElement>(
     context: &AssignContext<'_, W>,
     fullscreen_root: NodeId,
-    view_size: Size<f64, Logical>,
+    rect: Rectangle<f64, Logical>,
     result: &mut Geometry<W::Id>,
 ) {
     assign(
         context,
         Assignment {
             id: fullscreen_root,
-            rect: Rectangle::from_size(view_size),
+            rect,
             covering_titlebar: None,
             decorated_by_parent: false,
             decorated_corners: DecoratedCorners::NONE,
@@ -322,8 +334,14 @@ fn assign_leaf<W: LayoutElement>(
     if has_titlebar {
         border_corners.top_left = false;
         border_corners.top_right = false;
-        ipc_rect.loc.y += titlebar_height;
-        ipc_rect.size.h = (ipc_rect.size.h - titlebar_height).max(0.);
+        // GET_TREE subtracts the titlebar from the box, so an empty box reports a
+        // negative height (`ipc_json_describe_node`, sway/ipc-json.c:816-825).
+        ipc_rect = super::introspection::signed_rect(
+            ipc_rect.loc.x,
+            ipc_rect.loc.y + titlebar_height,
+            ipc_rect.size.w,
+            ipc_rect.size.h - titlebar_height,
+        );
     }
     result.border_corners.insert(id, border_corners);
     result.leaf_ipc_rects.insert(id, ipc_rect);
@@ -587,6 +605,7 @@ fn assign_linear_split<W: LayoutElement>(
         percents,
     } = split;
     let Assignment {
+        id: parent,
         rect,
         decorated_corners,
         suppress_gaps,
@@ -626,6 +645,15 @@ fn assign_linear_split<W: LayoutElement>(
                 Size::from((rect.size.w, extent)),
             ),
             _ => unreachable!(),
+        };
+        // Arbitrary lower bound for window size: sway empties a child smaller than
+        // 10 px in either direction (`apply_horiz_layout`, `apply_vert_layout`,
+        // sway/tree/arrange.c:91-94 and 176-179).
+        let sway_child = context.floating_group_root != Some(parent);
+        let child_rect = if sway_child && (child_rect.size.w < 10. || child_rect.size.h < 10.) {
+            Rectangle::new(child_rect.loc, Size::default())
+        } else {
+            child_rect
         };
         let child_corners = child_corners(
             decorated_corners,
@@ -704,6 +732,29 @@ fn assign_strip<W: LayoutElement>(
             },
             result,
         );
+        // Sway's pending box for a view child is the strip's whole box; only a
+        // container child starts below the rows (`apply_tabbed_layout` and
+        // `apply_stacked_layout`, sway/tree/arrange.c:183-212). A box kept
+        // unarranged under fullscreen stays as recorded.
+        let kept =
+            context.fullscreen.is_empty() && context.stale_fullscreen_rects.contains_key(child);
+        if !kept
+            && matches!(
+                nodes.get(child).map(|node| &node.value),
+                Some(TreeNode::Leaf { .. })
+            )
+        {
+            result.ipc_nodes.insert(*child, rect);
+        }
+        // A view takes the strip's whole box and GET_TREE subtracts the titlebar rows,
+        // so a box shorter than the rows reports a negative height
+        // (`apply_stacked_layout`, sway/tree/arrange.c:199-211;
+        // `ipc_json_describe_node`, sway/ipc-json.c:816-825).
+        if rect.size.h < total_height {
+            if let Some(ipc_rect) = result.leaf_ipc_rects.get_mut(child) {
+                ipc_rect.size.h = rect.size.h - total_height;
+            }
+        }
     }
 }
 

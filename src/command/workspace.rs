@@ -14,12 +14,11 @@ pub(super) fn activate(
             "Can't switch workspaces while fullscreen global".to_owned(),
         ));
     }
-    if target != WorkspaceTarget::BackAndForth {
-        // Sway completes focus changes synchronously. Finish a prior
-        // render-only transition before resolving the next named or numbered
-        // command so its inactive empty workspace is gone.
-        state.swayward.layout.finish_sway_workspace_switch(&target);
-    }
+    // Sway completes focus changes synchronously. Finish a prior render-only
+    // transition before resolving the next command so its inactive empty
+    // workspace is gone; `back_and_forth` then recreates it by name
+    // (sway/commands/workspace.c:215-222).
+    state.swayward.layout.finish_sway_workspace_switch(&target);
     let auto_back_and_forth = auto_back_and_forth
         && state
             .swayward
@@ -50,6 +49,9 @@ pub(super) fn activate(
     // keeps the focus itself.
     if let Some(workspace) = state.swayward.layout.active_workspace_mut() {
         let switched = previous != Some(workspace.id());
+        if switched {
+            workspace.raise_tiling_focus_on_switch();
+        }
         if !switched || workspace.has_non_sticky_windows() {
             workspace.focus_inactive_below_workspace();
         }

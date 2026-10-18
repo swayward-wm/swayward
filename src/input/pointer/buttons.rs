@@ -47,6 +47,7 @@ pub(super) fn classify_press(
     button: Option<MouseButton>,
     policy: DragPolicy,
     is_tiling: bool,
+    in_floating_group: bool,
     fullscreen: bool,
     on_titlebar: bool,
     overview: bool,
@@ -63,13 +64,22 @@ pub(super) fn classify_press(
                 && ((button == Some(policy.move_button) && policy.mod_down)
                     || (button == Some(MouseButton::Left) && on_titlebar))
         } else {
-            button == Some(policy.move_button) && policy.mod_down
+            // A view in a floating group moves the group from a modifier drag
+            // or a titlebar drag (`sway/input/seatop_default.c:459-463`).
+            (button == Some(policy.move_button) && policy.mod_down)
+                || (in_floating_group && button == Some(MouseButton::Left) && on_titlebar)
         };
 
     // Sway resizes from a border on a plain left press, tiled before any
     // modifier move and floating after one
-    // (`sway/sway/input/seatop_default.c:396-474`).
-    if !overview && button == Some(MouseButton::Left) && !grabbed && (is_tiling || !regular_move) {
+    // (`sway/sway/input/seatop_default.c:396-474`). A view in a floating
+    // group is not floating itself (`container_is_floating`,
+    // sway/tree/container.c:1041-1050), so its border takes the tiled branch.
+    if !overview
+        && button == Some(MouseButton::Left)
+        && !grabbed
+        && (is_tiling || in_floating_group || !regular_move)
+    {
         if let Some((location, edges)) = border_resize {
             return PressIntent::BorderResize(location, edges);
         }
@@ -190,6 +200,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 true,
                 8.,
                 Some(border),
@@ -200,6 +211,7 @@ mod tests {
             classify_press(
                 Some(MouseButton::Left),
                 policy,
+                false,
                 false,
                 false,
                 false,
@@ -223,11 +235,74 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 true,
                 8.,
                 None,
             ),
             PressIntent::CornerResize
+        );
+    }
+
+    /// A view in a floating group is floating-or-child but not floating in sway
+    /// (sway/tree/container.c:1041-1050,1338-1340), so its own border takes the tiled
+    /// resize branch (sway/input/seatop_default.c:396-411), while a modifier drag, a
+    /// titlebar drag and a modifier resize act on the whole group
+    /// (sway/input/seatop_default.c:459-487) without the tiling-drag threshold.
+    #[test]
+    fn classify_press_for_a_floating_group_child() {
+        let mod_down = DragPolicy {
+            mod_down: true,
+            move_button: MouseButton::Left,
+            resize_button: MouseButton::Right,
+        };
+        let plain = DragPolicy {
+            mod_down: false,
+            ..mod_down
+        };
+        let border = (Point::from((1., 2.)), ResizeEdge::RIGHT);
+        let press = |button, policy, on_titlebar, tiling_drag, border| {
+            classify_press(
+                Some(button),
+                policy,
+                false,
+                true,
+                false,
+                on_titlebar,
+                false,
+                false,
+                tiling_drag,
+                8.,
+                border,
+            )
+        };
+        let group_move = PressIntent::Move {
+            tiling: false,
+            threshold: 0.,
+        };
+
+        // An internal border resizes even with the modifier held.
+        assert!(matches!(
+            press(MouseButton::Left, mod_down, false, true, Some(border)),
+            PressIntent::BorderResize(_, ResizeEdge::RIGHT)
+        ));
+        assert_eq!(
+            press(MouseButton::Left, mod_down, false, true, None),
+            group_move
+        );
+        // A titlebar drag moves the group with no modifier, and `tiling_drag no`
+        // does not gate it (it gates only the tiled branch, seatop_default.c:490-492).
+        assert_eq!(
+            press(MouseButton::Left, plain, true, false, None),
+            group_move
+        );
+        assert_eq!(
+            press(MouseButton::Right, mod_down, false, true, None),
+            PressIntent::CornerResize
+        );
+        assert_eq!(
+            press(MouseButton::Left, plain, false, true, None),
+            PressIntent::None
         );
     }
 

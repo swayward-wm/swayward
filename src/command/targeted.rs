@@ -4,8 +4,7 @@ use swayward_ipc::command::FocusedNode;
 use swayward_ipc::{criteria, CommandOutcome};
 
 use super::movement::{
-    move_position, move_target_to_mark, move_target_to_workspace, move_tiling_subtree_to_output,
-    move_workspace_to_output,
+    move_position, move_target_to_mark, move_target_to_workspace, move_workspace_to_output,
 };
 use super::{
     execute, failure, focus, layout, movement, scratchpad, success, window, ClientColorClass,
@@ -86,20 +85,43 @@ fn move_target_to_adjacent_output(
             .swayward
             .adjacent_output(reference, reference_point, horizontal, positive)
     {
+        let layout_direction = match direction {
+            Direction::Left => crate::layout::tiling_tree::Direction::Left,
+            Direction::Right => crate::layout::tiling_tree::Direction::Right,
+            Direction::Up => crate::layout::tiling_tree::Direction::Up,
+            Direction::Down => crate::layout::tiling_tree::Direction::Down,
+        };
         match target {
             CommandTarget::Window(_) => state.swayward.layout.move_window_to_output_from_direction(
                 &window,
                 &output,
-                match direction {
-                    Direction::Left => crate::layout::tiling_tree::Direction::Left,
-                    Direction::Right => crate::layout::tiling_tree::Direction::Right,
-                    Direction::Up => crate::layout::tiling_tree::Direction::Up,
-                    Direction::Down => crate::layout::tiling_tree::Direction::Down,
-                },
+                layout_direction,
                 activate,
             ),
             CommandTarget::Container(workspace, node) => {
-                let _ = move_tiling_subtree_to_output(state, workspace, node, &output);
+                // `container_move_in_direction` leaves the seat focus alone
+                // (sway/commands/move.c:168-196, 277-298, 715-744), so a focused
+                // container keeps focus on its new output.
+                let focused = state
+                    .swayward
+                    .layout
+                    .active_workspace()
+                    .is_some_and(|active| {
+                        active.id() == workspace && active.focused_container_node() == Some(node)
+                    });
+                let layout = &mut state.swayward.layout;
+                let moved = layout.move_tiling_subtree_to_output_from_direction(
+                    workspace,
+                    node,
+                    &output,
+                    layout_direction,
+                );
+                if let Some(moved) = moved {
+                    if focused {
+                        layout.focus_tiling_node(moved.workspace, moved.node);
+                    }
+                    state.swayward.remap_container_marks(moved.remapped);
+                }
             }
         }
     }
@@ -220,7 +242,9 @@ fn move_targeted_direction(
         layout_direction,
         f64::from(pixels.unwrap_or(10)),
     );
-    if !moved {
+    if moved {
+        state.swayward.layout.rehome_floating_window(&window);
+    } else {
         move_target_to_adjacent_output(state, CommandTarget::Window(target), direction, activate);
     }
     Ok(moved)
@@ -348,7 +372,7 @@ fn run_targeted(
         }
         Command::TitleFormat(format) => super::handled(window::title_format(state, target, format)),
         Command::Border(border) => super::handled(window::border(state, target, border)),
-        Command::Floating(mode) => super::handled(window::floating(state, target, mode)),
+        Command::Floating(mode) => super::handled(window::floating(state, target.into(), *mode)),
         Command::Urgent(value) => super::handled(window::urgent(state, target, value)),
         Command::Kill => super::handled(window::kill(state, target)),
         Command::ResizeSet { width, height } => {
@@ -772,6 +796,30 @@ enum Candidate {
     Container(CommandTarget, crate::layout::tiling_tree::NodeId),
 }
 
+/// A criteria match, in sway's walk order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Match {
+    pub target: CommandTarget,
+    /// The container node a container criteria matched, or `None` for a
+    /// view. A hidden scratchpad group's splits have no workspace, so their
+    /// `target` names the group through one of its windows and cannot tell
+    /// which container matched.
+    pub node: Option<crate::layout::tiling_tree::NodeId>,
+}
+
+impl Match {
+    /// What the criteria matched, by stable id, for a handler that resolves
+    /// the live container when it runs, as sway's handlers read the matched
+    /// container pointer (sway/commands.c:240-262). A comma list keeps its
+    /// matches, so an earlier command may have hidden, shown or moved it.
+    pub fn subject(&self) -> super::window::Subject {
+        match self.node {
+            Some(node) => super::window::Subject::Container(node),
+            None => self.target.into(),
+        }
+    }
+}
+
 /// Every window and container a criteria command can match, in sway's
 /// `root_for_each_container` order: per output and workspace, the tiling
 /// tree and then the floating containers, each depth first with parents
@@ -810,7 +858,9 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
                          floating: bool,
                          candidates: &mut Vec<Candidate>,
                          snapshots: &mut HashMap<_, WindowSnapshot>| {
-            for (node, kind) in tree.nodes() {
+            let nodes = tree.nodes();
+            let root = nodes.first().map(|(node, _)| *node);
+            for (node, kind) in nodes {
                 if !matches!(kind, IpcNodeKind::Leaf) {
                     let target = CommandTarget::Container(workspace.id(), node);
                     candidates.push(Candidate::Container(target, node));
@@ -823,10 +873,16 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
                     warn!("criteria: leaf {node:?} has no mapped window");
                     continue;
                 };
+                // Only a parentless floater is floating to criteria: a view
+                // inside a floating split has a parent, so it is tiling
+                // (`sway/sway/criteria.c:422-432`,
+                // `sway/sway/tree/container.c:1041-1050`).
+                let floating = floating && root == Some(node);
                 // Floating-group leaves are not in `with_windows`.
-                let snapshot = snapshots.remove(&mapped.id()).unwrap_or_else(|| {
+                let mut snapshot = snapshots.remove(&mapped.id()).unwrap_or_else(|| {
                     WindowSnapshot::new(mapped, workspace.sway_name(), floating)
                 });
+                snapshot.floating = floating;
                 candidates.push(Candidate::Window(snapshot));
             }
         };
@@ -845,7 +901,10 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
             .map(|mapped| mapped.id())
             .collect::<Vec<_>>();
         for id in plain_floating.into_iter().rev() {
-            if let Some(snapshot) = snapshots.remove(&id) {
+            // A fullscreen floater stays parentless on the floating list, so
+            // it is still floating to criteria.
+            if let Some(mut snapshot) = snapshots.remove(&id) {
+                snapshot.floating = true;
                 candidates.push(Candidate::Window(snapshot));
             }
         }
@@ -915,7 +974,7 @@ fn collect_candidates(state: &State) -> Vec<Candidate> {
 /// Sway applies a criteria command to its matches in this order
 /// (`sway/sway/criteria.c:500-512`), so a command whose effect depends on
 /// order, such as `mark` moving a mark between targets, ends as sway does.
-pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> Vec<CommandTarget> {
+pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> Vec<Match> {
     let candidates = collect_candidates(state);
     let windows = || {
         candidates.iter().filter_map(|candidate| match candidate {
@@ -943,16 +1002,22 @@ pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> 
         }
         return urgent
             .first()
-            .map(|snapshot| CommandTarget::Window(snapshot.id))
+            .map(|snapshot| Match {
+                target: CommandTarget::Window(snapshot.id),
+                node: None,
+            })
             .into_iter()
             .collect();
     }
-    let mut targets = Vec::new();
+    let mut targets: Vec<Match> = Vec::new();
     for candidate in &candidates {
-        let target = match candidate {
+        let found = match candidate {
             Candidate::Window(snapshot) => criteria
                 .matches(&snapshot.info(state), &focused_info)
-                .then_some(CommandTarget::Window(snapshot.id)),
+                .then_some(Match {
+                    target: CommandTarget::Window(snapshot.id),
+                    node: None,
+                }),
             Candidate::Container(target, node) => {
                 let marks = state
                     .swayward
@@ -962,11 +1027,16 @@ pub(super) fn matching_targets(state: &State, criteria: &criteria::Criteria) -> 
                     .unwrap_or(&[]);
                 criteria
                     .matches_container(crate::ipc::tree::container_id(*node) as u64, marks)
-                    .then_some(*target)
+                    .then_some(Match {
+                        target: *target,
+                        node: Some(*node),
+                    })
             }
         };
-        if let Some(target) = target.filter(|target| !targets.contains(target)) {
-            targets.push(target);
+        if let Some(found) =
+            found.filter(|found| !targets.iter().any(|seen| seen.target == found.target))
+        {
+            targets.push(found);
         }
     }
     targets
@@ -978,7 +1048,7 @@ fn matching_ids(
 ) -> Vec<crate::window::mapped::MappedId> {
     matching_targets(state, criteria)
         .into_iter()
-        .filter_map(|target| match target {
+        .filter_map(|found| match found.target {
             CommandTarget::Window(id) => Some(id),
             CommandTarget::Container(_, _) => None,
         })

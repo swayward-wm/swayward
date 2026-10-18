@@ -108,6 +108,11 @@ impl<W: LayoutElement> TilingTree<W> {
         });
         let (parent, after) = self.insertion_slot(target);
         self.insert_child(parent, id, after);
+        // A view mapped into a wrapper a failed move left unarranged is laid
+        // out by `arrange_container(parent)` at the wrapper's empty box
+        // (sway/tree/view.c:936-937), so the wrapper stays unarranged and its
+        // children get boxes carved from nothing.
+        let into_unarranged_wrapper = self.unarranged_wrappers.contains(&parent);
         // Sway never focuses a view mapped while its workspace has a
         // fullscreen container (`should_focus`, `sway/tree/view.c:706-709`),
         // but only a view added directly to the workspace stays unarranged:
@@ -117,10 +122,13 @@ impl<W: LayoutElement> TilingTree<W> {
         // A global fullscreen container does not set `workspace->fullscreen`
         // (`container_fullscreen_global`, sway/tree/container.c), so
         // `arrange_workspace` lays the new view out with its siblings.
+        // A fullscreen floating container holds the workspace fullscreen from outside this
+        // tree, with the same effect.
         let mapped_under_fullscreen = parent == self.root
-            && fullscreen.is_some_and(|fullscreen| {
-                self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
-            });
+            && (self.fullscreen_in_floating
+                || fullscreen.is_some_and(|fullscreen| {
+                    self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Workspace)
+                }));
         self.forget_unarranged_after_map(parent, mapped_under_fullscreen);
         if fullscreen.is_some_and(|fullscreen| {
             self.divides_box_under_fullscreen(parent, fullscreen)
@@ -143,9 +151,10 @@ impl<W: LayoutElement> TilingTree<W> {
             // With no tiling container to map beside, sway attaches the view
             // with `workspace_add_tiling` (sway/tree/view.c:849-901), which
             // commits it. Only a floating fullscreen view leaves that so.
-            let floating_fullscreen = fullscreen
-                .and_then(|fullscreen| self.tile(fullscreen))
-                .is_some_and(|tile| tile.restore_to_floating);
+            let floating_fullscreen = self.fullscreen_in_floating
+                || fullscreen
+                    .and_then(|fullscreen| self.tile(fullscreen))
+                    .is_some_and(|tile| tile.restore_to_floating);
             let no_tiling_sibling = self.root_children().is_some_and(|children| {
                 children
                     .iter()
@@ -179,6 +188,9 @@ impl<W: LayoutElement> TilingTree<W> {
         }
         self.animate_geometry_changes(old_geometries, Some(id));
         self.request_window_sizes();
+        if into_unarranged_wrapper {
+            self.arrange_wrapper_at_empty_box(parent);
+        }
         id
     }
 
@@ -309,6 +321,57 @@ impl<W: LayoutElement> TilingTree<W> {
         })
     }
 
+    /// Whether closing `window` hands focus to another tiled view before the seat's walk up the
+    /// closed view's parents reaches the workspace. `handle_seat_node_destroy` asks each non-root
+    /// parent for its most recent view first, and only the workspace's search also covers
+    /// floaters (sway/input/seat.c:273-286), so a non-root parent that still holds a view wins
+    /// over a more recently focused floater.
+    pub fn close_refocuses_within_parent(&self, window: &W::Id) -> bool {
+        let Some(id) = self.node_for_window(window) else {
+            return false;
+        };
+        let mut parent = self.nodes.get(&id).and_then(|node| node.parent);
+        while let Some(ancestor) = parent.filter(|ancestor| *ancestor != self.root) {
+            if self.leaf_ids_in(ancestor).len() > 1 {
+                return true;
+            }
+            parent = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        false
+    }
+
+    /// Whether closing the focused leaf `id` leaves the workspace itself focused. Sway emits
+    /// the destroy signal while the global fullscreen container is still
+    /// `root->fullscreen_global` (sway/tree/container.c:488-501), so the seat refuses every
+    /// view it obstructs (sway/input/seat.c:1148-1151, 273-315). That holds when `id` is the
+    /// global fullscreen container, and when it is the last view of one: `container_split`
+    /// hands the mode to the new wrapper (sway/tree/container.c:1471-1501), which
+    /// `container_reap_empty` destroys the same way (sway/tree/view.c:994-996). A `layout`
+    /// wrap that orphaned the container, or a scratchpad view's close
+    /// (sway/tree/container.c:484-486), cleared `root->fullscreen_global` first, so nothing
+    /// is obstructed and focus moves on as for any close.
+    pub fn close_keeps_workspace_focus(&self, id: NodeId) -> bool {
+        self.focus == Some(id)
+            && !self.global_fullscreen_orphaned()
+            && self.fullscreen_node().is_some_and(|fullscreen| {
+                self.fullscreen_mode(fullscreen) == Some(FullscreenMode::Global)
+                    && self.leaf_ids_in(fullscreen) == [id]
+            })
+    }
+
+    /// A scratchpad view's close disables its global fullscreen before the destroy signal
+    /// (`container_begin_destroy`, sway/tree/container.c:484-486), as a `layout` wrap does.
+    pub fn release_global_fullscreen_before_close(&mut self, window: &W::Id) {
+        let Some(id) = self.node_for_window(window) else {
+            return;
+        };
+        if self.fullscreen_node() == Some(id)
+            && self.fullscreen_mode(id) == Some(FullscreenMode::Global)
+        {
+            self.orphaned_global_fullscreen = Some(id);
+        }
+    }
+
     pub fn remove_tile_node(&mut self, id: NodeId) -> Option<Tile<W>> {
         let old_geometries = self.compute_geometry();
         if !matches!(
@@ -318,7 +381,13 @@ impl<W: LayoutElement> TilingTree<W> {
             return None;
         }
         let removed_fullscreen = self.fullscreen_node() == Some(id);
-        if let Some(fullscreen) = self.fullscreen_node().filter(|_| !removed_fullscreen) {
+        // An orphaned global fullscreen view is neither `root->fullscreen_global`
+        // nor `ws->fullscreen`, so the arrange that follows lays out every
+        // tiled child (sway/tree/arrange.c:317-321).
+        if let Some(fullscreen) = self
+            .fullscreen_node()
+            .filter(|_| !removed_fullscreen && !self.global_fullscreen_orphaned())
+        {
             // Only the fullscreen container is arranged after the close; the
             // rest keep the boxes they had (sway/tree/view.c:1001-1006,
             // sway/tree/arrange.c:310-316). Views mapped under fullscreen
@@ -336,9 +405,13 @@ impl<W: LayoutElement> TilingTree<W> {
                 .collect::<Vec<_>>();
             self.unarranged_under_fullscreen.extend(unarranged);
         }
-        let removed_global = removed_fullscreen
-            && self.fullscreen_mode(id) == Some(FullscreenMode::Global)
-            && self.focus == Some(id);
+        let removed_global = self.close_keeps_workspace_focus(id);
+        let mut ancestors = Vec::new();
+        let mut ancestor = self.nodes.get(&id).and_then(|node| node.parent);
+        while let Some(parent) = ancestor {
+            ancestors.push(parent);
+            ancestor = self.nodes.get(&parent).and_then(|node| node.parent);
+        }
         let node = self.remove_node(id)?;
         if removed_fullscreen {
             self.mapped_under_fullscreen.clear();
@@ -364,16 +437,22 @@ impl<W: LayoutElement> TilingTree<W> {
             self.pending_modes.clear();
             self.set_focus_id(None);
         } else if removed_global {
-            // Sway emits the destroy signal while the view is still global fullscreen
-            // (sway/tree/container.c:488-501), so the seat refuses every sibling it obstructs
-            // and focus stays on the workspace (sway/input/seat.c:1148-1151).
+            // See `close_keeps_workspace_focus`.
             self.set_focus_id(Some(self.root));
         } else if self.focus == Some(id) {
-            self.set_focus_id(
-                self.fullscreen_node()
-                    .and_then(|fullscreen| self.focused_leaf_in(fullscreen))
-                    .or_else(|| self.focused_leaf_in(self.root)),
-            );
+            // The seat focuses the most recent view under the closed view's
+            // parent, walking up to the workspace (`handle_seat_node_destroy`,
+            // sway/input/seat.c:273-286).
+            let target = self
+                .fullscreen_node()
+                .and_then(|fullscreen| self.focused_leaf_in(fullscreen))
+                .or_else(|| {
+                    ancestors
+                        .iter()
+                        .filter(|ancestor| self.nodes.contains_key(ancestor))
+                        .find_map(|ancestor| self.focused_leaf_in(*ancestor))
+                });
+            self.set_focus_id(target);
         }
         self.animate_geometry_changes(old_geometries, None);
         Some(*tile)
@@ -381,22 +460,68 @@ impl<W: LayoutElement> TilingTree<W> {
 
     /// Removes a window that is being transferred elsewhere rather than closed. Sway refocuses
     /// the most recent focus entry under the old parent, which is a container when that
-    /// container was focused on its own (sway/commands/move.c:598-608;
-    /// sway/tree/root.c:128-140). Closing uses the view-only rule in `remove_tile`.
+    /// container was focused on its own (sway/commands/move.c:598-608). Closing uses the
+    /// view-only rule in `remove_tile`.
     pub fn remove_tile_for_transfer(
         &mut self,
         window: &W::Id,
         transaction: Transaction,
     ) -> Option<Tile<W>> {
         let id = self.node_for_window(window)?;
-        let target = (self.focus == Some(id) && self.fullscreen_node().is_none())
-            .then(|| {
-                self.transfer_focus_target(Some(id), self.nodes.get(&id).and_then(|n| n.parent))
-            })
-            .flatten();
+        // A fullscreen floating view only parks here; sway keeps it in `ws->floating` with no
+        // parent, so the search starts at the workspace (sway/commands/move.c:599-607).
+        let old_parent = self
+            .nodes
+            .get(&id)
+            .and_then(|n| n.parent)
+            .filter(|_| !self.tile(id).is_some_and(|tile| tile.restore_to_floating));
+        // The moved view may itself be the fullscreen container; only another fullscreen
+        // container keeps focus on itself (`workspace_focus_fullscreen`,
+        // sway/commands/move.c:96-110).
+        let target = (self.focus == Some(id)
+            && self
+                .fullscreen_node()
+                .is_none_or(|fullscreen| fullscreen == id))
+        .then(|| self.transfer_focus_target(Some(id), old_parent))
+        .flatten();
         let tile = self.remove_tile(window, transaction)?;
         if self.focus.is_some() {
             self.resolve_transfer_focus(target);
+        }
+        Some(tile)
+    }
+
+    /// Removes a window that moves to the scratchpad. Sway floats a tiled view first,
+    /// raising its old parent and then the view (`container_set_floating`,
+    /// sway/tree/container.c:969-973), and the hide then focuses
+    /// `seat_get_focus_inactive(old_parent)`, else `seat_get_focus_inactive(ws)`
+    /// (sway/tree/root.c:128-140). Neither returns the node it searches, so a surviving
+    /// parent hands focus to its most recent other entry. A parent the float reaps
+    /// instead raises the most recent view under its own parent
+    /// (sway/input/seat.c:273-323), which `remove_tile` has already focused.
+    pub fn remove_tile_for_scratchpad(
+        &mut self,
+        window: &W::Id,
+        transaction: Transaction,
+    ) -> Option<Tile<W>> {
+        let id = self.node_for_window(window)?;
+        let refocus = self.focus == Some(id) && self.fullscreen_node().is_none();
+        let old_parent = self
+            .nodes
+            .get(&id)
+            .and_then(|n| n.parent)
+            .filter(|parent| *parent != self.root);
+        let target = refocus
+            .then(|| match old_parent {
+                Some(parent) => self.focus_inactive_in_excluding(parent, id),
+                None => self.focus_inactive_in_excluding(self.root, id),
+            })
+            .flatten();
+        let tile = self.remove_tile(window, transaction)?;
+        if let Some(target) = target.filter(|target| self.nodes.contains_key(target)) {
+            if self.focus.is_some() {
+                self.set_focus_id(Some(target));
+            }
         }
         Some(tile)
     }
@@ -405,6 +530,73 @@ impl<W: LayoutElement> TilingTree<W> {
         let id = self.node_for_window(window)?;
         let tile = self.remove_tile_node(id)?;
         self.request_window_sizes_with(Some(transaction), true);
+        Some(tile)
+    }
+
+    /// Removes a workspace-level view that is being floated. With no old parent
+    /// `container_set_floating` raises nothing (sway/tree/container.c:969-973),
+    /// so the seat stack keeps its order and a later
+    /// `seat_get_focus_inactive_tiling` still finds the most recent remaining
+    /// entry, split or view. Only this tree's own focus moves.
+    pub fn remove_tile_keeping_focus_order(&mut self, window: &W::Id) -> Option<Tile<W>> {
+        let history = self.focus_history.clone();
+        let tile = self.remove_tile(window, Transaction::new())?;
+        self.focus_history = history
+            .into_iter()
+            .filter(|node| self.nodes.contains_key(node) && *node != self.root)
+            .collect();
+        if self.focus.is_some() {
+            self.focus = self.focus_history.first().copied().or(self.focus);
+        }
+        Some(tile)
+    }
+
+    /// Removes the focused view being floated out of a chain of singleton splits that
+    /// `container_reap_empty` destroys up to a surviving split below the workspace. The
+    /// destroy handler raw-raises only that split's focus-inactive view, then the floated
+    /// view (sway/tree/container.c:969-975, sway/input/seat.c:273-320): no ancestor is
+    /// raised, so each keeps its place, including the one the departing view gave it.
+    pub fn remove_tile_reaping_singletons(&mut self, window: &W::Id) -> Option<Tile<W>> {
+        if self.fullscreen_node().is_some() {
+            return self.remove_tile(window, Transaction::new());
+        }
+        let id = self.node_for_window(window)?;
+        let mut survivor = self.nodes.get(&id).and_then(|node| node.parent);
+        while let Some(ancestor) = survivor.filter(|ancestor| self.split_len(*ancestor) == Some(1))
+        {
+            survivor = self.nodes.get(&ancestor).and_then(|node| node.parent);
+        }
+        let history = self.focus_history.clone();
+        let stale = self.ipc_stale_nodes.clone();
+        let last_entered_by = self.last_entered_by.clone();
+        let capped = self.capped_entry_stamps.clone();
+        let tile = self.remove_tile(window, Transaction::new())?;
+        self.focus_history = history
+            .into_iter()
+            .filter(|node| self.nodes.contains_key(node) && *node != self.root)
+            .collect();
+        self.ipc_stale_nodes = stale
+            .into_iter()
+            .filter(|node| self.nodes.contains_key(node))
+            .collect();
+        self.last_entered_by = last_entered_by
+            .into_iter()
+            .filter(|(node, leaf)| self.nodes.contains_key(node) && self.tile(*leaf).is_some())
+            .collect();
+        self.capped_entry_stamps = capped
+            .into_iter()
+            .filter(|(node, _)| self.nodes.contains_key(node))
+            .collect();
+        if let Some(next) = survivor
+            .filter(|survivor| self.nodes.contains_key(survivor))
+            .and_then(|survivor| self.focused_leaf_in(survivor))
+        {
+            self.focus_history.retain(|node| *node != next);
+            self.focus_history.insert(0, next);
+            if self.focus.is_some() {
+                self.focus = Some(next);
+            }
+        }
         Some(tile)
     }
 

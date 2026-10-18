@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/handlers/compositor.rs", "src/layout/mod.rs", "src/layout/floating_tree.rs", "src/layout/monitor.rs"]
+what = "treat a global fullscreen view that `floating` or a `for_window` layout wrap detached as orphaned: activating another view leaves it alone, and a new view takes focus after its criteria run. A floating group records the orphan too. A sticky orphan carried by a workspace switch keeps mode 2."
+why = "Sway's `container_detach` clears `root->fullscreen_global` and reattaching never restores it, while the view keeps mode 2 (sway/tree/container.c:941-1011 and 1440-1446). `container_obstructing_fullscreen_container` then sees nothing (sway/tree/container.c:570-590), and `should_focus` runs after `view_execute_criteria` (sway/tree/view.c:707-710 and 943-945). Differential family diff-fam-v3-gfs-float-sibling-visible."

@@ -173,10 +173,17 @@ fn output_focus(monitor: &crate::layout::monitor::Monitor<Mapped>) -> Vec<i64> {
             workspace.id() == id && (workspace.must_be_kept() || id == active)
         })
     };
-    monitor
-        .workspace_focus_history()
-        .filter(|id| described(*id))
-        .map(|id| workspace_id(id.get()))
+    // The seat focus stack is one list across outputs, so a workspace evacuated from a
+    // disabled output keeps its rank among the survivor's (sway/sway/tree/output.c:205-253).
+    let mut workspaces = monitor
+        .sway_workspaces()
+        .map(|(_, workspace)| workspace)
+        .filter(|workspace| described(workspace.id()))
+        .collect::<Vec<_>>();
+    workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.focus_seq()));
+    workspaces
+        .into_iter()
+        .map(|workspace| workspace_id(workspace.id().get()))
         .collect()
 }
 

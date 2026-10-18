@@ -621,3 +621,147 @@ fn prev_on_output_after_focus_parent_refocuses_the_workspace_view() {
     let target = find_json_node_with_app_id(&tree, "target").unwrap();
     assert_eq!(target["focused"], true, "{tree}");
 }
+
+#[test]
+fn a_workspace_recreated_after_its_empty_namesake_was_destroyed_has_no_representation() {
+    // Sway destroys empty workspace 1 when focus leaves it
+    // (workspace_consider_destroy, sway/sway/tree/workspace.c:314-332), so
+    // `workspace 1` creates a fresh workspace that never held a tile and
+    // reports a null representation. Differential seed 15132; oracle row
+    // recreated_workspace_has_no_representation.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in [
+        "move container to workspace number 3",
+        "workspace oracle",
+        "workspace 1",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let names = workspaces
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["1", "3"]);
+    assert_eq!(workspaces[0]["representation"], serde_json::Value::Null);
+}
+
+#[test]
+fn back_and_forth_recreates_the_destroyed_empty_workspace() {
+    // `workspace 2` carries the sticky floater along and leaves workspace 1
+    // empty, so sway destroys it (sway/sway/tree/workspace.c:314-332).
+    // `workspace back_and_forth` then creates a fresh 1 by name
+    // (sway/sway/commands/workspace.c:215-222), and carrying a floater onto
+    // it does not refresh its representation (workspace_add_floating,
+    // sway/sway/tree/workspace.c:960-970). Differential seed 32168.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    for command in [
+        "floating enable",
+        "sticky enable",
+        "workspace 2",
+        "workspace back_and_forth",
+    ] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    let swayward = f.swayward();
+    let tree = serde_json::to_value(describe_tree(
+        &swayward.layout,
+        &swayward.global_space,
+        &Default::default(),
+        &Default::default(),
+    ))
+    .unwrap();
+    let workspaces = tree["nodes"][1]["nodes"].as_array().unwrap();
+    let names = workspaces
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["1"]);
+    assert_eq!(workspaces[0]["representation"], serde_json::Value::Null);
+    assert_eq!(workspaces[0]["floating_nodes"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn splitting_a_floater_on_a_fresh_workspace_refreshes_its_representation() {
+    // `workspace oracle` creates a workspace that never held a tile, and
+    // `scratchpad show` floats the view onto it without a representation
+    // (workspace_add_floating, sway/sway/tree/workspace.c:960-970). Splitting
+    // the floater refreshes the representation up to the workspace
+    // (container_split, sway/sway/tree/container.c:1508-1552), so it reports
+    // the workspace's empty layout. Differential seeds 31369 31674 32056.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let representation = |f: &mut Fixture| {
+        let swayward = f.swayward();
+        let tree = serde_json::to_value(describe_tree(
+            &swayward.layout,
+            &swayward.global_space,
+            &Default::default(),
+            &Default::default(),
+        ))
+        .unwrap();
+        let workspace = tree["nodes"][1]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|workspace| workspace["name"] == "oracle")
+            .unwrap()
+            .clone();
+        workspace["representation"].clone()
+    };
+    for command in ["move scratchpad", "workspace oracle", "scratchpad show"] {
+        assert!(
+            crate::command::execute(f.niri_state(), command)[0].success,
+            "{command}"
+        );
+    }
+    assert_eq!(representation(&mut f), serde_json::Value::Null);
+    assert!(crate::command::execute(f.niri_state(), "split toggle")[0].success);
+    assert_eq!(representation(&mut f), "H[]");
+}

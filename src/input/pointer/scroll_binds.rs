@@ -52,7 +52,7 @@ impl State {
                 && (!self.swayward.screenshot_ui.is_open()
                     || allowed_during_screenshot(&bind.action))
         };
-        (negative.filter(&filter), positive.filter(filter))
+        (negative.filter(filter), positive.filter(filter))
     }
 
     pub(super) fn fire_axis_ticks(
