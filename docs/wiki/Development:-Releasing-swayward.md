@@ -2,11 +2,11 @@
 
 `Cargo.toml` is the source of truth for the public version. Swayward uses
 three-part Semantic Versioning. Add a hyphenated suffix for a prerelease, such
-as `26.9.0-beta.1`. The version follows swayward releases. It does not claim
+as `26.10.0-beta.1`. The version follows swayward releases. It does not claim
 parity with the niri version in `docs/FORK-BASE.md`.
 
 Tag releases as `swayward-v<version>`, for example
-`swayward-v26.9.0-beta.1`. Do not use an unprefixed `v<version>` tag. The
+`swayward-v26.10.0-beta.1`. Do not use an unprefixed `v<version>` tag. The
 repository retains niri tags and fetches new niri tags for every upstream
 merge, so an unprefixed swayward tag can collide with an upstream tag.
 
@@ -22,8 +22,8 @@ second changelog file that can disagree with the releases.
    `Cargo.lock`.
 3. Update the swayward dependency pins in workspace manifests.
 4. Set `pkgver` in `contrib/PKGBUILD`. For a prerelease, remove the hyphen
-   and dots from its suffix (`26.9.0-beta.1` becomes `26.9.0beta1`) so Arch
-   sorts it before `26.9.0`. Keep `_tagver` equal to the Cargo version.
+   and dots from its suffix (`26.10.0-beta.1` becomes `26.10.0beta1`) so Arch
+   sorts it before `26.10.0`. Keep `_tagver` equal to the Cargo version.
 5. Run `makepkg --printsrcinfo > .SRCINFO` from `contrib/` in an Arch
    environment.
 6. Update public examples that pin the released `swayward-ipc` version.
@@ -136,7 +136,9 @@ a separate post-beta step:
 ## Publish swayward-ipc
 
 `swayward-ipc` is a library crate that other tools can use to speak sway's IPC
-protocol:
+protocol. It is not published for beta1: its manifest sets `publish = false`.
+Reconsider publication at the first stable release, then remove that line and
+run:
 
 ```sh
 cargo publish -p swayward-ipc

@@ -97,28 +97,23 @@ worth doing.
 
 ## Versioning
 
-swayward already uses niri's date scheme and should keep it: `YY.MM`, with a
-patch component for point releases.
+swayward uses niri's date scheme, `YY.MM` with a patch component, for its own
+releases. Prereleases carry a SemVer suffix and a human name:
 
-    26.4.0        # Cargo.toml, matching niri's own 26.4.0 at v26.04
-    26.04         # display form, zero-padded month
+    26.10.0-beta.1   # Cargo.toml and the tag swayward-v26.10.0-beta.1
+    beta1            # swayward --version and GET_VERSION human_readable
 
-`src/utils/version()` renders `MAJOR.MINOR` zero-padded, appending the patch
-only when it is non-zero, and always with the build commit. `get_version` over
-IPC reports the same numbers plus `"variant": "swayward"`, which is how a
-client tells us apart from sway.
+`src/utils/version()` renders the human name followed by the build commit.
+`get_version` over IPC reports that string, `"variant": "swayward"`, and the
+numeric fields `1.0.0`, which name the sway protocol family rather than the
+swayward release.
 
-Two consequences worth stating:
+The version says which swayward release this is, not which niri release it is
+based on. `FORK-BASE.md` records the niri base.
 
-- **Our version number is not sway's.** Clients checking for a sway feature
-  level by version will read a date, not `1.x`. The `variant` field exists for
-  exactly this, and any client that needs the distinction should use it.
-- **Matching niri's number does not mean matching niri's content.** We are on
-  26.4.0 while based on a commit 93 ahead of niri's v26.04. The version says
-  when, not what. `FORK-BASE.md` says what.
-
-A release is tagged `vYY.MM`, matching niri's tag convention, so the two
-histories read consistently in a log that contains both.
+A release is tagged `swayward-v<version>`. The prefix keeps our tags apart
+from niri's `vYY.MM` tags, which the repository fetches for every upstream
+merge.
 
 ## Never send AI-generated pull requests upstream
 

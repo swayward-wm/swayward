@@ -27,16 +27,16 @@ Gate: every `extract-compliance-harness` blocker except `oracle-final-squash` is
 
 **Owner: maintainer**
 
-Complete `launch-beta-version-contract` before editing release metadata. The current decisions conflict: the public version is `beta1`, while the release workflow requires a numeric Semantic Version such as `26.9.0-beta.1`, and Cargo/package metadata still says `26.4.0`.
+Complete `launch-beta-version-contract` before editing release metadata. The maintainer chose Option A on 2026-09-29: the human name is `beta1` and the ordered version is `26.10.0-beta.1`.
 
-Record one exact value for each item:
+The exact values:
 
-- the signed Git tag;
-- `swayward --version` and `GET_VERSION.human_readable`;
-- the Cargo workspace version;
-- Debian, RPM, and Arch package versions;
-- the release workflow input;
-- whether `swayward-ipc` is published for beta1.
+- signed Git tag: `swayward-v26.10.0-beta.1`;
+- `swayward --version` and `GET_VERSION.human_readable`: `swayward beta1 (<git describe>)`; the `GET_VERSION` numeric fields stay `1.0.0`;
+- Cargo workspace version: `26.10.0-beta.1`;
+- Debian and RPM: `26.10.0~beta.1`; Arch `pkgver`: `26.10.0beta1` with `_tagver=26.10.0-beta.1`;
+- release workflow input: `26.10.0-beta.1`;
+- `swayward-ipc` is not published for beta1 (`publish = false`).
 
 Gate: `contrib/check-release-consistency`, its test, the release runbook, and version tests all encode the same decision. Export the decided version as `VERSION`.
 

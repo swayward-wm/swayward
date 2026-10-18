@@ -47,7 +47,7 @@ mod tests {
         let output = error.to_string();
 
         assert_eq!(error.kind(), ErrorKind::DisplayVersion);
-        assert!(output.starts_with("swayward beta0-dev ("));
+        assert!(output.starts_with("swayward beta1 ("));
         assert!(output.ends_with(")\n"));
     }
 }

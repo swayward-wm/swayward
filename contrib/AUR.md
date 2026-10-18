@@ -55,7 +55,7 @@ cd aur-swayward
 cp ../contrib/PKGBUILD .
 makepkg --printsrcinfo > .SRCINFO      # AUR rejects a push without this
 git add PKGBUILD .SRCINFO
-git commit -m "swayward 26.4.0-1"
+git commit -m "swayward 26.10.0beta1-1"
 git push
 ```
 

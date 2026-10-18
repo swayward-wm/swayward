@@ -11,11 +11,11 @@ version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"
 grep -q '^Recommends:     foot$' swayward.spec.rpkg
 grep -q '^Suggests: .*foot' contrib/build-deb
 
-test "$(./contrib/package-version debian 26.4.0-beta.1)" = '26.4.0~beta.1'
-test "$(./contrib/package-version rpm 26.4.0-beta.1)" = '26.4.0~beta.1'
-test "$(./contrib/package-version arch 26.4.0-beta.1)" = '26.4.0beta1'
+test "$(./contrib/package-version debian 26.10.0-beta.1)" = '26.10.0~beta.1'
+test "$(./contrib/package-version rpm 26.10.0-beta.1)" = '26.10.0~beta.1'
+test "$(./contrib/package-version arch 26.10.0-beta.1)" = '26.10.0beta1'
 if command -v dpkg >/dev/null; then
-    dpkg --compare-versions "$(./contrib/package-version debian 26.4.0-beta.1)" lt 26.4.0
+    dpkg --compare-versions "$(./contrib/package-version debian 26.10.0-beta.1)" lt 26.10.0
 fi
 
 root=$(mktemp -d)
@@ -58,5 +58,6 @@ if ./contrib/check-release-consistency --root "$root" >/dev/null 2>"$root/error"
     echo "test-release-consistency: checker accepted a mismatched PKGBUILD" >&2
     exit 1
 fi
-grep -q "contrib/PKGBUILD: pkgver is '99.0.0'; expected '$version'" "$root/error"
+arch_version=$(./contrib/package-version arch "$version")
+grep -q "contrib/PKGBUILD: pkgver is '99.0.0'; expected '$arch_version'" "$root/error"
 echo "deliberate PKGBUILD mismatch rejected"

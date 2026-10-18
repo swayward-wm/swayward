@@ -10,6 +10,8 @@ description = "Types and helpers for interfacing with swayward, forked from niri
 keywords = ["wayland"]
 categories = ["api-bindings", "os"]
 readme = "README.md"
+# Not published to crates.io for beta1; reconsider at the first stable release.
+publish = false
 
 [dependencies]
 clap = { workspace = true, optional = true }

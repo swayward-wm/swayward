@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "swayward"
-version = "26.4.0"
+version = "26.10.0-beta.1"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3534,7 +3534,7 @@ dependencies = [
 
 [[package]]
 name = "swayward-config"
-version = "26.4.0"
+version = "26.10.0-beta.1"
 dependencies = [
  "bitflags",
  "csscolorparser",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "swayward-ipc"
-version = "26.4.0"
+version = "26.10.0-beta.1"
 dependencies = [
  "clap",
  "pcre2",
@@ -3564,7 +3564,7 @@ dependencies = [
 
 [[package]]
 name = "swayward-visual-tests"
-version = "26.4.0"
+version = "26.10.0-beta.1"
 dependencies = [
  "anyhow",
  "gtk4",

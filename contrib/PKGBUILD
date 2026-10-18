@@ -11,8 +11,8 @@
 # https://wiki.archlinux.org/title/AUR_submission_guidelines
 
 pkgname=swayward
-pkgver=26.4.0
-_tagver=26.4.0
+pkgver=26.10.0beta1
+_tagver=26.10.0-beta.1
 pkgrel=1
 pkgdesc="An i3/sway-compatible Wayland compositor, built in Rust on Smithay"
 arch=('x86_64' 'aarch64')

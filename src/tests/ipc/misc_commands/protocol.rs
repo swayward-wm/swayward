@@ -125,7 +125,7 @@ fn get_version_reports_swayward_version_independently_of_niri_base() {
     let version = query_ipc(&mut fixture, &mut stream, MessageType::GetVersion);
     let human_readable = version["human_readable"].as_str().unwrap();
 
-    assert!(human_readable.starts_with("swayward beta0-dev ("));
+    assert!(human_readable.starts_with("swayward beta1 ("));
     assert!(human_readable.ends_with(')'));
     assert_eq!(version["major"], 1);
     assert_eq!(version["minor"], 0);

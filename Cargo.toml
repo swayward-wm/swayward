@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "26.4.0"
+version = "26.10.0-beta.1"
 description = "An i3-compatible Wayland compositor based on niri"
 authors = ["Ivan Molodetskikh <yalterz@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -75,8 +75,8 @@ keyframe = { version = "1.1.1", default-features = false }
 libc = "0.2.189"
 libdisplay-info = "0.3.0"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
-swayward-config = { version = "26.4.0", path = "swayward-config" }
-swayward-ipc = { version = "26.4.0", path = "swayward-ipc", features = ["clap"] }
+swayward-config = { version = "26.10.0-beta.1", path = "swayward-config" }
+swayward-ipc = { version = "26.10.0-beta.1", path = "swayward-ipc", features = ["clap"] }
 ordered-float = "5"
 pango = { version = "0.21.5", features = ["v1_44"] }
 pcre2 = "0.2.11"

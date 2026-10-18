@@ -240,7 +240,7 @@ remote control or input injection.
 schema in sway 1.12's `sway/sway/ipc-json.c:225-238`; the target tag and exact
 commit are recorded in `sway-ipc/fixtures/schema-version.json` in the pinned oracle.
 Swayward reports its own variant and public version rather than claiming to be
-sway or i3. `human_readable` contains `swayward beta0-dev` until beta1 is tagged,
+sway or i3. `human_readable` contains the release name, such as `swayward beta1`,
 followed by `git describe` in parentheses; the description retains the niri base
 tag. The numeric fields are `1.0.0`: i3ipc and similar bindings deserialize them
 as integers, while swaymsg displays only `human_readable` and Waybar does not

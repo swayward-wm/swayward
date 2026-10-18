@@ -26,5 +26,5 @@ Use an exact version requirement to avoid breaking changes:
 
 ```toml
 [dependencies]
-swayward-ipc = "=26.4.0"
+swayward-ipc = "=26.10.0-beta.1"
 ```
