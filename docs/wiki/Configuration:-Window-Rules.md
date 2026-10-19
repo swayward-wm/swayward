@@ -8,15 +8,15 @@ This means that you can put more generic rules first, then override them for spe
 For example:
 
 ```kdl
-// Set open-maximized to true for all windows.
+// Set open-floating to true for all windows.
 window-rule {
-    open-maximized true
+    open-floating true
 }
 
-// Then, for Alacritty, set open-maximized back to false.
+// Then, for Alacritty, set open-floating back to false.
 window-rule {
     match app-id="Alacritty"
-    open-maximized false
+    open-floating false
 }
 ```
 
@@ -442,22 +442,18 @@ window-rule {
 
 #### `open-maximized`
 
-Make the window open maximized.
-
-```kdl
-// Maximize Firefox by default.
-window-rule {
-    match app-id="firefox$"
-
-    open-maximized true
-}
-```
+niri's rule to open a window as a full-width column. Swayward parses it but
+ignores it, because the tree sets a tiled window's width. Use
+[`open-maximized-to-edges`](#open-maximized-to-edges) to open a window
+maximized.
 
 #### `open-maximized-to-edges`
 
 <sup>Since: 25.11</sup>
 
-Make the window open [maximized to edges](./Fullscreen-and-Maximize.md).
+Make the window open in the maximized state, as if the application had asked to
+be maximized. Without this rule, swayward follows the application's own initial
+request.
 
 ```kdl
 window-rule {

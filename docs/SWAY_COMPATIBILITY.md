@@ -169,7 +169,7 @@ and the other user-visible differences.
 
 Subscriptions accept all 10 of sway's event family names. This page counts
 `barconfig_update` and `bar_state_update` separately; the oracle's event corpus
-subscribes to the other nine families, because sway emits no bar events without
+subscribes to the other eight families, because sway emits no bar events without
 a bar.
 
 - workspace, window, mode, and binding events;

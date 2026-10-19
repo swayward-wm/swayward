@@ -133,7 +133,8 @@ recent-windows {
 
 Configure binds that open and navigate the recent windows switcher.
 
-The defaults are <kbd>Alt</kbd><kbd>Tab</kbd> / <kbd>Mod</kbd><kbd>Tab</kbd> to switch across all windows, and <kbd>Alt</kbd><kbd>\`</kbd> / <kbd>Mod</kbd><kbd>\`</kbd> to switch between windows of the current application.
+The shipped config turns the switcher off with `recent-windows { off }`, so none of these keys are bound out of the box.
+Once you remove `off`, the default binds are <kbd>Alt</kbd><kbd>Tab</kbd> / <kbd>Mod</kbd><kbd>Tab</kbd> to switch across all windows, and <kbd>Alt</kbd><kbd>\`</kbd> / <kbd>Mod</kbd><kbd>\`</kbd> to switch between windows of the current application.
 Adding <kbd>Shift</kbd> will switch windows backwards.
 
 Adding the recent windows `binds {}` section to your config removes all default binds.

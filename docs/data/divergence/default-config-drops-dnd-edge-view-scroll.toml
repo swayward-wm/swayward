@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["resources/default-config.kdl"]
+what = "drop the commented `dnd-edge-view-scroll` example from the `gestures` section."
+why = "Nothing outside swayward-config reads `dnd_edge_view_scroll`: it scrolled niri's horizontal strip, which the nested tree does not have. The wiki's gesture configuration page says the parser still accepts it."

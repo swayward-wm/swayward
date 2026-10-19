@@ -110,6 +110,10 @@ If there's no sibling that way, but a parent further up has space, the window po
 #### Case C — enter a sibling container
 
 If the next sibling in that direction is itself a container, the window dives **into** it.
+Where it lands depends on the container's orientation:
+
+- If the container splits the same way you are moving (a splith when you move left or right), the window becomes its first child when moving right or down, or its last child when moving left or up.
+- If the container splits the other way (a splitv when you move left or right), the window goes to the container's most recently focused child and lands next to it: before it when moving right or down, after it when moving left or up.
 
 ### Bonus case — escape from a perpendicular layout
 
@@ -119,18 +123,19 @@ Swayward walks outward until the direction makes sense. A window is therefore
 allowed to leave its immediate family, which is more freedom than most nodes
 receive in a data-structure tutorial.
 
-**Quick check** — Tree is `splith [ A B* splitv[ C D ] ]` with B focused. You press `Mod+Shift+l` (move right). What happens?
+**Quick check** — Tree is `splith [ A B* splitv[ C D ] ]` with B focused. Before B, you last focused D. You press `Mod+Shift+l` (move right). What happens?
 
 1. B swaps with the column (column moves left, B moves right)
-2. B enters the column at the top: `splith [ A splitv[ B C D ] ]`
+2. B enters the column between C and D: `splith [ A splitv[ C B D ] ]`
 3. B and C swap inside the column
 4. Nothing — B can't move that direction
 
 <details><summary>Answer</summary>
 
-**2.** B enters the column at the top: `splith [ A splitv[ B C D ] ]`
+**2.** B enters the column between C and D: `splith [ A splitv[ C B D ] ]`
 
 B's right neighbour is a container (the splitv), so this is Case C: enter the container.
+The column splits vertically, which is perpendicular to a move right, so B goes to the column's most recently focused child, D, and lands before it.
 
 </details>
 

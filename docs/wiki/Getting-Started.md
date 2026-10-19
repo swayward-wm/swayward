@@ -25,6 +25,7 @@ it:
 
 ```sh
 sudo apt install ./swayward_VERSION_amd64.deb            # Ubuntu 24.04
+sudo dnf install ./swayward-VERSION-fedora43-x86_64.rpm  # Fedora 43
 sudo dnf install ./swayward-VERSION-fedora44-x86_64.rpm  # Fedora 44
 sudo pacman -U ./swayward-VERSION-arch-x86_64.pkg.tar.zst
 ```
@@ -61,9 +62,13 @@ From a source checkout, use the capped launcher:
 contrib/dev-run.sh --release
 ```
 
-The launcher builds swayward in `swayward-dev`, uses a private config, and stops
-the nested compositor after 120 seconds. Run `swayward` directly only when you
-installed a release package.
+The launcher builds swayward inside the `swayward-dev` distrobox container,
+which `contrib/dev-container.sh` creates (see [Build
+swayward](https://github.com/swayward-wm/swayward/blob/main/docs/BUILDING.md#build-on-an-immutable-host)).
+It uses a private config and stops the nested compositor after 120 seconds.
+
+If you installed swayward from a package, with Nix, or from your own build, run
+`swayward` from your session instead; it opens as a nested window.
 
 For a full session from a source checkout, run:
 
@@ -130,10 +135,11 @@ software](./Important-Software.md).
 
 A compositor session also needs a notification daemon, an authentication
 agent, and usually a panel and launcher. Install the programs used by the
-default config before your first login. On Fedora:
+default config, a notification daemon such as mako, and xwayland-satellite
+before your first login. On Fedora:
 
 ```sh
-sudo dnf install foot fuzzel waybar swaylock
+sudo dnf install foot fuzzel waybar swaylock mako xwayland-satellite
 ```
 
 The default config starts Waybar. Waybar's `sway/workspaces` and `sway/mode`

@@ -69,7 +69,7 @@ children:
 }
 ```
 
-The two stages from Induction V are two trees, not a tree and a bag of
+The two stages on each workspace are two trees, not a tree and a bag of
 rectangles. The tree knows no bounds.
 
 ### Mouse: hold Mod and drag
@@ -77,15 +77,19 @@ rectangles. The tree knows no bounds.
 - `Mod` + **left-click drag** anywhere on the window → move it
 - `Mod` + **right-click drag** → resize it
 
+On a window inside a floating group, both gestures act on the whole group: the
+drag moves or resizes the group's root. Dragging a border between two children
+without `Mod` resizes them inside the group.
+
 Both gestures are built in. They use whichever key `input { mod-key }` names: Super on a TTY, Alt in a nested winit window.
 
 ### Two stages per workspace
 
-`Mod+hjkl` only navigates within the layer you're in (tiled or floating). Swayward binds no key to `focus mode_toggle`. To cross between the layers, bind one. This example uses `Mod+Tab`, which is unbound in the shipped config:
+`Mod+hjkl` only navigates within the layer you're in (tiled or floating). Swayward binds no key to `focus mode_toggle`. To cross between the layers, bind one. This example uses `Mod+Space`, sway's default key for it, which is unbound in the shipped config:
 
 ```kdl
 binds {
-    Mod+Tab { command "focus mode_toggle"; }
+    Mod+Space { command "focus mode_toggle"; }
 }
 ```
 
@@ -107,7 +111,7 @@ to the desired neighbour, cross back to the floater, then press
 
 ### Keyboard resize
 
-`Mod+R` enters the `resize` mode that the default config defines. Inside that mode, `h`, `j`, `k`, `l` and the arrow keys resize the focused window by 10 px a step, and `Return` or `Escape` returns to the default mode. Directional floating moves count pixels only: sway's parser ignores a trailing `ppt` on `move left 25 ppt` and moves 25 pixels, and swayward follows sway.
+`Mod+R` enters the `resize` mode that the default config defines. Inside that mode, `h`, `j`, `k`, `l` and the arrow keys resize the focused window by 10 px a step, and `Return` or `Escape` returns to the default mode. Directional floating moves are in pixels.
 
 ### Auto-floating rules
 
@@ -146,7 +150,8 @@ window-rule {
 }
 ```
 
-Every launch: float, resize to a known size, centre on the active output. The window appears in the same predictable spot every time, with no manual cleanup.
+`default-column-width` keeps niri's name; for a floating window it sets the
+width. Every launch: float, resize to a known size, centre on the active output. The window appears in the same predictable spot every time, with no manual cleanup.
 
 ### The window-rule cookbook
 
@@ -199,7 +204,7 @@ We needed a place for the windows that refuse the tree, and a drawer was more ho
 
 | Key | Action |
 | --- | --- |
-| `Mod+Shift+Minus` | `move scratchpad` — stash focused window (it disappears) |
+| `Mod+Shift+Minus` | `move scratchpad` — stash the focused window or container (it disappears) |
 | `Mod+Minus` | `scratchpad show` — summon/hide; cycles through stash |
 
 
@@ -246,13 +251,17 @@ Cycling: `hidden → A → hidden → B → hidden → A → …`.
 
 ### Eviction
 
-No dedicated "unstash" command. Both routes work because they violate the "floating + no workspace" property:
+No dedicated "unstash" command. A scratchpad container leaves the scratchpad when it stops floating:
 
 | Method | Why it evicts |
 | --- | --- |
-| `Mod+Shift+Space` on a summoned window | Stops floating → must have a workspace → joins current |
-| `Mod+Shift+1` through `Mod+Shift+0` | Has a workspace → no longer no-workspace |
+| `Mod+Shift+Space` on a summoned window | Stops floating → becomes a tile on the current workspace |
+| `Mod+Shift+1` through `Mod+Shift+0` on a window *inside* a summoned floating group | The window leaves the group and lands tiled on that workspace |
 | Close the window | Window doesn't exist |
+
+Moving a summoned floating container to another workspace with `Mod+Shift+1`
+through `Mod+Shift+0` does not evict it. It is still floating, so it stays in
+the scratchpad: the next `Mod+Minus` brings it back to your current workspace.
 
 ### The useful pattern: stash on launch
 
@@ -301,6 +310,11 @@ window-rule {
 ```
 
 Pop a YouTube video out into PiP and it floats above the tiles on that workspace. To make it follow you across workspaces, focus it and run `swaywardmsg sticky enable`, or bind a key. Swayward implements the `sticky` command and binds no key to it.
+
+A floating group follows you only when the group itself is sticky. `sticky
+enable` on a window inside the group marks just that window, and the group
+stays behind. Press `Mod+A` until the group is focused, then run `sticky
+enable`.
 
 ### Sticky vs scratchpad
 

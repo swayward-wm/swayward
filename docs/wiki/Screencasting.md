@@ -42,7 +42,6 @@ Check [the corresponding wiki section](./Configuration:-Window-Rules.md#block-ou
 
 ### Dynamic screencast target
 
-<sup>Since: 25.05</sup>
 
 This feature requires the default `xdg-desktop-portal-gnome` backend. It is not available through `xdg-desktop-portal-wlr`.
 
@@ -73,7 +72,6 @@ All dynamic casts share the same target, but new ones start out empty until the 
 
 ### Indicate screencasted windows
 
-<sup>Since: 25.02</sup>
 
 With `xdg-desktop-portal-gnome`, the [`is-window-cast-target=true` window rule](./Configuration:-Window-Rules.md#is-window-cast-target) matches windows targeted by an ongoing window screencast.
 You use it with a special border color to clearly indicate screencasted windows.
@@ -112,7 +110,6 @@ Example:
 
 ### Windowed (fake/detached) fullscreen
 
-<sup>Since: 25.05</sup>
 
 When screencasting browser-based presentations like Google Slides, you usually want to hide the browser UI, which requires making the browser fullscreen.
 This is not always convenient, for example if you have an ultrawide monitor, or just want to leave the browser as a smaller window, without taking up an entire monitor.
@@ -143,7 +140,7 @@ binds {
 }
 ```
 Focus the output you want to mirror, press <kbd>Mod</kbd><kbd>P</kbd> and move the `wl-mirror` window to the target output.
-Finally, fullscreen the `wl-mirror` window (by default, <kbd>Mod</kbd><kbd>Shift</kbd><kbd>F</kbd>).
+Finally, fullscreen the `wl-mirror` window (by default, <kbd>Mod</kbd><kbd>F</kbd>).
 
 [OBS]: https://obsproject.com/
 

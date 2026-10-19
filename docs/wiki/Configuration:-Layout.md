@@ -6,7 +6,8 @@ container has one of four layouts:
 - `tabbed` shows one child at a time and draws a title strip.
 - `stacked` shows one child at a time in a vertical stack.
 
-A workspace starts with a horizontal root container. Splitting a focused node
+A workspace starts with a root split chosen by
+[`default-orientation`](#default-orientation). Splitting a focused node
 creates nested containers as needed. Removing or moving the last child out of a
 container collapses the empty container.
 
@@ -46,14 +47,17 @@ layout {
 
 ## Visual options
 
-The inherited `layout` options configure the tree's presentation:
+The inherited `layout` options configure the tree's presentation. The block
+below is an example showing every option, not the shipped defaults. Its focus
+ring and border match the shipped config (ring off, border on); the shipped
+config also turns `tab-indicator` off.
 
 ```kdl
 layout {
     gaps 0
 
     focus-ring {
-        on
+        off
         width 4
         active-color "#7fc8ff"
         inactive-color "#505050"
@@ -61,7 +65,7 @@ layout {
     }
 
     border {
-        off
+        on
         width 4
         active-color "#ffc87f"
         inactive-color "#505050"

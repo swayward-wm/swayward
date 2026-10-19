@@ -80,6 +80,9 @@ You can run Wayland-native games as well by passing `--expose-wayland` to gamesc
 
 ### Steam
 
+With xwayland-satellite 0.8.2, Steam's dropdown and context menus flash open and close immediately.
+Upgrade to xwayland-satellite [0.8.3](https://github.com/Supreeeme/xwayland-satellite/releases/tag/v0.8.3) or newer, which fixes it.
+
 On some systems, Steam will show a fully black window.
 To fix this, navigate to Settings -> Interface (via Steam's tray icon, or by blindly finding the Steam menu at the top left of the window), then **disable** GPU accelerated rendering in web views.
 Restart Steam and it should now work fine.

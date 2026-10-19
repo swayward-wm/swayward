@@ -42,7 +42,6 @@ The fix shipped in the driver at the time of writing uses a value of 0, while th
 
 ### Screencast flickering fix
 
-<sup>Until: 25.08</sup>
 
 If you have screencast glitches or flickering on NVIDIA, set this in the swayward config:
 
@@ -52,7 +51,7 @@ debug {
 }
 ```
 
-This debug flag has since been removed because the problem was properly fixed in swayward.
+This debug flag was removed when niri fixed the problem properly, before swayward forked, so swayward never needs it.
 
 ---
 

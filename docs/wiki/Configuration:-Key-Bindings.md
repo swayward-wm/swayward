@@ -57,12 +57,14 @@ Mouse buttons and wheel directions can appear in bindings:
 
 ```kdl
 binds {
-    Mod+MouseLeft { close-window; }
+    Mod+MouseForward { command "workspace next"; }
     Mod+WheelScrollDown { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.02-"; }
 }
 ```
 
-A pointer bind acts on the window focused when the event occurs.
+A pointer bind acts on the window focused when the event occurs. A bind on
+`Mod+MouseLeft` or `Mod+MouseRight` takes the button before the Mod+drag
+window gestures can, so those two disable dragging with that button.
 
 ## `spawn`
 

@@ -1,7 +1,7 @@
 ## Using xwayland-satellite
 
-<sup>Since: 25.08</sup> swayward integrates with [xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite) out of the box.
-Ensure xwayland-satellite >= 0.7 is installed and available in `$PATH`.
+swayward integrates with [xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite) out of the box.
+Ensure xwayland-satellite >= 0.7 is installed (0.8.3 or newer is recommended; see below) and available in `$PATH`.
 With no further configuration, swayward will create X11 sockets on disk, export `$DISPLAY`, and spawn xwayland-satellite on-demand when an X11 client connects.
 If xwayland-satellite dies, swayward will automatically restart it.
 
@@ -17,6 +17,8 @@ We're using xwayland-satellite rather than Xwayland directly because [X11 is ver
 xwayland-satellite takes on the bulk of the work dealing with the X11 peculiarities from us, giving swayward normal Wayland windows to manage.
 
 xwayland-satellite works well with most applications: Steam, games, Discord, and Ardour with wine Windows VST plugins.
+One known issue: with xwayland-satellite 0.8.2, Steam's dropdown and context menus flash open and close immediately.
+This is fixed in xwayland-satellite [0.8.3](https://github.com/Supreeeme/xwayland-satellite/releases/tag/v0.8.3); Fedora 44 still shipped 0.8.2 when swayward beta 1 was prepared, so check which version your distribution ships.
 However, X11 apps that want to position windows or bars at specific screen coordinates won't behave correctly and will need a nested compositor to run.
 See sections below for how to do that.
 
@@ -37,7 +39,7 @@ It will open as a new window.
 This method involves invoking XWayland directly and running it as its own window. It also requires an extra X11 window manager running inside it.
 
 1. Run `Xwayland` (just the binary on its own without flags).
-This will spawn a black window which you can resize and fullscreen (with Mod+Shift+F) for convenience.
+This will spawn a black window which you can resize and fullscreen (with Mod+F) for convenience.
 On older Xwayland versions the window will be screen-sized and non-resizable.
 1. Run some X11 window manager in there, e.g. `env DISPLAY=:0 i3`.
 This way you can manage X11 windows inside the Xwayland instance.
@@ -59,8 +61,8 @@ You can also bind these to hotkeys if you want:
 
 ```
 binds {
-    Mod+Shift+C { spawn "sh" "-c" "env DISPLAY=:0 xsel -ob | wl-copy"; }
-    Mod+Shift+V { spawn "sh" "-c" "wl-paste -n | env DISPLAY=:0 xsel -ib"; }
+    Mod+Ctrl+C { spawn "sh" "-c" "env DISPLAY=:0 xsel -ob | wl-copy"; }
+    Mod+Ctrl+V { spawn "sh" "-c" "wl-paste -n | env DISPLAY=:0 xsel -ib"; }
 }
 ```
 

@@ -47,7 +47,7 @@ starts being a thing you can pick up. When focus is on a container,
 **commands act on the whole container**:
 
 - **Send a whole column to another workspace**: focus a column container, hit `Mod+Shift+3` — the entire subtree moves.
-- **Tab a whole group**: focus a row, hit `Mod+W` — every direct child becomes a tab. `Mod+W` runs `layout tabbed`, which sets the layout rather than toggling it. Use `Mod+E` (`layout toggle split`) to get back to a split.
+- **Tab a whole group**: focus any window in a row, hit `Mod+W` — every direct child of the row becomes a tab. Layout commands change the focused node's parent, so with the row itself focused, `Mod+W` would tab the row's parent instead and the row would become one tab. `Mod+W` runs `layout tabbed`, which sets the layout rather than toggling it. Use `Mod+E` (`layout toggle split`) to get back to a split.
 - **Wrap a whole subtree in a new split**: focus a row, hit `Mod+V` — the entire row becomes the top child of a new splitv.
 
 Floating works at container scope too. Focus a split and press
