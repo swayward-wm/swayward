@@ -10,7 +10,7 @@ Specifically, swayward will announce:
 
 - workspace switching, for example it'll say "Workspace 2" when you switch to the second workspace;
 - the exit confirmation dialog (appears on <kbd>Super</kbd><kbd>Shift</kbd><kbd>E</kbd> by default);
-- <sup>Since: 25.11</sup> swayward has an <kbd>Alt</kbd><kbd>Tab</kbd> window switcher where it will announce the selected window title;
+- the <kbd>Alt</kbd><kbd>Tab</kbd> window switcher, where it will announce the selected window title (the switcher is off in the shipped config; see [Recent windows](./Configuration:-Recent-Windows.md));
 - entering the screenshot UI;
 - whenever a config parse error occurs;
 - the important hotkeys list (for now, as one big announcement without tab navigation; appears on <kbd>Super</kbd><kbd>Shift</kbd><kbd>/</kbd> by default).
@@ -35,7 +35,7 @@ Note that there are some limitations:
 
 If you're shipping swayward and would like to make it work better for screen readers out of the box, consider the following changes to the default swayward config:
 
-- Change the default terminal from Alacritty to one that supports screen readers. For example, [GNOME Console](https://gitlab.gnome.org/GNOME/console) or [GNOME Terminal](https://gitlab.gnome.org/GNOME/gnome-terminal) should work well.
+- Change the default terminal from foot to one that supports screen readers. For example, [GNOME Console](https://gitlab.gnome.org/GNOME/console) or [GNOME Terminal](https://gitlab.gnome.org/GNOME/gnome-terminal) should work well.
 - Change the default application launcher and screen locker to ones that support screen readers. For example, [xfce4-appfinder](https://docs.xfce.org/xfce/xfce4-appfinder/start) is an accessible launcher. Likely, something GTK-based will work fine.
 - Add some [`spawn-at-startup`](./Configuration:-Miscellaneous.md#spawn-at-startup) command that plays a sound which will indicate to users that swayward has finished loading.
 - Add `spawn-at-startup "orca"` to run Orca automatically at swayward startup.

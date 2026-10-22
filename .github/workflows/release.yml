@@ -108,6 +108,11 @@ jobs:
       - name: Build
         run: cargo build --all --frozen --release
 
+      - name: Fetch the pinned oracle
+        # The i3 conformance and IPC fixture tests read the sway-ipc-oracle
+        # checkout pinned in tests/oracle.toml, as in ci.yml.
+        run: ./contrib/fetch-oracle
+
       - name: Test
         run: cargo test --all --frozen --release -- --nocapture
 
@@ -293,7 +298,7 @@ jobs:
         run: |
           pacman -Syu --needed --noconfirm base-devel namcap cargo clang git \
             cairo libdisplay-info libinput libxkbcommon mesa pango python \
-            libpipewire seatd systemd-libs wayland xkeyboard-config
+            libpipewire seatd systemd-libs wayland xkeyboard-config ttf-dejavu
       - uses: actions/checkout@v6
         with:
           show-progress: false

@@ -309,6 +309,24 @@ gh run list --workflow release.yml --limit 1
 
 Gate: the validation, Ubuntu, Debian, Fedora, Arch, and clean-install jobs pass. Download the artifacts, verify checksums, review generated notes, and add the bounded beta limitations from `docs/RELEASE-NOTES-beta1.md`. Publish the draft only after maintainer review.
 
+The release body is the user-facing notes: drop the `DRAFT` heading and the
+maintainer-review paragraph from `docs/RELEASE-NOTES-beta1.md` when copying
+them, and keep its References section out of the body or behind a link.
+
+Right after publishing, flip the pages that describe beta1 as unpublished, in
+one docs-only commit on `main`:
+
+- `README.md`, "Install": "There is no public build yet" and "The first beta
+  will put these … packages".
+- `docs/wiki/Getting-Started.md`, "Install": the same two sentences and "Once
+  the beta is published".
+- `docs/wiki/FAQ.md`, "Which distributions have packages?": "No public beta
+  release exists yet" and "Until beta 1 is published".
+- `docs/RELEASE-NOTES-beta1.md`: remove the `DRAFT` heading.
+
+Each should say beta1 is on the releases page. Then run
+`./contrib/sync-github-wiki --check` and `./contrib/check-internal-links`.
+
 ## 11. Send courtesy notes and wait
 
 **Owner: maintainer**

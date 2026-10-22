@@ -37,8 +37,10 @@ contrib/sync-github-wiki --check-published
 This clones the wiki repository and compares it against what the tree would
 publish, so a page that drifted after a documentation change fails the check.
 The release workflow runs it, because a stale published reference is a defect
-only at a release; a documentation pull request is stale until it merges. With
-no network the command prints a skip and exits 0.
+at a release; a documentation pull request is stale until it merges. The
+daily `wiki-published.yml` workflow also runs it, so a wiki left unpublished
+after a merge shows up as a red run instead of drifting until the next
+release. With no network the command prints a skip and exits 0.
 
 Write GitHub-style admonitions:
 

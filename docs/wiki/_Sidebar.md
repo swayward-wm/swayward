@@ -29,6 +29,7 @@
 * [Tabbed and stacked containers](Tabs.md)
 * [Floating windows](Floating-Windows.md)
 * [Fullscreen and maximize](Fullscreen-and-Maximize.md)
+* [Mouse and touch gestures](Gestures.md)
 
 ## Configuration
 
@@ -52,7 +53,6 @@ and sway has no equivalent.
 
 * [Animations](Configuration:-Animations.md)
 * [Window effects](Window-Effects.md)
-* [Touchpad gestures](Gestures.md)
 * [Gesture configuration](Configuration:-Gestures.md)
 * [Recent windows](Configuration:-Recent-Windows.md)
 

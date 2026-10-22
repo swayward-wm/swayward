@@ -52,9 +52,11 @@ makedepends=(
 )
 
 # The Rust fixture suite compiles real XKB keymaps. libxkbcommon is the
-# library; the keymap data is a separate Arch package.
+# library; the keymap data is a separate Arch package. Titlebar tests measure
+# text, so they need a font.
 checkdepends=(
   'xkeyboard-config'
+  'ttf-dejavu'
 )
 
 optdepends=(
@@ -104,8 +106,47 @@ check() {
   # allocation failures. CI already runs the parallel gate; package validation
   # uses a modest raised soft limit and runs serially.
   ulimit -n 8192
+  # Tests that read the network-fetched sway-ipc-oracle checkout cannot run
+  # from a release tarball; CI and the Ubuntu release job run them.
   cargo test --frozen --release --lib \
-    -p swayward -p swayward-ipc -p swayward-config -- --test-threads=1
+    -p swayward -p swayward-ipc -p swayward-config -- --test-threads=1 --exact \
+    --skip tests::i3_conformance::docs_checks::coverage_data_validates_completely \
+    --skip tests::i3_conformance::harness_tests::harness_does_not_convert_wrong_named_assertions_into_skips \
+    --skip tests::i3_conformance::harness_tests::harness_skips_only_i3_invalid_criteria_wording \
+    --skip tests::i3_conformance::harness_tests::harness_xcb_xkb_guard_does_not_depend_on_the_host \
+    --skip tests::i3_conformance::manifest::passing_manifest_is_sorted_and_unique \
+    --skip tests::i3_conformance::runner::i3_conformance_runner \
+    --skip tests::ipc::binding_modes_switch_binds_emit_events_and_list_over_ipc \
+    --skip tests::ipc::captured_window_map_sequences_pin_focus_order_and_multiplicity \
+    --skip tests::ipc::captured_workspace_event_sequences_pin_order_and_multiplicity \
+    --skip tests::ipc::close_event_matches_captured_sway_schema_before_removal \
+    --skip tests::ipc::closing_last_window_removes_inactive_named_workspace_from_ipc \
+    --skip tests::ipc::directional_move_emits_one_settled_sway_move_event \
+    --skip tests::ipc::floating_stacking_and_focus_match_sway_before_and_after_raise \
+    --skip tests::ipc::get_inputs_and_seats_return_sway_schema_and_values \
+    --skip tests::ipc::get_tree_node_keys_all_appear_in_sway_fixtures \
+    --skip tests::ipc::libinput_object_has_every_sway_field_for_touchpads_and_mice \
+    --skip tests::ipc::live_floating_tree_matches_sway_roles \
+    --skip tests::ipc::live_get_tree_matches_sway_schema_and_values \
+    --skip tests::ipc::live_ipc_focus_matches_sway_mru_arrays \
+    --skip tests::ipc::live_ipc_percent_matches_sway_parent_shares \
+    --skip tests::ipc::live_ipc_rectangle_roles_match_sway_relationships \
+    --skip tests::ipc::live_workspace_output_and_marks_match_sway \
+    --skip tests::ipc::mark_event_matches_captured_sway_schema \
+    --skip tests::ipc::marks_round_trip_through_commands_get_marks_and_tree \
+    --skip tests::ipc::normalized_fixture_comparison_rejects_every_retained_value \
+    --skip tests::ipc::oracle_fixture_contents_are_owned \
+    --skip tests::ipc::reloaded_gap_defaults_do_not_change_an_existing_workspace \
+    --skip tests::ipc::reload_rereads_config_and_emits_the_sway_workspace_event \
+    --skip tests::ipc::tree_fixture_comparators_reject_a_missing_or_extra_child \
+    --skip tests::ipc::tree_fixture_comparison_rejects_every_rectangle_coordinate \
+    --skip tests::ipc::workspace_focus_spans_tiled_and_floating_children \
+    --skip tests::ipc::workspace_move_event_matches_sway_shape \
+    --skip tests::ipc::workspace_rename_event_matches_sway_shape \
+    --skip tests::ipc::workspace_urgency_event_matches_sway_shape \
+    --skip tests::ipc::workspace_window_and_mode_events_match_sway_shapes \
+    --skip tree::tests::a_view_missing_a_view_field_does_not_decode_as_a_plain_node \
+    --skip tree::tests::round_trips_all_real_sway_fixtures_without_schema_drift
 }
 
 package() {

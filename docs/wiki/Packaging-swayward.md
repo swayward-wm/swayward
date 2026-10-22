@@ -62,11 +62,11 @@ Set them as automatically-installed optional dependencies, if possible.
 - `xdg-desktop-portal-gtk`: the default backend for file choosers, printing, settings, and other general desktop portals.
 - `xdg-desktop-portal-gnome`: the capture backend for the integrated window and monitor picker, PipeWire streams, and dynamic cast target.
 - `gnome-keyring`: the Secret portal provider in `swayward-portals.conf`.
-
-`xdg-desktop-portal-wlr` is an optional, less integrated fallback for ScreenCast and Screenshot. Do not make it the package default: swayward deliberately retains niri's GNOME portal integration for its window picker and dynamic cast target.
 - Your distro's GPU driver package, such as `mesa-dri-drivers` and `mesa-libEGL`.
 Working hardware acceleration is required for running swayward.
 - Some notification daemon like `mako`, generally required for apps to work correctly.
+
+`xdg-desktop-portal-wlr` is an optional, less integrated fallback for ScreenCast and Screenshot. Do not make it the package default: swayward deliberately retains niri's GNOME portal integration for its window picker and dynamic cast target.
 
 Finally, you may want to auto-install some of the applications bound in swayward's [default configuration file](https://github.com/swayward-wm/swayward/blob/main/resources/default-config.kdl) (search for `exec` and `spawn`), such as `foot`, `fuzzel`, and `swaylock`.
 
@@ -95,13 +95,18 @@ You may also want to set the `RUN_SLOW_TESTS=1` environment variable to run the 
 
 ### Version string
 
-The swayward version string includes its public version and git description.
-The description also keeps the niri release at the merge base visible:
+The swayward version string includes its public version and the output of
+`git describe --always` for the source tree, which names the nearest tag. A
+build of the beta1 tag, and a build a few commits after it, look like this:
 
 ```
 $ swayward --version
-swayward beta1 (v26.04-183-ga0cebbd2)
+swayward beta1 (swayward-v26.10.0-beta.1)
+swayward beta1 (swayward-v26.10.0-beta.1-12-g1a2b3c4d)
 ```
+
+The RPM recipe sets the description to the package version, so a Fedora build
+reports `swayward beta1 (26.10.0~beta.1)`.
 
 The public version is the human release name, such as `beta1`. Cargo's package
 version is the same swayward release as ordered Semantic Versioning, such as
@@ -119,7 +124,7 @@ You can also override the version string entirely. Preserve the public
 swayward version and the source description:
 
 ```
-$ export SWAYWARD_BUILD_VERSION_STRING="beta1 (v26.04-183-ga0cebbd2)"
+$ export SWAYWARD_BUILD_VERSION_STRING="beta1 (swayward-v26.10.0-beta.1)"
 ...proceed to build swayward
 ```
 
@@ -148,9 +153,9 @@ stack backtrace:
    5: sub
              at /builddir/build/BUILD/rust-1.83.0-build/rustc-1.83.0-src/library/core/src/time.rs:1142:31
    6: cause_panic
-             at /builddir/build/BUILD/swayward-0.0.git.1699.279c8b6a-build/swayward/src/utils/mod.rs:382:13
+             at /builddir/build/BUILD/swayward-VERSION-build/swayward/src/utils/mod.rs:LINE:13
    7: main
-             at /builddir/build/BUILD/swayward-0.0.git.1699.279c8b6a-build/swayward/src/main.rs:107:27
+             at /builddir/build/BUILD/swayward-VERSION-build/swayward/src/main.rs:LINE:27
    8: call_once<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, ()>
              at /builddir/build/BUILD/rust-1.83.0-build/rustc-1.83.0-src/library/core/src/ops/function.rs:250:5
 note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
@@ -160,7 +165,7 @@ Important things to look for:
 
 - The panic message is there: "overflow when subtracting durations".
 - The backtrace goes all the way up to `main` and includes `cause_panic`.
-- The backtrace includes the file and line number for `cause_panic`: `at /.../src/utils/mod.rs:382:13`.
+- The backtrace includes the file and line number for `cause_panic`: `at /.../src/utils/mod.rs:LINE:13`.
 
 If possible, please ensure that your swayward package on its own has good panics, i.e. *without* installing debuginfo or other packages.
 The user likely won't have debuginfo installed when their compositor first crashes, and we really want to be able to diagnose and fix all crashes right away.

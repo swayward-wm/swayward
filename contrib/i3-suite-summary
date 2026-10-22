@@ -16,21 +16,24 @@ A generated block sits between
     <!-- i3-suite-summary:NAME generated from the pinned oracle; do not edit by hand -->
     <!-- end i3-suite-summary:NAME -->
 
-NAME is `i3-suite` (swayward's i3-suite outcomes) or `sway-ipc` (the sway IPC
-corpora). --check fails when a block differs from its rendering, when a file
+NAME is `i3-suite` (swayward's i3-suite outcomes), `sway-ipc` (the sway IPC
+corpora in full) or `sway-compat` (the README's front-page table: one row per
+sway IPC corpus with swayward's `[run]` match and mismatch counts, plus
+unstable and n.a. columns only when one is nonzero). --check fails when a block differs from its rendering, when a file
 has no block, or when a block name is unknown.
 
 The i3-suite figures use the oracle's stable filter (contrib/validate): every
 assertion of a file listed in i3/flaky.toml counts as `flaky`, every assertion
 listed for the compositor in i3/unstable.toml counts as `unstable`, and the
 rest count as their recorded outcome. The six columns sum to the suite size.
-Each table covers one compositor; sway appears only as the sway IPC reference.
+The i3-suite table has a swayward row and a sway reference row from the same
+oracle and the same filter; the sway IPC tables are swayward's, with sway's
+replay of its own captures as the self-check.
 Cells from a result listed in the oracle's pending.toml carry a dagger.
 """
 
 import argparse
 import collections
-import importlib.util
 import re
 import subprocess
 import sys
@@ -54,8 +57,18 @@ CORPORA = {
     "command-fuzz": "Command fuzz",
     "wire-fuzz": "Wire fuzz",
 }
+# Front-page labels for the sway-compat block; {steps} comes from the run.
+COMPAT = {
+    "": "Hand-picked state scenarios",
+    "events": "Event streams",
+    "i3-derived": "States reached by i3's test sequences",
+    "random": "Random {steps}-step sequences",
+    "command-fuzz": "Malformed commands",
+    "wire-fuzz": "Broken IPC framing",
+}
 # Published docs that embed generated blocks; --write and --check default to these.
 DOCS = [
+    "README.md",
     "docs/I3_SUITE_RESULTS.md",
     "docs/wiki/Testing-and-Conformance.md",
     "docs/RELEASE-NOTES-beta1.md",
@@ -149,20 +162,6 @@ class Oracle:
         unclassified = sum(row.get("reason") == "unclassified" for row in rows)
         return len(rows), verified, unclassified
 
-    def buckets(self):
-        """swayward's bucket row, when the oracle ships contrib/i3_buckets.py."""
-        path = self.path / "contrib" / "i3_buckets.py"
-        if not path.exists():
-            return None
-        spec = importlib.util.spec_from_file_location("i3_buckets", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _, snaps = module.snapshots()
-        snap = snaps["swayward"]
-        counts = collections.Counter(snap.bucket.values())
-        mark = module.dagger(snap)
-        return [(bucket, n(counts[bucket]) + mark) for bucket in module.BUCKETS]
-
     def corpus(self, name, suffix):
         stem = f"{name}-{suffix}" if suffix else name
         relative = f"sway-ipc/results/{stem}.toml"
@@ -232,42 +231,53 @@ def scope(suffix, result):
     if "cases" in run:
         return f"{n(run['cases'])} cases"
     scenarios = {row["scenario"] for row in rows}
-    noun = "states" if suffix == "i3-derived" else "scenarios"
-    return f"{n(len(scenarios))} {noun}, {n(len(rows))} rows"
+    if suffix == "i3-derived":
+        return f"{n(len(scenarios))} states, {n(len(rows))} rows"
+    # A scenario can capture several named states (captures and probes), so
+    # this counts captures; the oracle README counts scenario definitions.
+    return f"{n(len(scenarios))} captures, {n(len(rows))} rows"
 
 
 def render_i3_suite(oracle):
-    counts, total = oracle.stable_outcomes("swayward", oracle.snapshot)
-    mark = oracle.mark(oracle.i3_result())
     commit = oracle.pins["swayward"][:8]
-    rows, verified, unclassified = oracle.review()
-    review_mark = mark
+    version = oracle.reference.removeprefix("sway-")
+    # One compositor per table (maintainer decision 2): sway's figures are in
+    # its own block on the oracle's results page, linked below.
+    rows = [("swayward", oracle.snapshot, f"swayward `{commit}`")]
+    table, marks, size = [], [], None
+    for compositor, name, label in rows:
+        counts, total = oracle.stable_outcomes(compositor, name)
+        if size not in (None, total):
+            raise SystemExit(f"{name}: {total} assertions, swayward has {size}")
+        size = total
+        mark = oracle.mark(f"i3/results/{name}.toml")
+        marks.append(mark)
+        table.append(
+            f"| {label} | " + " | ".join(n(counts[outcome]) + mark for outcome in RAW)
+            + f" | {n(total)} |"
+        )
+    mark = marks[0]
+    review, verified, unclassified = oracle.review()
     lines = [
         f"Oracle [`{oracle.commit[:8]}`]({ORACLE_URL}/tree/{oracle.commit}), swayward "
-        f"snapshot `{oracle.snapshot}` (`{commit}`), stable filter over "
-        f"{n(total)} assertions:",
+        f"snapshot `{oracle.snapshot}`, stable filter over {n(size)} assertions:",
         "",
-        "| " + " | ".join(RAW) + " | total |",
-        "|" + " ---: |" * (len(RAW) + 1),
-        "| " + " | ".join(n(counts[outcome]) + mark for outcome in RAW) + f" | {n(total)} |",
+        "| Compositor | " + " | ".join(RAW) + " | total |",
+        "|---|" + " ---: |" * (len(RAW) + 1),
+        *table,
         "",
+        f"swayward review: {n(review)}{mark} non-pass rows; "
+        f"{n(verified)}{mark} verified, {n(review - verified)}{mark} "
+        f"unverified, {n(unclassified)}{mark} of them unclassified.",
     ]
-    buckets = oracle.buckets()
-    if buckets is not None:
+    if (oracle.path / "docs" / "results.md").exists():
         lines += [
-            "Interpretive buckets from the oracle's `contrib/i3_buckets.py`:",
             "",
-            "| " + " | ".join(name for name, _ in buckets) + " |",
-            "|" + " ---: |" * len(buckets),
-            "| " + " | ".join(cell for _, cell in buckets) + " |",
-            "",
+            "Each compositor, sway "
+            f"{version} included, has its own block on the oracle's "
+            f"[results page]({ORACLE_URL}/blob/{oracle.commit}/docs/results.md).",
         ]
-    lines.append(
-        f"Review: {n(rows)}{review_mark} non-pass rows are classified; "
-        f"{n(verified)}{review_mark} verified, {n(rows - verified)}{review_mark} "
-        f"unverified, {n(unclassified)}{review_mark} of them unclassified."
-    )
-    if mark:
+    if any(marks):
         lines += ["", PENDING_NOTE]
     return "\n".join(lines)
 
@@ -281,10 +291,10 @@ def render_sway_ipc(oracle):
         "captures as a self-check.",
         "",
         f"| Corpus | Scope | sway {version} self-check | swayward match | swayward mismatch "
-        "| swayward unstable | swayward n.a. | untriaged mismatches |",
-        "|---|---|---|---:|---:|---:|---:|---:|",
+        "| swayward unstable | swayward n.a. |",
+        "|---|---|---|---:|---:|---:|---:|",
     ]
-    notes, pending = [], []
+    notes, pending, untriaged = [], [], []
     for suffix in oracle.corpora():
         result = oracle.corpus(oracle.snapshot, suffix)
         sway = oracle.corpus(reference, suffix)
@@ -310,11 +320,21 @@ def render_sway_ipc(oracle):
         for reason, count in sorted(result["reasons"].items()):
             notes.append(f"- swayward, {label}: {n(count)} rows not applicable: {reason}.")
         cells = [n(v[key]) + mark for key in ("match", "mismatch", "unstable", "not_applicable")]
-        untriaged = n(oracle.untriaged(suffix, result)) + mark
+        count = oracle.untriaged(suffix, result)
+        if count:
+            untriaged.append(f"{label} {n(count)}{mark}")
         lines.append(
-            f"| {label} | {scope(suffix, result)} | {self_check} | " + " | ".join(cells)
-            + f" | {untriaged} |"
+            f"| {label} | {scope(suffix, result)} | {self_check} | " + " | ".join(cells) + " |"
         )
+    classifications = "the oracle's `sway-ipc/classifications/`"
+    if untriaged:
+        sentence = (
+            f"Swayward mismatches with no row yet in {classifications}: "
+            + ", ".join(untriaged) + "."
+        )
+    else:
+        sentence = f"Every swayward mismatch is classified in {classifications}."
+    lines += ["", sentence]
     if notes:
         lines += [""] + notes
     if pending:
@@ -322,7 +342,45 @@ def render_sway_ipc(oracle):
     return "\n".join(lines)
 
 
-RENDERERS = {"i3-suite": render_i3_suite, "sway-ipc": render_sway_ipc}
+def render_sway_compat(oracle):
+    """The front-page table: swayward's [run] counts per corpus, no totals."""
+    version = oracle.reference.removeprefix("sway-")
+    rows, pending = [], False
+    for suffix in oracle.corpora():
+        result = oracle.corpus(oracle.snapshot, suffix)
+        run = result["doc"]["run"]
+        counts = {key: run.get(key, 0) for key in ("match", "mismatch", "unstable",
+                                                   "not_applicable")}
+        label = COMPAT.get(suffix, suffix).format(steps=run.get("steps", ""))
+        rows.append((label, counts, result["mark"]))
+        pending = pending or bool(result["mark"])
+    columns = [("match", "Match"), ("mismatch", "Mismatch")] + [
+        (key, title)
+        for key, title in (("unstable", "Unstable"), ("not_applicable", "n.a."))
+        if any(counts[key] for _, counts, _ in rows)
+    ]
+    lines = [
+        f"Swayward snapshot `{oracle.snapshot}` against sway {version}, from oracle "
+        f"[`{oracle.commit[:8]}`]({ORACLE_URL}/tree/{oracle.commit}).",
+        "",
+        f"| Sway-compatibility corpus (reference: sway {version}) | "
+        + " | ".join(title for _, title in columns) + " |",
+        "|---|" + "---:|" * len(columns),
+    ]
+    for label, counts, mark in rows:
+        lines.append(
+            f"| {label} | " + " | ".join(n(counts[key]) + mark for key, _ in columns) + " |"
+        )
+    if pending:
+        lines += ["", PENDING_NOTE]
+    return "\n".join(lines)
+
+
+RENDERERS = {
+    "i3-suite": render_i3_suite,
+    "sway-ipc": render_sway_ipc,
+    "sway-compat": render_sway_compat,
+}
 
 
 def rewrite(text, oracle, path):

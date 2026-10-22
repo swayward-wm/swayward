@@ -1,16 +1,16 @@
-This page is the single reference for how swayward is tested. Other pages link
-here instead of quoting test counts.
+swayward is tested in layers: unit and headless compositor tests on every
+push, randomized layout and IPC suites, a nightly live soak against release
+builds, i3's own test suite run unchanged, and a separate oracle that
+compares swayward's IPC replies with real sway 1.12. This page is the single
+reference for all of it. Other pages link here instead of quoting test counts.
 
-Every number on this page comes from a command, named next to it. Numbers go
-stale: rerun the command for the current value. The oracle and coverage tables
-are generated, and `contrib/fast-gate` fails if one differs from its source.
+Every number on this page comes from a command, named next to it; rerun the
+command for the current value. The oracle and coverage tables are generated,
+and `contrib/fast-gate` fails if one differs from its source.
 The oracle figures are those recorded at the oracle revision pinned in
 [`tests/oracle.toml`](https://github.com/swayward-wm/swayward/blob/main/tests/oracle.toml).
 They measure the swayward commit named in that oracle's `pins.toml` against
 sway 1.12.
-
-A passing test is evidence for the behaviour it exercises, not a compatibility
-percentage.
 
 ## Where each check runs
 
@@ -31,19 +31,18 @@ percentage.
 and `contrib/coverage-report --check`. When the change touches `src/layout/`, it
 also runs both slow layout gates at 20,000 cases.
 
-Black-box oracle runs are not part of CI. They start real sway and swayward
-binaries and take hours across the full corpus.
+Black-box oracle runs start real sway and swayward binaries and take hours
+across the full corpus, so they run outside CI against pinned commits.
 
 ## Inherited niri unit tests
 
 Swayward forked niri at commit `9e72e491`
 ([`docs/FORK-BASE.md`](https://github.com/swayward-wm/swayward/blob/main/docs/FORK-BASE.md)).
-The niri test suite came with it. Most of it survives; to count how many
+The niri test suite came with it, and most of it survives. To count how many
 tests the fork base had, how many still exist here, and which were removed, run
 `contrib/test-census --inherited <dir>` in the dev container. It checks out
 the fork base in `<dir>`, lists its tests with `cargo test -- --list`, and
-prints the removed names. This page does not quote the figures because nothing
-can check them without building the fork base.
+prints the removed names.
 
 Almost all of the removed tests checked niri's scrolling layout: column
 widths, view offsets, and column moves between workspaces. Swayward replaced
@@ -119,8 +118,7 @@ The workspace has four crates: `swayward`, `swayward-ipc`,
 
 For the current counts per crate and per area, run `contrib/test-census` in
 the dev container. It lists tests with `cargo test -- --list`, so it counts
-what cargo runs. This page does not quote the counts: they change with almost
-every commit.
+what cargo runs.
 
 The tests under `src/tests/` start a real compositor in the test process and
 connect real `wayland-client` clients to it. No nested session or display is
@@ -148,12 +146,60 @@ job uploads the probe and compositor logs.
 The oracle's own command-fuzz and wire-fuzz corpora are described in
 [Sway IPC snapshots](#sway-ipc-snapshots).
 
-## The oracle: i3's own test suite
+## Sway IPC snapshots
 
 The [sway IPC oracle](https://github.com/swayward-wm/sway-ipc-oracle) is a
-separate repository. It holds i3's upstream Perl tests unchanged, plus the
-adapters that run them against i3, sway, and swayward. A test you can edit to
-pass is not evidence, so swayward never edits these files.
+separate repository. It compares swayward's IPC replies and events with
+captures from the pinned sway build, using the same black-box runners it uses
+for sway itself. Each corpus starts
+a fresh compositor per scenario, normalizes values that legitimately vary
+between runs, and compares the rest exactly.
+
+<!-- i3-suite-summary:sway-ipc generated from the pinned oracle; do not edit by hand -->
+Oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6), swayward snapshot `swayward-1fd3c25b`. The sway 1.12 column replays sway's own captures as a self-check.
+
+| Corpus | Scope | sway 1.12 self-check | swayward match | swayward mismatch | swayward unstable | swayward n.a. |
+|---|---|---|---:|---:|---:|---:|
+| Hand-picked state scenarios | 559 captures, 4,917 rows | 4,916 match, 1 mismatch | 4,908 | 9 | 0 | 0 |
+| Events | 45 captures, 45 rows | 45 match | 45 | 0 | 0 | 0 |
+| i3-derived states | 416 states, 4,160 rows | 4,160 match | 4,148 | 12 | 0 | 0 |
+| Random sequences | 500 seeds × 20 steps | 500 match | 466 | 34 | 0 | 0 |
+| Command fuzz | 195 cases | 195 match | 195 | 0 | 0 | 0 |
+| Wire fuzz | 10 cases | 10 match | 6 | 4 | 0 | 0 |
+
+Every swayward mismatch is classified in the oracle's `sway-ipc/classifications/`.
+<!-- end i3-suite-summary:sway-ipc -->
+
+Command: `contrib/i3-suite-summary`. The sway column replays sway's own
+captures, which shows the normalization does not hide real differences
+between two runs of one compositor. Its one state mismatch comes from a sway
+capture taken with different font metrics; the oracle's results page explains
+it. Each
+classification row records a mismatch as a bug, a declared deviation, or a
+harness issue.
+
+Normalization rules live in the oracle's `sway-ipc/normalize.toml`. Every
+ignored field there has a written reason. Examples are node IDs, process IDs,
+backend output names, and rectangle sizes that depend on font metrics.
+
+To compare a local build against one scenario or seed, run the oracle runner
+from an oracle checkout:
+
+```sh
+./contrib/sway-ipc-run --compositor swayward --binary <path> --scenario <name>
+./contrib/sway-ipc-run random --compositor swayward --binary <path> --seeds 3,17
+```
+
+`contrib/targeted-oracle` in the swayward repository selects the scenarios and
+seeds that a change can affect.
+
+## Context: i3's own test suite
+
+Sway has no conformance suite of its own, so i3's supplies many of the
+scenarios above. The oracle also runs it directly: it holds i3's upstream Perl
+tests unchanged, plus the adapters that run them against i3, sway, and
+swayward. A test you can edit to pass is not evidence, so swayward never edits
+these files.
 
 The adapter replaces X11 window creation with real Wayland clients. It does not
 rewrite assertions.
@@ -161,18 +207,19 @@ rewrite assertions.
 ### Black-box run
 
 The oracle runs each compositor as a separate process and records every
-assertion.
+assertion. Sway 1.12's figures, from the same oracle revision and stable
+filter, are in its own block on the oracle's results page.
 
 <!-- i3-suite-summary:i3-suite generated from the pinned oracle; do not edit by hand -->
-Oracle [`cd64b835`](https://github.com/swayward-wm/sway-ipc-oracle/tree/cd64b8351f6c427dd8b3533c231c3f0ba42fad12), swayward snapshot `swayward-54c5acd9` (`54c5acd9`), stable filter over 3,755 assertions:
+Oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6), swayward snapshot `swayward-1fd3c25b`, stable filter over 3,755 assertions:
 
-| pass | skip | fail | unreached | unstable | flaky | total |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,453† | 11† | 800† | 1,469† | 0† | 22† | 3,755 |
+| Compositor | pass | skip | fail | unreached | unstable | flaky | total |
+|---| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| swayward `1fd3c25b` | 1,470 | 12 | 780 | 1,469 | 0 | 24 | 3,755 |
 
-Review: 2,280† non-pass rows are classified; 2,199† verified, 81† unverified, 81† of them unclassified.
+swayward review: 2,261 non-pass rows; 2,191 verified, 70 unverified, 70 of them unclassified.
 
-† From a result listed in the oracle's `pending.toml`: it awaits regeneration, and the figure is its last measured value.
+Each compositor, sway 1.12 included, has its own block on the oracle's [results page](https://github.com/swayward-wm/sway-ipc-oracle/blob/27560327227afd9ff05ea40f3c527b7333e714a6/docs/results.md).
 <!-- end i3-suite-summary:i3-suite -->
 
 Command: `contrib/i3-suite-summary`.
@@ -180,19 +227,20 @@ Command: `contrib/i3-suite-summary`.
 Sway does not pass most of i3's suite either, because many assertions test i3
 itself: its X11 window manager, config parser, bar, in-place restart, or tree
 nodes that sway does not expose. The oracle's
-[README](https://github.com/swayward-wm/sway-ipc-oracle#snapshots) gives each
-compositor its own block, with the rows its labels set aside and the
-asymmetries between the views.
+[results](https://github.com/swayward-wm/sway-ipc-oracle/blob/main/docs/results.md)
+page gives each compositor its own block, with its interpretive buckets, the
+rows its labels set aside, and the asymmetries between the views.
 [Reading the i3 suite results](https://github.com/swayward-wm/swayward/blob/main/docs/I3_SUITE_RESULTS.md)
 explains the columns.
 
 ### In-process run
 
-Swayward also runs the same unchanged files inside its own test process. This
-is faster and runs on every build.
+Swayward also runs the same unchanged files inside its own test process. The
+fully green files gate every push; the slow CI job checks that the other files
+keep their recorded passes.
 [`tests/i3/coverage.toml`](https://github.com/swayward-wm/swayward/blob/main/tests/i3/coverage.toml)
-is the source of truth: one row per file, with every non-passing assertion
-itemized.
+is the source of truth: one row per file, with every documented skip itemized
+and the failing and unreached assertions counted.
 
 <!-- coverage-report generated from tests/i3/coverage.toml; do not edit by hand -->
 | Measure | Count |
@@ -209,62 +257,19 @@ itemized.
 Command: `contrib/coverage-report`.
 
 A documented skip cites the sway source that makes the assertion inapplicable,
-or the exact harness premise it cannot meet. Failures and unreached assertions
-are open work. `contrib/coverage-report --check` fails on an undocumented skip.
+or the exact harness premise it cannot meet.
+`contrib/coverage-report --check` fails on an undocumented skip. Failing and
+unreached assertions are counted per file and are open work.
 
 `cargo test --all` runs the fully green files. To check that no other file lost
 a pass, run the ratchet:
 
 ```sh
-SWAYWARD_I3_RATCHET=1 cargo test -p swayward --lib i3_conformance_non_green -- --nocapture
+RUN_SLOW_TESTS=1 cargo test -p swayward --lib i3_conformance_non_green -- --nocapture
 ```
 
 Count a single file's assertions with `contrib/tap-count`, never by hand. Only
 the first unindented TAP plan counts.
-
-## Sway IPC snapshots
-
-The oracle also compares swayward's IPC replies and events with captures from
-the pinned sway build. Each corpus starts a fresh compositor per scenario,
-normalizes values that legitimately vary between runs, and compares the rest
-exactly.
-
-<!-- i3-suite-summary:sway-ipc generated from the pinned oracle; do not edit by hand -->
-Oracle [`cd64b835`](https://github.com/swayward-wm/sway-ipc-oracle/tree/cd64b8351f6c427dd8b3533c231c3f0ba42fad12), swayward snapshot `swayward-54c5acd9`. The sway 1.12 column replays sway's own captures as a self-check.
-
-| Corpus | Scope | sway 1.12 self-check | swayward match | swayward mismatch | swayward unstable | swayward n.a. | untriaged mismatches |
-|---|---|---|---:|---:|---:|---:|---:|
-| Hand-picked state scenarios | 78 scenarios, 780 rows | 740 match, 40 n.a. | 749 | 31 | 0 | 0 | 31 |
-| Events | 45 scenarios, 45 rows | 45 match | 44 | 1 | 0 | 0 | 1 |
-| i3-derived states | 418 states, 4,180 rows | 4,180 match† | 4,118† | 62† | 0† | 0† | 62† |
-| Random sequences | 500 seeds × 20 steps | 500 match | 329 | 171 | 0 | 0 | 171 |
-| Command fuzz | 195 cases | 195 match | 195 | 0 | 0 | 0 | 0 |
-| Wire fuzz | 10 cases | 10 match | 6 | 4 | 0 | 0 | 0 |
-
-- sway 1.12, Hand-picked state scenarios: 40 rows not applicable: fixture client unavailable (missing wayland-scanner).
-
-† From a result listed in the oracle's `pending.toml`: it awaits regeneration, and the figure is its last measured value.
-<!-- end i3-suite-summary:sway-ipc -->
-
-Command: `contrib/i3-suite-summary`. The sway column replays sway's own
-captures. Where every row ran, it matched, which shows the normalization does
-not hide real differences between two runs of one compositor. An untriaged
-mismatch has no row yet in the oracle's `sway-ipc/classifications/`.
-
-Normalization rules live in the oracle's `sway-ipc/normalize.toml`. Every
-ignored field there has a written reason. Examples are node IDs, process IDs,
-backend output names, and rectangle sizes that depend on font metrics.
-
-To compare a local build against one scenario or seed, run the oracle runner
-from an oracle checkout:
-
-```sh
-./contrib/sway-ipc-run --compositor swayward --binary <path> --scenario <name>
-./contrib/sway-ipc-run random --compositor swayward --binary <path> --seeds 3,17
-```
-
-`contrib/targeted-oracle` in the swayward repository selects the scenarios and
-seeds that a change can affect.
 
 ## Intentional differences from sway
 
@@ -284,9 +289,9 @@ The design rule on the wire is that a request is answered exactly as sway
 answers it, or it returns `{"success": false}`, never a sway-shaped reply with
 different content. `GET_CONFIG` is the example: sway returns its config file,
 swayward's config is KDL, so the request is refused rather than approximated.
-The rule is the target, not a measurement: the sway IPC table above counts the
-replies that still differ, and the untriaged column counts those not yet
-classified as a bug, a declared deviation, or a harness issue.
+The sway IPC table above counts the replies that still differ, and the
+sentence under it names any not yet classified as a bug, a declared deviation,
+or a harness issue.
 
 ## Other checks
 

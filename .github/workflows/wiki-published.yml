@@ -1,0 +1,19 @@
+name: Published wiki matches main
+
+# The GitHub wiki is published from docs/wiki by contrib/sync-github-wiki.
+# Publishing is a manual step, so check daily that the live wiki still matches
+# main; a red run means: run ./contrib/sync-github-wiki.
+on:
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  wiki-published:
+    name: published wiki matches main
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          show-progress: false
+      - run: ./contrib/sync-github-wiki --check-published

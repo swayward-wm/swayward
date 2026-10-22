@@ -31,10 +31,12 @@ startup-only behavior and shell syntax. `exec_always` also keeps its startup
 effect, but emits manual attention because sway runs it again on reload while
 swayward has no reload-time startup hook.
 
-The repository tests translate pinned copies of the sway 1.11 and SwayFX default
-configs, check that reported directives remain in the output, and parse the
-resulting KDL. They also pin the counts, because this document quotes them: the
-sway 1.11 default produces three manual-attention items and the SwayFX default
+The repository tests translate pinned copies of the sway and SwayFX default
+configs. The sway copy was taken during the 1.12 development cycle and is
+byte-identical to the `config.in` in sway 1.12, the release swayward targets,
+so it keeps its `sway-1.11-default.conf` file name. The tests check that
+reported directives remain in the output, and parse the resulting KDL. They also pin the counts, because this document quotes them: the
+sway default produces three manual-attention items and the SwayFX default
 seven. A rise fails the suite. Directives that explicitly request behavior already
 provided by swayward's defaults remain visible as `// sway-to-kdl: satisfied by
 swayward defaults` comments, but do not count as manual-attention items. The project
@@ -93,25 +95,32 @@ input settings apply to every device of a class. Move settings from an
 `input "<identifier>" {}` block to the matching `keyboard`, `mouse`, `touchpad`,
 `tablet`, or `touch` KDL section only if applying them to the whole class is
 acceptable. Otherwise keep the generated manual-attention comment.
+
+### Gesture and switch bindings
+
 - **Gesture bindings:** `bindgesture` and `unbindgesture` are reported. Swayward
   keeps its additive four-finger overview swipe and forwards pinch and hold
   gestures to clients, but cannot bind swipe, pinch, or hold gestures to sway
-  commands. Sway stores these
-  bindings per mode and dispatches their commands when a tracked gesture ends
-  (`sway/commands/gesture.c:40-57`; `sway/input/seatop_default.c:898-917`).
+  commands. See [Gesture bindings](KNOWN_DEVIATIONS.md#gesture-bindings).
 - **Switch bindings:** `bindswitch` and `unbindswitch` are reported. Swayward's
   `switch-events {}` supports only unconditional process spawning. It cannot
   preserve sway command dispatch, binding modes, `toggle`, `--locked`, or
-  `--reload` behavior. Sway filters switch bindings by mode and lock state, and
-  `--reload` re-runs state-specific bindings during reload
-  (`sway/commands/bind.c:496-556`; `sway/input/switch.c:29-67`).
+  `--reload` behavior. See [Switch bindings](KNOWN_DEVIATIONS.md#switch-bindings).
+
+## Review partly translated directives
+
+These directives translate in their common forms. Check the generated comments
+for the parts that did not:
+
 - **Outputs:** common mode, position, scale, enable, and disable settings are
   translated. Wallpaper and unmatched output settings are reported.
 - **Window rules:** supported `for_window` effects with an `app_id` criterion
   become `window-rule` blocks. Other criteria or commands are reported.
 - **Includes:** sway include globs are expanded during translation. Included sway
   directives are translated in place. Missing, repeated, or recursive files are
-  reported.
+  reported. Includes that use command substitution, such as Fedora's stock
+  `include $(/usr/libexec/sway/layered-include ...)`, are refused; translate the
+  drop-in files explicitly or concatenate them into your config first.
 - **Titlebars:** configure the font, Pango markup, padding, border thickness,
   and per-state colors in `layout { titlebar { ... } }`. The translator maps
   sway's `font` and `client.*` directives where titlebar fields have equivalent
@@ -124,7 +133,8 @@ acceptable. Otherwise keep the generated manual-attention comment.
 
 ## Real-world corpus check
 
-A September 2026 audit translated 30 public personal and distribution sway
+This section is a dated snapshot of a one-time audit; the figures are not
+regenerated. A September 2026 audit translated 30 public personal and distribution sway
 configs, including Waybar setups, old i3-derived configs, multi-output configs,
 large `for_window` rule sets, modular includes, and SwayFX effects. After fixing
 two KDL scalar-format bugs found by the audit, all 30 translations validated,
@@ -145,8 +155,9 @@ device-specific input policy cannot be narrowed below a device class; swaybar
 configuration belongs in Waybar; and X11 `class` is unavailable through
 xwayland-satellite. [X11 window identity](KNOWN_DEVIATIONS.md#x11-window-identity)
 describes the last limit. Preserve or replace these items by hand rather than
-removing their comments. The pinned 12-entry reproducible audit remains in
-the repository's internal migration audit;
+removing their comments. A pinned 12-entry corpus can be re-run with
+`contrib/sway-to-kdl-corpus`, whose sources and hashes are listed in
+`contrib/sway-to-kdl-corpus.json`;
 the larger one-time sample was kept outside the repository because many source
 repositories declare no reusable license.
 

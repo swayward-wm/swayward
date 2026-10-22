@@ -130,7 +130,7 @@ serial, can restore it with `focus-on-window-activation "smart"`.
 **Deliberate.**
 
 Sway resizes a window when you left-drag its border
-(`sway/input/seatop_default.c:396-410`), and so does swayward, under
+(`sway/sway/input/seatop_default.c:396-410`), and so does swayward, under
 `input { border-resize }`, on by default. A borderless sway setup has nothing to
 drag: the gap between windows belongs to the workspace and ignores the press.
 
@@ -145,10 +145,10 @@ setups that use niri's focus ring instead of sway borders.
 **Command gap.**
 
 Sway's five `client.*` color commands set border, background, text, indicator,
-and child-border colors (`sway/commands/client.c:13-50`). The border color draws
+and child-border colors (`sway/sway/commands/client.c:13-50`). The border color draws
 the ring around each titlebar. The other four classes also use indicator and
 child-border colors, while `client.focused_tab_title` deliberately ignores those
-two fields (`sway/tree/container.c:145-242,347-375`).
+two fields (`sway/sway/tree/container.c:145-242,347-375`).
 
 Swayward stores and renders titlebar border, background, and text colors. It
 therefore accepts `client.focused_tab_title`, including the optional values sway
@@ -164,13 +164,13 @@ false success.
 Sway has two independent edge-decoration settings. `hide_edge_borders` has six
 case-sensitive values: `none`, `vertical`, `horizontal`, `both`, `smart`, and
 `smart_no_gaps`; the optional `--i3` flag separately enables `hide_lone_tab`
-(`sway/commands/hide_edge_borders.c:7-45`). The directional modes suppress
+(`sway/sway/commands/hide_edge_borders.c:7-45`). The directional modes suppress
 individual tiled-window edges at workspace boundaries. `smart` suppresses every
 edge only when the tiled view is the sole visible view, while `smart_no_gaps`
 does so only when the workspace's current outer gaps are also all zero. Floating
-windows are excluded (`sway/tree/view.c:309-409`). `hide_lone_tab` separately
+windows are excluded (`sway/sway/tree/view.c:309-409`). `hide_lone_tab` separately
 removes a singleton tabbed or stacked titlebar for non-normal border styles
-(`sway/desktop/transaction.c:316-347`; `sway/sway/ipc-json.c:543-555`).
+(`sway/sway/desktop/transaction.c:316-347`; `sway/sway/ipc-json.c:543-555`).
 
 Swayward represents the directional mode as `hide-edge-borders` and the smart
 mode as `smart-borders`, so later `smart_borders` directives can override the
@@ -179,6 +179,28 @@ smart flag without changing the edge mode. The translator accepts all six
 `--i3` form fail-loud because the titlebar model has no singleton suppression
 setting. Swayward's shipped 4 px border remains unchanged. Gaps now default to zero,
 matching sway; set `layout { gaps 16; }` to restore the older swayward default.
+
+### Gesture bindings
+
+**Command gap.**
+
+Sway stores `bindgesture` bindings per mode and dispatches their commands when
+a tracked swipe, pinch, or hold gesture ends (`sway/sway/commands/gesture.c:40-57`;
+`sway/sway/input/seatop_default.c:898-917`). Swayward keeps its additive four-finger
+overview swipe and forwards pinch and hold gestures to clients, but cannot bind
+gestures to sway commands. The translator reports `bindgesture` and
+`unbindgesture`.
+
+### Switch bindings
+
+**Command gap.**
+
+Sway filters `bindswitch` bindings by mode and lock state, and `--reload`
+re-runs state-specific bindings during reload (`sway/sway/commands/bind.c:496-556`;
+`sway/sway/input/switch.c:29-67`). Swayward's `switch-events {}` supports only
+unconditional process spawning, so it cannot preserve sway command dispatch,
+binding modes, `toggle`, `--locked`, or `--reload`. The translator reports
+`bindswitch` and `unbindswitch`.
 
 ## Bars
 
@@ -295,10 +317,10 @@ wire-fuzz cases differ on purpose, for safety:
 **Command gap.**
 
 `allow_tearing` and `max_render_time` store sway's per-view value and report it
-in `GET_TREE` (`sway/commands/allow_tearing.c:6-25` and
-`sway/commands/max_render_time.c:6-32`). Sway applies a view's value only when
+in `GET_TREE` (`sway/sway/commands/allow_tearing.c:6-25` and
+`sway/sway/commands/max_render_time.c:6-32`). Sway applies a view's value only when
 its output enables tearing or has a render budget
-(`sway/desktop/output.c:150-185,253-268`). Both output settings default to
+(`sway/sway/desktop/output.c:150-185,253-268`). Both output settings default to
 off, and swayward refuses `output <name> allow_tearing` and
 `output <name> max_render_time`, so the view value never changes presentation. Swayward also serves no tearing-control protocol, so a
 view without an override reports `allow_tearing` false where sway reports the
@@ -318,9 +340,9 @@ fullscreen, matching sway's scene-tree opacity.
 
 Swayward reads `bindcode` and `unbindcode` codes the way sway does: `strtol`
 truncated to an XKB keycode, refusing only `-1`
-(`sway/commands/bind.c:153-176`). A first key that names an evdev `BTN_*`
+(`sway/sway/commands/bind.c:153-176`). A first key that names an evdev `BTN_*`
 code, such as `bindcode 272`, is a mouse binding in sway
-(`get_mouse_bindcode`, `sway/input/cursor.c:1228-1247`). Swayward refuses it
+(`get_mouse_bindcode`, `sway/sway/input/cursor.c:1228-1247`). Swayward refuses it
 because runtime bindings have no pointer-region model, rather than bind the code
 as a key that no keyboard sends.
 
@@ -330,7 +352,7 @@ as a key that no keyboard sends.
 
 `output <name> scale` accepts what sway's `strtof` accepts. `-1` leaves the scale
 unchanged and zero, negative, or NaN values select the automatic scale
-(`sway/config/output.c:180-182,526-533`). Swayward refuses `inf` with
+(`sway/sway/config/output.c:180-182,526-533`). Swayward refuses `inf` with
 `Invalid scale.`, because sway passes an infinite scale to wlroots unchecked.
 
 ### Reload and transient output configuration
@@ -363,7 +385,7 @@ Reapply the output configuration explicitly rather than relying on the reset.
 ## Layout and Xwayland
 
 Sway rejects `layout toggle stacked` because its two-token form accepts only
-`split` or `all` (`sway/commands/layout.c:57-71`). i3 accepts the command as a
+`split` or `all` (`sway/sway/commands/layout.c:57-71`). i3 accepts the command as a
 no-op. Swayward follows sway and reports a command error.
 
 Swayward has no scrollable-tiling mode. It uses an i3-style nested container tree.
@@ -438,8 +460,8 @@ selection semantics.
 
 The i3 command `move right 25 ppt` moves a floating container by 25 percent of
 the output width. Sway's directional move parser reads only the numeric first
-argument and ignores the trailing `ppt` token (`sway/commands/move.c:672-681`).
-It therefore moves the container by 25 pixels (`sway/commands/move.c:693-710`).
+argument and ignores the trailing `ppt` token (`sway/sway/commands/move.c:672-681`).
+It therefore moves the container by 25 pixels (`sway/sway/commands/move.c:693-710`).
 Swayward follows sway's pixel-only directional movement rather than i3's
 percentage-point behavior.
 
@@ -470,7 +492,7 @@ creating another container (`sway/sway/tree/container.c:1565-1582`).
 **Infrastructure gap.**
 
 Sway picks a tiled drop target in three passes
-(`sway/input/seatop_move_tiling.c:handle_motion_tiling`, sway 1.12):
+(`sway/sway/input/seatop_move_tiling.c:handle_motion_tiling`, sway 1.12):
 
 1. Over a container's titlebar, the drop joins that container's tab group.
    Sway wraps the target in a tabbed container unless its parent is already
@@ -524,10 +546,10 @@ does not have.
 
 Sway treats `workspace <name> output <output>` as a literal-name assignment.
 Its parser stores the joined name unchanged, and workspace creation finds the
-configuration with `strcmp` (`sway/commands/workspace.c:13-29,135-162`;
-`sway/tree/workspace.c:143-174`). Number-prefix lookup exists only in the
+configuration with `strcmp` (`sway/sway/commands/workspace.c:13-29,135-162`;
+`sway/sway/tree/workspace.c:143-174`). Number-prefix lookup exists only in the
 separate runtime `workspace number <number>` path
-(`sway/commands/workspace.c:190-205`; `sway/tree/workspace.c:493-506`).
+(`sway/sway/commands/workspace.c:190-205`; `sway/sway/tree/workspace.c:493-506`).
 
 I3 instead interprets a bare numeric configuration name as a number assignment,
 so `workspace 2 output fake-0` also routes `2:foo`. Swayward follows sway: only
@@ -611,10 +633,10 @@ node are excluded as i3-only tree-structure tests.
 **Infrastructure gap.**
 
 Sway's `fullscreen enable global` sizes the view to the root box, the
-bounding box of every output (`sway/tree/arrange.c:349-355`,
-`sway/tree/view.c:365-369`). `GET_TREE` reports that box as the view's `rect`
+bounding box of every output (`sway/sway/tree/arrange.c:349-355`,
+`sway/sway/tree/view.c:365-369`). `GET_TREE` reports that box as the view's `rect`
 and `window_rect`. The view's `percent` is its area over its workspace's area
-(`sway/ipc-json.c:744-755`), so with two equal outputs side by side it is
+(`sway/sway/ipc-json.c:744-755`), so with two equal outputs side by side it is
 `2.0`.
 
 Swayward lays a global fullscreen view over its own output only. It reports
@@ -633,26 +655,26 @@ difference.
 **Deliberate.**
 
 `move scratchpad` on a view inside a floating split hides the split's root
-(`sway/commands/move.c:934-945`). Sway's `root_scratchpad_add_container` clears
-fullscreen on that root only (`sway/tree/root.c:109-112`). When the fullscreen
+(`sway/sway/commands/move.c:934-945`). Sway's `root_scratchpad_add_container` clears
+fullscreen on that root only (`sway/sway/tree/root.c:109-112`). When the fullscreen
 container is a view below the root, the view keeps `fullscreen_mode` 1.
 `container_detach` clears `workspace->fullscreen` only when the detached
-container is fullscreen itself (`sway/tree/container.c:1440-1442`), so the old
+container is fullscreen itself (`sway/sway/tree/container.c:1440-1442`), so the old
 workspace still points at the hidden view. That stale pointer then obstructs
 every tiled view on the workspace (`container_obstructing_fullscreen_container`,
-`sway/tree/container.c:570-578`). The seat refuses to focus them, so keyboard
-focus stays on the hidden scratchpad view (`sway/input/seat.c:1148-1151`). The
-tiled views report `visible: false` (`sway/tree/view.c:1195-1201`). Showing the
+`sway/sway/tree/container.c:570-578`). The seat refuses to focus them, so keyboard
+focus stays on the hidden scratchpad view (`sway/sway/input/seat.c:1148-1151`). The
+tiled views report `visible: false` (`sway/sway/tree/view.c:1195-1201`). Showing the
 split on another workspace does not reset the pointer
 (`container_handle_fullscreen_reparent` checks only the root,
-`sway/tree/container.c:1380-1391`). Pinned sway 1.12 shown that split on
+`sway/sway/tree/container.c:1380-1391`). Pinned sway 1.12 shown that split on
 workspace 2, then refused `workspace 1`: workspace 2 stayed focused.
 Closing the view leaves the pointer dangling, because
 `container_begin_destroy` clears only the view's current workspace
-(`sway/tree/container.c:481-483`).
+(`sway/sway/tree/container.c:481-483`).
 
 Swayward clears fullscreen on every container in the hidden split, as sway's
-own `root_scratchpad_hide` does (`sway/tree/root.c:223-224`). The hidden view
+own `root_scratchpad_hide` does (`sway/sway/tree/root.c:223-224`). The hidden view
 reports `fullscreen_mode` 0, and the old workspace's focus-inactive view takes
 focus and stays visible. Reproducing sway's state would leave keyboard input
 going to a window nobody can see and leave a workspace blank until restart.
@@ -666,11 +688,11 @@ difference.
 
 These three entries are about sway's `GET_TREE` reply, not about what appears
 on screen. Under a fullscreen container, sway arranges only that container
-(`arrange_workspace` and `arrange_root`, `sway/tree/arrange.c:310-316,349-355`).
+(`arrange_workspace` and `arrange_root`, `sway/sway/tree/arrange.c:310-316,349-355`).
 The views hidden behind it keep whatever pending box and committed state they
 last had. `GET_TREE` reports a view's `percent` from its pending box
-(`sway/ipc-json.c:744-755`) and its `border` and `current_border_width` from
-its last committed state (`sway/ipc-json.c:756-761`). A hidden view's reply
+(`sway/sway/ipc-json.c:744-755`) and its `border` and `current_border_width` from
+its last committed state (`sway/sway/ipc-json.c:756-761`). A hidden view's reply
 therefore depends on which earlier command touched it, not on the layout.
 Swayward copies the common cases: a view mapped, killed or wrapped under
 fullscreen reports what sway reports. Swayward does not copy the cases below.
@@ -682,19 +704,19 @@ view.
 A view mapped beside a fullscreen container is never arranged. When
 `view_map` inserts it as a sibling of the focused container,
 `container_add_sibling` does not mark it dirty
-(`sway/tree/view.c:896-900`, `sway/tree/container.c:1410-1423`). The new
+(`sway/sway/tree/view.c:896-900`, `sway/sway/tree/container.c:1410-1423`). The new
 container's committed state therefore keeps calloc's zero values: `border`
-`none` and width 0 (`sway/tree/container.c:47`). This holds even though
+`none` and width 0 (`sway/sway/tree/container.c:47`). This holds even though
 `view_map` set the configured border on the pending state
-(`sway/tree/view.c:914-915`). Its percent is 0.0. Floating the fullscreen
+(`sway/sway/tree/view.c:914-915`). Its percent is 0.0. Floating the fullscreen
 container does not end fullscreen. `container_detach` clears
-`workspace->fullscreen` (`sway/tree/container.c:1440-1442`), and
+`workspace->fullscreen` (`sway/sway/tree/container.c:1440-1442`), and
 `workspace_add_floating` sets it again through
-`container_handle_fullscreen_reparent` (`sway/tree/workspace.c:969`,
-`sway/tree/container.c:1380-1391`). The view stays unarranged until fullscreen
+`container_handle_fullscreen_reparent` (`sway/sway/tree/workspace.c:969`,
+`sway/sway/tree/container.c:1380-1391`). The view stays unarranged until fullscreen
 ends. Whether a later command commits its border depends on whether that
 command's code path happens to mark the view dirty. `container_add_child`
-does (`sway/tree/container.c:1436-1437`). `container_add_sibling` does not.
+does (`sway/sway/tree/container.c:1436-1437`). `container_add_sibling` does not.
 
 Swayward reports the view's configured border and the share its tiled slot
 gives it. The pinned sway 1.12 shape `map a; layout tabbed; layout toggle;
@@ -702,8 +724,7 @@ focus parent; fullscreen toggle; map b; floating toggle` reports `b` as
 `border none`, width 0 and percent 0.0. Swayward reports `border normal`, the
 configured width and percent 1.0. The headless test
 `floated_fullscreen_split_leaves_the_hidden_sibling_its_configured_border`
-pins swayward's values. Family
-`diff-fam-v3-floated-fullscreen-tiled-sibling-border-percent`; random-v3
+pins swayward's values. Random-v3
 seeds 34235 34333 34608 34795 34914 35662, each still differing on main
 at the 2026-10-10 triage.
 
@@ -717,16 +738,15 @@ should match sway there.
 
 A view that sway never arranged has a 0x0 pending box. A command that calls
 `arrange_container` on it directly, such as `border`
-(`sway/commands/border.c:98`), runs `view_autoconfigure`. That clamps the
-content size to at least 1x1 (`sway/tree/view.c:463-464`). `GET_TREE` reports
-that 1x1 content box as `window_rect` (`sway/ipc-json.c:596-604`) while
+(`sway/sway/commands/border.c:98`), runs `view_autoconfigure`. That clamps the
+content size to at least 1x1 (`sway/sway/tree/view.c:463-464`). `GET_TREE` reports
+that 1x1 content box as `window_rect` (`sway/sway/ipc-json.c:596-604`) while
 `rect` stays 0x0.
 
 Swayward reports a 0x0 `window_rect` inside the 0x0 `rect`. A content box
 larger than the container it sits in describes a window that does not exist.
 The reviewer-captured sway 1.12 shape is `map a; fullscreen enable;
-floating enable; map b; [app_id=b] border none`. Family
-`diff-fam-v3-sticky-carry-residual-3`. The headless test
+floating enable; map b; [app_id=b] border none`. The headless test
 `border_on_an_unarranged_view_keeps_an_empty_content_box` pins swayward's
 value.
 
@@ -734,10 +754,10 @@ value.
 
 `layout`, `resize`, `gaps` and output changes under a fullscreen container
 update the split's layout or fractions. The arrange that follows reaches only
-the fullscreen container (`sway/tree/arrange.c:310-316,349-355`), so the
+the fullscreen container (`sway/sway/tree/arrange.c:310-316,349-355`), so the
 hidden siblings keep their old pending boxes, and `percent` reports the old
 shares. Sway gives each tabbed or stacked child the whole box only when it
-arranges them (`sway/tree/arrange.c:184-212`). For example, after `map a;
+arranges them (`sway/sway/tree/arrange.c:184-212`). For example, after `map a;
 map b; layout toggle split; fullscreen toggle; layout tabbed` (seed 32027),
 sway still reports the splitv share 0.5 for `a`.
 
@@ -746,15 +766,15 @@ under the tabbed parent in that example. It keeps sway's stale box only where
 it already models the arrange that sway skips: killing, mapping and moving
 views under fullscreen, and fullscreen moving to a descendant. Reproducing
 every skipped arrange would mean storing, per command, the share sway would
-have last computed. It also cost more rows than it gained when tried
-(local branch `fullscreen-tab-slots`, net −1). The headless test
+have last computed. A trial of it lost more oracle rows than it gained. The headless test
 `layout_tabbed_under_fullscreen_reports_the_tabbed_share` pins swayward's
-value. Family `parity-f8l-stale-split-share` (F8l). In each of these seeds the
+value. In each of these seeds the
 minimal shape runs a `layout`, `split`, `resize`, `gaps` or `output` command
 while a view is fullscreen, and only `percent` differs:
 15791 16203 16347 16754 17389 17431 17462 17630 17781 31210 31930 32027
 32206 32332 32361 32443 32553 33355 33378 33403 33468 33865 34368 34575
-35611. The task's other seeds are not covered. Some have no fullscreen at
+35611. Other random-v3 seeds with a `percent` difference are not covered
+by this entry. Some have no fullscreen at
 all, such as the stacked titlebar share in seed 35353 (sway 0.9625,
 swayward 1.0) and 17066. Others differ in more than `percent`.
 
@@ -811,16 +831,21 @@ configure before swayward can observe the X11 create size. A later `floating
 enable` therefore cannot restore that size. This differs from sway's in-process
 Xwayland handling for resizable utility windows.
 
+Bugs in the satellite reach swayward and not sway. In xwayland-satellite
+0.8.2, Steam's override-redirect dropdown and context menus close as soon as
+they open (Supreeeme/xwayland-satellite#468). Release 0.8.3 fixes this; Fedora
+44 shipped 0.8.2 when beta 1 was prepared.
+
 The xdg-shell protocol exposes one `app_id` and one title, but no separate X11
 class, instance, `WM_WINDOW_ROLE`, window type, or window ID values
 (`xdg-shell.xml`, `xdg_toplevel.set_app_id`). Except for the satellite's own
 splash handling, swayward cannot evaluate those X11-only properties unless the
 satellite supplies a metadata protocol and swayward stores and exposes the
-metadata. Sway's in-process Xwayland path does both (`sway/criteria.c:355-410`;
+metadata. Sway's in-process Xwayland path does both (`sway/sway/criteria.c:355-410`;
 `sway/sway/ipc-json.c:670-700`).
 
 The same boundary applies to `swap container with id`. Sway resolves `id` only
-against an Xwayland view's XCB `window_id` (`sway/commands/swap.c:19-24,49-54`).
+against an Xwayland view's XCB `window_id` (`sway/sway/commands/swap.c:19-24,49-54`).
 Swayward rejects this form with a structured parse error because the satellite
 does not expose that identity. Use `con_id` or a mark instead; swayward does not
 widen `id` to native Wayland windows.

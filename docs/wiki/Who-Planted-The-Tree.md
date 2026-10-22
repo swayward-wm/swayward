@@ -113,7 +113,7 @@ measures itself against sway's reliability.
 
 ## niri, from a different direction
 
-**niri** (2024, Ivan Molodetskikh) is not in the tree lineage at all, and
+**niri** (2023, Ivan Molodetskikh) is not in the tree lineage at all, and
 that is the point of mentioning it.
 
 It implements *scrollable* tiling — windows on an infinite horizontal

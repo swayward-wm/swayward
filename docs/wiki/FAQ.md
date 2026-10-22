@@ -196,15 +196,17 @@ recorded.
 
 ### Can I try it without replacing my current compositor?
 
-Yes. Build swayward, then run it from an existing Wayland session:
+Yes. Run it in a window from an existing Wayland session. From a source
+checkout, use the capped launcher, which builds swayward, uses a private config
+and keeps its IPC socket away from your live session:
 
 ```sh
-swayward
+contrib/dev-run.sh --release
 ```
 
-It opens as a nested compositor window. Use `contrib/dev-run.sh` when developing
-swayward itself; that script caps memory and time and keeps its IPC socket away
-from your live session. See [Getting started](./Getting-Started.md).
+If you installed swayward from a package, with Nix, or from your own build,
+run `swayward` from your session instead; it opens as a nested window. See
+[Getting started](./Getting-Started.md).
 
 ### Can I migrate my sway or i3 configuration?
 
@@ -247,7 +249,8 @@ before drafting the release.
 
 The repository also provides a Nix flake. Install the current source with
 `nix profile install github:swayward-wm/swayward`, or use the flake as a NixOS
-input. `nix flake check` runs the test suite.
+input. `nix flake check` runs the tests that work in the Nix sandbox; tests
+that need the fetched oracle or an EGL display run in CI.
 
 Until beta 1 is published, use the Nix flake or [build from
 source](https://github.com/swayward-wm/swayward/blob/main/docs/BUILDING.md).
@@ -270,17 +273,21 @@ useful.
 
 ### How do I disable client-side decorations?
 
-Enable `prefer-no-csd` at the top level of the config, then restart affected
-applications. swayward asks clients to omit their decorations and marks tiled
-windows as tiled.
+The shipped config already enables `prefer-no-csd` at the top level. If your
+config lacks it, add it and restart affected applications. swayward then asks
+clients to omit their decorations and marks tiled windows as tiled.
 
 ### Why are transparent windows tinted? Why is the border/focus ring showing up through semitransparent windows?
 
-By default, the focus ring and border are solid rectangles behind windows.
-Enable `prefer-no-csd`, or set `draw-border-with-background false` in a window
+Without `prefer-no-csd`, the focus ring and border are solid rectangles behind
+windows. The shipped config enables `prefer-no-csd`; if yours does not, enable
+it, or set `draw-border-with-background false` in a window
 rule. See [Window rules](./Configuration:-Window-Rules.md#draw-border-with-background).
 
 ### How do I round window corners?
+
+The shipped config already rounds them with this window rule. Change the
+radius, or delete the rule for square corners:
 
 ```kdl
 window-rule {
@@ -291,8 +298,9 @@ window-rule {
 
 ### How do I run X11 applications?
 
-Install xwayland-satellite 0.7 or newer. swayward creates the X11 socket and
-starts it on demand. See [Xwayland](./Xwayland.md).
+Install xwayland-satellite 0.7 or newer; 0.8.3 or newer is recommended,
+because Steam's menus close as soon as they open under 0.8.2. swayward creates
+the X11 socket and starts it on demand. See [Xwayland](./Xwayland.md).
 
 ### Why doesn't swayward integrate Xwayland directly?
 

@@ -61,7 +61,7 @@ key for. Bind those yourself.
 
 | Key | Action |
 | --- | --- |
-| `Mod+Shift+Minus` | Stash the focused window into the scratchpad |
+| `Mod+Shift+Minus` | Stash the focused window or container into the scratchpad |
 | `Mod+Minus` | Summon, hide, and cycle scratchpad windows |
 
 ### System
@@ -85,8 +85,8 @@ equivalents and keep working while the session is locked.
 
 | Gesture | Action |
 | --- | --- |
-| `Mod` and left-drag | Move the window |
-| `Mod` and right-drag | Resize the window from the corner nearest the pointer, both ways at once |
+| `Mod` and left-drag | Move the window; on a window inside a floating group, move the whole group |
+| `Mod` and right-drag | Resize the window from the corner nearest the pointer, both ways at once; on a window inside a floating group, resize the whole group |
 
 ### Inspect the tree
 

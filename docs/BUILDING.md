@@ -20,22 +20,27 @@ On Debian and Ubuntu:
 ```sh
 sudo apt install curl gcc clang libudev-dev libgbm-dev libxkbcommon-dev \
     libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev \
-    libseat-dev libdisplay-info-dev libpipewire-0.3-dev libpango1.0-dev
+    libseat-dev libdisplay-info-dev libpipewire-0.3-dev libpango1.0-dev \
+    libadwaita-1-dev perl libtest-simple-perl libjson-pp-perl \
+    libxcb-xkb-dev x11-xkb-utils
 ```
+
+Debian and Ubuntu do not package a new enough Rust; install Rust 1.87 or newer
+with [rustup](https://rustup.rs).
 
 ## Build and test
 
 ```sh
-cargo build --release
+cargo build --release --workspace
+./contrib/fetch-oracle
 cargo test --all
 ```
 
-The i3 conformance suite runs as part of `cargo test` and needs Perl with
-`JSON::PP` and `Test::More`. To skip it, test one crate at a time:
-
-```sh
-cargo test -p swayward --lib
-```
+`--workspace` also builds `swaywardmsg`, the IPC client. `contrib/fetch-oracle`
+fetches the pinned [sway IPC oracle](https://github.com/swayward-wm/sway-ipc-oracle)
+into `.cache/`; it needs network access and git. The i3 conformance suite and
+the IPC fixture tests read it, and the i3 suite also needs Perl with `JSON::PP`
+and `Test::More`.
 
 ## Build on an immutable host
 

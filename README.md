@@ -6,100 +6,108 @@
 
 > sway, gone its own way.
 
-Keep your sway tools while changing the compositor underneath them. The tested
-parts of Waybar's sway modules, `swaymsg`, i3ipc-python, autotiling, Quickshell's
-I3 model, and DankMaterialShell run unmodified. The
-[client coverage matrix](docs/SWAY_IPC_ECOSYSTEM.md) says exactly what each
-probe exercises. No interpretive dance around the word "compatible."
-
-Swayward gives you i3's fully nested container tree on a modern Wayland
+swayward brings i3's fully nested container tree to a modern Wayland
 compositor: splits inside splits, tabbed and stacked containers, marks,
-criteria, the scratchpad, and sway's IPC protocol on `SWAYSOCK`. It is a very
-serious amount of engineering in service of putting one rectangle beside
-another rectangle, but correctly.
+criteria, the scratchpad, and sway's IPC protocol on `SWAYSOCK`.
 
-**Status: beta.** swayward has a very extensive suite of tests, including
-i3's own test suite run unchanged and IPC replies compared with captures from
-real sway. [Testing and
-conformance](https://github.com/swayward-wm/swayward/wiki/Testing-and-Conformance)
-has the current numbers and how each one is measured. It is also somebody's
-desktop now: the maintainer's two work machines run it every day,
-both Fedora 44, one a single-monitor setup with Waybar and kanshi, the other
-two monitors running DankMaterialShell with its outputs set in `config.kdl`.
-No spare laptop, no fallback session doing the real work. That is still two
-desks, not a hardware survey, and no stranger has installed it yet.
+Your sway tools keep working. The tested parts of Waybar's sway modules,
+`swaymsg`, i3ipc-python, autotiling, Quickshell's I3 model, and
+DankMaterialShell run unmodified, and the
+[client coverage matrix](docs/SWAY_IPC_ECOSYSTEM.md) says exactly what each
+probe exercises.
+
+**Status: beta.** swayward is the maintainer's daily driver on two work
+machines, both Fedora 44: one a single monitor with Waybar and kanshi, the
+other two monitors running DankMaterialShell with its outputs set in
+`config.kdl`. It is a compositor, so a crash takes your whole session.
 
 ![Four windows tiled by swayward over a wallpaper, with Waybar across the top: a terminal on the left, and on the right a tabbed container whose visible tab splits a terminal above Yazi](docs/wiki/_assets/shots/readme-desktop-v2.png)
 
-swayward with a wallpaper, Waybar and four windows: a `splitv` inside a tabbed
-container inside a `splith`. Yeah, someone really tried to impress here, they
-might have taken it too far while trying to prove the awesomeness idea in one
-picture.
-[Cult of the Tree](https://github.com/swayward-wm/swayward/wiki/Sway-School)
+A `splitv` inside a tabbed container inside a `splith`, with Waybar across the
+top. [Cult of the Tree](https://github.com/swayward-wm/swayward/wiki/Sway-School)
 pairs more captures with the tree each one produced.
 
-swayward is a fork of the niri project, thus the longish git history and many collaborators on the GitHub page.
+## How compatibility is measured
+
+swayward is measured against sway 1.12 by the separate [sway IPC
+oracle](https://github.com/swayward-wm/sway-ipc-oracle), using the same
+black-box runners that record sway itself. Anyone can rerun it from a clean
+checkout.
+
+<!-- i3-suite-summary:sway-compat generated from the pinned oracle; do not edit by hand -->
+Swayward snapshot `swayward-1fd3c25b` against sway 1.12, from oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6).
+
+| Sway-compatibility corpus (reference: sway 1.12) | Match | Mismatch |
+|---|---:|---:|
+| Hand-picked state scenarios | 4,908 | 9 |
+| Event streams | 45 | 0 |
+| States reached by i3's test sequences | 4,148 | 12 |
+| Random 20-step sequences | 466 | 34 |
+| Malformed commands | 195 | 0 |
+| Broken IPC framing | 6 | 4 |
+<!-- end i3-suite-summary:sway-compat -->
+
+The oracle lists every mismatch with its reason. A random sequence records
+only its first difference, so one difference marks the whole run. The framing
+mismatches are deliberate: swayward disconnects or replies with an error where
+sway waits.
+
+The rest of the test machinery, all described in [Testing and
+conformance](https://github.com/swayward-wm/swayward/wiki/Testing-and-Conformance):
+
+- **i3's own test suite runs unchanged**, through the oracle and inside
+  swayward's test process, where its fully green files gate every push. Sway has no conformance suite, so
+  i3's supplies many of the scenarios above; [I3 suite
+  results](docs/I3_SUITE_RESULTS.md) explains which assertions need X11 or i3
+  internals.
+- **A randomized layout suite runs on every push**, in release mode, checking
+  the tree's invariants after every operation.
+- **A nightly live IPC soak** drives a release build with command fuzz, wire
+  fuzz, and random commands with output hotplug. Every request must get a
+  reply, and the log must stay free of `ERROR` and panics.
+- **The oracle is published for other compositors.** Its
+  [results page](https://github.com/swayward-wm/sway-ipc-oracle/blob/main/docs/results.md)
+  measures i3, sway, and other sway-IPC compositors with the same rules.
 
 ## Looking for beta testers
 
-**Are you tree-curious, or a seasoned tree surgeon?** Either way, help would
-be appreciated.
+**Are you tree-curious, or a seasoned tree surgeon?** Either way, your help is
+welcome.
 
-Particularly useful: running your real sway or i3 config through
-[`contrib/sway-to-kdl`](contrib/sway-to-kdl); telling us where it differs from
-sway in a way that matters to you, especially differences not already
-[explained](https://github.com/swayward-wm/swayward/wiki/Differences-from-Sway); breaking the tree with deeply
-nested splits and awkwardly timed scratchpad calls; and telling us where the docs
-were confusing.
+The most useful things to try: run your real sway or i3 config through
+[`contrib/sway-to-kdl`](contrib/sway-to-kdl); tell us where swayward differs
+from sway in a way that matters to you, especially anything not already
+[explained](https://github.com/swayward-wm/swayward/wiki/Differences-from-Sway);
+break the tree with deeply nested splits and awkwardly timed scratchpad calls;
+and tell us where the docs were confusing.
 
 [Open an issue](https://github.com/swayward-wm/swayward/issues) with what you
 ran, what happened, and what you expected. A vague "this felt wrong" is worth
 more than silence.
 
-One thing before you install: this is a compositor, so a crash takes your
-whole session. It's branded beta for this reason.
-
-## Developed with AI assistance
-
-Swayward was built largely with AI assistance. A human reviews every change
-and is responsible for it, following the Linux kernel's rule that
-[AI does not sign off](https://www.kernel.org/doc/html/next/process/coding-assistants.html).
-
-The tokens went into checks, not just features. [Testing and
-conformance](https://github.com/swayward-wm/swayward/wiki/Testing-and-Conformance)
-describes the test suite, and every intentional difference from sway is
-[recorded](https://github.com/swayward-wm/swayward/wiki/Differences-from-Sway)
-with a citation into sway's source.
-
 ## Why the i3/sway model
 
-This is a good era for Wayland compositors. niri's scrollable strip is a
-new idea, and it is built well. swayward is a fork of it and owes it nearly
-everything below the layout engine. Hyprland has pushed harder on
-effects than anyone. sway did the unglamorous work of being the compositor
-people could rely on, and i3 contributed the tree itself.
+This is a good era for Wayland compositors. niri's scrollable strip is a new
+idea, built well, and swayward owes it nearly everything below the layout
+engine. Hyprland has pushed hardest on effects. sway did the unglamorous work
+of being the compositor people rely on, and i3 contributed the tree itself.
 
-We still think that tree is the best window-management model there is:
+We think that tree is the right model for window management:
 
 - **It is what you already mean.** Every layout is a nesting of "these share
-  space horizontally" and "these share space vertically". Once you see the
-  tree, every keystroke follows from it.
+  space horizontally" and "these share space vertically".
 - **It composes without limit.** A container holds windows or other
   containers, so tabs inside a split inside a tab cost nothing extra to learn.
-  Models built from special cases run out; a tree does not.
-- **It is explicit, and it remembers.** swayward does not guess where your
-  next window goes. You told it, and the arrangement is a structure you built
-  rather than a side effect of the order you opened things in.
+- **It is explicit, and it remembers.** swayward does not guess where your next
+  window goes. The arrangement is a structure you built, not a side effect of
+  the order you opened things in.
 
-[Cult of the Tree](https://github.com/swayward-wm/swayward/wiki/Sway-School) teaches the model from first
-principles, and [who planted the tree](https://github.com/swayward-wm/swayward/wiki/Who-Planted-The-Tree)
-traces it back through wmii to Plan 9.
-
-That explains why the tree. The
-[FAQ](https://github.com/swayward-wm/swayward/wiki/FAQ#why-does-swayward-exist) handles the awkward follow-up:
-why this project exists alongside sway, SwayFX, hy3, and niri; how AI-assisted
-development fits into it; and why the test suite is the main reason we think a
-new compositor is worth your time.
+[Cult of the Tree](https://github.com/swayward-wm/swayward/wiki/Sway-School)
+teaches the model from first principles, and
+[who planted the tree](https://github.com/swayward-wm/swayward/wiki/Who-Planted-The-Tree)
+traces it back through wmii to Plan 9. The
+[FAQ](https://github.com/swayward-wm/swayward/wiki/FAQ#why-does-swayward-exist)
+covers why swayward exists alongside sway, SwayFX, hy3, and niri.
 
 If the scrollable strip suits you better, use
 [niri](https://github.com/YaLTeR/niri). It is excellent, it is where swayward
@@ -135,18 +143,25 @@ nix profile install github:swayward-wm/swayward
 ```
 
 The repository flake provides `swayward`, `swayward-debug`, and a development
-shell. `nix flake check` runs the test suite. Without Nix, follow
-[Build swayward](docs/BUILDING.md); it needs Rust 1.87 or newer and the usual
+shell. `nix flake check` builds both and runs the tests that work in the Nix
+sandbox; tests that need the fetched oracle or an EGL display run in CI.
+Without Nix, follow [Build swayward](docs/BUILDING.md); it needs Rust 1.87 or newer and the usual
 wlroots-style build dependencies.
 
 ## First run
 
-Pick **Swayward** from your display manager. To try it without leaving your
-current session, run it nested in a window:
+With a package installed, pick **Swayward** from your display manager. To try
+it without leaving your current session, run it nested in a window:
 
 ```sh
 swayward
 ```
+
+From a source checkout, `contrib/dev-run.sh --release` builds and starts a
+nested session, and `contrib/install-session.sh` adds a **Swayward (dev)**
+entry to your display manager. The
+[getting-started guide](https://github.com/swayward-wm/swayward/wiki/Getting-Started)
+covers both.
 
 The defaults give you a working session: `Mod` is Super (Alt when running
 nested, so your outer session keeps its Super keys), `Mod+Return` opens a
@@ -206,30 +221,30 @@ swayward validate -c ~/.config/swayward/config.kdl
 It reports what it cannot translate exactly instead of quietly dropping it.
 See [Migrate a sway config](docs/SWAY_CONFIG_MIGRATION.md).
 
-## How compatibility is measured
-
-swayward has a very extensive suite of tests. [Testing and
-conformance](https://github.com/swayward-wm/swayward/wiki/Testing-and-Conformance)
-lists every part of it with current numbers. The independent [sway IPC
-oracle](https://github.com/swayward-wm/sway-ipc-oracle) runs i3's unchanged
-tests and sway IPC scenarios against i3, sway, and swayward, and the [i3 suite
-results guide](docs/I3_SUITE_RESULTS.md) explains how to read the i3 numbers.
-
 ## What differs from sway
 
-Read [differences from sway](https://github.com/swayward-wm/swayward/wiki/Differences-from-Sway) before
-migrating. The headlines:
+Read [differences from sway](https://github.com/swayward-wm/swayward/wiki/Differences-from-Sway)
+before migrating. The headlines:
 
 - **X11 identity is flattened.** Xwayland goes through
   `xwayland-satellite`, which presents ordinary `xdg_toplevel` surfaces, so
   separate X11 class, instance, role and XID do not cross the boundary.
-- **No `bar {}` block.** Swayward does not launch or configure swaybar.
+- **No `bar {}` block.** swayward does not launch or configure swaybar.
   Configure Waybar directly.
 - **No in-place restart.** Reload is supported; replacing the process while
   keeping clients is not. Sway has no runtime `restart` either.
 - **The IPC surface is incomplete.** Some requests, events, criteria and
   command forms are unimplemented and return structured failures rather than
   pretending to succeed.
+
+Every intentional difference is recorded with a citation into sway's source.
+
+## Developed with AI assistance
+
+swayward was built largely with AI assistance. A human reviews every change
+and is responsible for it, following the Linux kernel's rule that
+[AI does not sign off](https://www.kernel.org/doc/html/next/process/coding-assistants.html).
+Much of that effort went into the test machinery described above.
 
 ## Project invariants
 
@@ -241,16 +256,17 @@ migrating. The headlines:
 
 ## Credits
 
-Swayward is a fork of niri at commit `9e72e491`, and keeps its rendering,
+swayward is a fork of niri at commit `9e72e491`, which is why the repository
+carries niri's long history and contributors. It keeps niri's rendering,
 backend, protocol and portal work. See [Fork base](docs/FORK-BASE.md).
 
-- [niri](https://github.com/YaLTeR/niri) by Ivan Molodetskikh — the compositor
+- [niri](https://github.com/YaLTeR/niri) by Ivan Molodetskikh: the compositor
   this is built on. The debt is large and gladly acknowledged.
-- [Smithay](https://github.com/Smithay/smithay) — the Wayland compositor
+- [Smithay](https://github.com/Smithay/smithay): the Wayland compositor
   toolkit underneath.
-- [sway](https://github.com/swaywm/sway) — the IPC protocol, and the standard
+- [sway](https://github.com/swaywm/sway): the IPC protocol, and the standard
   of reliability worth aiming at.
-- [i3](https://i3wm.org) — the tree model, and the conformance suite that keeps
+- [i3](https://i3wm.org): the tree model, and the conformance suite that keeps
   us honest about it.
 
 Licensed under **GPL-3.0-or-later**. The i3 tests in

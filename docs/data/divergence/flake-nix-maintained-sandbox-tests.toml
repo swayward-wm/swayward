@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["flake.nix"]
+what = "build packages.swayward without running tests; run the debug check with every oracle-cache and EGL test skipped by exact name; check both packages in `checks`; set the license to gpl3Plus; replace niri's community-maintained header; apply nixfmt-rfc-style."
+why = "The suite reads the network-fetched sway-ipc-oracle cache and needs an EGL display, and the Nix sandbox has neither, so `nix build` and `nix flake check` failed (stranger re-audit B1). swayward is GPL-3.0-or-later and maintains its flake, tested by .github/workflows/nix.yml (re-audit L1)."

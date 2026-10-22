@@ -1,0 +1,43 @@
+name: Nix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - src/**
+      - swayward-config/**
+      - swayward-ipc/**
+      - swayward-visual-tests/**
+      - contrib/**
+      - docs/**
+      - proptest-regressions/**
+      - resources/**
+      - tests/**
+      - README.md
+      - .github/workflows/nix.yml
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          show-progress: false
+      - uses: cachix/install-nix-action@v31
+      # Builds packages.swayward (what `nix profile install` builds) and
+      # swayward-debug, which runs the sandbox-safe tests.
+      - name: Build and check the release and debug packages
+        run: nix flake check --print-build-logs --max-jobs 2 --cores 2
+      - name: Check formatting
+        run: nix fmt -- --check flake.nix

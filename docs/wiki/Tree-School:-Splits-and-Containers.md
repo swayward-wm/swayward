@@ -6,7 +6,7 @@ The screenshot shows the pixels. The diagram shows the reason.
 
 ## Choose the direction before opening the window
 
-So far swayward has been choosing horizontal because somebody had to make a
+So far swayward has been choosing horizontal, on a landscape output, because somebody had to make a
 decision and the empty workspace declined to comment. Now you take the wheel.
 
 | Key | Effect |
@@ -76,6 +76,7 @@ Read the output as nested boxes:
 | `"layout": "splith"` | horizontal container (children side-by-side) |
 | `"layout": "splitv"` | vertical container (children stacked) |
 | `"layout": "tabbed"` | tabbed container (children stacked as tabs) |
+| `"layout": "stacked"` | stacked container (one child shown, titles listed vertically) |
 | `"layout": "none"` | a *leaf* — a real window, not a container |
 | `"name": "..."` | a window's title (containers have `null` names) |
 
@@ -184,14 +185,22 @@ The new window is always a **sibling** of the focused window — same parent, im
 
 So if you're focused on A inside `splith [ A B C ]` and hit `Mod+V`, swayward silently rewraps A:
 
+```
+splith [ splitv[ A ] B C ]
+```
+
 Now opening a new terminal places it inside the new splitv (next sibling of A):
+
+```
+splith [ splitv[ A NEW ] B C ]
+```
 
 ### Repeated presses do not grow a tower
 
 A split key never stacks wrapper on wrapper. After the first press the focused window is an only child of a `splith` or `splitv`, so every later press only rewrites that parent's layout. Hit `Mod+V` ten times in a row and the tree after the tenth press matches the tree after the first. This is why ten anxious split-key presses do not produce a geological record
 of our indecision.
 
-What a split key does **not** do is skip the wrap when the layout already matches. Focused on A in `splith [ A B C ]`, `Mod+B` still wraps A in a fresh `splith`, because A has siblings. Sway wraps there too (`sway/sway/tree/container.c:1565-1621`).
+What a split key does **not** do is skip the wrap when the layout already matches. Focused on A in `splith [ A B C ]`, `Mod+B` still wraps A in a fresh `splith`, because A has siblings. Sway wraps there too.
 
 ### The full table
 

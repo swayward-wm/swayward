@@ -19,22 +19,25 @@ fails if a figure differs from those results. To regenerate after a repin:
 ./contrib/i3-suite-summary --write
 ```
 
-## Swayward's i3-suite outcomes
+## i3-suite outcomes
+
+The table holds swayward only. Sway 1.12's figures, from the same oracle
+revision and stable filter, are in its own block on the oracle's results page.
 
 <!-- i3-suite-summary:i3-suite generated from the pinned oracle; do not edit by hand -->
-Oracle [`cd64b835`](https://github.com/swayward-wm/sway-ipc-oracle/tree/cd64b8351f6c427dd8b3533c231c3f0ba42fad12), swayward snapshot `swayward-54c5acd9` (`54c5acd9`), stable filter over 3,755 assertions:
+Oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6), swayward snapshot `swayward-1fd3c25b`, stable filter over 3,755 assertions:
 
-| pass | skip | fail | unreached | unstable | flaky | total |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,453† | 11† | 800† | 1,469† | 0† | 22† | 3,755 |
+| Compositor | pass | skip | fail | unreached | unstable | flaky | total |
+|---| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| swayward `1fd3c25b` | 1,470 | 12 | 780 | 1,469 | 0 | 24 | 3,755 |
 
-Review: 2,280† non-pass rows are classified; 2,199† verified, 81† unverified, 81† of them unclassified.
+swayward review: 2,261 non-pass rows; 2,191 verified, 70 unverified, 70 of them unclassified.
 
-† From a result listed in the oracle's `pending.toml`: it awaits regeneration, and the figure is its last measured value.
+Each compositor, sway 1.12 included, has its own block on the oracle's [results page](https://github.com/swayward-wm/sway-ipc-oracle/blob/27560327227afd9ff05ea40f3c527b7333e714a6/docs/results.md).
 <!-- end i3-suite-summary:i3-suite -->
 
-The table uses the oracle's stable filter, so its columns sum to the whole
-suite:
+The table uses the oracle's stable filter, so each row's columns sum to the
+whole suite:
 
 - **fail** is an assertion that ran and did not pass;
 - **unreached** is an assertion after an earlier abort, which never ran;
@@ -53,13 +56,12 @@ holds the assertion-level review.
 
 ## Where sway and swayward differ
 
-The oracle publishes one block per compositor snapshot, never one table across
-compositors. Each block holds that snapshot's interpretive buckets, its own
-comparable view (the rows its labels do not set aside as i3-only, X11-only or
-harness), and the view's stated asymmetries. Read swayward's and sway's blocks
-in the oracle's
-[README](https://github.com/swayward-wm/sway-ipc-oracle#snapshots). Swayward's
-docs link to them and copy no figures from them.
+The table above gives the raw outcomes only. The oracle's
+[results](https://github.com/swayward-wm/sway-ipc-oracle/blob/main/docs/results.md)
+page holds one block per compositor snapshot, each with its interpretive
+buckets, its comparable view (the rows its labels do not set aside as i3-only,
+X11-only or harness), and the view's stated asymmetries. Swayward's docs link
+to those blocks and copy no figures from them.
 
 Many of swayward's remaining sway-relative gaps need X11 identity, window type,
 urgency hints, requested geometry, or client geometry. xwayland-satellite
@@ -78,20 +80,18 @@ is the closer measure of sway compatibility because each scenario starts from
 the same state and compares sway-shaped replies or event sequences.
 
 <!-- i3-suite-summary:sway-ipc generated from the pinned oracle; do not edit by hand -->
-Oracle [`cd64b835`](https://github.com/swayward-wm/sway-ipc-oracle/tree/cd64b8351f6c427dd8b3533c231c3f0ba42fad12), swayward snapshot `swayward-54c5acd9`. The sway 1.12 column replays sway's own captures as a self-check.
+Oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6), swayward snapshot `swayward-1fd3c25b`. The sway 1.12 column replays sway's own captures as a self-check.
 
-| Corpus | Scope | sway 1.12 self-check | swayward match | swayward mismatch | swayward unstable | swayward n.a. | untriaged mismatches |
-|---|---|---|---:|---:|---:|---:|---:|
-| Hand-picked state scenarios | 78 scenarios, 780 rows | 740 match, 40 n.a. | 749 | 31 | 0 | 0 | 31 |
-| Events | 45 scenarios, 45 rows | 45 match | 44 | 1 | 0 | 0 | 1 |
-| i3-derived states | 418 states, 4,180 rows | 4,180 match† | 4,118† | 62† | 0† | 0† | 62† |
-| Random sequences | 500 seeds × 20 steps | 500 match | 329 | 171 | 0 | 0 | 171 |
-| Command fuzz | 195 cases | 195 match | 195 | 0 | 0 | 0 | 0 |
-| Wire fuzz | 10 cases | 10 match | 6 | 4 | 0 | 0 | 0 |
+| Corpus | Scope | sway 1.12 self-check | swayward match | swayward mismatch | swayward unstable | swayward n.a. |
+|---|---|---|---:|---:|---:|---:|
+| Hand-picked state scenarios | 559 captures, 4,917 rows | 4,916 match, 1 mismatch | 4,908 | 9 | 0 | 0 |
+| Events | 45 captures, 45 rows | 45 match | 45 | 0 | 0 | 0 |
+| i3-derived states | 416 states, 4,160 rows | 4,160 match | 4,148 | 12 | 0 | 0 |
+| Random sequences | 500 seeds × 20 steps | 500 match | 466 | 34 | 0 | 0 |
+| Command fuzz | 195 cases | 195 match | 195 | 0 | 0 | 0 |
+| Wire fuzz | 10 cases | 10 match | 6 | 4 | 0 | 0 |
 
-- sway 1.12, Hand-picked state scenarios: 40 rows not applicable: fixture client unavailable (missing wayland-scanner).
-
-† From a result listed in the oracle's `pending.toml`: it awaits regeneration, and the figure is its last measured value.
+Every swayward mismatch is classified in the oracle's `sway-ipc/classifications/`.
 <!-- end i3-suite-summary:sway-ipc -->
 
 Read these as measurements by scenario, not as a ranking or one combined

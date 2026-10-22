@@ -424,7 +424,6 @@ animations {
 // Hot corners open the overview when the pointer touches a screen corner.
 // Sway has none, so they are off; list corners instead of `off` to enable them.
 gestures {
-    // dnd-edge-view-scroll { trigger-width 30; delay-ms 100; max-speed 1500; }
     // dnd-edge-workspace-switch { trigger-height 50; delay-ms 100; max-speed 1500; }
     hot-corners {
         off

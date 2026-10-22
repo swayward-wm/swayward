@@ -222,7 +222,7 @@ file whose first-stream pass count fell below its row. It also lists files
 that pass more than their rows record:
 
 ```sh
-SWAYWARD_I3_RATCHET=1 cargo test -p swayward --lib i3_conformance_non_green -- --nocapture
+RUN_SLOW_TESTS=1 cargo test -p swayward --lib i3_conformance_non_green -- --nocapture
 ```
 
 Passing files keep the adapter wired into the normal test gate. Other vendored
