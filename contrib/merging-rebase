@@ -1,0 +1,117 @@
+#!/bin/sh
+# Rebase swayward's patch stack onto a niri release tag without rewriting main.
+#
+#   contrib/merging-rebase <niri-tag>          dry run: report what would happen
+#   contrib/merging-rebase --apply <niri-tag>  do it locally (never pushes)
+#
+# This is git-for-windows' "merging-rebase" (see docs/UPSTREAM.md). It rebases
+# our commits onto the new niri tag, then joins the old history back in with a
+# marker commit:
+#
+#   marker = commit with the tree of <niri-tag>,
+#            parent 1 = <niri-tag>, parent 2 = the old main tip,
+#            message "Start the merging-rebase to <niri-tag>"
+#
+# and replays the rebased stack on top of the marker. main then fast-forwards
+# (no force-push), `<marker>..main` is exactly swayward's patch stack, and
+# `git log --first-parent` stays readable. The next run finds the stack's start
+# from the newest marker on main's first-parent line, or from the fork base on
+# the first run.
+#
+# Conflicts are the real work. rerere is enabled, so a conflict you resolve once
+# replays if the same rebase is repeated. When the rebase stops, resolve, then
+# `git rebase --continue`, and rerun this script with --resume <rebased-head>.
+set -eu
+
+FORK_BASE=9e72e4917ca31baf4010496bf7f4aaf78d34d236
+MARKER_SUBJECT='Start the merging-rebase to'
+
+apply=0
+resume=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --apply) apply=1; shift ;;
+        --resume) resume=$2; shift 2 ;;
+        -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*) echo "merging-rebase: unknown option $1" >&2; exit 2 ;;
+        *) break ;;
+    esac
+done
+[ $# -eq 1 ] || { echo "usage: contrib/merging-rebase [--apply] [--resume <rebased-head>] <niri-tag>" >&2; exit 2; }
+tag=$1
+
+die() { echo "merging-rebase: $*" >&2; exit 1; }
+
+[ -z "$(git status --porcelain)" ] || die "the working tree is not clean"
+[ "$(git symbolic-ref --short -q HEAD || true)" = main ] || [ -n "$resume" ] || die "run this on main"
+git remote get-url upstream >/dev/null 2>&1 || die "no 'upstream' remote (niri)"
+
+git fetch -q upstream --tags
+new=$(git rev-parse --verify -q "$tag^{commit}") || die "no such tag: $tag"
+old_tip=$(git rev-parse main)
+
+base=$(git rev-list -1 --first-parent --grep="^$MARKER_SUBJECT " "$old_tip")
+if [ -n "$base" ]; then
+    old_up=$(git rev-parse "$base^1")
+else
+    base=$FORK_BASE
+    old_up=$FORK_BASE
+fi
+git merge-base --is-ancestor "$old_up" "$new" || die "$tag does not contain the current niri base $(git rev-parse --short "$old_up")"
+[ "$old_up" != "$new" ] || die "main is already based on $tag"
+
+count=$(git rev-list --count "$base..$old_tip")
+echo "niri base:   $(git rev-parse --short "$old_up") -> $tag ($(git rev-parse --short "$new"), $(git rev-list --count "$old_up..$new") upstream commits)"
+echo "patch stack: $count commits ($(git rev-parse --short "$base")..main)"
+
+if [ "$apply" -eq 0 ]; then
+    echo "dry run: rerun with --apply to rebase locally; nothing was changed"
+    exit 0
+fi
+
+git config rerere.enabled true
+git config rerere.autoupdate true
+git config diff.renameLimit 10000
+
+# 1. Plain rebase of the stack onto the new tag. This is where conflicts happen.
+if [ -n "$resume" ]; then
+    rebased=$(git rev-parse --verify "$resume^{commit}")
+    git merge-base --is-ancestor "$new" "$rebased" || die "$resume is not on top of $tag"
+else
+    git switch -q --detach "$old_tip"
+    if ! git rebase -q --onto "$new" "$base"; then
+        echo "merging-rebase: the rebase stopped on a conflict. Resolve it, run" >&2
+        echo "  git rebase --continue" >&2
+        echo "until it finishes, then rerun with --resume HEAD:" >&2
+        echo "  git switch main && contrib/merging-rebase --apply --resume <that HEAD> $tag" >&2
+        exit 1
+    fi
+    rebased=$(git rev-parse HEAD)
+fi
+
+# 2. The marker: niri's tree, parents (new tag, old main tip).
+range_diff=$(git range-diff --no-color -s "$base..$old_tip" "$new..$rebased")
+marker=$(git commit-tree "$new^{tree}" -p "$new" -p "$old_tip" -F - <<EOF
+$MARKER_SUBJECT $tag
+
+This commit starts the rebase of $(git rev-parse --short "$base") to $(git rev-parse --short "$new").
+
+Range-diff of the patch stack (old vs rebased):
+$range_diff
+EOF
+)
+
+# 3. Replay the resolved stack onto the marker. The marker's tree is the tag's
+#    tree, so this cannot conflict.
+git rebase -q --onto "$marker" "$new" "$rebased"
+git branch -f main HEAD
+git switch -q main
+
+# 4. Checks.
+git merge-base --is-ancestor "$old_tip" main || die "main would not fast-forward"
+[ "$(git rev-parse "$marker^{tree}")" = "$(git rev-parse "$new^{tree}")" ] || die "the marker's tree is not $tag's"
+git diff --quiet "$rebased" main || die "the result differs from the plain rebase"
+
+echo "done: main is $(git rev-parse --short main); marker $(git rev-parse --short "$marker")"
+echo "review: git range-diff $(git rev-parse --short "$base")..$(git rev-parse --short "$old_tip") $(git rev-parse --short "$marker")..main"
+echo "then: ./contrib/fast-gate, update docs/FORK-BASE.md, and push main (a fast-forward)"

@@ -220,14 +220,16 @@ clone-local and does not travel. Re-run it in a fresh checkout.
 
 ## History is rebase fuel
 
-We merge upstream niri releases forever
-(`git fetch upstream --tags && git merge vXX.YY`). Every commit we author is a
-commit a future merge has to reason through, so our history is a tool for
-rebasing, not a diary of how the work happened.
+main follows each niri release by merging-rebase
+(`contrib/merging-rebase --apply vXX.YY`): our commits are replayed onto the
+new tag and main still only fast-forwards. Every commit we author is a commit
+each future rebase has to replay and reason through, so our history is a tool
+for rebasing, not a diary of how the work happened. Release lines live on
+protected `release/<YY.MM>` branches.
 
 [`docs/UPSTREAM.md`](docs/UPSTREAM.md) is the full strategy: release tags only,
-never `main`; rebase freely until beta1 and merge only after it; and why
-rebasing onto `v26.04` is rejected.
+never upstream `main`; release branches; the merging-rebase and its history
+shape; and why rebasing onto `v26.04` was rejected.
 
 Rewrite freely while a branch is unmerged. `origin` is ours alone:
 

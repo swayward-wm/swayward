@@ -8,11 +8,12 @@ Full niri history is preserved, so `git blame` and `git log --follow` reach niri
 
 This base is 93 commits *after* the `v26.04` tag, so it is a commit rather
 than a release. That is deliberate: rebasing back onto `v26.04` would discard
-upstream fixes we depend on. See [Upstream merge strategy](UPSTREAM.md).
+upstream fixes we depend on. See [Upstream strategy](UPSTREAM.md).
 
-To merge a later niri release (the next target must be a tag after 9e72e491):
+To follow a later niri release (the next target must be a tag after
+9e72e491), use the merging-rebase described in [Upstream strategy](UPSTREAM.md):
 
-    git fetch upstream --tags && git merge vXX.YY
+    contrib/merging-rebase --apply vXX.YY
 
 See [Divergence from upstream niri](DIVERGENCE.md) for every edit to an
 inherited file.

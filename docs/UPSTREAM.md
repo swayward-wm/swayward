@@ -7,93 +7,93 @@ See [`docs/FORK-BASE.md`](https://github.com/swayward-wm/swayward/blob/main/docs
 
 ## The rule
 
-**Rebase before the first release. Merge forever after.**
+**Release lines live on protected branches. main follows niri by merging-rebase.**
 
-Until beta1 is cut, our commits are ours to rewrite: squash, amend, reorder,
-force-push. Nobody has a checkout that a rewrite would break.
+- Every release line has a branch, `release/<YY.MM>` (the first is
+  `release/26.10`). It is protected: no force-push, no deletion. Releases are
+  tagged there (`swayward-v<version>`), and fixes for that line, such as a
+  beta.2, land there. Users, packagers and Nix inputs that want a stable ref
+  follow a tag or a `release/*` branch.
+- `main` is where development and niri catch-up happen. It only ever
+  fast-forwards, so nobody's checkout breaks, but it absorbs each niri release
+  by **merging-rebase** instead of a merge.
 
-After beta1, that stops. A published tag is a promise that a commit hash means
-one thing, and rewriting history under people who have cloned, packaged or
-bisected the repository breaks it. From beta1 onward the branch only grows.
+### Merging-rebase
 
-## Upstream comes in at niri releases
+This is the workflow git-for-windows uses to stay on top of git. Each time
+niri tags a release, swayward's commits are rebased onto the new tag, and a
+marker commit joins the old history back in:
 
-We merge niri **release tags**, not upstream `main`.
+    marker   tree   = the niri tag's tree
+             parent 1 = the niri tag
+             parent 2 = the previous main tip
+             message  "Start the merging-rebase to <tag>"
 
-    git fetch upstream --tags
-    git merge v26.08          # whatever the next tag is
+The rebased commits are replayed on top of the marker. So:
 
-Tracking `main` would mean absorbing upstream's in-progress refactors one
-commit at a time, each with its own conflict against our layout engine, and
-reconciling against a tree that upstream may still change before it ships. A
-release is a point upstream has already stabilised and tested. It is a bigger
-merge, less often, against a known-good tree — which is the trade we want,
-because the expensive part of a merge is judgement about our divergence, not
-the number of hunks.
+- `main` fast-forwards: the old tip is an ancestor, through parent 2.
+- `<newest marker>..main` is exactly swayward's patch stack on top of niri,
+  which keeps the divergence readable and reviewable.
+- `git log --first-parent` stays clean.
 
-The log will accumulate a large merge commit a few times a year, forever.
-That is the correct shape for a long-lived fork and not a problem to engineer
-away. Each one is a single reviewable event with a known upstream name
-attached.
+Run it with the script:
 
-Squashing our own commits does not make these merges cheaper. `git merge`
-compares base, ours and theirs as *trees*; it never walks our commit list.
-This was measured: two branches with byte-identical trees, one of two commits
-and one squashed to one, produce identical conflict and hunk counts. Squash
-for human legibility only.
+    contrib/merging-rebase v26.12            # dry run: the base and stack size
+    contrib/merging-rebase --apply v26.12    # rebase locally; never pushes
 
-### Merging a release
+The rebase onto the tag is where conflicts happen. Resolve them, run
+`git rebase --continue`, then rerun the script with `--resume <rebased HEAD>`
+to create the marker. The script enables `rerere`, so a resolution replays if
+the same rebase is repeated.
+
+Before pushing:
+
+1. Read the range-diff the script prints (it is also in the marker message):
+   `git range-diff <old marker>..<old tip> <new marker>..main`.
+2. Run `./contrib/fast-gate`. A rebase touches `src/layout/`, so it also runs
+   the slow layout tests.
+3. Update `docs/FORK-BASE.md` to the new tag, and add any new inherited-file
+   edits to `docs/data/divergence/`.
+4. `git push origin main`. It is a fast-forward, so no force is needed.
+
+Things that behave differently with this history shape:
+
+- `git bisect --first-parent`, otherwise bisect can step into an older copy
+  of the patch stack.
+- `git describe --first-parent`, or explicit tags.
+- "N commits ahead of niri" counts every older copy of the stack. Count the
+  patch stack as `<newest marker>..main`.
+- To undo before pushing, `git reset --hard <old tip>`. After pushing, fix
+  forwards: `main` is never force-pushed.
+
+### Upstream comes in at niri releases
+
+We follow niri **release tags**, not upstream `main`. Tracking `main` would
+mean absorbing upstream's in-progress refactors one commit at a time, each
+with its own conflict against our layout engine. A release is a point
+upstream has already stabilised and tested. The expensive part of each
+rebase is judgement about our divergence, not the number of hunks.
+
+When resolving a conflict:
 
 1. Read the upstream release notes first. Anything touching layout, IPC or
    window management is where our divergence lives.
-2. `git fetch upstream --tags && git merge vXX.YY` on a branch, never on a
-   dirty tree.
-3. Resolve conflicts in favour of **sway's behaviour**, not niri's. When a
-   conflict is about which model wins, sway wins, and the reason
-   goes in `docs/KNOWN_DEVIATIONS.md` with a citation into sway's source.
-4. Run `./contrib/fast-gate` before pushing. A merge touches `src/layout/`,
-   so it also runs the slow layout tests.
-   [Testing and conformance](https://github.com/swayward-wm/swayward/wiki/Testing-and-Conformance)
-   describes each check.
-5. Update `docs/FORK-BASE.md` to the new tag, and add any new inherited-file
-   edits to `docs/data/divergence/`.
+2. Resolve in favour of **sway's behaviour**, not niri's. When a conflict is
+   about which model wins, sway wins, and the reason goes in
+   `docs/KNOWN_DEVIATIONS.md` with a citation into sway's source.
+3. Expect breakage that the tests find only afterwards. An earlier upstream
+   merge produced three integration failures that appeared in no individual
+   commit, and one resolution silently deleted five tests until
+   `cargo test --all` caught it.
 
-Expect breakage the tests find only after the merge is resolved. A previous
-merge produced three integration failures that appeared in no individual
-commit, and one conflict resolution silently deleted five tests until
-`cargo test --all` caught it. The suite is the safety net; do not skip it
-because the conflicts looked mechanical.
+### History: before beta1
 
-## Do not rebase onto a niri release before beta1
-
-This was considered and rejected on evidence.
-
-Our base is upstream commit `9e72e491` (2026-09-11), which is **93 commits
-after the `v26.04` tag** and the newest release available. Rebasing onto
-`v26.04` therefore moves us *backwards*, discarding four and a half months of
-upstream work, including real fixes in code we inherit and do not maintain:
-
-| Commit | What we would lose |
-| --- | --- |
-| `9e72e491` | screencopy buffers when buffer-size != shm-pool-size |
-| `fec411ea` | deadlock opening the screenshot UI with a tablet connected |
-| `92a25a0a` | Smithay update: frame callback and late-bound enter fixes |
-| `0777769e` | wrong colour format for copy on multi-GPU setups |
-| `e5d463e1` | blur on OpenGL ES 2.0 GPUs |
-| `7f26c3ee` | 32-bit build failure |
-
-Eighteen of the 93 commits are fixes. Giving up a deadlock fix and a
-multi-GPU rendering fix to gain a tidier base is a bad trade in a project
-whose stated invariant is that stability regressions outrank everything else.
-
-Being based on a commit rather than a tag costs us only a slightly longer
-sentence in `FORK-BASE.md`. The next merge target is the first niri tag after
-`9e72e491`, and the merge base is computed from the graph, so nothing about
-the ongoing strategy depends on our base being a tag.
-
-Revisit only if upstream tags a release that is a descendant of `9e72e491`
-**before** we cut beta1. Then the rebase is forwards, costs nothing, and is
-worth doing.
+Until beta1, swayward's commits were rewritten freely and upstream came in
+by merge. The fork base is upstream commit `9e72e491` (2026-09-11), 93 commits
+after `v26.04`; rebasing back onto `v26.04` was rejected because it would
+have discarded upstream fixes we depend on (a screenshot-UI deadlock with a
+tablet, multi-GPU copy formats, GLES2 blur, and others). The first
+merging-rebase starts from that commit.
 
 ## Versioning
 

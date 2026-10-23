@@ -70,9 +70,15 @@ thing without promising a release of our own.
 
 ## Cut the release
 
+Releases are cut from the release line's branch, `release/<YY.MM>` (for
+example `release/26.10`). Create it from `main` for a new line; it is
+protected against force-push and deletion. Later fixes for that line are
+committed there, not taken from `main`, which follows niri by merging-rebase
+(see [docs/UPSTREAM.md](https://github.com/swayward-wm/swayward/blob/main/docs/UPSTREAM.md)).
+
 After the final audit, confirm that the release commit is the audited commit
-and the working tree is clean. Creating the real beta tag is the final source
-mutation:
+on the release branch and the working tree is clean. Creating the real beta
+tag is the final source mutation:
 
 ```sh
 version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
