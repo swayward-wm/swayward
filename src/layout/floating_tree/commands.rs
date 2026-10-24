@@ -654,8 +654,10 @@ impl<W: LayoutElement> FloatingLayout<W> {
             ((after.h - before.h).trunc() / 2.).trunc(),
         ));
         if shift != Point::from((0., 0.)) {
+            // Animate the recentre: a bare set_logical_pos jumps the old-size
+            // content to the new spot before the client commits the new size.
             let pos = entry.data.logical_pos - shift;
-            entry.data.set_logical_pos(pos);
+            self.move_and_animate(idx, pos);
         }
     }
 
