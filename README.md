@@ -115,15 +115,14 @@ came from, and swayward deliberately does not offer a scrollable mode.
 
 ## Install
 
-There is no public build yet. For now, install the current source with Nix or
-[build swayward](docs/BUILDING.md). The first beta will put these prebuilt
-x86_64 packages on the [release page](https://github.com/swayward-wm/swayward/releases):
+Prebuilt x86_64 packages are on the
+[release page](https://github.com/swayward-wm/swayward/releases):
 
 | File | For |
 |---|---|
 | `swayward_VERSION_amd64.deb` | Ubuntu 24.04 |
-| `swayward-VERSION-fedora43-x86_64.rpm` | Fedora 43 |
 | `swayward-VERSION-fedora44-x86_64.rpm` | Fedora 44 |
+| `swayward-VERSION-fedora45-x86_64.rpm` | Fedora 45 |
 | `swayward-VERSION-arch-x86_64.pkg.tar.zst` | Arch |
 | `swayward-VERSION-ubuntu24.04-x86_64.tar.gz` | prebuilt binaries, with a `.sha256` |
 
@@ -131,7 +130,7 @@ The release workflow installs and executes every package in a clean container
 before it drafts the release. The tarball is an Ubuntu 24.04 build needing
 GLIBC 2.39 and `libdisplay-info.so.1`, not a generic Linux build. See [Getting
 started](https://github.com/swayward-wm/swayward/wiki/Getting-Started) for the
-install commands once beta 1 is published.
+install commands.
 
 There is no COPR repository or AUR package. Both wait until the release packages
 have survived real installations.

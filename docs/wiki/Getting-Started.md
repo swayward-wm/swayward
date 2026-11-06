@@ -1,32 +1,27 @@
 ## Install
 
-There is no public build yet. For now, install the current source with Nix or
-[build swayward](https://github.com/swayward-wm/swayward/blob/main/docs/BUILDING.md).
-There is no COPR repository or AUR package either. Both wait until the release
-packages have survived real installations.
-
-The first beta will put these x86_64 downloads on the [releases
+Prebuilt x86_64 packages are on the [releases
 page](https://github.com/swayward-wm/swayward/releases), where `VERSION` is the
-release version:
+release version. There is no COPR repository or AUR package yet. Both wait until
+the release packages have survived real installations.
 
 | File | For |
 |---|---|
 | `swayward_VERSION_amd64.deb` | Ubuntu 24.04 |
-| `swayward-VERSION-fedora43-x86_64.rpm` | Fedora 43 |
 | `swayward-VERSION-fedora44-x86_64.rpm` | Fedora 44 |
+| `swayward-VERSION-fedora45-x86_64.rpm` | Fedora 45 |
 | `swayward-VERSION-arch-x86_64.pkg.tar.zst` | Arch |
 | `swayward-VERSION-ubuntu24.04-x86_64.tar.gz` | prebuilt binaries |
 
 Fedora gets one RPM per supported release. Use the file matching your Fedora
 version, which `cat /etc/fedora-release` reports.
 
-Once the beta is published, download the file for your distribution and install
-it:
+Download the file for your distribution and install it:
 
 ```sh
 sudo apt install ./swayward_VERSION_amd64.deb            # Ubuntu 24.04
-sudo dnf install ./swayward-VERSION-fedora43-x86_64.rpm  # Fedora 43
 sudo dnf install ./swayward-VERSION-fedora44-x86_64.rpm  # Fedora 44
+sudo dnf install ./swayward-VERSION-fedora45-x86_64.rpm  # Fedora 45
 sudo pacman -U ./swayward-VERSION-arch-x86_64.pkg.tar.zst
 ```
 

@@ -101,7 +101,7 @@ with generated release notes and these files:
 - the source tarball with vendored dependencies, for distribution builders;
 - an Ubuntu 24.04 `x86_64` binary tarball and its `sha256` sum;
 - an Ubuntu 24.04 `.deb`;
-- one `.rpm` for each supported Fedora release, currently 43 and 44;
+- one `.rpm` for each supported Fedora release, currently 44 and 45;
 - an Arch Linux `.pkg.tar.zst`.
 
 The package jobs install their artifact in a separate clean job and run both

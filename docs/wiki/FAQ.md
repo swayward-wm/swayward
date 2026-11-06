@@ -242,18 +242,19 @@ Remote control and input injection are not implemented.
 
 ### Which distributions have packages?
 
-No public beta release exists yet. The release workflow is ready to build an
-Ubuntu 24.04 `.deb`, one RPM for each supported Fedora release, an Arch package,
-and an Ubuntu 24.04 binary tarball. It installs each package in a clean container
-before drafting the release.
+The [releases page](https://github.com/swayward-wm/swayward/releases) carries an
+Ubuntu 24.04 `.deb`, one RPM for each supported Fedora release (currently 44 and
+45), an Arch package, and an Ubuntu 24.04 binary tarball. The release workflow
+installs each package in a clean container before drafting the release. See
+[Getting started](./Getting-Started.md) for the install commands.
 
 The repository also provides a Nix flake. Install the current source with
 `nix profile install github:swayward-wm/swayward`, or use the flake as a NixOS
 input. `nix flake check` runs the tests that work in the Nix sandbox; tests
-that need the fetched oracle or an EGL display run in CI.
-
-Until beta 1 is published, use the Nix flake or [build from
+that need the fetched oracle or an EGL display run in CI. You can also [build
+from
 source](https://github.com/swayward-wm/swayward/blob/main/docs/BUILDING.md).
+
 COPR and AUR publication are deliberately waiting until the release-page
 packages have survived real installations. We would prefer the first package
 review not double as the first installation test, thrilling though that would

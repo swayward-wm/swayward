@@ -141,8 +141,8 @@ impl ResizeEdge {
 }
 
 /// Swayward's human release name. Cargo carries the same release as ordered SemVer
-/// (beta1 is `26.10.0-beta.1`).
-pub const SWAYWARD_VERSION: &str = "beta1";
+/// (beta2 is `26.10.0-beta.2`).
+pub const SWAYWARD_VERSION: &str = "beta2";
 
 /// Numeric IPC identity for clients that model sway's GET_VERSION fields.
 pub const SWAYWARD_IPC_VERSION: (u32, u32, u32) = (1, 0, 0);
