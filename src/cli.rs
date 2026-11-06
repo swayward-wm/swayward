@@ -47,7 +47,7 @@ mod tests {
         let output = error.to_string();
 
         assert_eq!(error.kind(), ErrorKind::DisplayVersion);
-        assert!(output.starts_with("swayward beta1 ("));
+        assert!(output.starts_with(&format!("swayward {} (", crate::utils::SWAYWARD_VERSION)));
         assert!(output.ends_with(")\n"));
     }
 }

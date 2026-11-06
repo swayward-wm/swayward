@@ -97,20 +97,20 @@ You may also want to set the `RUN_SLOW_TESTS=1` environment variable to run the 
 
 The swayward version string includes its public version and the output of
 `git describe --always` for the source tree, which names the nearest tag. A
-build of the beta1 tag, and a build a few commits after it, look like this:
+build of the beta2 tag, and a build a few commits after it, look like this:
 
 ```
 $ swayward --version
-swayward beta1 (swayward-v26.10.0-beta.1)
-swayward beta1 (swayward-v26.10.0-beta.1-12-g1a2b3c4d)
+swayward beta2 (swayward-v26.10.0-beta.2)
+swayward beta2 (swayward-v26.10.0-beta.2-12-g1a2b3c4d)
 ```
 
 The RPM recipe sets the description to the package version, so a Fedora build
-reports `swayward beta1 (26.10.0~beta.1)`.
+reports `swayward beta2 (26.10.0~beta.2)`.
 
-The public version is the human release name, such as `beta1`. Cargo's package
+The public version is the human release name, such as `beta2`. Cargo's package
 version is the same swayward release as ordered Semantic Versioning, such as
-`26.10.0-beta.1`; it no longer tracks the niri merge-base version.
+`26.10.0-beta.2`; it no longer tracks the niri merge-base version.
 
 When building in a packaging system, there's usually no repository, so the git description is unavailable and the version will show "unknown commit".
 In this case, please set it manually:
@@ -124,7 +124,7 @@ You can also override the version string entirely. Preserve the public
 swayward version and the source description:
 
 ```
-$ export SWAYWARD_BUILD_VERSION_STRING="beta1 (swayward-v26.10.0-beta.1)"
+$ export SWAYWARD_BUILD_VERSION_STRING="beta2 (swayward-v26.10.0-beta.2)"
 ...proceed to build swayward
 ```
 

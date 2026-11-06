@@ -205,7 +205,7 @@ jobs:
       matrix:
         # Same pair release.yml ships RPMs for. Gating on both means a rename
         # or drop in DEPS_DNF fails a pull request rather than a release run.
-        fedora: [43, 44]
+        fedora: [44, 45]
     container: fedora:${{ matrix.fedora }}
     steps:
       - uses: actions/checkout@v6

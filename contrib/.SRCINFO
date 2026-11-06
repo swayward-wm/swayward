@@ -1,6 +1,6 @@
 pkgbase = swayward
 	pkgdesc = An i3/sway-compatible Wayland compositor, built in Rust on Smithay
-	pkgver = 26.10.0beta1
+	pkgver = 26.10.0beta2
 	pkgrel = 1
 	url = https://github.com/swayward-wm/swayward
 	arch = x86_64
@@ -37,7 +37,7 @@ pkgbase = swayward
 	optdepends = mako: notifications
 	optdepends = sway: provides swaymsg; swayward ships swaywardmsg, so this is optional
 	options = !lto
-	source = swayward-26.10.0beta1.tar.gz::https://github.com/swayward-wm/swayward/archive/refs/tags/swayward-v26.10.0-beta.1.tar.gz
+	source = swayward-26.10.0beta2.tar.gz::https://github.com/swayward-wm/swayward/archive/refs/tags/swayward-v26.10.0-beta.2.tar.gz
 	sha256sums = SKIP
 
 pkgname = swayward
