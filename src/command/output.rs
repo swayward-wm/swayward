@@ -35,11 +35,48 @@ pub(super) fn switch_layout(
     Ok(None)
 }
 
+/// Whether `target` names an output that `toggle` would switch off.
+///
+/// Sway looks the name up among every output it knows, disabled ones
+/// included, and disables the output unless its stored configuration already
+/// does (`sway/sway/commands/output/toggle.c:17-30`).
+fn toggle_disables(state: &State, target: &str) -> Option<bool> {
+    let name = state
+        .backend
+        .ipc_outputs()
+        .lock()
+        .unwrap()
+        .values()
+        .map(swayward_config::OutputName::from_ipc_output)
+        .find(|name| name.matches(target))?;
+    let config = state.swayward.config.borrow();
+    Some(!config.outputs.find(&name).is_some_and(|output| output.off))
+}
+
 pub(super) fn configure(
     state: &mut State,
     target: String,
-    actions: Vec<swayward_ipc::OutputAction>,
+    mut actions: Vec<swayward_ipc::OutputAction>,
 ) -> HandlerResult {
+    if actions.contains(&swayward_ipc::OutputAction::Toggle) {
+        let Some(disables) = toggle_disables(state, &target) else {
+            return Err(failure(format!(
+                "Cannot apply toggle to unknown output {target}"
+            )));
+        };
+        // Every subcommand of one command reads the stored configuration, so
+        // each toggle resolves to the same state and the last
+        // enable, disable, or toggle wins.
+        for action in &mut actions {
+            if *action == swayward_ipc::OutputAction::Toggle {
+                *action = if disables {
+                    swayward_ipc::OutputAction::Off
+                } else {
+                    swayward_ipc::OutputAction::On
+                };
+            }
+        }
+    }
     if actions
         .iter()
         .any(|action| matches!(action, swayward_ipc::OutputAction::Off))

@@ -143,8 +143,9 @@ class rather than by each sway device identifier, and swayward has one seat
 created at startup. Accepting either namespace before those state models exist
 would be a polite-looking lie.
 
-The `output` namespace is partial. Enable, mode, scale, transform, position,
-adaptive-sync, bit depth, modeline, and power have runtime paths. An `*` target
+The `output` namespace is partial. Enable, disable, toggle, mode, scale,
+transform, position, adaptive-sync, bit depth, modeline, and power have runtime
+paths. An `*` target
 applies to connected outputs; unlike sway, it is not retained as wildcard
 configuration for outputs connected later. Other output subcommands fail.
 

@@ -558,6 +558,7 @@ impl State {
                 match action {
                     swayward_ipc::OutputAction::Off => config.off = true,
                     swayward_ipc::OutputAction::On => config.off = false,
+                    swayward_ipc::OutputAction::Toggle => config.off = !config.off,
                     swayward_ipc::OutputAction::Power { .. } => {}
                     swayward_ipc::OutputAction::Mode { mode } => {
                         config.mode = match mode {

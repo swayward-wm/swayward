@@ -60,6 +60,69 @@ fn headless_output_disable_evacuates_workspaces_and_enable_reconnects_it() {
     assert_eq!(fixture.swayward().layout.outputs().count(), 2);
 }
 
+/// `output <name> toggle` disables an enabled output and enables a disabled
+/// one, found by name among every known output
+/// (`sway/sway/commands/output/toggle.c:17-30`).
+#[test]
+fn output_toggle_disables_an_enabled_output_and_enables_a_disabled_one() {
+    let mut fixture = Fixture::new();
+    fixture.add_output(1, (800, 600));
+    fixture.add_output(2, (1024, 768));
+    let enabled = |fixture: &mut Fixture| {
+        let mut names = fixture
+            .swayward()
+            .layout
+            .outputs()
+            .map(|output| output.name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    let run = |fixture: &mut Fixture, command: &str| {
+        let outcome = crate::command::execute(fixture.niri_state(), command);
+        assert_eq!(outcome.len(), 1, "{command}: {outcome:?}");
+        outcome.into_iter().next().unwrap()
+    };
+
+    assert!(run(&mut fixture, "output headless-2 toggle").success);
+    assert_eq!(enabled(&mut fixture), ["headless-1"]);
+    assert!(run(&mut fixture, "output headless-2 toggle").success);
+    assert_eq!(enabled(&mut fixture), ["headless-1", "headless-2"]);
+
+    // A toggle follows an explicit disable or enable too, and matches the
+    // name without regard to case like the other output subcommands.
+    assert!(run(&mut fixture, "output headless-2 disable").success);
+    assert!(run(&mut fixture, "output HEADLESS-2 Toggle").success);
+    assert_eq!(enabled(&mut fixture), ["headless-1", "headless-2"]);
+    assert!(run(&mut fixture, "output headless-2 enable").success);
+    assert!(run(&mut fixture, "output headless-2 toggle").success);
+    assert_eq!(enabled(&mut fixture), ["headless-1"]);
+
+    // Every subcommand of one command reads the stored configuration, and the
+    // last one to set the enabled state wins.
+    assert!(run(&mut fixture, "output headless-2 toggle disable").success);
+    assert_eq!(enabled(&mut fixture), ["headless-1"]);
+    assert!(run(&mut fixture, "output headless-2 disable toggle").success);
+    assert_eq!(enabled(&mut fixture), ["headless-1", "headless-2"]);
+    assert!(run(&mut fixture, "output headless-2 toggle scale 2").success);
+    assert_eq!(enabled(&mut fixture), ["headless-1"]);
+
+    let unknown = run(&mut fixture, "output nowhere toggle");
+    assert!(!unknown.success);
+    assert_eq!(
+        unknown.error.as_deref(),
+        Some("Cannot apply toggle to unknown output nowhere")
+    );
+    let all = run(&mut fixture, "output * toggle");
+    assert!(!all.success);
+    assert_eq!(
+        all.error.as_deref(),
+        Some("Cannot apply toggle to all outputs.")
+    );
+    assert_eq!(enabled(&mut fixture), ["headless-1"]);
+    fixture.swayward().layout.verify_invariants();
+}
+
 #[test]
 fn output_runtime_commands_apply_named_state_and_wildcard_fanout() {
     let (mut fixture, socket) = ipc_fixture();

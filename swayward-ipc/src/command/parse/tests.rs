@@ -257,6 +257,19 @@ fn output_parses_chained_core_actions_and_power() {
         parse_output_command(&["*", "dpms", "toggle"]),
         Err("Cannot apply toggle to all outputs".into())
     );
+    assert!(matches!(
+        parse_output_command(&["HDMI-A-1", "toggle", "scale", "2"]),
+        Ok(Command::Output { actions, .. })
+            if actions == [
+                crate::OutputAction::Toggle,
+                crate::OutputAction::Scale { scale: crate::ScaleToSet::Specific(2.) },
+            ]
+    ));
+    // `sway/sway/commands/output/toggle.c:12-15`; the full stop is sway's.
+    assert_eq!(
+        parse_output_command(&["*", "toggle"]),
+        Err("Cannot apply toggle to all outputs.".into())
+    );
     // Sway stores whatever strtof reads; -1 is its unset sentinel and any
     // other value that is not positive selects the default scale
     // (`sway/sway/commands/output/scale.c`, `sway/sway/config/output.c`).

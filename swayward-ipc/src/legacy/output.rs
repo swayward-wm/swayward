@@ -13,6 +13,8 @@ pub enum OutputAction {
     Off,
     /// Turn on the output.
     On,
+    /// Turn the output off if it is on, and on if it is off.
+    Toggle,
     /// Change whether the output is powered.
     Power {
         /// Requested power state.

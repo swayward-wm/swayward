@@ -44,6 +44,7 @@ type OutputSubcommand = fn(&str, &[&str]) -> Result<(crate::OutputAction, usize)
 const OUTPUT_SUBCOMMANDS: &[(&[&str], OutputSubcommand)] = &[
     (&["enable"], |_, _| Ok((crate::OutputAction::On, 0))),
     (&["disable"], |_, _| Ok((crate::OutputAction::Off, 0))),
+    (&["toggle"], parse_output_toggle),
     (&["mode", "res", "resolution"], parse_output_mode),
     (&["scale"], parse_output_scale),
     (&["transform"], parse_output_transform),
@@ -88,6 +89,14 @@ pub(super) fn parse_output_command(args: &[&str]) -> Result<Command, String> {
         target: (*target).to_owned(),
         actions,
     })
+}
+
+fn parse_output_toggle(target: &str, _: &[&str]) -> Result<(crate::OutputAction, usize), String> {
+    // `sway/sway/commands/output/toggle.c:12-15`.
+    if target == "*" {
+        return Err("Cannot apply toggle to all outputs.".into());
+    }
+    Ok((crate::OutputAction::Toggle, 0))
 }
 
 fn parse_output_mode(_: &str, rest: &[&str]) -> Result<(crate::OutputAction, usize), String> {
