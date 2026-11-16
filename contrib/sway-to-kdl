@@ -13,259 +13,69 @@ from pathlib import Path
 from typing import Callable, Iterator, Union
 
 
-MODIFIER_ALIASES = {
-    "Mod4": "Super",
-    "Mod1": "Alt",
-    "Shift": "Shift",
-    "Lock": "Lock",
-    "Control": "Control",
-    "Ctrl": "Ctrl",
-    "Alt": "Alt",
-    "Mod2": "Num",
-    # Sway's default XKB map assigns Mod5 to ISO_Level3_Shift. swayward's
-    # compatibility spelling keeps that semantic name instead of the X11 bit.
-    "Mod5": "ISO_Level3_Shift",
-    "Super": "Super",
-    # sway spells an XKB group qualifier Group1..Group4, with Mode_switch
-    # as an alias for Group2. The typed KDL parser accepts the same names.
-    "Group1": "Group1",
-    "Group2": "Group2",
-    "Group3": "Group3",
-    "Group4": "Group4",
-    "Mode_switch": "Mode_switch",
-}
-
-
 # ---------------------------------------------------------------------------
-# Reader
+# Legacy helpers (C2 only)
 #
-# read_config segments a file into logical lines and blocks by sway 1.12's
-# rules (sway/config.c:666-869). It expands no variables and runs no
-# includes: sway runs both as directives, in source order, so the front end
-# does. Nothing calls read_config yet. The front end reads with LegacyReader,
-# today's segmentation, which the goldens record; C3 switches it over.
+# The pipeline follows sway. Wherever following it would change today's
+# output, which the goldens record, the code goes through one of these
+# instead; each is defined in the section named. C3 deletes each one with
+# the fix it stands for and updates the goldens that fix changes.
+#
+# Reader
+# - LegacyReader: today's segmentation. A continuation is joined as
+#   `text[:-1] + " " + next.strip()` and never inside a block body. A block
+#   opens where a block handler's pattern matches, and its extent is a raw
+#   count of `{` and `}` on physical lines, quoted or commented ones
+#   included, so `X { a }` on one line is a block and a `{` on the next
+#   line opens none. translate_mode re-reads its body with scan_block.
+#   C3: read_config, which reports one-line blocks and handles a
+#   continuation or a next-line `{` inside a block.
+#
+# Handlers
+# - legacy_handler_key: routes by today's regex prefixes and re.IGNORECASE
+#   folding. C3: sway's case-insensitive argv[0] lookup.
+# - LEGACY_MODIFIER_ALIASES: one table of modifiers and XKB group names, so
+#   `Mode_switch+a` and `Group2+a` pass as modifiers and `Mod3` is refused.
+#   C3: separate SWAY_MODIFIERS and SWAY_GROUPS (sway/input/keyboard.c:24-50,
+#   sway/commands/bind.c:398-449).
+# - legacy_unquote: strips quote characters from both ends of a selector or
+#   name that a handler regex cut from the text, so `output "A B" scale 2`
+#   names output `A`. C3: strip_quotes over the lexed arguments.
+# - legacy_command_list: for_window splits its command list on every `,`
+#   and `;`, quoted or bracketed ones included (`title_format "a, b"`).
+#   C3: split_command_list, which cuts with argsep.
+# - legacy_layer_effects: layer_effects strips braces from both ends of its
+#   effects and splits them on every `;`. C3: split_command_list.
+# - legacy_bar_echo: the bar report echoes LegacyReader's block list, the
+#   expanded header and stripped body lines, joined with " | ". C3: the
+#   block's physical lines as read_config keeps them (Block.raw).
+# - legacy_mode_nested_line: a block nested inside a mode numbers its body
+#   from the line above its header, one line early. C3: from the header.
+# - legacy_unlocated_report: input-block and layer_effects comments omit
+#   the location that their manual-list item still gives. C3: every
+#   comment is located.
+# - legacy_keep_first: a duplicate binding keeps the first and reports the
+#   rest; sway lets the later one overwrite (sway/commands/bind.c:280-300).
+#   C3: none planned; it stays until the pipeline note's open question 3
+#   is decided.
+#
+# KDL IR
+# - legacy_add: appends a singular child (SINGULAR) without dropping an
+#   earlier one, so a repeated directive emits a duplicate node that
+#   `swayward validate` rejects. C3: last wins through Node.set or
+#   Node.put, and Node.add raises on a SINGULAR name.
+# - legacy_g_float: formats with `:g`, so a whole number loses its ".0"
+#   (`accel-speed 1`, `proportion 1`). C3: pass the float, which render()
+#   writes with kdl_float.
+# - legacy_workspace_assignment: workspaces with an output assignment
+#   render before the rest, in first-assignment order. C3: first-mention
+#   order.
+#
+# Not a helper: the handlers parse Directive.text with the moved regexes
+# and str.split, never Directive.args, so no argument is unescaped
+# (`bindsym Mod4+a exec echo \"x\"` keeps both backslashes in `command`).
+# C3 moves them to Directive.args.
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Pos:
-    path: Path
-    line: int  # first physical line; 0 = whole file (as warn() reports it)
-
-
-@dataclass(frozen=True)
-class Line:
-    text: str  # logical line: continuation joined, stripped
-    raw: tuple[str, ...]  # the physical lines it came from, unstripped
-    pos: Pos
-
-
-@dataclass
-class Block:
-    header: Line  # text without the trailing "{"
-    body: list[Line | Block]
-    raw: tuple[str, ...]  # header through closing line
-    end: Line | None = None  # the closing line; None if the file ended first
-
-
-def _physical_lines(data: str) -> list[str]:
-    """getline's view of a file: split after each "\\n", which stays."""
-    lines = data.split("\n")
-    physical = [line + "\n" for line in lines[:-1]]
-    if lines[-1]:
-        physical.append(lines[-1])
-    return physical
-
-
-def read_config(path: Path) -> list[Line | Block]:
-    r"""Sway's line and block rules (`read_config`, sway/config.c:732-869).
-
-    - A physical line ending in `\` and a newline is joined with the next,
-      whose leading whitespace stays, unless its first byte is `#`
-      (`getline_with_cont`, :666-694). The result is cut at a NUL, stripped,
-      and skipped when blank or starting with `#`; a later `#` is text.
-    - A line opens a block when the last `split_args` token of the line as
-      config_command sees it is `{` and there are at least two tokens
-      (sway/commands.c:355-360). Inside a block the header prefix supplies
-      the first token (`expand_line`, config.c:719-729), so a lone `{`
-      opens one.
-    - A line whose last character is neither `{` nor `}` takes " {" from the
-      next nonblank physical line when that line is exactly `{`
-      (`detect_brace`, :696-717). Blank lines before it are consumed; a
-      comment stops the search. The " {" joins the line before it is split,
-      so `x "abc` swallows the `{` into its open quote and opens nothing.
-    - A last token of `}` closes the innermost block
-      (sway/commands.c:362-366), whatever precedes it: `X { a }` closes the enclosing block,
-      and at top level it is an unmatched `}` (config.c:842-846) that this
-      returns as a Line. A block still open at the end of the file ends
-      there with no `end`, as sway's stack is dropped silently.
-
-    The `<commands>` dispatch at config.c:805-807 is unreachable in sway 1.12:
-    no handler returns CMD_BLOCK_COMMANDS, so it is not modelled.
-
-    Bytes are decoded as UTF-8 with surrogateescape and only "\n" ends a line,
-    as with getline. A header's text drops the `{` token and the whitespace
-    before it, unless escaped (`\ {`); join_args over its split_args tokens
-    is sway's block name. A header's raw includes the blank and `{` lines
-    detect_brace consumed, and Block.raw every physical line from the header
-    through the closing line, comments included.
-    """
-    physical = _physical_lines(path.read_bytes().decode("utf-8", "surrogateescape"))
-    raw = [line[:-1] if line.endswith("\n") else line for line in physical]
-    top: list[Line | Block] = []
-    stack: list[tuple[Block, int]] = []  # open blocks, with their first index
-    index = 0
-    while index < len(physical):
-        start = index
-        buffer = physical[index]
-        index += 1
-        while (
-            buffer.endswith("\\\n")
-            and not buffer.startswith("#")
-            and index < len(physical)
-        ):
-            buffer = buffer[:-2] + physical[index]
-            index += 1
-        text = _c_string(buffer).strip(SWAY_WHITESPACE)
-        if not text or text.startswith("#"):
-            continue
-        if text[-1] not in "{}":
-            probe = index
-            while probe < len(physical):
-                candidate = _c_string(physical[probe]).strip(SWAY_WHITESPACE)
-                probe += 1
-                if candidate:
-                    if candidate == "{":
-                        text += " {"
-                        index = probe
-                    break
-        line = Line(text, tuple(raw[start:index]), Pos(path, start + 1))
-        parent = stack[-1][0].body if stack else top
-        tokens = split_args(text)
-        if tokens and tokens[-1] == "{" and (len(tokens) > 1 or stack):
-            name = text[:-1].rstrip(SWAY_WHITESPACE)
-            if (len(name) - len(name.rstrip("\\"))) % 2:
-                name = text[: len(name) + 1]  # `\ {`: the space is escaped
-            block = Block(Line(name, line.raw, line.pos), [], ())
-            parent.append(block)
-            stack.append((block, start))
-        elif tokens and tokens[-1] == "}" and stack:
-            block, first = stack.pop()
-            block.end = line
-            block.raw = tuple(raw[first:index])
-        else:
-            parent.append(line)
-    for block, first in stack:
-        block.raw = tuple(raw[first:])
-    return top
-
-
-def expand_line(block: str | None, line: str, add_brace: bool) -> str:
-    """Sway's `expand_line` (sway/config.c:719-729)."""
-    prefix = f"{block} " if block is not None else ""
-    return prefix + line + (" {" if add_brace else "")
-
-
-def flatten(
-    nodes: list[Line | Block], block: str | None = None
-) -> Iterator[tuple[Line, str]]:
-    """The lines read_config hands config_command, with sway's prefix.
-
-    Yields (line, expanded) for every node in read order: a block's header
-    (with " {"), its body, and its closing line. Inside a block the prefix is
-    the block name, join_args over the header's tokens, and it accumulates:
-    `bar {` + `colors {` + `a` runs `bar colors a`. Tokens match sway's;
-    whitespace inside an explicit header line is collapsed.
-    """
-    for node in nodes:
-        if isinstance(node, Line):
-            yield node, expand_line(block, node.text, False)
-            continue
-        yield node.header, expand_line(block, node.header.text, True)
-        name = join_args(split_args(expand_line(block, node.header.text, False)))
-        yield from flatten(node.body, name)
-        if node.end is not None:
-            yield node.end, expand_line(name, node.end.text, False)
-
-
-class LegacyReader:
-    """Today's segmentation, which the goldens record; C2 only.
-
-    next_line is the loop that opened Translator.parse and scan_block its
-    block() helper, both moved verbatim behind a cursor over the file's
-    physical lines. A continuation is joined as `text[:-1] + " " +
-    next.strip()`, and never inside a block body. A block's extent is a raw
-    count of `{` and `}` on physical lines, quoted or commented ones
-    included. take_block builds a Block whose raw is today's block list: the
-    expanded header first, then stripped physical lines, blanks and comments
-    kept. As today, the last line taken counts as the closing line even when
-    the file ended first.
-    """
-
-    def __init__(self, path: Path, lines: list[str]) -> None:
-        self.path = path
-        self.lines = lines
-        self.index = 0
-        self.last: Line | None = None
-
-    @classmethod
-    def open(cls, path: Path) -> LegacyReader:
-        return cls(path, path.read_text().splitlines())
-
-    def next_line(self) -> Line | None:
-        lines = self.lines
-        index = self.index
-        self.last = None
-        while index < len(lines):
-            line_no = index + 1
-            text = lines[index].strip()
-            index += 1
-            if not text or text.startswith("#"):
-                continue
-            while text.endswith("\\") and index < len(lines):
-                text = text[:-1] + " " + lines[index].strip()
-                index += 1
-            self.last = Line(
-                text, tuple(lines[line_no - 1 : index]), Pos(self.path, line_no)
-            )
-            break
-        self.index = index
-        return self.last
-
-    def take_block(self, first: str) -> Block:
-        """The block opened by the line next_line just returned.
-
-        `first` is that line as the caller matched it, variables expanded.
-        """
-        assert self.last is not None, "take_block follows next_line"
-        start = self.index
-        block, self.index = self.scan_block(self.lines, start, first)
-        lines = [
-            Line(text, (self.lines[index],), Pos(self.path, index + 1))
-            for index, text in enumerate(block[1:], start)
-        ]
-        header = first[:-1].rstrip() if first.endswith("{") else first
-        return Block(
-            Line(header, self.last.raw, self.last.pos),
-            list(lines[:-1]),
-            tuple(block),
-            lines[-1] if lines else None,
-        )
-
-    def block(self, first: str) -> list[str]:
-        """Stand-in for Translator.block in S2: today's block list."""
-        return list(self.take_block(first).raw)
-
-    @staticmethod
-    def scan_block(lines: list[str], index: int, first: str) -> tuple[list[str], int]:
-        block = [first]
-        depth = first.count("{") - first.count("}")
-        while depth > 0 and index < len(lines):
-            line = lines[index]
-            block.append(line.strip())
-            depth += line.count("{") - line.count("}")
-            index += 1
-        return block, index
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +381,239 @@ def split_command_list(s: str) -> list[Command]:
 
 
 # ---------------------------------------------------------------------------
+# Reader
+#
+# read_config segments a file into logical lines and blocks by sway 1.12's
+# rules (sway/config.c:666-869). It expands no variables and runs no
+# includes: sway runs both as directives, in source order, so the front end
+# does. Nothing calls read_config yet: the front end reads with
+# LegacyReader, today's segmentation, which the goldens record; C3 switches
+# it over.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pos:
+    path: Path
+    line: int  # first physical line; 0 = whole file (as warn() reports it)
+
+
+@dataclass(frozen=True)
+class Line:
+    text: str  # logical line: continuation joined, stripped
+    raw: tuple[str, ...]  # the physical lines it came from, unstripped
+    pos: Pos
+
+
+@dataclass
+class Block:
+    header: Line  # text without the trailing "{"
+    body: list[Line | Block]
+    raw: tuple[str, ...]  # header through closing line
+    end: Line | None = None  # the closing line; None if the file ended first
+
+
+def _physical_lines(data: str) -> list[str]:
+    """getline's view of a file: split after each "\\n", which stays."""
+    lines = data.split("\n")
+    physical = [line + "\n" for line in lines[:-1]]
+    if lines[-1]:
+        physical.append(lines[-1])
+    return physical
+
+
+def read_config(path: Path) -> list[Line | Block]:
+    r"""Sway's line and block rules (`read_config`, sway/config.c:732-869).
+
+    - A physical line ending in `\` and a newline is joined with the next,
+      whose leading whitespace stays, unless its first byte is `#`
+      (`getline_with_cont`, :666-694). The result is cut at a NUL, stripped,
+      and skipped when blank or starting with `#`; a later `#` is text.
+    - A line opens a block when the last `split_args` token of the line as
+      config_command sees it is `{` and there are at least two tokens
+      (sway/commands.c:355-360). Inside a block the header prefix supplies
+      the first token (`expand_line`, config.c:719-729), so a lone `{`
+      opens one.
+    - A line whose last character is neither `{` nor `}` takes " {" from the
+      next nonblank physical line when that line is exactly `{`
+      (`detect_brace`, :696-717). Blank lines before it are consumed; a
+      comment stops the search. The " {" joins the line before it is split,
+      so `x "abc` swallows the `{` into its open quote and opens nothing.
+    - A last token of `}` closes the innermost block
+      (sway/commands.c:362-366), whatever precedes it: `X { a }` closes the enclosing block,
+      and at top level it is an unmatched `}` (config.c:842-846) that this
+      returns as a Line. A block still open at the end of the file ends
+      there with no `end`, as sway's stack is dropped silently.
+
+    The `<commands>` dispatch at config.c:805-807 is unreachable in sway 1.12:
+    no handler returns CMD_BLOCK_COMMANDS, so it is not modelled.
+
+    Bytes are decoded as UTF-8 with surrogateescape and only "\n" ends a line,
+    as with getline. A header's text drops the `{` token and the whitespace
+    before it, unless escaped (`\ {`); join_args over its split_args tokens
+    is sway's block name. A header's raw includes the blank and `{` lines
+    detect_brace consumed, and Block.raw every physical line from the header
+    through the closing line, comments included.
+    """
+    physical = _physical_lines(path.read_bytes().decode("utf-8", "surrogateescape"))
+    raw = [line[:-1] if line.endswith("\n") else line for line in physical]
+    top: list[Line | Block] = []
+    stack: list[tuple[Block, int]] = []  # open blocks, with their first index
+    index = 0
+    while index < len(physical):
+        start = index
+        buffer = physical[index]
+        index += 1
+        while (
+            buffer.endswith("\\\n")
+            and not buffer.startswith("#")
+            and index < len(physical)
+        ):
+            buffer = buffer[:-2] + physical[index]
+            index += 1
+        text = _c_string(buffer).strip(SWAY_WHITESPACE)
+        if not text or text.startswith("#"):
+            continue
+        if text[-1] not in "{}":
+            probe = index
+            while probe < len(physical):
+                candidate = _c_string(physical[probe]).strip(SWAY_WHITESPACE)
+                probe += 1
+                if candidate:
+                    if candidate == "{":
+                        text += " {"
+                        index = probe
+                    break
+        line = Line(text, tuple(raw[start:index]), Pos(path, start + 1))
+        parent = stack[-1][0].body if stack else top
+        tokens = split_args(text)
+        if tokens and tokens[-1] == "{" and (len(tokens) > 1 or stack):
+            name = text[:-1].rstrip(SWAY_WHITESPACE)
+            if (len(name) - len(name.rstrip("\\"))) % 2:
+                name = text[: len(name) + 1]  # `\ {`: the space is escaped
+            block = Block(Line(name, line.raw, line.pos), [], ())
+            parent.append(block)
+            stack.append((block, start))
+        elif tokens and tokens[-1] == "}" and stack:
+            block, first = stack.pop()
+            block.end = line
+            block.raw = tuple(raw[first:index])
+        else:
+            parent.append(line)
+    for block, first in stack:
+        block.raw = tuple(raw[first:])
+    return top
+
+
+def expand_line(block: str | None, line: str, add_brace: bool) -> str:
+    """Sway's `expand_line` (sway/config.c:719-729)."""
+    prefix = f"{block} " if block is not None else ""
+    return prefix + line + (" {" if add_brace else "")
+
+
+def flatten(
+    nodes: list[Line | Block], block: str | None = None
+) -> Iterator[tuple[Line, str]]:
+    """The lines read_config hands config_command, with sway's prefix.
+
+    Yields (line, expanded) for every node in read order: a block's header
+    (with " {"), its body, and its closing line. Inside a block the prefix is
+    the block name, join_args over the header's tokens, and it accumulates:
+    `bar {` + `colors {` + `a` runs `bar colors a`. Tokens match sway's;
+    whitespace inside an explicit header line is collapsed.
+    """
+    for node in nodes:
+        if isinstance(node, Line):
+            yield node, expand_line(block, node.text, False)
+            continue
+        yield node.header, expand_line(block, node.header.text, True)
+        name = join_args(split_args(expand_line(block, node.header.text, False)))
+        yield from flatten(node.body, name)
+        if node.end is not None:
+            yield node.end, expand_line(name, node.end.text, False)
+
+
+class LegacyReader:
+    """Today's segmentation, which the goldens record; C2 only.
+
+    next_line is the loop that opened Translator.parse and scan_block its
+    block() helper, both moved verbatim behind a cursor over the file's
+    physical lines. A continuation is joined as `text[:-1] + " " +
+    next.strip()`, and never inside a block body. A block's extent is a raw
+    count of `{` and `}` on physical lines, quoted or commented ones
+    included. take_block builds a Block whose raw is today's block list: the
+    expanded header first, then stripped physical lines, blanks and comments
+    kept. As today, the last line taken counts as the closing line even when
+    the file ended first. translate_mode re-reads its body with scan_block.
+    """
+
+    def __init__(self, path: Path, lines: list[str]) -> None:
+        self.path = path
+        self.lines = lines
+        self.index = 0
+        self.last: Line | None = None
+
+    @classmethod
+    def open(cls, path: Path) -> LegacyReader:
+        return cls(path, path.read_text().splitlines())
+
+    def next_line(self) -> Line | None:
+        lines = self.lines
+        index = self.index
+        self.last = None
+        while index < len(lines):
+            line_no = index + 1
+            text = lines[index].strip()
+            index += 1
+            if not text or text.startswith("#"):
+                continue
+            while text.endswith("\\") and index < len(lines):
+                text = text[:-1] + " " + lines[index].strip()
+                index += 1
+            self.last = Line(
+                text, tuple(lines[line_no - 1 : index]), Pos(self.path, line_no)
+            )
+            break
+        self.index = index
+        return self.last
+
+    def take_block(self, first: str) -> Block:
+        """The block opened by the line next_line just returned.
+
+        `first` is that line as the caller matched it, variables expanded.
+        """
+        assert self.last is not None, "take_block follows next_line"
+        start = self.index
+        block, self.index = self.scan_block(self.lines, start, first)
+        lines = [
+            Line(text, (self.lines[index],), Pos(self.path, index + 1))
+            for index, text in enumerate(block[1:], start)
+        ]
+        header = first[:-1].rstrip() if first.endswith("{") else first
+        return Block(
+            Line(header, self.last.raw, self.last.pos),
+            list(lines[:-1]),
+            tuple(block),
+            lines[-1] if lines else None,
+        )
+
+    def take_body(self, first: str) -> list[str]:
+        """The text of take_block's body lines, as the block handlers read them."""
+        return [line.text for line in self.take_block(first).body]
+
+    @staticmethod
+    def scan_block(lines: list[str], index: int, first: str) -> tuple[list[str], int]:
+        block = [first]
+        depth = first.count("{") - first.count("}")
+        while depth > 0 and index < len(lines):
+            line = lines[index]
+            block.append(line.strip())
+            depth += line.count("{") - line.count("}")
+            index += 1
+        return block, index
+
+
+# ---------------------------------------------------------------------------
 # Front end
 #
 # Variables, includes and the set of files already read, handled in source
@@ -606,9 +649,6 @@ class Directive:
     args: list[str]
     text: str  # expanded logical text: today's string, used in messages
     pos: Pos
-    # Always None until the front end reads blocks itself: the block handlers
-    # still take theirs from the LegacyReader.
-    block: Block | None = None
 
     @classmethod
     def from_line(cls, text: str, pos: Pos) -> Directive:
@@ -655,6 +695,10 @@ class Frontend:
             index += 1
         return "".join(output)
 
+    def define(self, name: str, value: str) -> None:
+        """`set name value`: the value is expanded once, when it is set."""
+        self.variables[name] = self.expand(value.strip()).replace(r"\$", "$")
+
     def run(
         self, path: Path, doc: Translator
     ) -> Iterator[tuple[Directive, LegacyReader]]:
@@ -673,12 +717,11 @@ class Frontend:
             text = line.text
 
             if re.fullmatch(r"set\s*\{", text):
-                block = reader.block(text)
-                self.translate_set_block(doc, path, line_no, block[1:-1])
+                body = reader.take_body(text)
+                self.translate_set_block(doc, path, line_no, body)
                 continue
             if match := re.fullmatch(r"set\s+(\$+[^\s]+)\s+(.+)", text):
-                value = self.expand(match.group(2).strip())
-                self.variables[match.group(1)] = value.replace(r"\$", "$")
+                self.define(match.group(1), match.group(2))
                 continue
             text = self.expand(text).replace(r"\$", "$")
 
@@ -695,15 +738,14 @@ class Frontend:
             if not item or item.startswith("#"):
                 continue
             if match := re.fullmatch(r"(\$+[^\s]+)\s+(.+)", item):
-                value = self.expand(match.group(2).strip())
-                self.variables[match.group(1)] = value.replace(r"\$", "$")
+                self.define(match.group(1), match.group(2))
             else:
                 doc.warn(source, line + offset, item, "malformed directive in set block")
 
     def translate_include(
         self, doc: Translator, source: Path, line: int, text: str
     ) -> Iterator[tuple[Directive, LegacyReader]]:
-        pattern = text.removeprefix("include ").strip().strip('"\'')
+        pattern = legacy_unquote(text.removeprefix("include ").strip(), "\"'")
         if "`" in pattern or "$(" in pattern:
             doc.warn(source, line, text, "include command substitution is refused")
             return
@@ -718,10 +760,12 @@ class Frontend:
 
 
 # ---------------------------------------------------------------------------
-# Translator: dispatch, one handler per branch of the old elif chain (in
-# its order) and the translate_* helpers they call. They build nodes on a
-# Document (see KDL IR); render() turns it into text. The handler tables
-# follow the class.
+# Handlers
+#
+# Report, the handlers' own helpers, and Translator: dispatch, one handler
+# per branch of the old elif chain (in its order) and the translate_*
+# helpers they call. They build nodes on a Document (see KDL IR); render()
+# turns it into text. The handler tables follow the class.
 # ---------------------------------------------------------------------------
 
 
@@ -766,6 +810,78 @@ def shadow(value: str) -> Node:
     return Node("shadow", children=[Node("on" if value in {"enable", "on"} else "off")])
 
 
+def legacy_unlocated_report(pos: Pos, reason: str, text: str) -> Report:
+    return Report(pos, reason, text, located=False)
+
+
+def legacy_unquote(text: str, quotes: str) -> str:
+    """A selector or name with any of quotes stripped from both ends."""
+    return text.strip(quotes)
+
+
+def legacy_command_list(command: str) -> list[str]:
+    """for_window's commands, split on every `,` and `;`.
+
+    Empty segments are dropped, as sway ignores them
+    (sway/sway/commands.c:257-260).
+    """
+    return [
+        directive
+        for directive in re.split(r"\s*,\s*|\s*;\s*", command)
+        if directive.strip()
+    ]
+
+
+def legacy_layer_effects(effects: str) -> list[str]:
+    """layer_effects' effects: braces stripped from both ends, split on `;`."""
+    return re.split(r"\s*;\s*", effects.strip().strip("{} "))
+
+
+def legacy_bar_echo(block: Block) -> str:
+    """The bar report's text: LegacyReader's block list joined with " | "."""
+    return " | ".join(block.raw)
+
+
+def legacy_mode_nested_line(header: int) -> int:
+    """The line a block nested in a mode numbers its body from.
+
+    translate_mode passes the line above the nested header, so each report
+    from the nested body names the line above its own.
+    """
+    return header - 1
+
+
+def legacy_keep_first(binds: dict[tuple, Node], key: tuple, node: Node) -> bool:
+    """Bind node under key unless key is bound already; False when it is."""
+    if key in binds:
+        return False
+    binds[key] = node
+    return True
+
+
+LEGACY_MODIFIER_ALIASES = {
+    "Mod4": "Super",
+    "Mod1": "Alt",
+    "Shift": "Shift",
+    "Lock": "Lock",
+    "Control": "Control",
+    "Ctrl": "Ctrl",
+    "Alt": "Alt",
+    "Mod2": "Num",
+    # Sway's default XKB map assigns Mod5 to ISO_Level3_Shift. swayward's
+    # compatibility spelling keeps that semantic name instead of the X11 bit.
+    "Mod5": "ISO_Level3_Shift",
+    "Super": "Super",
+    # sway spells an XKB group qualifier Group1..Group4, with Mode_switch
+    # as an alias for Group2. The typed KDL parser accepts the same names.
+    "Group1": "Group1",
+    "Group2": "Group2",
+    "Group3": "Group3",
+    "Group4": "Group4",
+    "Mode_switch": "Mode_switch",
+}
+
+
 class Translator:
     def __init__(self) -> None:
         self.frontend = Frontend()
@@ -801,11 +917,10 @@ class Translator:
     def h_bar_block(self, d: Directive, reader: LegacyReader) -> bool:
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if re.match(r"bar\s*\{", text):
-            block = reader.block(text)
             self.warn(
                 path,
                 line_no,
-                " | ".join(block),
+                legacy_bar_echo(reader.take_block(text)),
                 "bar blocks are unsupported; use waybar "
                 "(docs/SWAY_CONFIG_MIGRATION.md#replace-swaybar)",
             )
@@ -818,12 +933,11 @@ class Translator:
         if match := re.match(
             r'mode\s+(--pango_markup\s+)?("[^"]+"|\S+)\s*\{', text
         ):
-            block = reader.block(text)
             self.translate_mode(
                 path,
                 line_no,
-                match.group(2).strip('"'),
-                block[1:-1],
+                legacy_unquote(match.group(2), '"'),
+                reader.take_body(text),
                 match.group(1) is not None,
             )
         else:
@@ -833,9 +947,8 @@ class Translator:
     def h_bind_block(self, d: Directive, reader: LegacyReader) -> bool:
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if match := re.fullmatch(r"(bindsym|bindcode)(.*?)\s*\{", text):
-            block = reader.block(text)
             self.translate_bind_block(
-                path, line_no, match.group(1), match.group(2), block[1:-1]
+                path, line_no, match.group(1), match.group(2), reader.take_body(text)
             )
         else:
             return False
@@ -844,9 +957,8 @@ class Translator:
     def h_exec_block(self, d: Directive, reader: LegacyReader) -> bool:
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if match := re.fullmatch(r"(exec|exec_always)\s*\{", text):
-            block = reader.block(text)
             self.translate_exec_block(
-                path, line_no, match.group(1), block[1:-1]
+                path, line_no, match.group(1), reader.take_body(text)
             )
         else:
             return False
@@ -857,14 +969,12 @@ class Translator:
         # nothing between them matches a line starting with for_window.
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if re.fullmatch(r"for_window\s*\{", text):
-            block = reader.block(text)
-            self.translate_for_window_block(path, line_no, block[1:-1])
+            self.translate_for_window_block(path, line_no, reader.take_body(text))
         elif match := re.fullmatch(
             r'for_window\s*(\[(?:[^"\]]|"(?:\\.|[^"])*")+\])\s*\{', text
         ):
-            block = reader.block(text)
             self.translate_for_window_commands(
-                path, line_no, match.group(1), block[1:-1]
+                path, line_no, match.group(1), reader.take_body(text)
             )
         else:
             return False
@@ -873,9 +983,8 @@ class Translator:
     def h_device_block(self, d: Directive, reader: LegacyReader) -> bool:
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if match := re.match(r"(input|output)\s+(.+?)\s*\{", text):
-            block = reader.block(text)
             self.translate_device_block(
-                path, line_no, match.group(1), match.group(2), block[1:-1]
+                path, line_no, match.group(1), match.group(2), reader.take_body(text)
             )
         else:
             return False
@@ -920,7 +1029,7 @@ class Translator:
         return True
 
     def h_nop(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if re.fullmatch(r"nop(?:\s+.*)?", text):
             self.doc.note(f"sway {text}")
         else:
@@ -973,8 +1082,8 @@ class Translator:
         # gaps branches and `workspace X gaps`, which ignores case, after them.
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if match := re.fullmatch(r"workspace\s+(.+?)\s+output\s+(.+)", text):
-            workspace = match.group(1).strip(chr(34))
-            outputs = [output.strip(chr(34)) for output in match.group(2).split()]
+            workspace = legacy_unquote(match.group(1), '"')
+            outputs = [legacy_unquote(output, '"') for output in match.group(2).split()]
             # Sway appends every output to one workspace_config in source
             # order (sway/commands/workspace.c:153-161).
             legacy_workspace_assignment(self.doc, workspace).args.extend(outputs)
@@ -989,14 +1098,14 @@ class Translator:
                 text,
                 match.group(2),
                 match.group(3),
-                match.group(1).strip(chr(34)),
+                legacy_unquote(match.group(1), '"'),
             )
         else:
             return False
         return True
 
     def h_font(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"font\s+(pango:)?(.+)", text):
             self.doc.titlebar.pango_markup = match.group(1) is not None
             self.doc.titlebar.font = match.group(2)
@@ -1128,7 +1237,7 @@ class Translator:
         return True
 
     def h_smart_borders(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"smart_borders\s+(\S+)", text):
             value = match.group(1)
             enabled = {"1", "yes", "on", "true", "enable", "enabled", "active"}
@@ -1163,7 +1272,7 @@ class Translator:
         return True
 
     def h_show_marks(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"show_marks\s+(\S+)", text, re.IGNORECASE):
             self.doc.titlebar.show_marks = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
@@ -1173,7 +1282,7 @@ class Translator:
         return True
 
     def h_title_align(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"title_align\s+(left|center|right)", text):
             self.doc.titlebar.alignment = match.group(1)
         else:
@@ -1181,7 +1290,7 @@ class Translator:
         return True
 
     def h_tiling_drag(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"tiling_drag\s+(\S+)", text, re.IGNORECASE):
             enabled = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
@@ -1192,7 +1301,7 @@ class Translator:
         return True
 
     def h_tiling_drag_threshold(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"tiling_drag_threshold\s+(\d+)", text):
             legacy_add(
                 self.doc.input, Node("tiling-drag-threshold", [Raw(match.group(1))])
@@ -1202,7 +1311,7 @@ class Translator:
         return True
 
     def h_force_focus_wrapping(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"force_focus_wrapping\s+(\S+)", text):
             enabled = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
@@ -1239,7 +1348,7 @@ class Translator:
         return True
 
     def h_workspace_auto_back_and_forth(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"workspace_auto_back_and_forth\s+(\S+)", text):
             enabled = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
@@ -1321,7 +1430,7 @@ class Translator:
         return True
 
     def h_force_display_urgency_hint(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(
             r"force_display_urgency_hint\s+(-?\d+)(?:\s*ms)?",
             text,
@@ -1335,7 +1444,7 @@ class Translator:
         return True
 
     def h_primary_selection(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
+        text = d.text
         if match := re.fullmatch(r"primary_selection\s+(\S+)", text, re.IGNORECASE):
             enabled = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
@@ -1635,19 +1744,18 @@ class Translator:
             if re.fullmatch(r"set\s*\{", text):
                 block, index = LegacyReader.scan_block(body, index, text)
                 self.frontend.translate_set_block(
-                    self, source, line + offset - 1, block[1:-1]
+                    self, source, legacy_mode_nested_line(line + offset), block[1:-1]
                 )
                 continue
             if match := re.fullmatch(r"set\s+(\$+[^\s]+)\s+(.+)", text):
-                value = self.frontend.expand(match.group(2).strip())
-                self.frontend.variables[match.group(1)] = value.replace(r"\$", "$")
+                self.frontend.define(match.group(1), match.group(2))
                 continue
             text = self.frontend.expand(text).replace(r"\$", "$")
             if match := re.fullmatch(r"(bindsym|bindcode)(.*?)\s*\{", text):
                 block, index = LegacyReader.scan_block(body, index, text)
                 self.translate_bind_block(
                     source,
-                    line + offset - 1,
+                    legacy_mode_nested_line(line + offset),
                     match.group(1),
                     match.group(2),
                     block[1:-1],
@@ -1795,19 +1903,18 @@ class Translator:
             ("release", True) in properties,
             frozenset(mouse_regions),
         )
-        if binding_key in binds:
-            self.warn(source, line, rest, f"duplicate binding for {shown}; kept the first")
-            return
-        binds[binding_key] = Node(
+        node = Node(
             key, props=properties, children=[Node("command", [command])], inline=True
         )
+        if not legacy_keep_first(binds, binding_key, node):
+            self.warn(source, line, rest, f"duplicate binding for {shown}; kept the first")
 
     @staticmethod
     def translate_modifier(modifier: str) -> str | None:
         return next(
             (
                 translated
-                for name, translated in MODIFIER_ALIASES.items()
+                for name, translated in LEGACY_MODIFIER_ALIASES.items()
                 if name.lower() == modifier.lower()
             ),
             None,
@@ -1897,7 +2004,7 @@ class Translator:
             if target.startswith("number "):
                 property_name = "open-on-workspace-number"
                 target = target.removeprefix("number ").strip()
-                number = target.strip(chr(34))
+                number = legacy_unquote(target, '"')
                 if not number or not number[0].isdigit():
                     self.warn(
                         source,
@@ -1911,7 +2018,7 @@ class Translator:
                 "window-rule",
                 children=[
                     self.match_node(match),
-                    Node(property_name, [target.strip(chr(34))]),
+                    Node(property_name, [legacy_unquote(target, '"')]),
                 ],
             )
         )
@@ -2047,13 +2154,7 @@ class Translator:
         if match is None:
             return
         rule = Node("window-rule", children=[self.match_node(match)])
-        directives = [
-            directive
-            for directive in re.split(r"\s*,\s*|\s*;\s*", command)
-            # sway ignores an empty segment of a command list, so a trailing
-            # separator is not a command (sway/sway/commands.c:257-260).
-            if directive.strip()
-        ]
+        directives = legacy_command_list(command)
         if not directives:
             self.warn(
                 source,
@@ -2283,7 +2384,7 @@ class Translator:
     def translate_device_block(
         self, source: Path, line: int, kind: str, selector: str, body: list[str]
     ) -> None:
-        selector = selector.strip().strip('"\'')
+        selector = legacy_unquote(selector.strip(), "\"'")
         if kind == "input":
             self.translate_input_block(source, line, selector, body)
         else:
@@ -2353,7 +2454,7 @@ class Translator:
                 if len(words) == 1:
                     translated.report(unhandled, self.doc)
                     continue
-                value = words[1].split()[0].strip('"\'')
+                value = legacy_unquote(words[1].split()[0], "\"'")
                 enabled = value.lower() in {
                     "1", "yes", "on", "true", "enable", "enabled", "active", "toggle"
                 }
@@ -2395,7 +2496,7 @@ class Translator:
             elif name in enum_values:
                 legacy_add(parent, Node(name, [enum_values[name].get(value, value)]))
             elif name in {"layout", "model", "options", "rules", "variant"}:
-                legacy_add(parent, Node(name, [value.strip(chr(34))]))
+                legacy_add(parent, Node(name, [legacy_unquote(value, '"')]))
             elif name in {"accel-speed", "scroll-factor"}:
                 try:
                     legacy_add(parent, Node(name, [legacy_g_float(float(value))]))
@@ -2624,7 +2725,7 @@ class Translator:
                 Node("match", props=[("namespace", "^" + re.escape(namespace) + "$")])
             ],
         )
-        for effect in re.split(r"\s*;\s*", effects.strip().strip("{} ")):
+        for effect in legacy_layer_effects(effects):
             words = effect.split()
             if words[:1] == ["blur"] and len(words) == 2:
                 legacy_add(rule, background_effect("blur", words[1]))
@@ -2758,6 +2859,7 @@ HANDLERS: dict[str, Handler] = {
     "default_dim_inactive": Translator.h_swayfx,
     "layer_effects": Translator.h_swayfx,
 }
+
 
 # ---------------------------------------------------------------------------
 # KDL IR
@@ -2998,7 +3100,7 @@ class Document:
     """The translation: one field per output group, in render order."""
 
     def __init__(self) -> None:
-        # Keyed by key, device, release and mouse regions; the first wins.
+        # Keyed by key, device, release and mouse regions; legacy_keep_first.
         self.binds: dict[tuple, Node] = {}
         self.modes: list[Node] = []
         # input's own settings. Sway defaults focus_follows_mouse to yes;
@@ -3040,43 +3142,8 @@ class Document:
         return layout
 
 
-# ---------------------------------------------------------------------------
-# Legacy helpers (C2 only)
-#
-# Each reproduces a result of today's translator that the pipeline, followed
-# faithfully, would change; the goldens record them. C3 deletes each one
-# with the fix it stands for and updates the goldens that fix changes:
-#
-# - LegacyReader (Reader): today's line joining and brace counting.
-#   C3: read_config.
-# - legacy_handler_key (Handler tables): routes by today's regex prefixes
-#   and re.IGNORECASE folding. C3: sway's case-insensitive argv[0] lookup.
-# - legacy_add: appends a singular child (SINGULAR) without dropping an
-#   earlier one, so a repeated directive emits a duplicate node that
-#   `swayward validate` rejects. C3: last wins through Node.set or
-#   Node.put, and Node.add raises on a SINGULAR name.
-# - legacy_unlocated_report: input-block and layer_effects comments omit
-#   the location that their manual-list item still gives. C3: every
-#   comment is located.
-# - legacy_g_float: formats with `:g`, so a whole number loses its ".0"
-#   (`accel-speed 1`, `proportion 1`). C3: pass the float, which render()
-#   writes with kdl_float.
-# - legacy_workspace_assignment: workspaces with an output assignment
-#   render before the rest, in first-assignment order. C3: first-mention
-#   order.
-#
-# Still inline, for S5 to name: the bar echo `" | ".join(block)`
-# (h_bar_block) and translate_mode re-reading its body with
-# LegacyReader.scan_block, with its line offsets.
-# ---------------------------------------------------------------------------
-
-
 def legacy_add(parent: Node, *children: Node | Comment) -> None:
     parent.children.extend(children)
-
-
-def legacy_unlocated_report(pos: Pos, reason: str, text: str) -> Report:
-    return Report(pos, reason, text, located=False)
 
 
 def legacy_g_float(value: float) -> Raw:
@@ -3204,6 +3271,11 @@ def render(doc: Document) -> str:
         for item in group:
             lines += render_item(item, 0)
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 
 def main() -> int:

@@ -2337,33 +2337,85 @@ SINGULAR_STRUCTS = {
 CONFIG_SRC = ROOT / "swayward-config" / "src"
 
 
-def knuffel_child_names(path, struct):
+def strip_rust_comments(text):
+    """text with its `//` and (nested) `/* */` comments blanked out.
+
+    String and character literals are kept, so a `//` inside one is text. A
+    `'` that does not close a one-character literal starts a lifetime. Raw
+    strings are not recognised; no config struct body uses one.
+    """
+    out = []
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            out.append(" ")
+        elif text.startswith("/*", index):
+            depth = 0
+            while index < len(text):
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                    if not depth:
+                        break
+                else:
+                    index += 1
+            out.append(" ")
+        elif text[index] == '"':
+            literal = re.match(r'"(?:\\.|[^"\\])*"', text[index:], re.S)
+            end = index + (literal.end() if literal else 1)
+            out.append(text[index:end])
+            index = end
+        elif text[index] == "'":
+            literal = re.match(r"'(?:\\.[^']*|[^'\\])'", text[index:])
+            end = index + (literal.end() if literal else 1)
+            out.append(text[index:end])
+            index = end
+        else:
+            out.append(text[index])
+            index += 1
+    return "".join(out)
+
+
+def knuffel_child_names_in(text, struct, where="<text>"):
     """The kebab-cased names of struct's `#[knuffel(child...)]` fields.
 
-    Reads the source text: knuffel names a child after its field, `_` as `-`.
-    Returns None when the struct is not found as `pub struct Name {` in path.
+    Reads Rust source text: knuffel names a child after its field, `_` as
+    `-`. Comments are dropped first, and an attribute may be spaced or split
+    over lines, with comments inside, wherever Rust allows. Returns None when
+    the struct is not found as `pub struct Name {`.
     """
-    text = (CONFIG_SRC / path).read_text()
     found = re.search(rf"^pub struct {struct} \{{\n(.*?)^\}}", text, re.S | re.M)
     if found is None:
         return None
-    body = found.group(1)
+    body = strip_rust_comments(found.group(1))
+    attribute = r"#\s*\[\s*knuffel\s*\((.*?)\)\s*\]"
     fields = re.finditer(
-        r"#\[knuffel\((.*?)\)\]\s*"  # the attribute
-        r"(?:(?://[^\n]*|#\[[^\]]*\])\s*)*"  # comments and other attributes
-        r"(?:pub(?:\([^)]*\))?\s+)?(?:r#)?(\w+)\s*:",  # the field
+        attribute + r"\s*"
+        r"(?:#\s*\[[^\]]*\]\s*)*"  # other attributes
+        r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:r#)?(\w+)\s*:",  # the field
         body,
         re.S,
     )
     names = [
         field.replace("_", "-")
-        for attribute, field in (match.groups() for match in fields)
-        if re.match(r"child\b", attribute)
+        for argument, field in (match.groups() for match in fields)
+        if re.match(r"\s*child\b", argument)
     ]
     # Every child attribute pairs with a field, or the pattern above missed one.
-    if len(names) != len(re.findall(r"#\[knuffel\(child\b", body)):
-        raise AssertionError(f"{path} {struct}: unpaired #[knuffel(child)] attribute")
+    children = re.findall(r"#\s*\[\s*knuffel\s*\(\s*child\b", body)
+    if len(names) != len(children):
+        raise AssertionError(f"{where} {struct}: unpaired #[knuffel(child)] attribute")
     return names
+
+
+def knuffel_child_names(path, struct):
+    """knuffel_child_names_in for path under swayward-config/src."""
+    return knuffel_child_names_in((CONFIG_SRC / path).read_text(), struct, path)
 
 
 class SingularTests(unittest.TestCase):
@@ -2389,6 +2441,64 @@ class SingularTests(unittest.TestCase):
                 self.assertTrue(names, f"{struct} has no #[knuffel(child)] field")
                 self.assertEqual(len(names), len(set(names)))
                 self.assertEqual(self.s2k.SINGULAR[parent], frozenset(names))
+
+    def test_knuffel_child_names_reads_a_multi_line_commented_attribute(self):
+        # The parse once required `child` right after the parenthesis, so
+        # this field was not seen and SINGULAR could drift past it.
+        source = (
+            "pub struct Synthetic {\n"
+            "    #[knuffel(\n"
+            "        // note\n"
+            "        child, unwrap(argument)\n"
+            "    )]\n"
+            "    pub noted: u8,\n"
+            "}\n"
+        )
+        self.assertEqual(knuffel_child_names_in(source, "Synthetic"), ["noted"])
+
+    def test_knuffel_child_names_reads_every_spelling_of_the_attribute(self):
+        # A synthetic struct: the guard must see a child field however its
+        # attribute is spelled, or a new singular field drifts silently.
+        source = (
+            "pub struct Synthetic {\n"
+            "    #[knuffel(child)]\n"
+            "    pub plain: bool,\n"
+            "    #[knuffel(\n"
+            "        // note\n"
+            "        child, unwrap(argument)\n"
+            "    )]\n"
+            "    pub multi_line: u8,\n"
+            "    # [ knuffel ( /* why */ child , default ) ]\n"
+            "    pub(crate) spaced: u8,\n"
+            "    #[knuffel(child, default = \"// not a comment\")]\n"
+            "    /// docs\n"
+            "    #[allow(dead_code)]\n"
+            "    pub r#after_attributes: u8,\n"
+            "    // #[knuffel(child)]\n"
+            "    /* #[knuffel(child)] */\n"
+            "    #[knuffel(children)]\n"
+            "    pub repeated: Vec<u8>,\n"
+            "    #[knuffel(argument)]\n"
+            "    pub child: u8,\n"
+            "}\n"
+        )
+        self.assertEqual(
+            knuffel_child_names_in(source, "Synthetic"),
+            ["plain", "multi-line", "spaced", "after-attributes"],
+        )
+
+    def test_knuffel_child_names_rejects_an_unpaired_child_attribute(self):
+        source = (
+            "pub struct Synthetic {\n"
+            "    #[knuffel(child)]\n"
+            "    #[knuffel(\n"
+            "        child,\n"
+            "    )]\n"
+            "    pub only_one_field: u8,\n"
+            "}\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "unpaired"):
+            knuffel_child_names_in(source, "Synthetic")
 
     def test_singular_top_level_mirrors_config_decode(self):
         # decode.rs rejects a second node of any top-level name except the
