@@ -5261,10 +5261,10 @@ citation = "tests/i3/t/520-regress-focus-direction-floating.t:31-39; sway/sway/c
 [files."522-rename-assigned-workspace.t"]
 assertions = 9
 tap_plan = 9
-pass = 4
+pass = 3
 reason = "i3_only_semantics"
 reason_verified = true
-note = "Fresh measurement after removing assertion interception: 4 pass, 5 documented skip. Raw TAP runs the real comparisons; each retained skip has an assertion-level sway citation below."
+note = "Measured after rename finishes pending switches and stops treating sway-output-assignment names as persistent: 3 pass, 6 documented skip. Assertion 6 previously passed only because the rename collided and left an unrelated workspace 2 on fake-1; with the rename succeeding as sway does, the i3 assignment-move expectation fails."
 [[files."522-rename-assigned-workspace.t".skip]]
 n = 3
 desc = "renaming to 2:foo uses workspace 2's numeric assignment"
@@ -5276,10 +5276,15 @@ desc = "renaming to configured workspace baz moves it to fake-1"
 reason = "Sway does not reapply configured output assignments when renaming a workspace."
 citation = "tests/i3/t/522-rename-assigned-workspace.t:65-70; sway/sway/commands/rename.c:84-104"
 [[files."522-rename-assigned-workspace.t".skip]]
+n = 6
+desc = "renaming workspace 5 to 2 replaces the focused empty workspace on the assigned output"
+reason = "Sway accepts the rename once empty workspace 2 is gone, but leaves the renamed workspace on its current output; it does not reapply the workspace 2 output assignment or replace the focused empty workspace on fake-1."
+citation = "tests/i3/t/522-rename-assigned-workspace.t:90-93; sway/sway/commands/rename.c:84-104; oracle i3-derived/05c86021f6914103"
+[[files."522-rename-assigned-workspace.t".skip]]
 n = 7
-desc = "renaming empty workspace 1 to assigned name baz closes it"
-reason = "Sway rejects a rename when the destination workspace name already exists; it does not merge or destroy the source workspace. The external sway calibration passed incidentally because its untranslated output-assignment setup did not establish that collision premise."
-citation = "tests/i3/t/522-rename-assigned-workspace.t:98-105; sway/sway/commands/rename.c:84-104"
+desc = "renaming empty workspace 1 to assigned name baz closes it on fake-1"
+reason = "Before the rename, workspace 1 then workspace 2 runs; workspace 2 lands on fake-1 and destroys empty baz there (workspace_consider_destroy). Sway therefore accepts rename workspace 1 to baz (destination free), but rename only renames: baz stays on fake-0 and sway does not reapply output assignments or close it. Pinned sway 1.12 i3 result for this file: pass [1,2,5], fail [3,4,6,7]."
+citation = "tests/i3/t/522-rename-assigned-workspace.t:100-105; sway/sway/tree/workspace.c:314-331; sway/sway/commands/rename.c:84-104"
 [[files."522-rename-assigned-workspace.t".skip]]
 n = 8
 desc = "renaming to workspace 6 chooses its second available output"

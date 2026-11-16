@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/mod.rs"]
+what = "set_workspace_name treats only niri-style workspace declarations (no sway-output-assignment) as persistent, matching rename_sway_workspace_by_id."
+why = "Sway workspace_consider_destroy ignores config names; marking assignment-only names persistent kept empty workspaces alive and broke rename after an assigned workspace switch (oracle i3-derived/05c86021f6914103)."

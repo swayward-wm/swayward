@@ -225,6 +225,58 @@ fn inactive_empty_configured_workspace_is_destroyed_after_focus_changes() {
     assert!(layout.find_workspace_by_id(source).is_none());
 }
 
+/// `set_workspace_name` uses the same persistence rule as rename: only a
+/// niri-style declaration (no sway-output-assignment) keeps an empty unfocused
+/// workspace alive.
+#[test]
+fn set_workspace_name_persistence_ignores_sway_output_assignment() {
+    let config = Config {
+        workspaces: vec![
+            WorkspaceConfig {
+                name: WorkspaceName("assigned".into()),
+                sway_output_assignment: Some(vec!["output1".into()]),
+                open_on_output: None,
+                layout: None,
+            },
+            WorkspaceConfig {
+                name: WorkspaceName("declared".into()),
+                sway_output_assignment: None,
+                open_on_output: None,
+                layout: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let mut layout = Layout::default();
+    Op::AddOutput(1).apply(&mut layout);
+    layout.update_config(&config);
+
+    layout.set_workspace_name("assigned".into(), None);
+    assert!(!layout.active_workspace().unwrap().is_persistent());
+    let assigned = layout.active_workspace().unwrap().id();
+    layout
+        .activate_sway_workspace(crate::command::WorkspaceTarget::Name("other".into()))
+        .unwrap();
+    Op::CompleteAnimations.apply(&mut layout);
+    assert!(
+        layout.find_workspace_by_id(assigned).is_none(),
+        "assignment-only name must not keep an empty unfocused workspace"
+    );
+
+    layout.set_workspace_name("declared".into(), None);
+    assert!(layout.active_workspace().unwrap().is_persistent());
+    let declared = layout.active_workspace().unwrap().id();
+    layout
+        .activate_sway_workspace(crate::command::WorkspaceTarget::Name("elsewhere".into()))
+        .unwrap();
+    Op::CompleteAnimations.apply(&mut layout);
+    assert!(
+        layout.find_workspace_by_id(declared).is_some(),
+        "niri-declared name must keep an empty unfocused workspace"
+    );
+}
+
 #[test]
 fn moving_the_only_workspace_replaces_it_before_reparenting() {
     let mut layout = Layout::default();

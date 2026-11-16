@@ -369,24 +369,6 @@ pub(super) const ALLOWED_REJECTIONS: &[AllowedRejection] = &[
         reason: "sway rejects renaming to an existing workspace name",
     },
     AllowedRejection {
-        test: "522-rename-assigned-workspace.t",
-        command: "rename workspace to baz",
-        count: 1,
-        reason: "sway rejects renaming to an existing workspace name",
-    },
-    AllowedRejection {
-        test: "522-rename-assigned-workspace.t",
-        command: "rename workspace 5 to 2",
-        count: 1,
-        reason: "sway rejects renaming to an existing workspace name",
-    },
-    AllowedRejection {
-        test: "522-rename-assigned-workspace.t",
-        command: "rename workspace 1 to baz",
-        count: 1,
-        reason: "sway rejects renaming to an existing workspace name",
-    },
-    AllowedRejection {
         test: "271-for_window_tilingfloating.t",
         command: "[tiling_from=\"auto\" con_mark=\"tiling\"] mark --add tiling_auto",
         count: 1,

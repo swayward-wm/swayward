@@ -1,5 +1,6 @@
 //! Sway workspace switching, creation, renaming and move-to-workspace commands.
 
+use super::monitor::WorkspaceSwitch;
 use super::*;
 use crate::command::NO_PREVIOUS_WORKSPACE;
 
@@ -402,6 +403,10 @@ impl<W: LayoutElement> Layout<W> {
         old: Option<crate::command::WorkspaceTarget>,
         new_name: String,
     ) -> Result<(), String> {
+        // Source resolution already skips empty inactive workspaces (sway has
+        // already destroyed them in seat_set_focus, seat.c:1243-1250). Do not
+        // finish every in-flight switch here: workspace-autoname tools rename
+        // on every event, and a no-op or rejected rename must not cut them.
         let id = match old {
             Some(ref target) => self
                 .workspaces()
@@ -441,6 +446,16 @@ impl<W: LayoutElement> Layout<W> {
         ) {
             return Err(format!("Cannot use special workspace name '{new_name}'"));
         }
+        // Finish switches only on monitors that still hold an empty inactive
+        // workspace named `new_name` behind a render-only Animation. Sway
+        // already destroyed that workspace inside seat_set_focus
+        // (sway/input/seat.c:1243-1250); finishing lets destroy_stale reclaim
+        // the name. Other outputs' animations, and no-op/collision renames,
+        // must keep running.
+        self.finish_stale_name_workspace_switches(&new_name, id);
+        if self.workspace(id).is_none() {
+            return Err("There is no workspace with that name".to_owned());
+        }
         self.destroy_stale_workspaces_named(&new_name, id);
         // Whatever survived (a persistent or still-visible workspace) is live,
         // and sway refuses to rename onto a live name
@@ -456,15 +471,21 @@ impl<W: LayoutElement> Layout<W> {
                 .ok_or_else(|| "Workspace already exists".into());
         }
 
-        // Persistence follows the configuration, not the name: a workspace
-        // renamed away from its declared name no longer outlives its last
-        // window.
-        let declared = self
-            .workspace_configs
-            .iter()
-            .any(|config| config.name.0.eq_ignore_ascii_case(&new_name));
+        // Persistence follows niri-style workspace declarations, not the name
+        // and not sway `workspace <name> output <output>` assignments.
+        // Assignments are creation/placement metadata only; sway's
+        // workspace_consider_destroy does not consult them
+        // (sway/tree/workspace.c:314-331). Treating an assignment name as
+        // persistent kept empty `baz` alive so `workspace baz` never visited
+        // its assigned output, leaving empty `2` to collide with
+        // `rename workspace 5 to 2` (oracle i3-derived/05c86021f6914103).
+        let declared = self.workspace_configs.iter().any(|config| {
+            config.name.0.eq_ignore_ascii_case(&new_name) && config.sway_output_assignment.is_none()
+        });
         let (name, number) = sway_identity_from_name(new_name);
-        let workspace = self.workspace_mut(id).unwrap();
+        let workspace = self
+            .workspace_mut(id)
+            .ok_or_else(|| "There is no workspace with that name".to_owned())?;
         workspace.set_sway_identity(name, number);
         workspace.set_persistent(declared);
         self.reap_outputless_workspaces();
@@ -481,6 +502,58 @@ impl<W: LayoutElement> Layout<W> {
             entry.1 = renamed;
         }
         Ok(())
+    }
+
+    /// Whether the active monitor has a finishable render-only workspace switch.
+    pub fn active_monitor_switch_animating(&self) -> bool {
+        self.active_monitor_ref().is_some_and(|monitor| {
+            matches!(
+                monitor.workspace_switch,
+                Some(WorkspaceSwitch::Animation(_))
+            )
+        })
+    }
+
+    /// Whether the named output has a finishable render-only workspace switch.
+    pub fn monitor_switch_animating(&self, output_name: &str) -> bool {
+        self.monitors().any(|monitor| {
+            monitor.output_name() == output_name
+                && matches!(
+                    monitor.workspace_switch,
+                    Some(WorkspaceSwitch::Animation(_))
+                )
+        })
+    }
+
+    /// Finishes workspace-switch animations only on monitors that hold a stale
+    /// empty inactive workspace named `new_name` (other than `keep`) behind a
+    /// `WorkspaceSwitch::Animation`. Other monitors keep their animations.
+    fn finish_stale_name_workspace_switches(&mut self, new_name: &str, keep: WorkspaceId) {
+        let outputs: Vec<_> = self
+            .workspaces()
+            .filter_map(|(monitor, index, workspace)| {
+                let monitor = monitor?;
+                if workspace.id() == keep
+                    || workspace.must_be_kept()
+                    || monitor.active_workspace_idx() == index
+                    || !matches!(
+                        monitor.workspace_switch,
+                        Some(WorkspaceSwitch::Animation(_))
+                    )
+                {
+                    return None;
+                }
+                workspace
+                    .sway_name()
+                    .filter(|name| name.eq_ignore_ascii_case(new_name))
+                    .map(|_| monitor.output().clone())
+            })
+            .collect();
+        for output in outputs {
+            if let Some(monitor) = self.monitor_for_output_mut(&output) {
+                monitor.finish_workspace_switch(None);
+            }
+        }
     }
 
     /// Destroys the empty, non-visible workspaces named `new_name` other than

@@ -73,9 +73,11 @@ impl<W: LayoutElement> Workspace<W> {
     /// merely holds a number is addressable but disposable: measured on sway
     /// 1.11, focusing an empty workspace 7 and switching away leaves
     /// `get_workspaces` reporting no 7 at all, while an empty workspace that
-    /// still holds focus is reported. Only windows or a configured name earn
-    /// survival, per `workspace_consider_destroy`,
-    /// `sway/tree/workspace.c:313-330`.
+    /// still holds focus is reported. Sway's `workspace_consider_destroy`
+    /// (`sway/tree/workspace.c:314-331`) keeps only windows, the active
+    /// workspace, or a seat's focus-inactive node — not config names. The
+    /// `persistent` bit is niri's declared-workspace lifecycle, not sway
+    /// `workspace <name> output <output>` assignments.
     pub fn must_be_kept(&self) -> bool {
         self.has_windows() || self.persistent
     }

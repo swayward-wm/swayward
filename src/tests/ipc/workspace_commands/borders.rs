@@ -255,10 +255,16 @@ fn rename_ignores_an_empty_inactive_source_sway_would_have_destroyed() {
 fn rename_workspace_updates_name_number_and_rejects_collisions() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
+    let client = f.add_client();
 
+    for command in ["workspace 5", "rename workspace to 7: web"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+    // Keep `7: web` alive when focus leaves it; sway destroys empty inactive
+    // workspaces (workspace_consider_destroy, sway/tree/workspace.c:314-331).
+    windows::map_window(&mut f, client, windows::WindowSpec::default());
     for command in [
-        "workspace 5",
-        "rename workspace to 7: web",
         "workspace mail",
         "rename workspace mail to inbox",
         "rename workspace inbox to mail",
@@ -267,7 +273,7 @@ fn rename_workspace_updates_name_number_and_rejects_collisions() {
         assert!(outcome[0].success, "{command}: {outcome:?}");
     }
     let collision = crate::command::execute(f.niri_state(), "rename workspace mail to 7: web");
-    assert!(!collision[0].success);
+    assert!(!collision[0].success, "{collision:?}");
     assert_eq!(collision[0].parse_error, Some(true));
     for command in [
         "rename workspace mail to chat",
@@ -280,12 +286,252 @@ fn rename_workspace_updates_name_number_and_rejects_collisions() {
     assert!(!crate::command::execute(f.niri_state(), "rename workspace to next")[0].success);
 
     let swayward = f.swayward();
+    let mut names = describe_workspaces(&swayward.layout, &swayward.global_space)
+        .into_iter()
+        .map(|workspace| (workspace.num, workspace.name))
+        .collect::<Vec<_>>();
+    names.sort_by(|left, right| left.1.cmp(&right.1));
     assert_eq!(
-        describe_workspaces(&swayward.layout, &swayward.global_space)
+        names
             .iter()
-            .map(|workspace| (workspace.num, workspace.name.as_str()))
+            .map(|(num, name)| (*num, name.as_str()))
             .collect::<Vec<_>>(),
-        [(9, "9 web")]
+        [(7, "7: web"), (9, "9 web")]
+    );
+}
+
+/// Oracle row i3-derived/05c86021f6914103 (522-rename-assigned-workspace.t:104).
+///
+/// Sway's `workspace baz` creates baz on its assigned output, which destroys
+/// the empty workspace 2 that output was showing (`workspace_consider_destroy`,
+/// sway/tree/workspace.c:314-331). `rename workspace 5 to 2` then succeeds
+/// because the name is free (`rename.c:84-91`). A rename that treats a
+/// sway-output-assignment name as persistent keeps empty baz alive on the
+/// focused output, so `workspace baz` never visits the other output and the
+/// rename collides with the surviving 2.
+#[test]
+fn rename_to_freed_name_after_assigned_workspace_switch() {
+    let config = swayward_config::Config::parse_mem(
+        r#"
+animations { off; }
+workspace "1" { sway-output-assignment "headless-1"; }
+workspace "2" { sway-output-assignment "headless-2"; }
+workspace "baz" { sway-output-assignment "headless-2"; }
+workspace "5" { sway-output-assignment "left"; }
+"#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1024, 768));
+    f.add_output(2, (1024, 768));
+
+    for command in [
+        "focus output headless-1",
+        "rename workspace to unassigned",
+        "focus output headless-1",
+        "rename workspace to 2",
+        "focus output headless-1",
+        r#"rename workspace to "2:foo""#,
+        "focus output headless-1",
+        "rename workspace to baz",
+        "focus output headless-1",
+        "workspace bar",
+        "rename workspace to 5",
+        "workspace baz",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        if command == "rename workspace to 2" {
+            assert!(!outcome[0].success, "{command}: {outcome:?}");
+            continue;
+        }
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+        f.swayward().layout.advance_animations();
+    }
+
+    assert!(
+        !f.swayward()
+            .layout
+            .workspaces()
+            .any(|(_, _, workspace)| workspace.sway_name().as_deref() == Some("2")),
+        "empty workspace 2 must be gone after workspace baz lands on headless-2"
+    );
+
+    let rename = crate::command::execute(f.niri_state(), "rename workspace 5 to 2");
+    assert!(rename[0].success, "{rename:?}");
+    f.swayward().layout.advance_animations();
+
+    let names: Vec<_> = f
+        .swayward()
+        .layout
+        .workspaces()
+        .filter_map(|(_, _, workspace)| workspace.sway_name())
+        .collect();
+    assert!(names.iter().any(|name| name == "2"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "5"), "{names:?}");
+}
+
+/// Rename finishes a pending workspace-switch animation only when an empty
+/// inactive workspace still holds the destination name. A no-op rename must
+/// leave the animation running (autoname tools rename on every event).
+#[test]
+fn rename_finishes_pending_switch_only_to_free_stale_name() {
+    // Animations stay on: do not advance between the switch and the rename.
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    for command in ["workspace a", "workspace b"] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+
+    assert!(
+        f.swayward().layout.active_monitor_switch_animating(),
+        "workspace b switch must still be animating"
+    );
+    let render_idx = f
+        .swayward()
+        .layout
+        .active_monitor_ref()
+        .unwrap()
+        .workspace_render_idx();
+
+    let noop = crate::command::execute(f.niri_state(), "rename workspace to b");
+    assert!(noop[0].success, "{noop:?}");
+    assert!(
+        f.swayward().layout.active_monitor_switch_animating(),
+        "no-op rename must not finish the workspace switch"
+    );
+    assert_eq!(
+        f.swayward()
+            .layout
+            .active_monitor_ref()
+            .unwrap()
+            .workspace_render_idx(),
+        render_idx,
+        "no-op rename must leave the switch render index unchanged"
+    );
+
+    // Sway destroyed empty `a` inside the switch (seat_set_focus); the rename
+    // must finish that pending transition so the name is free.
+    let rename = crate::command::execute(f.niri_state(), "rename workspace b to a");
+    assert!(rename[0].success, "{rename:?}");
+    let names: Vec<_> = f
+        .swayward()
+        .layout
+        .workspaces()
+        .filter_map(|(_, _, workspace)| workspace.sway_name())
+        .collect();
+    assert!(names.iter().any(|name| name == "a"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "b"), "{names:?}");
+}
+
+/// A rename onto a live workspace name is rejected and must not cut an
+/// in-flight workspace-switch animation on the same output.
+#[test]
+fn rejected_rename_onto_live_name_leaves_pending_switch_running() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let outcome = crate::command::execute(f.niri_state(), "workspace live");
+    assert!(outcome[0].success, "{outcome:?}");
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let outcome = crate::command::execute(f.niri_state(), "workspace other");
+    assert!(outcome[0].success, "{outcome:?}");
+    assert!(
+        f.swayward().layout.active_monitor_switch_animating(),
+        "workspace other switch must still be animating"
+    );
+    let render_idx = f
+        .swayward()
+        .layout
+        .active_monitor_ref()
+        .unwrap()
+        .workspace_render_idx();
+
+    let rename = crate::command::execute(f.niri_state(), "rename workspace other to live");
+    assert!(!rename[0].success, "{rename:?}");
+    assert_eq!(
+        rename[0].error.as_deref(),
+        Some("Workspace already exists"),
+        "{rename:?}"
+    );
+
+    assert!(
+        f.swayward().layout.active_monitor_switch_animating(),
+        "rejected rename onto a live name must leave the workspace switch running"
+    );
+    assert_eq!(
+        f.swayward()
+            .layout
+            .active_monitor_ref()
+            .unwrap()
+            .workspace_render_idx(),
+        render_idx,
+        "rejected rename must leave the switch render index unchanged"
+    );
+}
+
+/// Finishing a stale-name rename on one output must not cut a pending
+/// workspace-switch animation on another output.
+#[test]
+fn stale_name_rename_leaves_other_output_switch_running() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.add_output(2, (1920, 1080));
+
+    for command in [
+        "focus output headless-1",
+        "workspace a",
+        "workspace b",
+        "focus output headless-2",
+        "workspace c",
+        "workspace d",
+    ] {
+        let outcome = crate::command::execute(f.niri_state(), command);
+        assert!(outcome[0].success, "{command}: {outcome:?}");
+    }
+
+    assert!(
+        f.swayward().layout.monitor_switch_animating("headless-1"),
+        "output 1 switch must still be animating"
+    );
+    let render_idx = f
+        .swayward()
+        .layout
+        .monitors()
+        .find(|monitor| monitor.output_name() == "headless-1")
+        .unwrap()
+        .workspace_render_idx();
+    assert!(
+        f.swayward().layout.monitor_switch_animating("headless-2"),
+        "output 2 switch must still be animating"
+    );
+
+    let rename = crate::command::execute(f.niri_state(), "rename workspace d to c");
+    assert!(rename[0].success, "{rename:?}");
+
+    assert!(
+        f.swayward().layout.monitor_switch_animating("headless-1"),
+        "stale-name rename on output 2 must not finish output 1's workspace switch"
+    );
+    assert_eq!(
+        f.swayward()
+            .layout
+            .monitors()
+            .find(|monitor| monitor.output_name() == "headless-1")
+            .unwrap()
+            .workspace_render_idx(),
+        render_idx,
+        "output 1's switch render index must be unchanged"
     );
 }
 

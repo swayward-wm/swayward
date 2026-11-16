@@ -5607,14 +5607,13 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
 
-        // Persistence follows the configuration, not the name. A workspace
-        // renamed to something the config does not declare no longer outlives
-        // its last window, the way sway's `rename workspace` leaves a
-        // non-configured workspace disposable.
-        let declared = self
-            .workspace_configs
-            .iter()
-            .any(|config| config.name.0.eq_ignore_ascii_case(&name));
+        // Persistence follows niri-style workspace declarations only. Sway
+        // output assignments do not retain an empty inactive workspace
+        // (sway/tree/workspace.c:314-331); config_reload eagerly creates the
+        // same niri-style set (sway_output_assignment.is_none()).
+        let declared = self.workspace_configs.iter().any(|config| {
+            config.name.0.eq_ignore_ascii_case(&name) && config.sway_output_assignment.is_none()
+        });
 
         let ws = if let Some(reference) = reference {
             self.find_workspace_by_ref(reference)
