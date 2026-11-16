@@ -2337,21 +2337,32 @@ SINGULAR_STRUCTS = {
 CONFIG_SRC = ROOT / "swayward-config" / "src"
 
 
+RAW_STRING_START = re.compile(r'b?r(#*)"')
+
+
 def strip_rust_comments(text):
     """text with its `//` and (nested) `/* */` comments blanked out.
 
-    String and character literals are kept, so a `//` inside one is text. A
-    `'` that does not close a one-character literal starts a lifetime. Raw
-    strings are not recognised; no config struct body uses one.
+    A comment becomes a space, or the newlines it spans, so line numbers
+    hold. String, raw string and character literals are kept, so a `//`
+    inside one is text. A `'` that does not close a one-character literal
+    starts a lifetime.
     """
     out = []
     index = 0
     while index < len(text):
-        if text.startswith("//", index):
+        raw = RAW_STRING_START.match(text, index)
+        if raw and (index == 0 or not re.match(r"\w", text[index - 1])):
+            close = text.find('"' + raw.group(1), raw.end())
+            end = len(text) if close < 0 else close + 1 + len(raw.group(1))
+            out.append(text[index:end])
+            index = end
+        elif text.startswith("//", index):
             end = text.find("\n", index)
             index = len(text) if end < 0 else end
             out.append(" ")
         elif text.startswith("/*", index):
+            start = index
             depth = 0
             while index < len(text):
                 if text.startswith("/*", index):
@@ -2364,7 +2375,7 @@ def strip_rust_comments(text):
                         break
                 else:
                     index += 1
-            out.append(" ")
+            out.append("\n" * text.count("\n", start, index) or " ")
         elif text[index] == '"':
             literal = re.match(r'"(?:\\.|[^"\\])*"', text[index:], re.S)
             end = index + (literal.end() if literal else 1)
@@ -2385,14 +2396,19 @@ def knuffel_child_names_in(text, struct, where="<text>"):
     """The kebab-cased names of struct's `#[knuffel(child...)]` fields.
 
     Reads Rust source text: knuffel names a child after its field, `_` as
-    `-`. Comments are dropped first, and an attribute may be spaced or split
-    over lines, with comments inside, wherever Rust allows. Returns None when
-    the struct is not found as `pub struct Name {`.
+    `-`. Comments are dropped before the struct is found, so a commented `}`
+    cannot end its body early, and an attribute may be spaced or split over
+    lines, with comments inside, wherever Rust allows. Returns None when the
+    struct is not found as `pub struct Name {`.
     """
-    found = re.search(rf"^pub struct {struct} \{{\n(.*?)^\}}", text, re.S | re.M)
+    found = re.search(
+        rf"^pub struct {struct} \{{[ \t]*\n(.*?)^\}}",
+        strip_rust_comments(text),
+        re.S | re.M,
+    )
     if found is None:
         return None
-    body = strip_rust_comments(found.group(1))
+    body = found.group(1)
     attribute = r"#\s*\[\s*knuffel\s*\((.*?)\)\s*\]"
     fields = re.finditer(
         attribute + r"\s*"
@@ -2418,6 +2434,25 @@ def knuffel_child_names(path, struct):
     return knuffel_child_names_in((CONFIG_SRC / path).read_text(), struct, path)
 
 
+def cfg_attr_knuffel_lines(text):
+    """The lines where a `cfg_attr(...)` holding `knuffel(` starts.
+
+    knuffel_child_names_in reads only plain `#[knuffel(...)]` attributes, so
+    a child field behind cfg_attr would escape the SINGULAR check. Comments
+    are dropped first; string literals inside the attribute are not parsed.
+    """
+    text = strip_rust_comments(text)
+    lines = []
+    for found in re.finditer(r"\bcfg_attr\s*\(", text):
+        depth, index = 1, found.end()
+        while index < len(text) and depth:
+            depth += {"(": 1, ")": -1}.get(text[index], 0)
+            index += 1
+        if re.search(r"\bknuffel\s*\(", text[found.end() : index]):
+            lines.append(text.count("\n", 0, found.start()) + 1)
+    return lines
+
+
 class SingularTests(unittest.TestCase):
     """SINGULAR against the Rust config structs, read as text, without Cargo.
 
@@ -2434,6 +2469,18 @@ class SingularTests(unittest.TestCase):
         self.assertEqual(set(self.s2k.SINGULAR), {"", *SINGULAR_STRUCTS})
 
     def test_singular_mirrors_knuffel_child_fields(self):
+        cfg_attr = [
+            f"{path.relative_to(ROOT)}:{line}"
+            for path in sorted(CONFIG_SRC.rglob("*.rs"))
+            for line in cfg_attr_knuffel_lines(path.read_text())
+        ]
+        self.assertEqual(
+            cfg_attr,
+            [],
+            "#[cfg_attr(..., knuffel(...))] is invisible to this check, so a "
+            "child field behind it would escape SINGULAR; write the knuffel "
+            "attribute unconditionally or teach knuffel_child_names_in to read it",
+        )
         for parent, (path, struct) in SINGULAR_STRUCTS.items():
             with self.subTest(parent=parent, struct=struct):
                 names = knuffel_child_names(path, struct)
@@ -2486,6 +2533,48 @@ class SingularTests(unittest.TestCase):
             knuffel_child_names_in(source, "Synthetic"),
             ["plain", "multi-line", "spaced", "after-attributes"],
         )
+
+    def test_knuffel_child_names_reads_past_a_commented_closing_brace(self):
+        # Comments were once stripped after the body was cut at the first
+        # line starting with `}`, so this commented brace hid `second`. Whole
+        # files are stripped now, so the raw string's `/*` must stay text.
+        source = (
+            'const BEFORE: &str = r#"say "/*" and //"#;\n'
+            "pub struct Synthetic {\n"
+            "    #[knuffel(child)]\n"
+            "    pub first: bool,\n"
+            "/*\n"
+            "}\n"
+            "*/\n"
+            "    #[knuffel(child)]\n"
+            "    pub second: bool,\n"
+            "}\n"
+        )
+        self.assertEqual(
+            knuffel_child_names_in(source, "Synthetic"), ["first", "second"]
+        )
+
+    def test_cfg_attr_knuffel_lines_finds_every_spelling(self):
+        source = (
+            "#[derive(knuffel::Decode)]\n"
+            "pub struct Synthetic {\n"
+            "    #[cfg_attr(test, knuffel(child))]\n"
+            "    pub one_line: bool,\n"
+            "    /* a\n"
+            "       b */\n"
+            "    # [ cfg_attr (\n"
+            "        all(test, feature = \"x\"),\n"
+            "        knuffel ( child )\n"
+            "    ) ]\n"
+            "    pub split: bool,\n"
+            "    // #[cfg_attr(test, knuffel(child))]\n"
+            "    /* #[cfg_attr(test, knuffel(child))] */\n"
+            "    #[cfg_attr(test, derive(Debug))]\n"
+            "    #[knuffel(child)]\n"
+            "    pub plain: bool,\n"
+            "}\n"
+        )
+        self.assertEqual(cfg_attr_knuffel_lines(source), [3, 7])
 
     def test_knuffel_child_names_rejects_an_unpaired_child_attribute(self):
         source = (

@@ -58,6 +58,25 @@ from typing import Callable, Iterator, Union
 #   rest; sway lets the later one overwrite (sway/commands/bind.c:280-300).
 #   C3: none planned; it stays until the pipeline note's open question 3
 #   is decided.
+# - legacy_bind_trailing_options: --release, --whole-window, --border and
+#   --exclude-titlebar between a binding's key and its command become
+#   binding properties; sway reads options only before the key
+#   (sway/commands/bind.c:353-383), so they stay in its command.
+#   C3: leave them in the command.
+# - legacy_exec_unquote: an exec command, from exec, exec_always or a bind,
+#   loses one matching pair of outer quotes, so `exec "echo a" "echo b"`
+#   runs `echo a" "echo b`. C3: sway's rule, strip_quotes only when the
+#   command is one argument that starts with a quote, else join_args
+#   (sway/commands/exec_always.c:39-44).
+# - legacy_unescape_at: a bind command has every `\@` replaced by `@`;
+#   sway's lexed arguments keep `\@`, which unescape_string does not know
+#   (common/stringop.c:152-233). C3: keep `\@`.
+# - legacy_command_spelling: a bind command is respelled: `move container
+#   to workspace` as `move to workspace`, `splith` and `splitv` as
+#   `split h` and `split v`, `resize grow|shrink width|height <n>px` with
+#   a separate `px`. swayward parses sway's spellings
+#   (swayward-ipc/src/command/parse/mod.rs:366-367, move_resize.rs:85-90,
+#   :440). C3: pass the command through unchanged.
 #
 # KDL IR
 # - legacy_add: appends a singular child (SINGULAR) without dropping an
@@ -74,7 +93,8 @@ from typing import Callable, Iterator, Union
 # Not a helper: the handlers parse Directive.text with the moved regexes
 # and str.split, never Directive.args, so no argument is unescaped
 # (`bindsym Mod4+a exec echo \"x\"` keeps both backslashes in `command`).
-# C3 moves them to Directive.args.
+# C3 moves them to Directive.args. Frontend.expand and its `\$` to `$`
+# replacement also move verbatim (the pipeline note, "Risks").
 # ---------------------------------------------------------------------------
 
 
@@ -857,6 +877,52 @@ def legacy_keep_first(binds: dict[tuple, Node], key: tuple, node: Node) -> bool:
         return False
     binds[key] = node
     return True
+
+
+LEGACY_TRAILING_BIND_OPTIONS = {
+    "--release",
+    "--whole-window",
+    "--border",
+    "--exclude-titlebar",
+}
+
+
+def legacy_bind_trailing_options(command: str) -> tuple[list[str], str]:
+    """The options that open a bind command, and the command without them."""
+    options: list[str] = []
+    while command.startswith("--"):
+        option, separator, remainder = command.partition(" ")
+        if not separator or option not in LEGACY_TRAILING_BIND_OPTIONS:
+            break
+        options.append(option)
+        command = remainder.lstrip()
+    return options, command
+
+
+def legacy_exec_unquote(command: str) -> str:
+    """An exec command with one matching pair of outer quotes stripped."""
+    if command[:1] in {"\"", "'"} and command[-1:] == command[0]:
+        return command[1:-1]
+    return command
+
+
+def legacy_unescape_at(command: str) -> str:
+    """A bind command with every `\\@` replaced by `@`."""
+    return command.replace(r"\@", "@")
+
+
+def legacy_command_spelling(command: str) -> str:
+    """A bind command in the spellings swayward's parser once required."""
+    command = re.sub(
+        r"^move\s+container\s+to\s+workspace", "move to workspace", command
+    )
+    command = re.sub(r"^splith$", "split h", command)
+    command = re.sub(r"^splitv$", "split v", command)
+    return re.sub(
+        r"^(resize\s+(?:grow|shrink)\s+(?:width|height))\s+(\d+)px$",
+        r"\1 \2 px",
+        command,
+    )
 
 
 LEGACY_MODIFIER_ALIASES = {
@@ -1717,7 +1783,7 @@ class Translator:
         if not command:
             self.warn(source, line, text, f"Expected '{directive} <command>'")
             return
-        command = self.strip_outer_quotes(command)
+        command = legacy_exec_unquote(command)
         if directive == "exec_always":
             self.warn(
                 source,
@@ -1844,19 +1910,13 @@ class Translator:
                 return
             key = "+".join([*parts, f"code:{code}"])
 
-        command = command.strip()
-        while command.startswith("--"):
-            option, separator, remainder = command.partition(" ")
-            if not separator:
-                break
+        trailing, command = legacy_bind_trailing_options(command.strip())
+        for option in trailing:
             if option == "--release":
                 properties.extend((("release", True), ("repeat", False)))
-            elif option in region_options:
+            else:
                 mouse_regions.update(region_options[option])
                 exclude_titlebar |= option == "--exclude-titlebar"
-            else:
-                break
-            command = remainder.lstrip()
         if exclude_titlebar:
             mouse_regions.discard("titlebar")
             mouse_regions.update(("border", "contents"))
@@ -1963,29 +2023,12 @@ class Translator:
         return "+".join(aliases.get(part, part) for part in parts)
 
     @staticmethod
-    def strip_outer_quotes(command: str) -> str:
-        if command[:1] in {"\"", "'"} and command[-1:] == command[0]:
-            return command[1:-1]
-        return command
-
-    @classmethod
-    def translate_command(cls, command: str) -> str | None:
+    def translate_command(command: str) -> str | None:
         if match := re.fullmatch(
             r"(exec(?:_always)?\s+(?:--no-startup-id\s+)?)(.+)", command
         ):
-            command = match.group(1) + cls.strip_outer_quotes(match.group(2))
-        command = re.sub(
-            r"^move\s+container\s+to\s+workspace", "move to workspace", command
-        )
-        command = command.replace(r"\@", "@")
-        command = re.sub(r"^splith$", "split h", command)
-        command = re.sub(r"^splitv$", "split v", command)
-        command = re.sub(
-            r"^(resize\s+(?:grow|shrink)\s+(?:width|height))\s+(\d+)px$",
-            r"\1 \2 px",
-            command,
-        )
-        return command
+            command = match.group(1) + legacy_exec_unquote(match.group(2))
+        return legacy_command_spelling(legacy_unescape_at(command))
 
     def translate_assign(
         self, source: Path, line: int, criteria: str, target: str
