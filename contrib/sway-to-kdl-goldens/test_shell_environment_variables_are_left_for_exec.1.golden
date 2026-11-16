@@ -7,7 +7,7 @@ exec_always $XDG_CONFIG_HOME/sway/start
 // keep their full option sets. Review every sway-to-kdl comment below.
 
 binds {
-    Super+q { command "exec $HOME/bin/run"; }
+    Super+q { command "exec \"$HOME/bin/run\""; }
 }
 
 input {

@@ -18,12 +18,6 @@ from typing import Callable, Iterator, Union
 #
 # Each one departs from sway; its entry names the rule it departs from.
 #
-# - LEGACY_MODIFIER_ALIASES: one table of modifiers and XKB groups (keyboard.c:24-50, bind.c:398-449).
-# - legacy_keep_first: a duplicate binding keeps the first; sway keeps the last (bind.c:280-300).
-# - legacy_bind_trailing_options: reads options after the key; sway only before (bind.c:353-383).
-# - legacy_exec_unquote: strips one pair of outer quotes from an exec command (exec_always.c:39-44).
-# - legacy_unescape_at: turns `\@` into `@` in a bind command.
-# - legacy_command_spelling: respells some bind commands.
 # - legacy_add: appends a SINGULAR child without dropping an earlier one.
 # - legacy_g_float: formats a float with `:g`, so 1.0 renders as `1`.
 # - legacy_workspace_assignment: assigned workspaces render first.
@@ -793,81 +787,120 @@ def shadow(value: str) -> Node:
     return Node("shadow", children=[Node("on" if value in {"enable", "on"} else "off")])
 
 
-def legacy_keep_first(binds: dict[tuple, Node], key: tuple, node: Node) -> bool:
-    """Bind node under key unless key is bound already; False when it is."""
-    if key in binds:
-        return False
-    binds[key] = node
-    return True
-
-
-LEGACY_TRAILING_BIND_OPTIONS = {
-    "--release",
-    "--whole-window",
-    "--border",
-    "--exclude-titlebar",
+# Sway's modifier names, matched ignoring case (sway/input/keyboard.c:24-50),
+# with the wlr modifier bit sway stores, spelled as swayward's KDL key parser
+# reads them (swayward-config/src/binds/key.rs:70-101). That parser maps Mod3
+# and Mod5 to the ISO level shifts of the conventional XKB map, so they are
+# written by those names.
+SWAY_MODIFIERS: dict[str, tuple[str, int]] = {
+    "shift": ("Shift", 1),
+    "lock": ("Lock", 2),
+    "control": ("Control", 4),
+    "ctrl": ("Ctrl", 4),
+    "mod1": ("Alt", 8),
+    "alt": ("Alt", 8),
+    "mod2": ("Num", 16),
+    "mod3": ("ISO_Level5_Shift", 32),
+    "mod4": ("Super", 64),
+    "super": ("Super", 64),
+    "mod5": ("ISO_Level3_Shift", 128),
 }
 
+# A `+` part that starts with this prefix names an XKB group, compared
+# case-sensitively (sway/commands/bind.c:401-416). swayward's KDL writes the
+# same Group1 to Group4 (swayward-config/src/binds/decode.rs:177-201).
+SWAY_GROUP_PREFIX = "Group"
+# The i3 alias for Group2; unlike a GroupN part it is also one of the
+# binding's keys (sway/commands/bind.c:417-427).
+SWAY_MODE_SWITCH = "Mode_switch"
 
-def legacy_bind_trailing_options(command: str) -> tuple[list[str], str]:
-    """The options that open a bind command, and the command without them."""
-    options: list[str] = []
-    while command.startswith("--"):
-        option, separator, remainder = command.partition(" ")
-        if not separator or option not in LEGACY_TRAILING_BIND_OPTIONS:
-            break
-        options.append(option)
-        command = remainder.lstrip()
-    return options, command
-
-
-def legacy_exec_unquote(command: str) -> str:
-    """An exec command with one matching pair of outer quotes stripped."""
-    if command[:1] in {"\"", "'"} and command[-1:] == command[0]:
-        return command[1:-1]
-    return command
-
-
-def legacy_unescape_at(command: str) -> str:
-    """A bind command with every `\\@` replaced by `@`."""
-    return command.replace(r"\@", "@")
-
-
-def legacy_command_spelling(command: str) -> str:
-    """A bind command in the spellings swayward's parser once required."""
-    command = re.sub(
-        r"^move\s+container\s+to\s+workspace", "move to workspace", command
-    )
-    command = re.sub(r"^splith$", "split h", command)
-    command = re.sub(r"^splitv$", "split v", command)
-    return re.sub(
-        r"^(resize\s+(?:grow|shrink)\s+(?:width|height))\s+(\d+)px$",
-        r"\1 \2 px",
-        command,
-    )
-
-
-LEGACY_MODIFIER_ALIASES = {
-    "Mod4": "Super",
-    "Mod1": "Alt",
-    "Shift": "Shift",
-    "Lock": "Lock",
-    "Control": "Control",
-    "Ctrl": "Ctrl",
-    "Alt": "Alt",
-    "Mod2": "Num",
-    # Sway's default XKB map assigns Mod5 to ISO_Level3_Shift. swayward's
-    # compatibility spelling keeps that semantic name instead of the X11 bit.
-    "Mod5": "ISO_Level3_Shift",
-    "Super": "Super",
-    # sway spells an XKB group qualifier Group1..Group4, with Mode_switch
-    # as an alias for Group2. The typed KDL parser accepts the same names.
-    "Group1": "Group1",
-    "Group2": "Group2",
-    "Group3": "Group3",
-    "Group4": "Group4",
-    "Mode_switch": "Mode_switch",
+# SWAY_SCROLL_UP is KEY_MAX + 1 (include/sway/input/cursor.h:13-16).
+SWAY_SCROLL_UP = 0x2FF + 1
+# Mouse buttons by the names sway binds: the button code get_mouse_bindsym
+# returns (sway/input/cursor.c:1203-1226), which binding_key_compare
+# compares, and swayward's KDL trigger. BTN_SIDE and BTN_BACK are distinct
+# buttons to sway and one trigger to swayward's KDL, as are BTN_EXTRA and
+# BTN_FORWARD.
+MOUSE_BUTTONS = {
+    "button1": (0x110, "MouseLeft"),
+    "button2": (0x112, "MouseMiddle"),
+    "button3": (0x111, "MouseRight"),
+    "button4": (SWAY_SCROLL_UP, "WheelScrollUp"),
+    "button5": (SWAY_SCROLL_UP + 1, "WheelScrollDown"),
+    "button6": (SWAY_SCROLL_UP + 2, "WheelScrollLeft"),
+    "button7": (SWAY_SCROLL_UP + 3, "WheelScrollRight"),
+    "button8": (0x113, "MouseBack"),
+    "button9": (0x114, "MouseForward"),
+    "BTN_LEFT": (0x110, "MouseLeft"),
+    "BTN_MIDDLE": (0x112, "MouseMiddle"),
+    "BTN_RIGHT": (0x111, "MouseRight"),
+    "BTN_SIDE": (0x113, "MouseBack"),
+    "BTN_BACK": (0x116, "MouseBack"),
+    "BTN_EXTRA": (0x114, "MouseForward"),
+    "BTN_FORWARD": (0x115, "MouseForward"),
 }
+MOUSE_TRIGGERS = {name: trigger for name, (_, trigger) in MOUSE_BUTTONS.items()}
+
+
+@dataclass
+class Binding:
+    """A translated binding under sway's identity (Translator.translate_bind)."""
+
+    kdl: tuple  # the identity swayward's KDL gives the node
+    node: Node
+    pos: Pos
+    command: str
+
+
+class BindError(ValueError):
+    """A key combination sway rejects, or one swayward's KDL cannot bind."""
+
+
+@dataclass
+class KeyCombo:
+    """A bind's key argument as cmd_bindsym_or_bindcode reads it."""
+
+    modifiers: list[str]  # KDL spellings, in source order
+    mask: int  # the wlr modifier bits, as binding_key_compare sees them
+    group: int | None  # 1 to 4
+    keys: list[str]  # every other part, in source order; Mode_switch included
+    mode_switch: bool
+
+
+def split_key_combo(combo: str) -> KeyCombo:
+    """Sway's loop over a bind's `+` parts (sway/commands/bind.c:398-453).
+
+    split_string drops empty parts. A part that starts with "Group" names a
+    group, Group1 to Group4 by strtol, and only one group is allowed.
+    Mode_switch sets group 2 and then, like every part that is not a
+    modifier, is a key. Raises BindError with sway's message for a bad group.
+    """
+    result = KeyCombo([], 0, None, [], False)
+    for part in (p for p in combo.split("+") if p):
+        if part.startswith(SWAY_GROUP_PREFIX):
+            if result.group is not None:
+                raise BindError("only one group can be specified")
+            # strtol with nothing left over (bind.c:408-410). The digits
+            # are compared as text, so no length reaches int().
+            number = re.fullmatch(
+                r"[ \f\n\r\t\v]*\+?0*([1-4])", part[len(SWAY_GROUP_PREFIX) :]
+            )
+            if number is None:
+                raise BindError(f"invalid group {part}")
+            result.group = int(number.group(1))
+            continue
+        if part == SWAY_MODE_SWITCH:
+            if result.group is not None:
+                raise BindError("only one group can be specified")
+            result.group = 2
+            result.mode_switch = True
+        modifier = SWAY_MODIFIERS.get(ascii_lower(part))
+        if modifier is not None:
+            result.modifiers.append(modifier[0])
+            result.mask |= modifier[1]
+            continue
+        result.keys.append(part)
+    return result
 
 
 class Translator:
@@ -963,21 +996,13 @@ class Translator:
         return True
 
     def h_bind(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
-        if match := re.match(r"(bindsym|bindcode)\s+(.+)", text):
-            self.translate_bind(path, line_no, match.group(1), match.group(2))
-        else:
+        if not d.args:
             return False
+        self.translate_bind(d)
         return True
 
     def h_exec(self, d: Directive) -> bool:
-        path, line_no, text = d.pos.path, d.pos.line, d.text
-        if match := re.fullmatch(r"(exec|exec_always)(?:\s+(.*))?", text):
-            self.translate_exec(
-                path, line_no, text, match.group(1), match.group(2) or ""
-            )
-        else:
-            return False
+        self.translate_exec(d)
         return True
 
     def h_nop(self, d: Directive) -> bool:
@@ -1501,15 +1526,15 @@ class Translator:
             self.warn(source, line, text, "unsupported default border")
             return
 
-        # These are layout defaults, not per-window rules. Emitting an
-        # unmatched window-rule applied the border to every window and could
-        # not be overridden by a later rule; layout.default-border is the
-        # setting the `default_border` IPC command also writes.
+        # These are layout defaults, not per-window rules: an unmatched
+        # window-rule would apply the border to every window and no later
+        # rule could override it. layout.default-border is the setting the
+        # `default_border` IPC command also writes.
         floating = directive in {"default_floating_border", "new_float"}
         name = "default-floating-border" if floating else "default-border"
         props = [("width", Raw(width))] if width is not None else []
         # A config may set the same default twice, and new_window/new_float
-        # are older spellings of the same settings. KDL rejects a duplicate
+        # are i3's aliases of the same settings. KDL rejects a duplicate
         # node, and sway's own behaviour is last-wins.
         self.doc.layout.set(Node(name, [style], props))
 
@@ -1526,8 +1551,12 @@ class Translator:
             )
             return
         modifier = words[0]
+        # cmd_floating_modifier takes a modifier name or none
+        # (sway/commands/floating_modifier.c:12-20).
         translated = (
-            "None" if modifier.lower() == "none" else self.translate_modifier(modifier)
+            "None"
+            if modifier.lower() == "none"
+            else SWAY_MODIFIERS.get(ascii_lower(modifier), (None, 0))[0]
         )
         if translated not in {"None", "Ctrl", "Shift", "Alt", "Super"}:
             self.warn(source, line, text, f"unsupported modifier {modifier}")
@@ -1610,19 +1639,22 @@ class Translator:
             )
         self.warn(source, line, text, reason)
 
-    def translate_exec(
-        self, source: Path, line: int, text: str, directive: str, command: str
-    ) -> None:
-        command = command.strip()
-        if command.startswith("--no-startup-id") and (
-            len(command) == len("--no-startup-id")
-            or command[len("--no-startup-id")].isspace()
-        ):
-            command = command[len("--no-startup-id") :].strip()
-        if not command:
+    def translate_exec(self, d: Directive) -> None:
+        """exec and exec_always as cmd_exec_process builds the shell command
+        (sway/commands/exec_always.c:28-45): a leading --no-startup-id is
+        dropped, a single argument that starts with a quote loses its quotes,
+        and anything else is joined with single spaces."""
+        source, line, text, directive = d.pos.path, d.pos.line, d.text, d.name
+        args = d.args
+        if args[:1] == ["--no-startup-id"]:
+            args = args[1:]
+        if not args:
             self.warn(source, line, text, f"Expected '{directive} <command>'")
             return
-        command = legacy_exec_unquote(command)
+        if len(args) == 1 and args[0][:1] in {"'", '"'}:
+            command = strip_quotes(args[0])
+        else:
+            command = join_args(args)
         if directive == "exec_always":
             self.warn(
                 source,
@@ -1638,7 +1670,7 @@ class Translator:
     def translate_mode(
         self, name: str, body: list[Line], pango_markup: bool
     ) -> None:
-        mode_binds: dict[tuple, Node] = {}
+        mode_binds: dict[tuple, Binding] = {}
         for item in body:
             source, line, text = item.pos.path, item.pos.line, item.text
             if match := SET_DIRECTIVE.fullmatch(text):
@@ -1647,12 +1679,10 @@ class Translator:
             text = self.frontend.expand(text).replace(r"\$", "$")
             # Mode subcommands are looked up ignoring case too
             # (sway/commands/mode.c:11-21, sway/commands.c:145-149).
-            argv = split_args(text)
-            text = ascii_lower(argv[0]) + text[len(argv[0]) :] if argv else text
-            if match := re.match(r"(bindsym|bindcode)\s+(.+)", text):
-                self.translate_bind(
-                    source, line, match.group(1), match.group(2), mode_binds
-                )
+            directive = Directive.from_line(text, item.pos).lowered()
+            text = directive.text
+            if directive.name in {"bindsym", "bindcode"} and directive.args:
+                self.translate_bind(directive, mode_binds)
             elif re.match(r"(?:un)?bind(?:gesture|switch)(?:\s|$)", text):
                 self.refuse_unsupported_binding(source, line, text)
             else:
@@ -1662,67 +1692,95 @@ class Translator:
                 "mode",
                 [name],
                 [("pango-markup", True)] if pango_markup else [],
-                list(mode_binds.values()),
+                [binding.node for binding in mode_binds.values()],
                 block=True,
             )
         )
 
     def translate_bind(
-        self,
-        source: Path,
-        line: int,
-        kind: str,
-        rest: str,
-        binds: dict[tuple, Node] | None = None,
+        self, d: Directive, binds: dict[tuple, Binding] | None = None
     ) -> None:
-        """Add one binding to binds, the default mode's unless given."""
+        """Add one binding to binds, the default mode's unless given.
+
+        Follows cmd_bindsym_or_bindcode (sway/commands/bind.c:323-491): the
+        options come before the key, the key is the next argument, and the
+        command is every argument after it, joined with single spaces. The
+        arguments are config_command's, unescaped with their quotes kept
+        (sway/commands.c:409-423), so the command reaches swayward's command
+        parser as sway's reaches execute_command.
+        """
         if binds is None:
             binds = self.doc.binds
+        source, line, kind, args = d.pos.path, d.pos.line, d.name, d.args
+
+        def echo(consumed: int) -> str:
+            # The directive's text after its name and the consumed arguments.
+            return text_after(d.text, d.argv, 1 + consumed)
+
         properties: list[tuple[str, Value]] = []
         mouse_regions: set[str] = set()
         exclude_titlebar = False
+        locked = False
+        warn = True
+        input_device = "*"
         region_options = {
             "--whole-window": {"titlebar", "border", "contents"},
             "--border": {"border"},
             "--exclude-titlebar": set(),
         }
-        rest = rest.strip()
-        while rest.startswith("--"):
-            input_match = re.match(r'--input-device=(?:"([^"]*)"|\'([^\']*)\'|(\S+))\s+', rest)
-            if input_match:
-                device = next(value for value in input_match.groups() if value is not None)
-                properties.append(("input-device", device))
-                rest = rest[input_match.end() :]
-                continue
-            option, separator, rest = rest.partition(" ")
-            if not separator:
-                self.warn(source, line, rest, f"malformed {kind}")
+        index = 0
+        while index < len(args) and args[index].startswith("--"):
+            option = args[index]
+            index += 1
+            if option.startswith("--input-device="):
+                # The last --input-device is the binding's (bind.c:370-373).
+                input_device = strip_quotes(option[len("--input-device=") :])
+                properties = [p for p in properties if p[0] != "input-device"]
+                properties.append(("input-device", input_device))
+            elif index == len(args):
+                self.warn(source, line, echo(index), f"malformed {kind}")
                 return
-            rest = rest.lstrip()
-            if option == "--locked":
+            elif option == "--locked":
                 properties.append(("allow-when-locked", True))
+                locked = True
             elif option == "--no-repeat":
                 properties.append(("repeat", False))
             elif option == "--release":
                 properties.extend((("release", True), ("repeat", False)))
+            elif option == "--no-warn":
+                warn = False
             elif option in region_options:
                 mouse_regions.update(region_options[option])
                 exclude_titlebar |= option == "--exclude-titlebar"
             else:
-                self.warn(source, line, rest, f"unsupported {kind} option {option}")
+                self.warn(
+                    source, line, echo(index), f"unsupported {kind} option {option}"
+                )
                 return
 
-        key, separator, command = rest.partition(" ")
-        if not separator or not command.strip():
+        rest = echo(index)
+        if len(args) - index < 2:
             self.warn(source, line, rest, f"malformed {kind}")
             return
+        combo_text = args[index]
+        command = join_args(args[index + 1 :])
+        try:
+            combo = split_key_combo(combo_text)
+        except BindError as error:
+            self.warn(source, line, rest, str(error))
+            return
+        keycode = None
         if kind == "bindcode":
-            parts = key.split("+")
-            code = parts.pop()
-            if not code.isdecimal():
+            code = combo.keys[-1] if combo.keys else ""
+            if not re.fullmatch(r"[0-9]+", code):
                 self.warn(source, line, rest, "bindcode key must be numeric")
                 return
-            if not 8 <= int(code) <= 255:
+            # Sway compares the number strtol reads (bind.c:166), so 024 and
+            # 24 are one key; the digits are compared as text, so no length
+            # reaches int().
+            digits = code.lstrip("0") or "0"
+            keycode = int(digits) if len(digits) <= 3 else 256
+            if not 8 <= keycode <= 255:
                 self.warn(
                     source,
                     line,
@@ -1730,127 +1788,143 @@ class Translator:
                     f"bindcode keycode must be between 8 and 255: {code}",
                 )
                 return
-            key = "+".join([*parts, f"code:{code}"])
+            combo.keys[-1] = f"code:{keycode}"
+        try:
+            key = self.translate_key(combo_text, combo)
+        except BindError as error:
+            self.warn(source, line, rest, str(error))
+            return
+        trigger = key.rsplit("+", 1)[-1]
+        mouse = trigger in MOUSE_TRIGGERS.values()
 
-        trailing, command = legacy_bind_trailing_options(command.strip())
-        for option in trailing:
-            if option == "--release":
-                properties.extend((("release", True), ("repeat", False)))
-            else:
-                mouse_regions.update(region_options[option])
-                exclude_titlebar |= option == "--exclude-titlebar"
+        # Sway's region flags (bind.c:359-369,384-388,459-464): a region
+        # option or --exclude-titlebar makes a mouse binding, which then
+        # covers the titlebar unless --exclude-titlebar removes it. A plain
+        # mouse binding emits no mouse-regions and --border emits border
+        # alone, without the titlebar sway adds; --exclude-titlebar emits
+        # sway's flags exactly.
+        sway_regions = set(mouse_regions)
         if exclude_titlebar:
-            mouse_regions.discard("titlebar")
-            mouse_regions.update(("border", "contents"))
+            sway_regions.discard("titlebar")
+            mouse_regions = set(sway_regions)
+            if not sway_regions:
+                # get_active_mouse_binding skips a binding that shares no
+                # region with the click (sway/input/seatop_default.c:128-139),
+                # and swayward's KDL reads no mouse-regions as every region.
+                self.warn(
+                    source,
+                    line,
+                    rest,
+                    "--exclude-titlebar without --whole-window or --border "
+                    "leaves the binding no region, so sway never runs it "
+                    "(sway/commands/bind.c:459-464, "
+                    "sway/input/seatop_default.c:128-139); swayward's KDL "
+                    "has no binding that never runs",
+                )
+                return
+        elif mouse or mouse_regions:
+            sway_regions.add("titlebar")
+        regions = ""
         if mouse_regions:
             ordered_regions = ("titlebar", "border", "contents")
             regions = "+".join(region for region in ordered_regions if region in mouse_regions)
             properties.append(("mouse-regions", regions))
-        command = self.translate_command(command)
-        if command is None:
-            self.warn(
-                source,
-                line,
-                rest,
-                "command is outside swayward's current command subset",
-            )
-            return
-        original_key = key
-        key = self.translate_key(key)
-        if key is None:
-            unsupported = next(
-                (
-                    part
-                    for part in original_key.split("+")[:-1]
-                    if not part.lower().startswith("button")
-                ),
-                original_key,
-            )
-            reason = (
-                f"unsupported mouse button {original_key}"
-                if original_key.lower().startswith("button")
-                else f"unsupported modifier {unsupported}"
-            )
-            self.warn(source, line, rest, reason)
-            return
-        # The duplicate check and its report see the key as rendered, so a
-        # numeric key and its quoted spelling collide, as they always have.
-        shown = render_name(key)
-        input_device = next(
-            (value for name, value in properties if name == "input-device"), "*"
-        )
-        binding_key = (
-            shown,
-            input_device,
-            ("release", True) in properties,
-            frozenset(mouse_regions),
-        )
+
+        # binding_key_compare's identity (sway/commands/bind.c:64-104): the
+        # device, the binding type, the conflict flags, the group, the
+        # modifier bits and the key. A keycode and a mouse button are
+        # numbers; keysyms are looked up ignoring case (bind.c:194-195).
+        if keycode is not None:
+            sway_key: tuple = ("keycode", keycode)
+        elif mouse:
+            sway_key = ("mouse", MOUSE_BUTTONS[combo.keys[0]][0])
+        else:
+            sway_key = ("keysym", ascii_lower(trigger))
+        release = ("release", True) in properties
+        flags = (input_device, release, locked, combo.group, combo.mask)
+        sway_identity = (*flags, frozenset(sway_regions), sway_key)
+        # swayward's BindIdentity (swayward-config/src/binds/mod.rs:79-102):
+        # the KDL trigger and the emitted regions. Sway-distinct bindings
+        # can share it, and KDL rejects a duplicate identity.
+        kdl_key = trigger if mouse else sway_key
+        kdl_identity = (*flags, frozenset(mouse_regions), kdl_key)
         node = Node(
             key, props=properties, children=[Node("command", [command])], inline=True
         )
-        if not legacy_keep_first(binds, binding_key, node):
-            self.warn(source, line, rest, f"duplicate binding for {shown}; kept the first")
+        previous = binds.get(sway_identity)
+        if previous is None:
+            clash = next(
+                (entry for entry in binds.values() if entry.kdl == kdl_identity),
+                None,
+            )
+            if clash is not None:
+                self.warn(
+                    source,
+                    line,
+                    rest,
+                    f"sway keeps this apart from the binding at {clash.pos.path}:"
+                    f"{clash.pos.line} (`{clash.command}`), but both translate "
+                    f"to {key}{f' mouse-regions={regions}' if regions else ''}, "
+                    "which swayward's KDL binds only once "
+                    "(sway/commands/bind.c:64-104, "
+                    "swayward-config/src/binds/decode.rs:24-40)",
+                )
+                return
+        # binding_upsert replaces an equal binding in place, and binding_add
+        # warns through swaynag unless --no-warn (bind.c:266-302). The later
+        # binding wins here too, so the comment that carries sway's warning
+        # asks for nothing, and an overwrite that changes nothing has none.
+        binds[sway_identity] = Binding(kdl_identity, node, d.pos, command)
+        if previous is not None and previous.node != node and warn:
+            self.doc.note(
+                f"sway-to-kdl: {source}:{line}: overwriting binding "
+                f"{combo_text} for device '{input_device}' to `{command}` "
+                f"from `{previous.command}`, as sway does "
+                "(sway/commands/bind.c:280-292)"
+            )
 
     @staticmethod
-    def translate_modifier(modifier: str) -> str | None:
-        return next(
-            (
-                translated
-                for name, translated in LEGACY_MODIFIER_ALIASES.items()
-                if name.lower() == modifier.lower()
-            ),
-            None,
-        )
+    def translate_key(combo_text: str, combo: KeyCombo) -> str:
+        """The KDL key for a bind's combo, or BindError with the reason
+        swayward's KDL cannot bind it.
 
-    @staticmethod
-    def translate_key(key: str) -> str | None:
-        aliases = {
-            "button1": "MouseLeft",
-            "button2": "MouseMiddle",
-            "button3": "MouseRight",
-            "button4": "WheelScrollUp",
-            "button5": "WheelScrollDown",
-            "button6": "WheelScrollLeft",
-            "button7": "WheelScrollRight",
-            "button8": "MouseBack",
-            "button9": "MouseForward",
-            "BTN_LEFT": "MouseLeft",
-            "BTN_MIDDLE": "MouseMiddle",
-            "BTN_RIGHT": "MouseRight",
-            "BTN_SIDE": "MouseBack",
-            "BTN_BACK": "MouseBack",
-            "BTN_EXTRA": "MouseForward",
-            "BTN_FORWARD": "MouseForward",
-        }
-        parts = key.split("+")
-        non_modifiers = [
-            index
-            for index, part in enumerate(parts)
-            if Translator.translate_modifier(part) is None
-        ]
-        if len(non_modifiers) == 1:
-            trigger = parts.pop(non_modifiers[0])
-        else:
-            trigger = parts.pop()
-        translated_modifiers = [Translator.translate_modifier(part) for part in parts]
-        if any(part is None for part in translated_modifiers):
-            return None
-        parts = [part for part in translated_modifiers if part is not None] + [trigger]
-        if any(
-            (part.lower().startswith("button") or part.startswith("BTN_"))
-            and part not in aliases
-            for part in parts
-        ):
-            return None
-        return "+".join(aliases.get(part, part) for part in parts)
-
-    @staticmethod
-    def translate_command(command: str) -> str | None:
-        if match := re.fullmatch(
-            r"(exec(?:_always)?\s+(?:--no-startup-id\s+)?)(.+)", command
-        ):
-            command = match.group(1) + legacy_exec_unquote(match.group(2))
-        return legacy_command_spelling(legacy_unescape_at(command))
+        swayward binds one trigger with modifiers and at most one group
+        (swayward-config/src/binds/decode.rs:177-201,240-259). It reads every
+        Mode_switch part as Group2 and none as a key, so a sway binding that
+        holds Mode_switch has no KDL spelling.
+        """
+        if combo.mode_switch:
+            raise BindError(
+                "Mode_switch selects XKB group 2 and is also a key of the "
+                "binding in sway (sway/commands/bind.c:417-427); swayward's "
+                "KDL reads it only as Group2"
+            )
+        if not combo.keys:
+            raise BindError(
+                "binding has no key; sway binds modifiers alone, swayward "
+                "needs a trigger key"
+            )
+        if len(combo.keys) > 1:
+            extra = next(
+                (k for k in combo.keys[:-1] if not ascii_lower(k).startswith("button")),
+                None,
+            )
+            if extra is None:
+                raise BindError(f"unsupported mouse button {combo_text}")
+            raise BindError(f"unsupported modifier {extra}")
+        trigger = combo.keys[0]
+        if (
+            ascii_lower(trigger).startswith("button") or trigger.startswith("BTN_")
+        ) and trigger not in MOUSE_TRIGGERS:
+            raise BindError(f"unsupported mouse button {trigger}")
+        trigger = MOUSE_TRIGGERS.get(trigger, trigger)
+        if combo.group is not None and trigger in MOUSE_TRIGGERS.values():
+            raise BindError(
+                "swayward binds an XKB group only to a keyboard key "
+                "(swayward-config/src/binds/decode.rs:254-259)"
+            )
+        group = [f"Group{combo.group}"] if combo.group is not None else []
+        return "+".join([*group, *combo.modifiers, trigger])
 
     def translate_assign(
         self, source: Path, line: int, criteria: str, args: list[str]
@@ -2962,8 +3036,9 @@ class Document:
     """The translation: one field per output group, in render order."""
 
     def __init__(self) -> None:
-        # Keyed by key, device, release and mouse regions; legacy_keep_first.
-        self.binds: dict[tuple, Node] = {}
+        # Keyed by sway's binding identity; a later binding replaces an
+        # earlier one in place (Translator.translate_bind).
+        self.binds: dict[tuple, Binding] = {}
         self.modes: list[Node] = []
         # input's own settings. Sway defaults focus_follows_mouse to yes;
         # swayward defaults it off.
@@ -3109,7 +3184,7 @@ def render(doc: Document) -> str:
     """The groups in a fixed order, each after a blank line."""
     groups: list[list[Node | Comment]] = []
     if doc.binds:
-        groups.append([Node("binds", children=list(doc.binds.values()))])
+        groups.append([Node("binds", children=[b.node for b in doc.binds.values()])])
     groups += [[mode] for mode in doc.modes]
     devices = list(doc.devices.values())
     groups.append(

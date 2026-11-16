@@ -54,7 +54,7 @@ binds {
 }
 
 mode "resize" {
-    h { command "resize shrink width 10 px"; }
+    h { command "resize shrink width 10px"; }
     Escape { command "mode \"default\""; }
 }
 

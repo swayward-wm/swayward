@@ -262,7 +262,7 @@ bindsym Mod5+q workspace 1
         for expected in [
             'Super+h repeat=false { command "focus left"; }',
             'Super+Return repeat=false { command "exec foot"; }',
-            'h { command "resize shrink width 10 px"; }',
+            'h { command "resize shrink width 10px"; }',
             'Escape { command "mode \\"default\\""; }',
             'spawn-sh-at-startup "mako"',
             'spawn-sh-at-startup "kanshi"',
@@ -464,13 +464,16 @@ bindsym Mod5+q workspace 1
         self.assertIn('Super+x { command "exec fuzzel --show drun"; }', result.stdout)
         self.assertIn("manual attention: none", result.stderr)
 
-    def test_bind_exec_strips_one_pair_of_command_quotes(self):
+    def test_bind_exec_keeps_its_quotes_for_the_command_parser(self):
+        # The command is kept as sway stores it (sway/commands/bind.c:488);
+        # sway's exec strips the quotes when the binding runs
+        # (sway/commands/exec_always.c:40-44).
         result = self.translate(
             'set $term "foot -e \'tmux\'"\n'
             'bindsym Mod4+Return exec $term\n'
         )
         self.assertIn(
-            'Super+Return { command "exec foot -e \'tmux\'"; }', result.stdout
+            'Super+Return { command "exec \\"foot -e \'tmux\'\\""; }', result.stdout
         )
         self.assertIn("manual attention: none", result.stderr)
 
@@ -554,7 +557,7 @@ bindsym Mod5+q workspace 1
             "exec_always $XDG_CONFIG_HOME/sway/start\n"
         )
         self.assertIn(
-            'Super+q { command "exec $HOME/bin/run"; }', result.stdout
+            'Super+q { command "exec \\"$HOME/bin/run\\""; }', result.stdout
         )
         self.assertIn(
             'spawn-sh-at-startup "$XDG_CONFIG_HOME/sway/start"', result.stdout
@@ -644,6 +647,7 @@ bindsym Mod5+q workspace 1
             "bindsym Mod4+i nop mod4\n"
             "bindsym Mod5+k nop mod5\n"
             "bindsym Super+j nop super\n"
+            "bindsym Mod3+z nop mod3\n"
         )
         for key in [
             "Shift+a",
@@ -656,14 +660,10 @@ bindsym Mod5+q workspace 1
             "Super+i",
             "ISO_Level3_Shift+k",
             "Super+j",
+            "ISO_Level5_Shift+z",
         ]:
             self.assertIn(f"    {key} ", result.stdout)
         self.assertIn("manual attention: none", result.stderr)
-
-        for name in ["Mod3"]:
-            refused = self.translate(f"bindsym {name}+z nop x\n")
-            self.assertNotIn("command", refused.stdout)
-            self.assertIn(f"unsupported modifier {name}", refused.stdout)
 
         result = self.translate("bindsym Mod6+a nop unsupported\n")
         self.assertNotIn("command", result.stdout)
@@ -748,9 +748,9 @@ bindsym Mod5+q workspace 1
         result = self.translate(
             "bindsym Control+Print nop key-press\n"
             "bindsym --release Control+Print nop key-release\n"
-            "bindsym button1 --release nop mouse-release\n"
+            "bindsym --release button1 nop mouse-release\n"
             "mode test {\n"
-            "    bindcode 27 --release nop mode-release\n"
+            "    bindcode --release 27 nop mode-release\n"
             "}\n"
         )
         for binding in [
@@ -769,19 +769,19 @@ bindsym Mod5+q workspace 1
         )
         self.assertIn("manual attention: none", result.stderr)
 
-    def test_mouse_binding_regions_after_key_keep_translating(self):
-        for option, regions in [
-            ("--whole-window", "titlebar+border+contents"),
-            ("--border", "border"),
-            ("--exclude-titlebar", "border+contents"),
-        ]:
+    def test_bind_options_after_the_key_stay_in_the_command(self):
+        # cmd_bindsym_or_bindcode reads options only before the key
+        # (sway/commands/bind.c:353-383).
+        for option in ["--whole-window", "--border", "--exclude-titlebar", "--release"]:
             with self.subTest(option=option):
                 result = self.translate(f"bindsym button1 {option} nop supported\n")
                 self.assertIn(
-                    f'MouseLeft mouse-regions="{regions}" {{ command "nop supported"; }}',
+                    f'MouseLeft {{ command "{option} nop supported"; }}',
                     result.stdout,
                 )
                 self.assertIn("manual attention: none", result.stderr)
+        result = self.translate("bindsym Mod4+a --no-repeat nop a\n")
+        self.assertIn('Super+a { command "--no-repeat nop a"; }', result.stdout)
 
     def test_mouse_binding_region_options_combine_like_sway(self):
         for options, regions in [
@@ -995,12 +995,130 @@ bindsym Mod5+q workspace 1
     def test_bind_groups_are_preserved_for_symbols_and_codes(self):
         result = self.translate(
             "bindsym Group2+x nop symbol\n"
-            "bindsym Mode_switch+y nop alias\n"
             "bindcode Group3+42 nop code\n"
         )
         self.assertIn('Group2+x { command "nop symbol"; }', result.stdout)
-        self.assertIn('Mode_switch+y { command "nop alias"; }', result.stdout)
         self.assertIn('Group3+code:42 { command "nop code"; }', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_bind_modifiers_and_groups_follow_sways_tables(self):
+        # Modifiers ignore case (sway/input/keyboard.c:24-50); GroupN is
+        # case-sensitive, one only, and Mode_switch is group 2 and a key
+        # (sway/commands/bind.c:398-453).
+        for directive, binding in [
+            ("bindsym Mod3+a nop mod3", 'ISO_Level5_Shift+a { command "nop mod3"; }'),
+            ("bindsym b+MOD4 nop key-first", 'Super+b { command "nop key-first"; }'),
+            ("bindsym Mod4+Group2+c nop group", 'Group2+Super+c { command "nop group"; }'),
+        ]:
+            with self.subTest(directive=directive):
+                result = self.translate(directive + "\n")
+                self.assertIn(binding, result.stdout)
+                self.assertIn("manual attention: none", result.stderr)
+
+        mode_switch = "Mode_switch selects XKB group 2 and is also a key of the binding"
+        for directive, reason in [
+            ("bindsym Mode_switch+y nop alias", mode_switch),
+            ("bindsym Mode_switch nop alone", mode_switch),
+            ("bindsym group2+x nop lower", "unsupported modifier group2"),
+            ("bindsym Group1+Group2+x nop two", "only one group can be specified"),
+            ("bindsym Group2+Mode_switch+x nop two", "only one group can be specified"),
+            ("bindsym Group5+x nop five", "invalid group Group5"),
+            ("bindsym Groupx+x nop junk", "invalid group Groupx"),
+            ("bindsym Group2+button1 nop mouse", "XKB group only to a keyboard key"),
+            ("bindsym Mod4 nop modifier-only", "binding has no key"),
+            ("bindsym Mod4+Shift nop modifiers-only", "binding has no key"),
+        ]:
+            with self.subTest(directive=directive):
+                result = self.translate(directive + "\n")
+                self.assertNotIn("{ command", result.stdout)
+                self.assertIn(f"{reason}", result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_bind_group_of_any_length_is_read_without_crashing(self):
+        # strtol reads any number of digits (sway/commands/bind.c:409-410);
+        # the digits are compared as text, so no length reaches int(), whose
+        # digit limit raises ValueError.
+        result = self.translate(f"bindsym Group{'1' * 5000}+x nop huge\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("{ command", result.stdout)
+        self.assertIn(f"invalid group Group{'1' * 5000}", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+        result = self.translate("bindsym Group002+x nop leading-zeros\n")
+        self.assertIn('Group2+x { command "nop leading-zeros"; }', result.stdout)
+
+    def test_exec_follows_sways_exec_rule(self):
+        # cmd_exec_process strips the quotes of a single quoted argument and
+        # joins anything else (sway/commands/exec_always.c:40-44).
+        for directive, command in [
+            ('exec "a" "b"', '"a" "b"'),
+            ("exec 'one arg'", "one arg"),
+            ("exec --no-startup-id 'one arg'", "one arg"),
+            ("exec 'a'b", "ab"),
+            ('exec echo \\"x\\"', 'echo "x"'),
+            ("exec   a    b", "a b"),
+        ]:
+            with self.subTest(directive=directive):
+                result = self.translate(directive + "\n")
+                self.assertIn(
+                    f"spawn-sh-at-startup {json.dumps(command)}", result.stdout
+                )
+        # A bind's exec keeps its quotes, as sway stores the binding's command
+        # (sway/commands/bind.c:488); the rule applies when the binding runs.
+        result = self.translate(
+            "bindsym Mod4+a exec 'notify-send a; b'\n"
+            'bindsym Mod4+b exec "a" "b"\n'
+        )
+        self.assertIn(
+            'Super+a { command "exec \'notify-send a; b\'"; }', result.stdout
+        )
+        self.assertIn('Super+b { command "exec \\"a\\" \\"b\\""; }', result.stdout)
+
+    def test_bind_command_is_joined_from_unescaped_arguments(self):
+        # config_command unescapes bind arguments and keeps their quotes
+        # (sway/commands.c:409-423); the command is join_args of those after
+        # the key (sway/commands/bind.c:488).
+        result = self.translate(
+            'bindsym Mod4+a exec echo \\"x\\"\n'
+            "bindsym Mod4+b   nop   a    b\n"
+            'bindsym Mod4+d exec notify-send "a   b"\n'
+        )
+        self.assertIn('Super+a { command "exec echo \\"x\\""; }', result.stdout)
+        self.assertIn('Super+b { command "nop a b"; }', result.stdout)
+        self.assertIn(
+            'Super+d { command "exec notify-send \\"a   b\\""; }', result.stdout
+        )
+
+    def test_bind_command_keeps_a_backslash_before_at(self):
+        # unescape_string has no `\@` escape (common/stringop.c:152-233), so
+        # the shell that runs the command removes the backslash, as in sway.
+        result = self.translate(
+            "bindsym Mod4+c exec pactl set-sink-mute \\@DEFAULT_SINK@ toggle\n"
+        )
+        self.assertIn(
+            'Super+c { command "exec pactl set-sink-mute \\\\@DEFAULT_SINK@ toggle"; }',
+            result.stdout,
+        )
+
+    def test_bind_commands_keep_sways_spellings(self):
+        # swayward's parser takes each: `move container to workspace`
+        # (swayward-ipc/src/command/parse/move_resize.rs:80-91), splith and
+        # splitv (parse/mod.rs:366-367) and an attached px unit
+        # (parse/move_resize.rs:433-441).
+        result = self.translate(
+            "bindsym Mod4+1 move container to workspace number 1\n"
+            "bindsym Mod4+h splith\n"
+            "bindsym Mod4+v splitv\n"
+            "bindsym Mod4+r resize grow width 10px\n"
+            "bindsym Mod4+s resize shrink height 5px\n"
+        )
+        for binding in [
+            'Super+1 { command "move container to workspace number 1"; }',
+            'Super+h { command "splith"; }',
+            'Super+v { command "splitv"; }',
+            'Super+r { command "resize grow width 10px"; }',
+            'Super+s { command "resize shrink height 5px"; }',
+        ]:
+            self.assertIn(binding, result.stdout)
         self.assertIn("manual attention: none", result.stderr)
 
     def test_assign_workspace_target_is_preserved(self):
@@ -1068,8 +1186,8 @@ bindsym Mod5+q workspace 1
         self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
     def test_deprecated_default_borders_translate_without_changing_shipped_defaults(self):
-        # new_window and new_float are i3's older spellings of default_border
-        # and default_floating_border. They set a layout default, not a rule
+        # new_window and new_float are i3's aliases of default_border and
+        # default_floating_border. They set a layout default, not a rule
         # matching every window, so they land on layout.default-border.
         result = self.translate("new_window 1pixel\nnew_float normal 3\n")
         self.assertIn('default-border "pixel" width=1', result.stdout)
@@ -1590,10 +1708,9 @@ bindsym Mod5+q workspace 1
                 self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
     def test_mouse_warping_maps_every_mode_case_insensitively(self):
-        # output used to be refused for lacking an exact equivalent. swayward
-        # warps to the focused window for both sway modes, which the
-        # mouse_warping IPC command also does, so converting with a recorded
-        # narrowing beats dropping the directive.
+        # swayward warps to the focused window for both sway modes, which the
+        # mouse_warping IPC command also does, so output converts with a
+        # recorded narrowing rather than being dropped.
         for value, expected in [
             ("none", None),
             ("NoNe", None),
@@ -1614,11 +1731,170 @@ bindsym Mod5+q workspace 1
         self.assertIn("expected mouse_warping output|container|none", result.stdout)
         self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
-    def test_duplicate_bind_is_reported_instead_of_silently_overwritten(self):
-        result = self.translate("bindsym Mod4+h focus left\nbindsym Mod4+h focus right\n")
-        self.assertIn('Super+h { command "focus left"; }', result.stdout)
-        self.assertNotIn('command "focus right"', result.stdout)
-        self.assertIn("duplicate binding for Super+h; kept the first", result.stdout)
+    def test_later_duplicate_binding_overwrites_the_earlier(self):
+        # binding_upsert replaces in place and binding_add warns unless
+        # --no-warn (sway/commands/bind.c:263-300).
+        result = self.translate(
+            "bindsym Mod4+h focus left\n"
+            "bindsym Mod4+j focus down\n"
+            "bindsym Mod4+h focus right\n"
+        )
+        self.assertIn(
+            '    Super+h { command "focus right"; }\n'
+            '    Super+j { command "focus down"; }\n',
+            result.stdout,
+        )
+        self.assertNotIn('command "focus left"', result.stdout)
+        self.assertIn(
+            "config:3: overwriting binding Mod4+h for device '*' to "
+            "`focus right` from `focus left`, as sway does",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+
+        # The identity is sway's: modifier bits in any order and spelling,
+        # keysyms ignoring case; --locked makes a different binding.
+        result = self.translate(
+            "bindsym Mod1+Shift+a nop one\n"
+            "bindsym shift+Alt+A nop two\n"
+            "bindsym --locked Mod1+Shift+a nop locked\n"
+            "mode m {\n"
+            "    bindsym x nop x1\n"
+            "    bindsym --no-warn x nop x2\n"
+            "    bindsym y nop y\n"
+            "    bindsym y nop y\n"
+            "}\n"
+        )
+        self.assertIn('Shift+Alt+A { command "nop two"; }', result.stdout)
+        self.assertNotIn('command "nop one"', result.stdout)
+        self.assertIn(
+            'Alt+Shift+a allow-when-locked=true { command "nop locked"; }',
+            result.stdout,
+        )
+        self.assertIn('x { command "nop x2"; }', result.stdout)
+        self.assertNotIn('command "nop x1"', result.stdout)
+        # Only the first overwrite changes anything and warns.
+        self.assertEqual(result.stdout.count("overwriting binding"), 1)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_bindcode_identity_is_the_keycode_number(self):
+        # identify_key reads a keycode with strtol (sway/commands/bind.c:166),
+        # so 024 and 24 are one key and the later binding replaces the
+        # earlier. The digits are compared as text, so no length reaches
+        # int().
+        result = self.translate(
+            "bindcode 024 nop first\n"
+            "bindcode 24 nop second\n"
+            f"bindcode {'0' * 5000}25 nop third\n"
+            f"bindcode {'9' * 5000} nop huge\n"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('code:24 { command "nop second"; }', result.stdout)
+        self.assertIn('code:25 { command "nop third"; }', result.stdout)
+        self.assertNotIn("code:0", result.stdout)
+        self.assertNotIn('command "nop first"', result.stdout)
+        self.assertIn(
+            "config:2: overwriting binding 24 for device '*' to `nop second` "
+            "from `nop first`",
+            result.stdout,
+        )
+        self.assertIn("bindcode keycode must be between 8 and 255: 999", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_mouse_buttons_that_share_a_kdl_trigger_are_reported(self):
+        # Sway compares button codes (sway/input/cursor.c:1203-1226):
+        # button8 is BTN_SIDE, while BTN_BACK and BTN_FORWARD are other
+        # buttons. swayward's KDL gives BTN_SIDE and BTN_BACK one trigger, so
+        # the later of two sway-distinct bindings is reported, not dropped.
+        result = self.translate(
+            "bindsym BTN_SIDE nop side\n"
+            "bindsym BTN_BACK nop back\n"
+            "bindsym button8 nop button8\n"
+            "bindsym BTN_EXTRA nop extra\n"
+            "bindsym BTN_FORWARD nop forward\n"
+        )
+        self.assertIn('MouseBack { command "nop button8"; }', result.stdout)
+        self.assertIn('MouseForward { command "nop extra"; }', result.stdout)
+        self.assertEqual(result.stdout.count("MouseBack {"), 1)
+        self.assertEqual(result.stdout.count("MouseForward {"), 1)
+        self.assertIn(
+            "config:3: overwriting binding button8 for device '*' to "
+            "`nop button8` from `nop side`",
+            result.stdout,
+        )
+        self.assertRegex(
+            result.stdout,
+            r"config:2: sway keeps this apart from the binding at \S*/config:1 "
+            r"\(`nop side`\), but both translate to MouseBack,",
+        )
+        self.assertRegex(
+            result.stdout,
+            r"config:5: sway keeps this apart from the binding at \S*/config:4 "
+            r"\(`nop extra`\), but both translate to MouseForward,",
+        )
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+
+    def test_exclude_titlebar_bindings_keep_sways_region_flags(self):
+        # --exclude-titlebar removes the titlebar sway adds to a mouse
+        # binding (sway/commands/bind.c:459-464), so with --whole-window it
+        # is border+contents, with --border border alone, and alone no
+        # region: sway never runs it (sway/input/seatop_default.c:128-139).
+        result = self.translate(
+            "bindsym --whole-window --exclude-titlebar button1 nop whole\n"
+            "bindsym --exclude-titlebar button1 nop none\n"
+            "bindsym --border --exclude-titlebar button3 nop border\n"
+        )
+        self.assertIn(
+            'MouseLeft mouse-regions="border+contents" { command "nop whole"; }',
+            result.stdout,
+        )
+        self.assertIn(
+            'MouseRight mouse-regions="border" { command "nop border"; }',
+            result.stdout,
+        )
+        self.assertNotIn('command "nop none"', result.stdout)
+        self.assertNotIn("overwriting binding", result.stdout)
+        self.assertIn(
+            "config:2: --exclude-titlebar without --whole-window or --border "
+            "leaves the binding no region, so sway never runs it",
+            result.stdout,
+        )
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+        # --border alone also covers the titlebar in sway, so it differs from
+        # --border --exclude-titlebar; swayward's KDL emits border for both,
+        # and the later is reported.
+        result = self.translate(
+            "bindsym --border --exclude-titlebar button3 nop border\n"
+            "bindsym --border button3 nop titlebar-border\n"
+        )
+        self.assertIn(
+            'MouseRight mouse-regions="border" { command "nop border"; }',
+            result.stdout,
+        )
+        self.assertNotIn('command "nop titlebar-border"', result.stdout)
+        self.assertRegex(
+            result.stdout,
+            r"config:2: sway keeps this apart from the binding at \S*/config:1 "
+            r"\(`nop border`\), but both translate to MouseRight "
+            r"mouse-regions=border,",
+        )
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_last_input_device_option_is_the_bindings_device(self):
+        # cmd_bindsym_or_bindcode replaces the device for each
+        # --input-device (sway/commands/bind.c:370-373).
+        result = self.translate(
+            "bindsym --input-device=a --input-device=b Mod4+q nop one\n"
+            "bindsym --input-device=b Mod4+q nop two\n"
+        )
+        self.assertIn('Super+q input-device="b" { command "nop two"; }', result.stdout)
+        self.assertNotIn('input-device="a"', result.stdout)
+        self.assertIn(
+            "config:2: overwriting binding Mod4+q for device 'b' to `nop two` "
+            "from `nop one`",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
 
     def test_bindcode_is_preserved_as_a_numeric_trigger(self):
         result = self.translate("bindcode --no-repeat 24 kill\n")
@@ -1626,22 +1902,20 @@ bindsym Mod5+q workspace 1
         self.assertIn("manual attention: none", result.stderr)
 
     def test_focus_mode_toggle_translates_now_that_the_command_exists(self):
-        # The translator used to refuse this specific command with "outside
-        # swayward's current command subset". That refusal outlived its reason:
         # Command::FocusModeToggle is implemented (src/command/mod.rs:170) and
-        # docs/SWAY_COMPATIBILITY.md already listed mode_toggle as supported.
+        # docs/SWAY_COMPATIBILITY.md lists mode_toggle as supported, so the
+        # binding translates.
         result = self.translate("bindsym Mod4+a focus mode_toggle\n")
         self.assertIn('Super+a { command "focus mode_toggle"; }', result.stdout)
         self.assertIn("manual attention: none", result.stderr)
 
     def test_checked_in_sway_and_swayfx_defaults_keep_manual_items(self):
         # The counts are pinned because docs/SWAY_CONFIG_MIGRATION.md quotes
-        # them, and it went stale once when a directive started translating.
-        # Lower them when coverage improves; a rise is a regression.
+        # them. Lower them when coverage improves; a rise is a regression.
         fixtures = ROOT / "tests" / "fixtures" / "config"
         for source, expected in [
             (fixtures / "sway-1.11-default.conf", 3),
-            (fixtures / "swayfx-default.conf", 7),
+            (fixtures / "swayfx-default.conf", 5),
         ]:
             with self.subTest(source=source.name):
                 result = self.run_translator(source)
@@ -1833,7 +2107,8 @@ bindsym Mod5+q workspace 1
             'mode "m" {\n    bindsym {\n        a nop a\n        a nop b\n    }\n}\n'
         )
         self.assertIn(
-            "config:4: duplicate binding for a; kept the first: a nop b", result.stdout
+            "config:4: overwriting binding a for device '*' to `nop b` from `nop a`",
+            result.stdout,
         )
 
     def test_input_and_layer_effects_reports_are_located(self):
@@ -2640,8 +2915,8 @@ class SingularTests(unittest.TestCase):
                 self.assertEqual(self.s2k.SINGULAR[parent], frozenset(names))
 
     def test_knuffel_child_names_reads_a_multi_line_commented_attribute(self):
-        # The parse once required `child` right after the parenthesis, so
-        # this field was not seen and SINGULAR could drift past it.
+        # `child` need not follow the parenthesis: a parse that required it
+        # would miss this field and let SINGULAR drift past it.
         source = (
             "pub struct Synthetic {\n"
             "    #[knuffel(\n"
@@ -2685,9 +2960,9 @@ class SingularTests(unittest.TestCase):
         )
 
     def test_knuffel_child_names_reads_past_a_commented_closing_brace(self):
-        # Comments were once stripped after the body was cut at the first
-        # line starting with `}`, so this commented brace hid `second`. Whole
-        # files are stripped now, so the raw string's `/*` must stay text.
+        # Comments are stripped from the whole file before the body is cut at
+        # the first line starting with `}`, so this commented brace cannot
+        # hide `second`, and the raw string's `/*` stays text.
         source = (
             'const BEFORE: &str = r#"say "/*" and //"#;\n'
             "pub struct Synthetic {\n"

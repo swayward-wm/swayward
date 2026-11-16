@@ -277,18 +277,18 @@ binds {
     Super+8 { command "workspace number 8"; }
     Super+9 { command "workspace number 9"; }
     Super+0 { command "workspace number 10"; }
-    Super+Shift+1 { command "move to workspace number 1"; }
-    Super+Shift+2 { command "move to workspace number 2"; }
-    Super+Shift+3 { command "move to workspace number 3"; }
-    Super+Shift+4 { command "move to workspace number 4"; }
-    Super+Shift+5 { command "move to workspace number 5"; }
-    Super+Shift+6 { command "move to workspace number 6"; }
-    Super+Shift+7 { command "move to workspace number 7"; }
-    Super+Shift+8 { command "move to workspace number 8"; }
-    Super+Shift+9 { command "move to workspace number 9"; }
-    Super+Shift+0 { command "move to workspace number 10"; }
-    Super+b { command "split h"; }
-    Super+v { command "split v"; }
+    Super+Shift+1 { command "move container to workspace number 1"; }
+    Super+Shift+2 { command "move container to workspace number 2"; }
+    Super+Shift+3 { command "move container to workspace number 3"; }
+    Super+Shift+4 { command "move container to workspace number 4"; }
+    Super+Shift+5 { command "move container to workspace number 5"; }
+    Super+Shift+6 { command "move container to workspace number 6"; }
+    Super+Shift+7 { command "move container to workspace number 7"; }
+    Super+Shift+8 { command "move container to workspace number 8"; }
+    Super+Shift+9 { command "move container to workspace number 9"; }
+    Super+Shift+0 { command "move container to workspace number 10"; }
+    Super+b { command "splith"; }
+    Super+v { command "splitv"; }
     Super+s { command "layout stacking"; }
     Super+w { command "layout tabbed"; }
     Super+e { command "layout toggle split"; }
@@ -299,10 +299,10 @@ binds {
     Super+Shift+minus { command "move scratchpad"; }
     Super+minus { command "scratchpad show"; }
     Super+r { command "mode \"resize\""; }
-    XF86AudioMute allow-when-locked=true { command "exec pactl set-sink-mute @DEFAULT_SINK@ toggle"; }
-    XF86AudioLowerVolume allow-when-locked=true { command "exec pactl set-sink-volume @DEFAULT_SINK@ -5%"; }
-    XF86AudioRaiseVolume allow-when-locked=true { command "exec pactl set-sink-volume @DEFAULT_SINK@ +5%"; }
-    XF86AudioMicMute allow-when-locked=true { command "exec pactl set-source-mute @DEFAULT_SOURCE@ toggle"; }
+    XF86AudioMute allow-when-locked=true { command "exec pactl set-sink-mute \\@DEFAULT_SINK@ toggle"; }
+    XF86AudioLowerVolume allow-when-locked=true { command "exec pactl set-sink-volume \\@DEFAULT_SINK@ -5%"; }
+    XF86AudioRaiseVolume allow-when-locked=true { command "exec pactl set-sink-volume \\@DEFAULT_SINK@ +5%"; }
+    XF86AudioMicMute allow-when-locked=true { command "exec pactl set-source-mute \\@DEFAULT_SOURCE@ toggle"; }
     XF86AudioPlay allow-when-locked=true { command "exec playerctl play-pause"; }
     XF86AudioPause allow-when-locked=true { command "exec playerctl play-pause"; }
     XF86AudioPrev allow-when-locked=true { command "exec playerctl previous"; }
@@ -314,14 +314,14 @@ binds {
 }
 
 mode "resize" {
-    h { command "resize shrink width 10 px"; }
-    j { command "resize grow height 10 px"; }
-    k { command "resize shrink height 10 px"; }
-    l { command "resize grow width 10 px"; }
-    Left { command "resize shrink width 10 px"; }
-    Down { command "resize grow height 10 px"; }
-    Up { command "resize shrink height 10 px"; }
-    Right { command "resize grow width 10 px"; }
+    h { command "resize shrink width 10px"; }
+    j { command "resize grow height 10px"; }
+    k { command "resize shrink height 10px"; }
+    l { command "resize grow width 10px"; }
+    Left { command "resize shrink width 10px"; }
+    Down { command "resize grow height 10px"; }
+    Up { command "resize shrink height 10px"; }
+    Right { command "resize grow width 10px"; }
     Return { command "mode \"default\""; }
     Escape { command "mode \"default\""; }
 }

@@ -37,7 +37,7 @@ byte-identical to the `config.in` in sway 1.12, the release swayward targets,
 so it keeps its `sway-1.11-default.conf` file name. The tests check that
 reported directives remain in the output, and parse the resulting KDL. They also pin the counts, because this document quotes them: the
 sway default produces three manual-attention items and the SwayFX default
-seven. A rise fails the suite. Directives that explicitly request behavior already
+five. A rise fails the suite. Directives that explicitly request behavior already
 provided by swayward's defaults remain visible as `// sway-to-kdl: satisfied by
 swayward defaults` comments, but do not count as manual-attention items. The project
 has also translated and validated the upstream sway and SwayFX default files once
@@ -59,12 +59,24 @@ binds {
 ```
 
 `bindcode` becomes a `code:N` binding. Variables are expanded in source order.
-The same command parser handles key bindings and `swaymsg` requests.
+The same command parser handles key bindings and `swaymsg` requests, so a
+binding's command is kept as sway stores it.
+
+As in sway, a later binding for the same keys replaces the earlier one, and a
+comment records the replacement unless the binding has `--no-warn` or repeats
+the earlier binding exactly, which leaves no comment. Bindings that swayward
+cannot express are reported: one that holds `Mode_switch`, which sway treats
+as both group 2 and a key, one with no key, one with more than one key, and
+one with `--exclude-titlebar` but neither `--whole-window` nor `--border`,
+which sway never runs. Two bindings that sway keeps apart but that translate
+to the same KDL binding, such as `BTN_SIDE` and `BTN_BACK`, which are both
+`MouseBack`, keep the first and report the second.
 
 Sway binding modes become KDL `mode "name" { ... }` blocks. Bindings can enter
 and leave modes with commands such as `mode "resize"` and `mode "default"`.
 
-Commands outside swayward's current subset are also reported. Check the
+The translator does not check binding commands against swayward's command
+subset. Check the
 [Sway compatibility guide](https://github.com/swayward-wm/swayward/wiki/Sway-Compatibility)
 before replacing or retaining a command by hand.
 

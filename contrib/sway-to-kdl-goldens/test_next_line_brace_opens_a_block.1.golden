@@ -9,7 +9,7 @@ mode "resize"
 // keep their full option sets. Review every sway-to-kdl comment below.
 
 mode "resize" {
-    Left { command "resize shrink width 10 px"; }
+    Left { command "resize shrink width 10px"; }
 }
 
 input {

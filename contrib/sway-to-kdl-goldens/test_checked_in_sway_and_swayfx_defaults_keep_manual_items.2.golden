@@ -317,18 +317,18 @@ binds {
     Alt+8 { command "workspace number 8"; }
     Alt+9 { command "workspace number 9"; }
     Alt+0 { command "workspace number 10"; }
-    Alt+Shift+1 { command "move to workspace number 1"; }
-    Alt+Shift+2 { command "move to workspace number 2"; }
-    Alt+Shift+3 { command "move to workspace number 3"; }
-    Alt+Shift+4 { command "move to workspace number 4"; }
-    Alt+Shift+5 { command "move to workspace number 5"; }
-    Alt+Shift+6 { command "move to workspace number 6"; }
-    Alt+Shift+7 { command "move to workspace number 7"; }
-    Alt+Shift+8 { command "move to workspace number 8"; }
-    Alt+Shift+9 { command "move to workspace number 9"; }
-    Alt+Shift+0 { command "move to workspace number 10"; }
-    Alt+b { command "split h"; }
-    Alt+v { command "split v"; }
+    Alt+Shift+1 { command "move container to workspace number 1"; }
+    Alt+Shift+2 { command "move container to workspace number 2"; }
+    Alt+Shift+3 { command "move container to workspace number 3"; }
+    Alt+Shift+4 { command "move container to workspace number 4"; }
+    Alt+Shift+5 { command "move container to workspace number 5"; }
+    Alt+Shift+6 { command "move container to workspace number 6"; }
+    Alt+Shift+7 { command "move container to workspace number 7"; }
+    Alt+Shift+8 { command "move container to workspace number 8"; }
+    Alt+Shift+9 { command "move container to workspace number 9"; }
+    Alt+Shift+0 { command "move container to workspace number 10"; }
+    Alt+b { command "splith"; }
+    Alt+v { command "splitv"; }
     Alt+s { command "layout stacking"; }
     Alt+w { command "layout tabbed"; }
     Alt+e { command "layout toggle split"; }
@@ -339,10 +339,10 @@ binds {
     Alt+Shift+minus { command "move scratchpad"; }
     Alt+minus { command "scratchpad show"; }
     Alt+r { command "mode \"resize\""; }
-    XF86AudioMute allow-when-locked=true { command "exec pactl set-sink-mute @DEFAULT_SINK@ toggle"; }
-    XF86AudioLowerVolume allow-when-locked=true { command "exec pactl set-sink-volume @DEFAULT_SINK@ -5%"; }
-    XF86AudioRaiseVolume allow-when-locked=true { command "exec pactl set-sink-volume @DEFAULT_SINK@ +5%"; }
-    XF86AudioMicMute allow-when-locked=true { command "exec pactl set-source-mute @DEFAULT_SOURCE@ toggle"; }
+    XF86AudioMute allow-when-locked=true { command "exec pactl set-sink-mute \\@DEFAULT_SINK@ toggle"; }
+    XF86AudioLowerVolume allow-when-locked=true { command "exec pactl set-sink-volume \\@DEFAULT_SINK@ -5%"; }
+    XF86AudioRaiseVolume allow-when-locked=true { command "exec pactl set-sink-volume \\@DEFAULT_SINK@ +5%"; }
+    XF86AudioMicMute allow-when-locked=true { command "exec pactl set-source-mute \\@DEFAULT_SOURCE@ toggle"; }
     XF86MonBrightnessDown allow-when-locked=true { command "exec brightnessctl set 5%-"; }
     XF86MonBrightnessUp allow-when-locked=true { command "exec brightnessctl set 5%+"; }
     XF86AudioPlay allow-when-locked=true { command "exec playerctl play-pause"; }
@@ -354,14 +354,14 @@ binds {
 }
 
 mode "resize" {
-    h { command "resize shrink width 10 px"; }
-    j { command "resize grow height 10 px"; }
-    k { command "resize shrink height 10 px"; }
-    l { command "resize grow width 10 px"; }
-    Left { command "resize shrink width 10 px"; }
-    Down { command "resize grow height 10 px"; }
-    Up { command "resize shrink height 10 px"; }
-    Right { command "resize grow width 10 px"; }
+    h { command "resize shrink width 10px"; }
+    j { command "resize grow height 10px"; }
+    k { command "resize shrink height 10px"; }
+    l { command "resize grow width 10px"; }
+    Left { command "resize shrink width 10px"; }
+    Down { command "resize grow height 10px"; }
+    Up { command "resize shrink height 10px"; }
+    Right { command "resize grow width 10px"; }
     Return { command "mode \"default\""; }
     Escape { command "mode \"default\""; }
 }
@@ -408,16 +408,12 @@ window-rule {
 output "*" {
     // sway-to-kdl: <repo>/tests/fixtures/config/swayfx-default.conf:60: unhandled output directive: bg @datadir@/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill
 }
-// sway-to-kdl: <repo>/tests/fixtures/config/swayfx-default.conf:257: duplicate binding for XF86MonBrightnessDown; kept the first: XF86MonBrightnessDown exec brightnessctl set 5%-
-// sway-to-kdl: <repo>/tests/fixtures/config/swayfx-default.conf:258: duplicate binding for XF86MonBrightnessUp; kept the first: XF86MonBrightnessUp exec brightnessctl set 5%+
 // sway-to-kdl: <repo>/tests/fixtures/config/swayfx-default.conf:267: bar blocks are unsupported; use waybar (docs/SWAY_CONFIG_MIGRATION.md#replace-swaybar): bar { | position top |  | # When the status_command prints a new line to stdout, swaybar updates. | # The default just shows the current date and time. | status_command while date +'%Y-%m-%d %X'; do sleep 1; done |  | colors { | statusline #ffffff | background #323232 | inactive_workspace #32323200 #32323200 #5c5c5c | } | }
 // sway-to-kdl: <repo>/tests/fixtures/config/swayfx-default.conf:281: include matched no files: include @sysconfdir@/sway/config.d/*
 ==== sway-to-kdl golden: stderr ====
-manual attention: 7 directive(s)
+manual attention: 5 directive(s)
   <repo>/tests/fixtures/config/swayfx-default.conf:3: unhandled: animation_duration_ms 250
   <repo>/tests/fixtures/config/swayfx-default.conf:23: SwayFX shadows_on_csd has no exact swayward equivalent; tune layout shadow draw-behind-window: shadows_on_csd enable
   <repo>/tests/fixtures/config/swayfx-default.conf:60: unhandled output directive: bg @datadir@/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill
-  <repo>/tests/fixtures/config/swayfx-default.conf:257: duplicate binding for XF86MonBrightnessDown; kept the first: XF86MonBrightnessDown exec brightnessctl set 5%-
-  <repo>/tests/fixtures/config/swayfx-default.conf:258: duplicate binding for XF86MonBrightnessUp; kept the first: XF86MonBrightnessUp exec brightnessctl set 5%+
   <repo>/tests/fixtures/config/swayfx-default.conf:267: bar blocks are unsupported; use waybar (docs/SWAY_CONFIG_MIGRATION.md#replace-swaybar): bar { | position top |  | # When the status_command prints a new line to stdout, swaybar updates. | # The default just shows the current date and time. | status_command while date +'%Y-%m-%d %X'; do sleep 1; done |  | colors { | statusline #ffffff | background #323232 | inactive_workspace #32323200 #32323200 #5c5c5c | } | }
   <repo>/tests/fixtures/config/swayfx-default.conf:281: include matched no files: include @sysconfdir@/sway/config.d/*
