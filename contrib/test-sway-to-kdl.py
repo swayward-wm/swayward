@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import pickle
+import re
 import subprocess
 import sys
 import tempfile
@@ -2212,6 +2213,196 @@ class ReaderTests(unittest.TestCase):
         block = reader.take_block("bar { }")
         self.assertEqual((block.raw, block.body, block.end), (("bar { }",), [], None))
         self.assertEqual(reader.next_line().text, "a")
+
+
+class IRTests(unittest.TestCase):
+    """The KDL IR and renderer, called directly; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def names(self, node):
+        return [(child.name, child.args) for child in node.children]
+
+    def test_add_set_and_put_order_children(self):
+        Node = self.s2k.Node
+        node = Node("x", children=[Node("a", [1]), Node("b"), Node("a", [2])])
+        node.add(Node("b", [3]))
+        self.assertEqual(self.names(node), [("a", [1]), ("b", []), ("a", [2]), ("b", [3])])
+        node.set(Node("a", [4]))  # drop every "a", append
+        self.assertEqual(self.names(node), [("b", []), ("b", [3]), ("a", [4])])
+        node.put(Node("b", [5]))  # replace the first "b" in place
+        self.assertEqual(self.names(node), [("b", [5]), ("b", [3]), ("a", [4])])
+        node.put(Node("c"))
+        self.assertEqual(node.get("c").args, [])
+        node.put(Node("d"), "c")  # an alias names the same slot
+        self.assertEqual([child.name for child in node.children], ["b", "b", "a", "d"])
+        self.assertEqual(node.get("b").args, [5])
+        self.assertIsNone(node.get("c"))
+
+    def test_render_quotes_values_and_shapes_nodes(self):
+        s2k = self.s2k
+        Node, Comment, Raw = s2k.Node, s2k.Comment, s2k.Raw
+        node = Node(
+            "rule",
+            ["é \"q\"", 3, 1.0, 0.25, True, Raw("007")],
+            [("k", False), ("k", "v")],
+            [
+                Comment("note"),
+                Node("36", children=[Node("command", ["x"])], inline=True),
+                Node("empty", block=True),
+                Node("leaf"),
+            ],
+        )
+        self.assertEqual(
+            s2k.render_item(node, 1),
+            [
+                '    rule "é \\"q\\"" 3 1.0 0.25 true 007 k=false k="v" {',
+                "        // note",
+                '        "36" { command "x"; }',
+                "        empty {",
+                "        }",
+                "        leaf",
+                "    }",
+            ],
+        )
+
+    def test_render_keeps_the_group_order(self):
+        s2k = self.s2k
+        doc = s2k.Document()
+        doc.body.add(s2k.Node("spawn-sh-at-startup", ["a"]))
+        doc.urgent_timeout = s2k.Node("urgent-timeout-ms", [5])
+        doc.body.add(s2k.Node("spawn-sh-at-startup", ["b"]))
+        doc.device("touchpad")
+        doc.input.add(s2k.Node("tiling-drag", [False]))
+        doc.titlebar.alignment = "left"
+        doc.layout.add(s2k.Node("gaps", [1]))
+        self.assertEqual(
+            s2k.render(doc).split("\n")[3:],
+            [
+                "",
+                "input {",
+                "    focus-follows-mouse",
+                "    tiling-drag false",
+                "    touchpad {",
+                "    }",
+                "}",
+                "",
+                "layout {",
+                "    gaps 1",
+                "    titlebar {",
+                '        alignment "left"',
+                "    }",
+                "}",
+                "",
+                'spawn-sh-at-startup "a"',
+                'spawn-sh-at-startup "b"',
+                "urgent-timeout-ms 5",
+                "",
+            ],
+        )
+
+
+# The struct that decodes each SINGULAR parent, under swayward-config/src.
+# "" (the top level) is decoded by hand in decode.rs and checked separately;
+# binds, mode and default-column-width decode by hand and have no entry.
+SINGULAR_STRUCTS = {
+    "input": ("input/mod.rs", "InputPart"),
+    "keyboard": ("input/keyboard.rs", "KeyboardPart"),
+    "xkb": ("input/keyboard.rs", "Xkb"),
+    "touchpad": ("input/libinput.rs", "Touchpad"),
+    "mouse": ("input/libinput.rs", "Mouse"),
+    "tablet": ("input/tablet.rs", "Tablet"),
+    "touch": ("input/tablet.rs", "Touch"),
+    "layout": ("layout.rs", "LayoutPart"),
+    "outer-gaps": ("layout.rs", "OuterGapsPart"),
+    "titlebar": ("appearance/titlebar.rs", "TitlebarPart"),
+    "focused": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "focused-inactive": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "focused-tab-title": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "unfocused": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "urgent": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "blur": ("appearance/effects.rs", "BlurPart"),
+    "background-effect": ("appearance/effects.rs", "BackgroundEffectRule"),
+    "shadow": ("appearance/border.rs", "ShadowRule"),
+    "window-rule": ("window_rule.rs", "WindowRule"),
+    "layer-rule": ("layer_rule.rs", "LayerRule"),
+    "workspace": ("workspace.rs", "Workspace"),
+    "output": ("output.rs", "Output"),
+    "clipboard": ("misc.rs", "ClipboardPart"),
+    "xwayland-satellite": ("misc.rs", "XwaylandSatellitePart"),
+}
+
+CONFIG_SRC = ROOT / "swayward-config" / "src"
+
+
+def knuffel_child_names(path, struct):
+    """The kebab-cased names of struct's `#[knuffel(child...)]` fields.
+
+    Reads the source text: knuffel names a child after its field, `_` as `-`.
+    Returns None when the struct is not found as `pub struct Name {` in path.
+    """
+    text = (CONFIG_SRC / path).read_text()
+    found = re.search(rf"^pub struct {struct} \{{\n(.*?)^\}}", text, re.S | re.M)
+    if found is None:
+        return None
+    body = found.group(1)
+    fields = re.finditer(
+        r"#\[knuffel\((.*?)\)\]\s*"  # the attribute
+        r"(?:(?://[^\n]*|#\[[^\]]*\])\s*)*"  # comments and other attributes
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:r#)?(\w+)\s*:",  # the field
+        body,
+        re.S,
+    )
+    names = [
+        field.replace("_", "-")
+        for attribute, field in (match.groups() for match in fields)
+        if re.match(r"child\b", attribute)
+    ]
+    # Every child attribute pairs with a field, or the pattern above missed one.
+    if len(names) != len(re.findall(r"#\[knuffel\(child\b", body)):
+        raise AssertionError(f"{path} {struct}: unpaired #[knuffel(child)] attribute")
+    return names
+
+
+class SingularTests(unittest.TestCase):
+    """SINGULAR against the Rust config structs, read as text, without Cargo.
+
+    Scope: the parents listed in SINGULAR_STRUCTS and the top level. It does
+    not find which parents the translator emits; a new emitted parent needs
+    an entry here by hand.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def test_every_singular_parent_names_its_struct(self):
+        self.assertEqual(set(self.s2k.SINGULAR), {"", *SINGULAR_STRUCTS})
+
+    def test_singular_mirrors_knuffel_child_fields(self):
+        for parent, (path, struct) in SINGULAR_STRUCTS.items():
+            with self.subTest(parent=parent, struct=struct):
+                names = knuffel_child_names(path, struct)
+                self.assertIsNotNone(names, f"no `pub struct {struct} {{` in {path}")
+                self.assertTrue(names, f"{struct} has no #[knuffel(child)] field")
+                self.assertEqual(len(names), len(set(names)))
+                self.assertEqual(self.s2k.SINGULAR[parent], frozenset(names))
+
+    def test_singular_top_level_mirrors_config_decode(self):
+        # decode.rs rejects a second node of any top-level name except the
+        # multipart sections listed in its `matches!(name, ...)`.
+        text = (CONFIG_SRC / "decode.rs").read_text()
+        multipart = re.search(r"if !matches!\(\s*name,(.*?)\)\s*&&", text, re.S)
+        self.assertIsNotNone(multipart, "decode.rs: no multipart matches!(name, ...)")
+        multipart = set(re.findall(r'"([a-z-]+)"', multipart.group(1)))
+        start = text.index("match name {", text.index("if !matches!("))
+        end = text.index("name => {", start)
+        arms = set(re.findall(r'^\s*"([a-z-]+)" =>', text[start:end], re.M))
+        self.assertTrue({"output", "window-rule", "include"} <= multipart <= arms)
+        self.assertEqual(self.s2k.SINGULAR[""], frozenset(arms - multipart))
+
 
 if __name__ == "__main__":
     unittest.main()
