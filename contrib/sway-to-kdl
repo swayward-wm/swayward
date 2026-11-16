@@ -6,25 +6,12 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterator, Union
-
-
-# ---------------------------------------------------------------------------
-# Legacy helpers
-#
-# Each one departs from sway; its entry names the rule it departs from.
-#
-# - legacy_add: appends a SINGULAR child without dropping an earlier one.
-# - legacy_g_float: formats a float with `:g`, so 1.0 renders as `1`.
-# - legacy_workspace_assignment: assigned workspaces render first.
-#
-# Most handlers parse Directive.text with regexes and str.split rather
-# than Directive.args, so their arguments are not unescaped.
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +735,8 @@ class Frontend:
 # Report, the handlers' own helpers, and Translator: dispatch, the handlers
 # and the translate_* helpers they call. They build nodes on a Document (see
 # KDL IR); render() turns it into text. The handler tables follow the class.
+# Most handlers parse Directive.text with regexes and str.split rather than
+# Directive.args, so their arguments are not unescaped.
 # ---------------------------------------------------------------------------
 
 
@@ -780,6 +769,11 @@ def preset_size(name: str, kind: str, value: Value) -> Node:
 def background_effect(name: str, value: str) -> Node:
     """`background-effect { blur true }` from a SwayFX enable/disable word."""
     return Node("background-effect", children=[Node(name, [value in {"enable", "on"}])])
+
+
+def set_background_effect(rule: Node, name: str, value: str) -> None:
+    """Set one effect in rule's background-effect, keeping the others."""
+    set_merged(rule, background_effect(name, value))
 
 
 def shadow(value: str) -> Node:
@@ -840,6 +834,34 @@ MOUSE_BUTTONS = {
     "BTN_FORWARD": (0x115, "MouseForward"),
 }
 MOUSE_TRIGGERS = {name: trigger for name, (_, trigger) in MOUSE_BUTTONS.items()}
+# swayward's KDL pointer triggers, matched ignoring case
+# (swayward-config/src/binds/key.rs:118-148). None is an XKB keysym, so sway
+# refuses each as an unknown key (sway/commands/bind.c:194-199).
+KDL_POINTER_TRIGGERS = frozenset(
+    name.lower()
+    for name in (
+        "MouseLeft", "MouseRight", "MouseMiddle", "MouseBack", "MouseForward",
+        "WheelScrollDown", "WheelScrollUp", "WheelScrollLeft", "WheelScrollRight",
+        "TouchpadScrollDown", "TouchpadScrollUp", "TouchpadScrollLeft",
+        "TouchpadScrollRight", "TabletStylusButton1", "TabletStylusButton2",
+        "TabletStylusButton3",
+    )
+)
+
+
+def sway_mouse_button(name: str) -> str | None:
+    """The MOUSE_BUTTONS name sway's get_mouse_bindsym reads name as, or None
+    for a keysym.
+
+    `button` is matched ignoring case and `BTN_` exactly
+    (sway/input/cursor.c:1203-1226). A result missing from MOUSE_BUTTONS is
+    a button sway refuses or swayward cannot bind.
+    """
+    if ascii_lower(name).startswith("button"):
+        return ascii_lower(name)
+    if name.startswith("BTN_"):
+        return name
+    return None
 
 
 @dataclass
@@ -1067,8 +1089,7 @@ class Translator:
             workspace = join_args(args[:output])
             # Sway appends every output to one workspace_config in source
             # order (sway/commands/workspace.c:153-161).
-            assignment = legacy_workspace_assignment(self.doc, workspace)
-            assignment.args.extend(args[output + 1 :])
+            self.doc.workspace_assignment(workspace).args.extend(args[output + 1 :])
         elif gaps and (
             match := re.fullmatch(
                 r"(inner|outer|horizontal|vertical|top|right|bottom|left)\s+(.+)",
@@ -1160,7 +1181,7 @@ class Translator:
                 self.warn(path, line_no, text, "floating size below -1 is unsupported")
             else:
                 name = match.group(1).replace("_", "-")
-                legacy_add(self.doc.layout, Node(name, [width, height]))
+                self.doc.layout.set(Node(name, [width, height]))
         else:
             return False
         return True
@@ -1188,7 +1209,7 @@ class Translator:
         if match := re.fullmatch(r"workspace_layout\s+(\S+)", text, re.IGNORECASE):
             value = match.group(1).lower()
             if value in {"default", "stacking", "tabbed"}:
-                legacy_add(self.doc.layout, Node("workspace-layout", [value]))
+                self.doc.layout.set(Node("workspace-layout", [value]))
             else:
                 self.warn(path, line_no, text, "unsupported workspace layout")
         else:
@@ -1279,7 +1300,7 @@ class Translator:
             enabled = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
             }
-            legacy_add(self.doc.input, Node("tiling-drag", [enabled]))
+            self.doc.input.set(Node("tiling-drag", [enabled]))
         else:
             return False
         return True
@@ -1287,9 +1308,7 @@ class Translator:
     def h_tiling_drag_threshold(self, d: Directive) -> bool:
         text = d.text
         if match := re.fullmatch(r"tiling_drag_threshold\s+(\d+)", text):
-            legacy_add(
-                self.doc.input, Node("tiling-drag-threshold", [Raw(match.group(1))])
-            )
+            self.doc.input.set(Node("tiling-drag-threshold", [Raw(match.group(1))]))
         else:
             return False
         return True
@@ -1300,8 +1319,8 @@ class Translator:
             enabled = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
             }
-            legacy_add(
-                self.doc.layout, Node("focus-wrapping", ["force" if enabled else "yes"])
+            self.doc.layout.set(
+                Node("focus-wrapping", ["force" if enabled else "yes"])
             )
         else:
             return False
@@ -1312,7 +1331,7 @@ class Translator:
         if match := re.fullmatch(r"popup_during_fullscreen\s+(\S+?);?", text):
             value = match.group(1).lower()
             if value in {"smart", "ignore", "leave_fullscreen"}:
-                legacy_add(self.doc.body, Node("popup-during-fullscreen", [value]))
+                self.doc.body.set(Node("popup-during-fullscreen", [value]))
             else:
                 self.warn(
                     path,
@@ -1337,9 +1356,8 @@ class Translator:
             enabled = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
             }
-            legacy_add(
-                self.doc.input,
-                Node("workspace-auto-back-and-forth", [] if enabled else [False]),
+            self.doc.input.set(
+                Node("workspace-auto-back-and-forth", [] if enabled else [False])
             )
         else:
             return False
@@ -1377,9 +1395,9 @@ class Translator:
         if match := re.fullmatch(r"focus_wrapping\s+(\S+)", text, re.IGNORECASE):
             value = match.group(1).lower()
             if value in {"1", "yes", "on", "true", "enable", "enabled", "active"}:
-                legacy_add(self.doc.layout, Node("focus-wrapping", ["yes"]))
+                self.doc.layout.set(Node("focus-wrapping", ["yes"]))
             elif value in {"no", "force", "workspace"}:
-                legacy_add(self.doc.layout, Node("focus-wrapping", [value]))
+                self.doc.layout.set(Node("focus-wrapping", [value]))
             else:
                 self.warn(
                     path,
@@ -1404,9 +1422,7 @@ class Translator:
         if match := re.fullmatch(r"focus_on_window_activation\s+(\S+)", text):
             value = match.group(1)
             if value in {"smart", "urgent", "focus", "none"}:
-                legacy_add(
-                    self.doc.body, Node("focus-on-window-activation", [value])
-                )
+                self.doc.body.set(Node("focus-on-window-activation", [value]))
             else:
                 self.warn(path, line_no, text, "expected focus_on_window_activation smart|urgent|focus|none")
         else:
@@ -1433,10 +1449,13 @@ class Translator:
             enabled = match.group(1).lower() in {
                 "1", "yes", "on", "true", "enable", "enabled", "active"
             }
-            if not enabled:
-                legacy_add(
-                    self.doc.body,
-                    Node("clipboard", children=[Node("disable-primary")], inline=True),
+            # The last primary_selection wins
+            # (sway/commands/primary_selection.c:13-22).
+            if enabled:
+                self.doc.body.remove("clipboard")
+            else:
+                self.doc.body.set(
+                    Node("clipboard", children=[Node("disable-primary")], inline=True)
                 )
         else:
             return False
@@ -1450,10 +1469,12 @@ class Translator:
             # switched off, so only the disabled case emits anything.
             value = match.group(1).lower()
             if value in {"disable", "disabled", "no", "false", "0"}:
-                legacy_add(
-                    self.doc.body, Node("xwayland-satellite", children=[Node("off")])
+                self.doc.body.set(
+                    Node("xwayland-satellite", children=[Node("off")])
                 )
             elif value in {"enable", "enabled", "yes", "true", "1", "force"}:
+                # The last xwayland wins (sway/commands/xwayland.c:14-29).
+                self.doc.body.remove("xwayland-satellite")
                 self.satisfied(text)
             else:
                 self.warn(
@@ -1577,15 +1598,16 @@ class Translator:
         self, source: Path, line: int, text: str, value: str
     ) -> None:
         value = value.lower()
+        # The last mouse_warping wins (sway/commands/mouse_warping.c:9-14).
         if value == "none":
+            self.doc.input.remove("warp-mouse-to-focus")
             return
         if value in {"container", "output"}:
             # KDL has no mouse-warping spelling, so approximate both enabled
             # modes with the inherited centering option. The note records the
             # narrower output-mode semantics so the conversion is not silent.
-            legacy_add(
-                self.doc.input,
-                Node("warp-mouse-to-focus", props=[("mode", "center-xy")]),
+            self.doc.input.set(
+                Node("warp-mouse-to-focus", props=[("mode", "center-xy")])
             )
             if value == "output":
                 self.doc.note(
@@ -1795,7 +1817,10 @@ class Translator:
             self.warn(source, line, rest, str(error))
             return
         trigger = key.rsplit("+", 1)[-1]
-        mouse = trigger in MOUSE_TRIGGERS.values()
+        # Only the bindsym key's sway spelling makes a mouse binding
+        # (sway/commands/bind.c:177-192).
+        button = sway_mouse_button(combo.keys[0]) if kind == "bindsym" else None
+        mouse = button is not None
 
         # Sway's region flags (bind.c:359-369,384-388,459-464): a region
         # option or --exclude-titlebar makes a mouse binding, which then
@@ -1837,7 +1862,7 @@ class Translator:
         if keycode is not None:
             sway_key: tuple = ("keycode", keycode)
         elif mouse:
-            sway_key = ("mouse", MOUSE_BUTTONS[combo.keys[0]][0])
+            sway_key = ("mouse", MOUSE_BUTTONS[button][0])
         else:
             sway_key = ("keysym", ascii_lower(trigger))
         release = ("release", True) in properties
@@ -1913,12 +1938,18 @@ class Translator:
                 raise BindError(f"unsupported mouse button {combo_text}")
             raise BindError(f"unsupported modifier {extra}")
         trigger = combo.keys[0]
-        if (
-            ascii_lower(trigger).startswith("button") or trigger.startswith("BTN_")
-        ) and trigger not in MOUSE_TRIGGERS:
-            raise BindError(f"unsupported mouse button {trigger}")
-        trigger = MOUSE_TRIGGERS.get(trigger, trigger)
-        if combo.group is not None and trigger in MOUSE_TRIGGERS.values():
+        button = sway_mouse_button(trigger)
+        if button is not None:
+            if button not in MOUSE_TRIGGERS:
+                raise BindError(f"unsupported mouse button {trigger}")
+            trigger = MOUSE_TRIGGERS[button]
+        elif ascii_lower(trigger) in KDL_POINTER_TRIGGERS:
+            raise BindError(
+                f"Unknown key or button '{trigger}': sway has no such keysym "
+                "(sway/commands/bind.c:194-199), and swayward's KDL would read "
+                "it as a pointer trigger (swayward-config/src/binds/key.rs:118-148)"
+            )
+        if combo.group is not None and button is not None:
             raise BindError(
                 "swayward binds an XKB group only to a keyboard key "
                 "(swayward-config/src/binds/decode.rs:254-259)"
@@ -2127,19 +2158,16 @@ class Translator:
                 directive = f"{listed.criteria} {directive}"
             if words[:1] == ["border"]:
                 if words == ["border", "none"]:
-                    legacy_add(rule, Node("sway-border", ["none"]))
+                    rule.set(Node("sway-border", ["none"]))
                 elif words == ["border", "pixel"]:
-                    legacy_add(rule, Node("sway-border", ["pixel"]))
+                    rule.set(Node("sway-border", ["pixel"]))
                 elif (
                     len(words) == 3
                     and words[:2] == ["border", "pixel"]
                     and words[2].isdigit()
                 ):
-                    legacy_add(
-                        rule,
-                        Node("sway-border", ["pixel"]),
-                        Node("sway-border-width", [Raw(words[2])]),
-                    )
+                    rule.set(Node("sway-border", ["pixel"]))
+                    rule.set(Node("sway-border-width", [Raw(words[2])]))
                 else:
                     self.warn(
                         source,
@@ -2153,11 +2181,11 @@ class Translator:
             elif words == ["floating", "disable"]:
                 rule.set(Node("open-floating", [False]))
             elif words == ["layout", "tabbed"]:
-                legacy_add(rule, Node("default-column-display", ["tabbed"]))
+                rule.set(Node("default-column-display", ["tabbed"]))
             elif words == ["focus"]:
-                legacy_add(rule, Node("open-focused", [True]))
+                rule.set(Node("open-focused", [True]))
             elif words == ["nofocus"]:
-                legacy_add(rule, Node("open-focused", [False]))
+                rule.set(Node("open-focused", [False]))
             elif (
                 len(words) == 2 and words[0] in {"opacity", "opacity_set"}
             ) or (len(words) == 3 and words[:2] == ["opacity", "set"]):
@@ -2201,7 +2229,7 @@ class Translator:
                     return
                 rule.add(Node("sway-for-window-command", [directive]))
             elif words[:2] == ["move", "workspace"] and len(words) == 3:
-                legacy_add(rule, Node("open-on-workspace", [words[2]]))
+                rule.set(Node("open-on-workspace", [words[2]]))
             elif (
                 len(words) == 6
                 and words[:2] == ["resize", "set"]
@@ -2214,18 +2242,13 @@ class Translator:
                 except ValueError:
                     width = height = -1
                 if width > 0 and height > 0:
-                    legacy_add(
-                        rule,
-                        preset_size(
-                            "default-column-width",
-                            "proportion",
-                            legacy_g_float(width / 100),
-                        ),
-                        preset_size(
-                            "default-window-height",
-                            "proportion",
-                            legacy_g_float(height / 100),
-                        ),
+                    # PresetSize::Proportion holds an f64
+                    # (swayward-config/src/layout.rs:198-201).
+                    rule.set(
+                        preset_size("default-column-width", "proportion", width / 100)
+                    )
+                    rule.set(
+                        preset_size("default-window-height", "proportion", height / 100)
                     )
                 else:
                     self.warn(
@@ -2242,20 +2265,14 @@ class Translator:
                 and words[5].isdigit()
                 and (len(words) == 6 or words[6] == "px")
             ):
-                legacy_add(
-                    rule,
-                    preset_size("default-column-width", "fixed", Raw(words[3])),
-                    preset_size("default-window-height", "fixed", Raw(words[5])),
-                )
+                rule.set(preset_size("default-column-width", "fixed", Raw(words[3])))
+                rule.set(preset_size("default-window-height", "fixed", Raw(words[5])))
             elif (
                 resized := self.fixed_resize_set(words)
             ) is not None:
                 width, height = resized
-                legacy_add(
-                    rule,
-                    preset_size("default-column-width", "fixed", width),
-                    preset_size("default-window-height", "fixed", height),
-                )
+                rule.set(preset_size("default-column-width", "fixed", width))
+                rule.set(preset_size("default-window-height", "fixed", height))
             elif words == ["move", "position", "center"]:
                 rule.add(Node("sway-for-window-command", ["move position center"]))
             elif self.is_move_position_coordinates(words):
@@ -2282,15 +2299,12 @@ class Translator:
             elif words[:1] == ["dim_inactive"] and len(words) == 2:
                 rule.set(Node("opacity", [1.0 - float(words[1])]))
             elif words[:1] == ["corner_radius"] and len(words) == 2:
-                legacy_add(
-                    rule,
-                    Node("geometry-corner-radius", [Raw(words[1])]),
-                    Node("clip-to-geometry", [True]),
-                )
+                rule.set(Node("geometry-corner-radius", [Raw(words[1])]))
+                rule.set(Node("clip-to-geometry", [True]))
             elif words[:1] == ["blur"] and len(words) == 2:
-                legacy_add(rule, background_effect("blur", words[1]))
+                set_background_effect(rule, "blur", words[1])
             elif words[:1] == ["shadows"] and len(words) == 2:
-                legacy_add(rule, shadow(words[1]))
+                rule.set(shadow(words[1]))
             else:
                 self.warn(
                     source,
@@ -2333,13 +2347,10 @@ class Translator:
             "bottom": ("bottom",),
             "left": ("left",),
         }[kind]
-        # One outer-gaps node per layout: the sides set so far keep their
-        # place, and the node moves to the end, as sway's last setting wins.
-        existing = settings.get("outer-gaps")
-        gaps = Node("outer-gaps", children=list(existing.children) if existing else [])
-        for side in sides:
-            gaps.put(Node(side, [amount]))
-        settings.set(gaps)
+        # One outer-gaps node per layout, merged as sway's last setting wins.
+        set_merged(
+            settings, Node("outer-gaps", children=[Node(side, [amount]) for side in sides])
+        )
 
     def translate_device_block(
         self, source: Path, line: int, kind: str, selector: str, body: list[str]
@@ -2402,7 +2413,10 @@ class Translator:
             "xkb_variant": "variant",
         }
         pos = Pos(source, line)
-        translated = Node(target)  # this block's settings, merged below
+        # Later settings replace earlier ones, as sway merges input configs
+        # field by field (sway/config/input.c:52-189). The xkb settings of
+        # one block are merged at its end.
+        device = self.doc.device(target)
         xkb = Node("xkb")
         for item in body:
             if not item or item.startswith("#"):
@@ -2411,18 +2425,18 @@ class Translator:
             unhandled = Report(pos, "unhandled input directive", item)
             if words[0] == "xkb_numlock" and target == "keyboard":
                 if len(words) == 1:
-                    translated.report(unhandled, self.doc)
+                    device.report(unhandled, self.doc)
                     continue
                 value = unquote_args(split_args(words[1]))[0]
                 enabled = value.lower() in {
                     "1", "yes", "on", "true", "enable", "enabled", "active", "toggle"
                 }
-                translated.add(Comment(f"sway-to-kdl: sway {item}"))
-                legacy_add(translated, Node("numlock", [] if enabled else [False]))
+                device.add(Comment(f"sway-to-kdl: sway {item}"))
+                device.set(Node("numlock", [] if enabled else [False]))
                 continue
             name = mappings.get(words[0])
             if name is None:
-                translated.report(unhandled, self.doc)
+                device.report(unhandled, self.doc)
                 continue
             value = words[1] if len(words) > 1 else "enabled"
             enum_values = {
@@ -2442,25 +2456,33 @@ class Translator:
                     "lmr": "left-middle-right",
                 },
             }
-            parent = xkb if words[0].startswith("xkb_") else translated
+            parent = xkb if words[0].startswith("xkb_") else device
             if name == "drag":
-                legacy_add(parent, Node(name, [value == "enabled"]))
+                parent.set(Node(name, [value == "enabled"]))
             elif value in {"enabled", "disabled"}:
                 # libinput booleans are bare KDL flags that take no argument:
                 # presence enables them and absence leaves them off.
                 if value == "enabled":
-                    legacy_add(parent, Node(name))
+                    parent.set(Node(name))
                 else:
+                    parent.remove(name)
                     parent.add(Comment(f"sway-to-kdl: sway {item}"))
             elif name in enum_values:
-                legacy_add(parent, Node(name, [enum_values[name].get(value, value)]))
+                parent.set(Node(name, [enum_values[name].get(value, value)]))
             elif name in {"layout", "model", "options", "rules", "variant"}:
                 value = join_args(unquote_args(split_args(value)))
-                legacy_add(parent, Node(name, [value]))
+                parent.set(Node(name, [value]))
             elif name in {"accel-speed", "scroll-factor"}:
+                # Both are FloatOrInt (swayward-config/src/input/libinput.rs:
+                # 11,46). Sway refuses NaN (sway/commands/input/pointer_accel.c:
+                # 19-22, scroll_factor.c:20-23), and KDL has no infinity.
                 try:
-                    legacy_add(parent, Node(name, [legacy_g_float(float(value))]))
+                    number = float(value)
                 except ValueError:
+                    number = math.nan
+                if math.isfinite(number):
+                    parent.set(Node(name, [number]))
+                else:
                     parent.report(unhandled, self.doc)
             elif name == "scroll-button" and not value.isdecimal():
                 button_codes = {
@@ -2475,12 +2497,11 @@ class Translator:
                 if value not in button_codes:
                     parent.report(unhandled, self.doc)
                 else:
-                    legacy_add(parent, Node(name, [button_codes[value]]))
+                    parent.set(Node(name, [button_codes[value]]))
             else:
-                legacy_add(parent, Node(name, [Raw(value)]))
+                parent.set(Node(name, [Raw(value)]))
         if xkb.children:
-            legacy_add(translated, xkb)
-        legacy_add(self.doc.device(target), *translated.children)
+            set_merged(device, xkb)
 
     def translate_output_block(
         self, source: Path, line: int, selector: str, body: list[str]
@@ -2507,7 +2528,7 @@ class Translator:
                 # (`sway/sway/commands/output/mode.c`), swayward's parser does
                 # not. Strip it so the emitted config loads.
                 mode = re.sub(r"(@[0-9.]+)\s*Hz$", r"\1", words[index + 1], flags=re.IGNORECASE)
-                legacy_add(translated, Node("mode", [mode]))
+                translated.set(Node("mode", [mode]))
                 index += 2
             elif name in {"pos", "position"} and index + 1 < len(words):
                 if "," in words[index + 1]:
@@ -2520,9 +2541,8 @@ class Translator:
                     x = y = ""
                     consumed = 0
                 if re.fullmatch(r"-?\d+", x) and re.fullmatch(r"-?\d+", y):
-                    legacy_add(
-                        translated,
-                        Node("position", props=[("x", Raw(x)), ("y", Raw(y))]),
+                    translated.set(
+                        Node("position", props=[("x", Raw(x)), ("y", Raw(y))])
                     )
                     index += consumed
                 else:
@@ -2544,7 +2564,7 @@ class Translator:
                     "flipped-270",
                 }
                 if value in valid:
-                    legacy_add(translated, Node("transform", [value]))
+                    translated.set(Node("transform", [value]))
                 else:
                     translated.report(
                         Report(pos, "unhandled output directive", f"{name} {value}"),
@@ -2552,12 +2572,15 @@ class Translator:
                     )
                 index += 2
             elif name == "scale" and index + 1 < len(words):
-                legacy_add(translated, Node("scale", [Raw(words[index + 1])]))
+                translated.set(Node("scale", [Raw(words[index + 1])]))
                 index += 2
             elif name in {"enable", "on"}:
+                # The last enable or disable wins
+                # (sway/commands/output/enable.c:9, disable.c:8).
+                translated.remove("off")
                 index += 1
             elif name in {"disable", "off"}:
-                legacy_add(translated, Node("off"))
+                translated.set(Node("off"))
                 index += 1
             else:
                 argument_count = unsupported_argument_counts.get(name)
@@ -2647,7 +2670,7 @@ class Translator:
             self.doc.layout.add(
                 Comment("SwayFX shadows; tune remaining shadow controls as needed")
             )
-            legacy_add(self.doc.layout, Node("shadow", children=[Node(state)]))
+            self.doc.layout.set(Node("shadow", children=[Node(state)]))
         elif name == "shadows_on_csd" and len(words) == 2:
             self.warn(
                 source,
@@ -2692,13 +2715,13 @@ class Translator:
         for effect in effects:
             words = command_words(effect)
             if words[:1] == ["blur"] and len(words) == 2:
-                legacy_add(rule, background_effect("blur", words[1]))
+                set_background_effect(rule, "blur", words[1])
             elif words[:1] == ["blur_xray"] and len(words) == 2:
-                legacy_add(rule, background_effect("xray", words[1]))
+                set_background_effect(rule, "xray", words[1])
             elif words[:1] == ["shadows"] and len(words) == 2:
-                legacy_add(rule, shadow(words[1]))
+                rule.set(shadow(words[1]))
             elif words[:1] == ["corner_radius"] and len(words) == 2:
-                legacy_add(rule, Node("geometry-corner-radius", [Raw(words[1])]))
+                rule.set(Node("geometry-corner-radius", [Raw(words[1])]))
             else:
                 rule.report(
                     Report(
@@ -2832,10 +2855,10 @@ class Comment:
 class Node:
     """A KDL node. add, set and put say how a child joins its parent.
 
-    add appends a repeatable child or a comment. set and put take a
-    singular child, last wins: set drops any child of that name and appends;
-    put replaces the first such child in place, and appends only when there
-    is none.
+    add appends a repeatable child or a comment, and raises on a singular
+    one (SINGULAR). set and put take a singular child, last wins: set drops
+    any child of that name and appends; put replaces the first such child in
+    place, and appends only when there is none.
     """
 
     name: str  # rendered bare, except that an all-digit name is quoted
@@ -2846,6 +2869,11 @@ class Node:
     block: bool = False  # braces even with no children: `output "x" {` `}`
 
     def add(self, child: Node | Comment) -> None:
+        if isinstance(child, Node) and child.name in SINGULAR.get(self.name, ()):
+            raise ValueError(
+                f"{child.name} is a singular child of {self.name or 'the top level'}; "
+                "use set or put"
+            )
         self.children.append(child)
 
     def set(self, child: Node) -> None:
@@ -2893,7 +2921,8 @@ class Node:
 # decode.rs: every node except its multipart sections. binds, mode and
 # default-column-width decode by hand too and have no entry.
 # test-sway-to-kdl.py reads the Rust sources and fails when this drifts.
-# Nothing enforces it: legacy_add appends these names unchecked.
+# Node.add raises on these names, so a singular child joins through set or
+# put and a repeated directive never emits a second one.
 SINGULAR: dict[str, frozenset[str]] = {
     "": frozenset({
         "animations", "binds", "blur", "clipboard", "config-notification",
@@ -3066,47 +3095,48 @@ class Document:
         return self.devices[name]
 
     def workspace(self, name: str) -> Node:
+        """The workspace's node, created on first mention.
+
+        Workspaces render in first-mention order, the order of sway's
+        workspace_configs (sway/commands/workspace.c:13-31), which
+        workspace_next_name walks (sway/tree/workspace.c:461-480).
+        """
         if name not in self.workspaces:
             self.workspaces[name] = Node("workspace", [name], block=True)
         return self.workspaces[name]
 
-    def workspace_layout(self, name: str) -> Node:
+    def workspace_child(self, name: str, child: str) -> Node:
+        """The workspace's singular child named child, created on first use."""
         workspace = self.workspace(name)
-        layout = workspace.get("layout")
-        if layout is None:
-            layout = Node("layout")
-            workspace.add(layout)
-        return layout
+        node = workspace.get(child)
+        if node is None:
+            node = Node(child)
+            workspace.put(node)
+        return node
+
+    def workspace_layout(self, name: str) -> Node:
+        return self.workspace_child(name, "layout")
+
+    def workspace_assignment(self, name: str) -> Node:
+        return self.workspace_child(name, "sway-output-assignment")
 
 
-def legacy_add(parent: Node, *children: Node | Comment) -> None:
-    parent.children.extend(children)
+def set_merged(parent: Node, node: Node) -> None:
+    """Set node in parent, merged with parent's node of that name.
 
-
-def legacy_g_float(value: float) -> Raw:
-    return Raw(f"{value:g}")
-
-
-def legacy_workspace_assignment(doc: Document, name: str) -> Node:
-    """The workspace's sway-output-assignment node, created on first use.
-
-    Assigned workspaces render first, in assignment order, so a newly
-    assigned workspace moves to the end of the assigned ones; its assignment
-    renders before its layout.
+    Each child of node replaces its namesake in place or is appended, and
+    the merged node moves to the end, as the later setting wins.
     """
-    workspace = doc.workspace(name)
-    assignment = workspace.get("sway-output-assignment")
-    if assignment is None:
-        assignment = Node("sway-output-assignment")
-        workspace.children.insert(0, assignment)
-        assigned = [
-            other
-            for other, node in doc.workspaces.items()
-            if other != name and node.get("sway-output-assignment") is not None
-        ]
-        rest = [other for other in doc.workspaces if other != name and other not in assigned]
-        doc.workspaces = {other: doc.workspaces[other] for other in [*assigned, name, *rest]}
-    return assignment
+    existing = parent.get(node.name)
+    if existing is not None:
+        merged = replace(node, children=list(existing.children))
+        for child in node.children:
+            if isinstance(child, Node):
+                merged.put(child)
+            else:
+                merged.add(child)
+        node = merged
+    parent.set(node)
 
 
 # ---------------------------------------------------------------------------

@@ -24,8 +24,6 @@ input {
     keyboard {
         xkb {
             layout "us"
-        }
-        xkb {
             options "caps:escape"
         }
     }

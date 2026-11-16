@@ -495,7 +495,7 @@ bindsym Mod5+q workspace 1
         result = self.translate('output DP-1 mode 1920x1080\n')
         self.assertIn('mode "1920x1080"', result.stdout)
 
-    def test_output_legacy_aliases_positions_and_transform_translate(self):
+    def test_output_alias_names_positions_and_transform_translate(self):
         result = self.translate(
             "output DP-1 pos 1920,0 res 1920x1080\n"
             "output DP-2 position 0 0 mode 2560x1440@60Hz\n"
@@ -2230,6 +2230,142 @@ bindsym Mod5+q workspace 1
             'layer_effects "rofi" blur_xray enable; shadows on; corner_radius 4; foo bar\n'
         )
 
+    def test_repeated_singular_settings_keep_the_last(self):
+        # A singular KDL child appears once, holding the later directive's
+        # value, as sway's later setting wins; a second node fails to load.
+        result = self.translate(
+            "workspace_layout tabbed\n"
+            "workspace_layout stacking\n"
+            "focus_wrapping no\n"
+            "force_focus_wrapping yes\n"
+            "floating_minimum_size 10 x 10\n"
+            "floating_minimum_size 20 x 20\n"
+            "tiling_drag disable\n"
+            "tiling_drag enable\n"
+            "tiling_drag_threshold 5\n"
+            "tiling_drag_threshold 9\n"
+            "workspace_auto_back_and_forth yes\n"
+            "workspace_auto_back_and_forth no\n"
+            "popup_during_fullscreen ignore\n"
+            "popup_during_fullscreen smart\n"
+            "focus_on_window_activation focus\n"
+            "focus_on_window_activation none\n"
+            "mouse_warping container\n"
+            "mouse_warping none\n"
+            "primary_selection disabled\n"
+            "primary_selection enabled\n"
+            "xwayland disable\n"
+            "xwayland enable\n"
+            "shadows on\n"
+            "shadows off\n"
+            "input type:touchpad {\n"
+            "    tap enabled\n"
+            "    accel_profile flat\n"
+            "    accel_profile adaptive\n"
+            "}\n"
+            "input type:touchpad tap disabled\n"
+            "input type:keyboard {\n"
+            "    xkb_layout us\n"
+            "    xkb_options caps:escape\n"
+            "}\n"
+            "input type:keyboard xkb_layout de\n"
+            "input type:keyboard xkb_numlock disabled\n"
+            "input type:keyboard xkb_numlock enabled\n"
+            "output DP-1 mode 800x600 mode 1920x1080 disable enable scale 1 scale 2\n"
+            'for_window [app_id="a"] border pixel 2, border none, focus, nofocus\n'
+            'for_window [app_id="b"] blur on, shadows on, shadows off, '
+            "move workspace 1, move workspace 2\n"
+            "layer_effects rofi blur enable; blur_xray enable; blur disable\n"
+        )
+        out = result.stdout
+        for line, count in [
+            ('workspace-layout "stacking"', 1),
+            ("workspace-layout", 1),
+            ('focus-wrapping "force"', 1),
+            ("focus-wrapping", 1),
+            ("floating-minimum-size 20 20", 1),
+            ("floating-minimum-size", 1),
+            ("tiling-drag true", 1),
+            ("tiling-drag-threshold 9", 1),
+            ("workspace-auto-back-and-forth false", 1),
+            ('popup-during-fullscreen "smart"', 1),
+            ('focus-on-window-activation "none"', 1),
+            ("warp-mouse-to-focus", 0),
+            ("clipboard", 0),
+            ("xwayland-satellite", 0),
+            ("shadow {\n        off\n    }", 2),  # layout and window-rule
+            ("    tap\n", 0),
+            ('accel-profile "adaptive"', 1),
+            ("accel-profile", 1),
+            ("xkb {", 1),
+            ('layout "de"', 1),
+            ('options "caps:escape"', 1),
+            ("numlock\n", 1),
+            ("numlock false", 0),
+            ('output "DP-1" {\n    mode "1920x1080"\n    scale 2\n}', 1),
+            ('sway-border "none"', 1),
+            ("sway-border-width 2", 1),
+            ("open-focused false", 1),
+            ("open-focused", 1),
+            ('open-on-workspace "2"', 1),
+            ("open-on-workspace", 1),
+            ("background-effect {", 2),
+            ("blur false", 1),
+            ("xray true", 1),
+            ("blur true", 1),
+        ]:
+            with self.subTest(line=line):
+                self.assertEqual(out.count(line), count, out)
+
+    def test_whole_floats_keep_their_decimal_point(self):
+        # accel-speed and scroll-factor are FloatOrInt, a proportion is an
+        # f64 (swayward-config/src/input/libinput.rs:11,46, layout.rs:198-201).
+        result = self.translate(
+            "input type:pointer {\n"
+            "    pointer_accel 1\n"
+            "    scroll_factor 2\n"
+            "}\n"
+            "input type:touchpad pointer_accel nan\n"
+            'for_window [app_id="a"] resize set 100 ppt 50 ppt\n'
+        )
+        self.assertIn("accel-speed 1.0", result.stdout)
+        self.assertIn("scroll-factor 2.0", result.stdout)
+        self.assertIn("proportion 1.0", result.stdout)
+        self.assertIn("proportion 0.5", result.stdout)
+        self.assertNotIn("nan", result.stdout.replace("unhandled input directive: pointer_accel nan", ""))
+        self.assertIn("unhandled input directive: pointer_accel nan", result.stderr)
+
+    def test_workspaces_render_in_first_mention_order(self):
+        # sway keeps workspace_configs in first-mention order
+        # (sway/commands/workspace.c:13-31), and workspace_next_name walks
+        # them in that order (sway/tree/workspace.c:461-480).
+        result = self.translate(
+            "workspace 1 gaps inner 5\n"
+            "workspace 2 output HDMI-A-1\n"
+            "workspace 1 output DP-1 DP-2\n"
+            "workspace 1 output DP-3\n"
+        )
+        out = result.stdout
+        self.assertLess(out.index('workspace "1" {'), out.index('workspace "2" {'))
+        self.assertIn('sway-output-assignment "DP-1" "DP-2" "DP-3"', out)
+        self.assertEqual(out.count("sway-output-assignment"), 2)
+
+    def test_mouse_bindings_are_known_by_their_sway_names(self):
+        # get_mouse_bindsym reads `button` ignoring case and `BTN_` exactly
+        # (sway/input/cursor.c:1203-1226); anything else is a keysym, and
+        # swayward's pointer trigger names are none (sway/commands/bind.c:194-199).
+        result = self.translate(
+            "bindsym Button8 nop back\n"
+            "bindsym MouseBack nop kdl-name\n"
+            "bindsym Mod4+wheelscrollup nop kdl-wheel\n"
+        )
+        self.assertIn('MouseBack { command "nop back"; }', result.stdout)
+        self.assertNotIn("kdl-name;", result.stdout)
+        self.assertNotIn("kdl-wheel;", result.stdout)
+        self.assertIn("Unknown key or button 'MouseBack'", result.stderr)
+        self.assertIn("Unknown key or button 'wheelscrollup'", result.stderr)
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+
 
 def checking_stale_goldens(method):
     # Runs inside the test body, so a stale golden fails that test. The check
@@ -2666,6 +2802,25 @@ class IRTests(unittest.TestCase):
         self.assertEqual(node.get("b").args, [5])
         self.assertIsNone(node.get("c"))
 
+    def test_add_refuses_a_singular_child(self):
+        Node, Comment = self.s2k.Node, self.s2k.Comment
+        for parent, child in [("layout", "gaps"), ("", "clipboard"), ("window-rule", "opacity")]:
+            with self.subTest(parent=parent, child=child):
+                node = Node(parent)
+                with self.assertRaisesRegex(ValueError, "singular"):
+                    node.add(Node(child))
+                node.add(Comment("a comment joins any parent"))
+                node.add(Node("not-singular"))
+                node.set(Node(child))
+                self.assertEqual(len(node.children), 3)
+
+    def test_set_merged_keeps_earlier_children(self):
+        Node = self.s2k.Node
+        layout = Node("layout", children=[Node("outer-gaps", children=[Node("top", [1]), Node("left", [2])]), Node("gaps", [3])])
+        self.s2k.set_merged(layout, Node("outer-gaps", children=[Node("left", [4]), Node("right", [5])]))
+        self.assertEqual([c.name for c in layout.children], ["gaps", "outer-gaps"])
+        self.assertEqual(self.names(layout.get("outer-gaps")), [("top", [1]), ("left", [4]), ("right", [5])])
+
     def test_render_quotes_values_and_shapes_nodes(self):
         s2k = self.s2k
         Node, Comment, Raw = s2k.Node, s2k.Comment, s2k.Raw
@@ -2700,9 +2855,9 @@ class IRTests(unittest.TestCase):
         doc.urgent_timeout = s2k.Node("urgent-timeout-ms", [5])
         doc.body.add(s2k.Node("spawn-sh-at-startup", ["b"]))
         doc.device("touchpad")
-        doc.input.add(s2k.Node("tiling-drag", [False]))
+        doc.input.set(s2k.Node("tiling-drag", [False]))
         doc.titlebar.alignment = "left"
-        doc.layout.add(s2k.Node("gaps", [1]))
+        doc.layout.set(s2k.Node("gaps", [1]))
         self.assertEqual(
             s2k.render(doc).split("\n")[3:],
             [
@@ -2765,14 +2920,27 @@ CONFIG_SRC = ROOT / "swayward-config" / "src"
 RAW_STRING_START = re.compile(r'b?r(#*)"')
 
 
-def strip_rust_comments(text):
+def blank(text):
+    """text with every character but a newline replaced by a space."""
+    return re.sub(r"[^\n]", " ", text)
+
+
+def strip_rust_comments(text, literals=True):
     """text with its `//` and (nested) `/* */` comments blanked out.
 
     A comment becomes a space, or the newlines it spans, so line numbers
     hold. String, raw string and character literals are kept, so a `//`
-    inside one is text. A `'` that does not close a one-character literal
-    starts a lifetime.
+    inside one is text; with literals=False their contents are blanked too,
+    quotes kept. A `'` that does not close a one-character literal starts a
+    lifetime.
     """
+
+    def literal(source, quote_open, quote_close):
+        if literals or len(source) < quote_open + quote_close:
+            return source
+        inner = source[quote_open : len(source) - quote_close]
+        return source[:quote_open] + blank(inner) + source[len(source) - quote_close :]
+
     out = []
     index = 0
     while index < len(text):
@@ -2780,7 +2948,8 @@ def strip_rust_comments(text):
         if raw and (index == 0 or not re.match(r"\w", text[index - 1])):
             close = text.find('"' + raw.group(1), raw.end())
             end = len(text) if close < 0 else close + 1 + len(raw.group(1))
-            out.append(text[index:end])
+            closing = 0 if close < 0 else 1 + len(raw.group(1))
+            out.append(literal(text[index:end], raw.end() - index, closing))
             index = end
         elif text.startswith("//", index):
             end = text.find("\n", index)
@@ -2802,14 +2971,14 @@ def strip_rust_comments(text):
                     index += 1
             out.append("\n" * text.count("\n", start, index) or " ")
         elif text[index] == '"':
-            literal = re.match(r'"(?:\\.|[^"\\])*"', text[index:], re.S)
-            end = index + (literal.end() if literal else 1)
-            out.append(text[index:end])
+            found = re.match(r'"(?:\\.|[^"\\])*"', text[index:], re.S)
+            end = index + (found.end() if found else 1)
+            out.append(literal(text[index:end], 1, 1) if found else text[index:end])
             index = end
         elif text[index] == "'":
-            literal = re.match(r"'(?:\\.[^']*|[^'\\])'", text[index:])
-            end = index + (literal.end() if literal else 1)
-            out.append(text[index:end])
+            found = re.match(r"'(?:\\.[^']*|[^'\\])'", text[index:])
+            end = index + (found.end() if found else 1)
+            out.append(literal(text[index:end], 1, 1) if found else text[index:end])
             index = end
         else:
             out.append(text[index])
@@ -2864,9 +3033,10 @@ def cfg_attr_knuffel_lines(text):
 
     knuffel_child_names_in reads only plain `#[knuffel(...)]` attributes, so
     a child field behind cfg_attr would escape the SINGULAR check. Comments
-    are dropped first; string literals inside the attribute are not parsed.
+    and the contents of string and character literals are blanked first, so
+    a parenthesis or `knuffel(` inside a literal is not counted.
     """
-    text = strip_rust_comments(text)
+    text = strip_rust_comments(text, literals=False)
     lines = []
     for found in re.finditer(r"\bcfg_attr\s*\(", text):
         depth, index = 1, found.end()
@@ -2876,6 +3046,16 @@ def cfg_attr_knuffel_lines(text):
         if re.search(r"\bknuffel\s*\(", text[found.end() : index]):
             lines.append(text.count("\n", 0, found.start()) + 1)
     return lines
+
+
+class NoCompatibilityHelpersTests(unittest.TestCase):
+    def test_no_compatibility_helper_names_remain(self):
+        # No name with this prefix remains in either file; the prefix is
+        # built so this file does not match itself.
+        prefix = "leg" + "acy_"
+        for path in [SCRIPT, Path(__file__)]:
+            with self.subTest(path=path.name):
+                self.assertNotIn(prefix, path.read_text().lower())
 
 
 class SingularTests(unittest.TestCase):
@@ -3000,6 +3180,23 @@ class SingularTests(unittest.TestCase):
             "}\n"
         )
         self.assertEqual(cfg_attr_knuffel_lines(source), [3, 7])
+
+    def test_cfg_attr_knuffel_lines_ignores_parentheses_in_literals(self):
+        # A `)` inside a string literal does not close the cfg_attr, so the
+        # knuffel( after it is still inside.
+        source = (
+            "pub struct Synthetic {\n"
+            '    #[cfg_attr(all(), doc = ")", knuffel(child))]\n'
+            "    pub string: bool,\n"
+            '    #[cfg_attr(all(), doc = r#")"#, knuffel(child))]\n'
+            "    pub raw_string: bool,\n"
+            "    #[cfg_attr(all(), doc = ')', knuffel(child))]\n"
+            "    pub character: bool,\n"
+            '    #[cfg_attr(all(), doc = "knuffel(child)")]\n'
+            "    pub only_in_a_string: bool,\n"
+            "}\n"
+        )
+        self.assertEqual(cfg_attr_knuffel_lines(source), [2, 4, 6])
 
     def test_knuffel_child_names_rejects_an_unpaired_child_attribute(self):
         source = (

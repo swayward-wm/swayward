@@ -27,7 +27,6 @@ input {
 layout {
     floating-minimum-size 100 50
     smart-borders "no-gaps"
-    focus-wrapping "force"
     focus-wrapping "yes"
 }
 
