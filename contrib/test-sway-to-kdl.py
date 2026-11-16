@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import difflib
 import functools
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pickle
@@ -1805,6 +1807,238 @@ for _name in [n for n in vars(TranslatorTests) if n.startswith("test_")]:
     setattr(
         TranslatorTests, _name, checking_stale_goldens(getattr(TranslatorTests, _name))
     )
+
+
+def load_script():
+    # The script has no .py suffix, so spec_from_file_location needs a loader.
+    loader = importlib.machinery.SourceFileLoader("sway_to_kdl", str(SCRIPT))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves annotations through sys.modules on Python 3.9.
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+# Case tables for the lexer ports, derived from reading sway 1.12's
+# common/stringop.c and sway/commands.c:205-335. Inputs are raw strings so a
+# backslash in a case is one backslash in the input.
+
+SPLIT_ARGS_CASES = [
+    ("", []),
+    ("   ", []),
+    ("a b", ["a", "b"]),
+    ("  a \t\n\f\v\r b  ", ["a", "b"]),
+    ('a "b c" d', ["a", '"b c"', "d"]),
+    ("a 'b c' d", ["a", "'b c'", "d"]),
+    ('"it\'s" x', ['"it\'s"', "x"]),
+    ("'say \"hi\"' x", ["'say \"hi\"'", "x"]),
+    ('a"b c"d e', ['a"b c"d', "e"]),
+    # A backslash makes the next character literal, whitespace included, and
+    # stays in the token; a second backslash toggles the escape off.
+    (r"a\ b c", [r"a\ b", "c"]),
+    (r'"a\"b c" d', [r'"a\"b c"', "d"]),
+    (r"a\\ b", [r"a\\", "b"]),
+    (r"a\\\ b", [r"a\\\ b"]),
+    (r"\"a b", [r'\"a', "b"]),
+    # Brackets are one level deep, and only outside quotes.
+    ('[app_id="a b"] kill', ['[app_id="a b"]', "kill"]),
+    ("[a [b c] d", ["[a [b c]", "d"]),
+    ("[a] ]b c", ["[a]", "]b", "c"]),
+    ("a[b c]d e", ["a[b c]d", "e"]),
+    ('"[" a', ['"["', "a"]),
+    (r"\[a b]", [r"\[a", "b]"]),
+    # Unterminated runs end at the end of input.
+    ('a "b c', ["a", '"b c']),
+    ("a 'b c", ["a", "'b c"]),
+    ("[x y", ["[x y"]),
+    ("a\\", ["a\\"]),
+    ("x {", ["x", "{"]),
+    ("a\0b c", ["a"]),
+]
+
+STRIP_QUOTES_CASES = [
+    ('"a b"', "a b"),
+    ("'a b'", "a b"),
+    ('"it\'s"', "it's"),
+    ("'say \"hi\"'", 'say "hi"'),
+    ('a"b"c', "abc"),
+    ('"a" \'b\'', "a b"),
+    ('""', ""),
+    ('"unterminated', "unterminated"),
+    # Backslashes stay; an escaped quote stays; the escape toggles.
+    (r'"a\"b"', r"a\"b"),
+    (r'\"a', r'\"a'),
+    (r'\\"a"', r"\\a"),
+    ("plain", "plain"),
+    ('"a"\0"b"', "a"),
+]
+
+# (input, delims, (segment, matched, rest))
+ARGSEP_CASES = [
+    ("a;b", ";,", ("a", ";", "b")),
+    ("a,b", ";,", ("a", ",", "b")),
+    ("a", ";,", ("a", "", None)),
+    ("", ";,", ("", "", None)),
+    (";", ";,", ("", "", None)),
+    (";;a;b", ";,", ("a", ";", "b")),
+    (",;a", ";,", ("a", "", None)),
+    ("a;", ";,", ("a", ";", "")),
+    (" ; a", ";,", (" ", ";", " a")),
+    ('"a;b";c', ";,", ('"a;b"', ";", "c")),
+    ("'a;b';c", ";,", ("'a;b'", ";", "c")),
+    ("'a\"b';c", ";,", ("'a\"b'", ";", "c")),
+    ('a "b;c', ";,", ('a "b;c', "", None)),
+    (r"a\;b;c", ";,", (r"a\;b", ";", "c")),
+    (r"a\\;b", ";,", (r"a\\", ";", "b")),
+    (r"a\ ;b", ";,", (r"a\ ", ";", "b")),
+    # The escape survives an escaped character when the next interesting
+    # character is adjacent: the ';' after \" is escaped too.
+    (r'a\";b', ";,", (r'a\";b', "", None)),
+    (r'a\"x;b', ";,", (r'a\"x', ";", "b")),
+    (r"a\;;b", ";,", (r"a\;;b", "", None)),
+    (r'a\"\";b', ";,", (r'a\"\";b', "", None)),
+    # argsep knows nothing of brackets.
+    ("[x=1;] y;z", ";,", ("[x=1", ";", "] y;z")),
+    ("a b", " ", ("a", " ", "b")),
+    ("a;\0b", ";,", ("a", ";", "")),
+]
+
+UNESCAPE_CASES = [
+    ("plain", "plain"),
+    (r"a\nb", "a\nb"),
+    (r"\t\r\f\v\a\b", "\t\r\f\v\a\b"),
+    (r"\'\"\?", "'\"?"),
+    (r"a\\b", r"a\b"),
+    (r"\\\\", r"\\"),
+    (r"\\n", r"\n"),
+    (r"\q", r"\q"),
+    ("a\\", "a\\"),
+    # \0 returns before the holes are shifted out.
+    (r"a\0b", "a"),
+    (r"a\tb\0c", "a\t"),
+    (r"\n\0", "\n"),
+    # \x reads up to two decimal digits as hex and ends the scan.
+    (r"\x41", "A"),
+    (r"\x4", "\x04"),
+    (r"\x41\n", "A\\n"),
+    (r"\x4\n", "\x04\\n"),
+    (r"\x4a\n", "\x04a\\n"),
+    (r"\xa\n", "a\n"),
+    (r"\x00b", "b"),
+    (r"\x", ""),
+    ("a\0\\n", "a"),
+]
+
+JOIN_ARGS_CASES = [
+    (["a"], "a"),
+    (["a", "b c"], "a b c"),
+    (["", "x"], " x"),
+]
+
+# (input, [(criteria, argv), ...])
+COMMAND_LIST_CASES = [
+    ("", []),
+    (" ; ,; ", []),
+    ("kill", [(None, ["kill"])]),
+    ("  a  ", [(None, ["a"])]),
+    ("floating enable;", [(None, ["floating", "enable"])]),
+    ("a,", [(None, ["a"])]),
+    ("a;;b", [(None, ["a"]), (None, ["b"])]),
+    ("a; ;b", [(None, ["a"]), (None, ["b"])]),
+    ("a , b", [(None, ["a"]), (None, ["b"])]),
+    (
+        '[app_id="a b"] kill; focus',
+        [('[app_id="a b"]', ["kill"]), (None, ["focus"])],
+    ),
+    (
+        '[app_id="x"] floating enable, resize set 10 10',
+        [
+            ('[app_id="x"]', ["floating", "enable"]),
+            ('[app_id="x"]', ["resize", "set", "10", "10"]),
+        ],
+    ),
+    (
+        "[app_id=x] a, b; c",
+        [("[app_id=x]", ["a"]), ("[app_id=x]", ["b"]), (None, ["c"])],
+    ),
+    # Criteria are only parsed after ';' (or at the start).
+    (
+        '[app_id="x"] a, [title="y"] b',
+        [('[app_id="x"]', ["a"]), ('[app_id="x"]', ['[title="y"]', "b"])],
+    ),
+    ("a, ;[app_id=x] b", [(None, ["a"]), (None, ["[app_id=x]", "b"])]),
+    # The criteria are cut before argsep, so a ';' inside them is fine, and
+    # argsep skips a ';' straight after them.
+    ('[title="a;b"] kill', [('[title="a;b"]', ["kill"])]),
+    ("[app_id=x];kill", [("[app_id=x]", ["kill"])]),
+    (r'[title="a\"b"] kill', [(r'[title="a\"b"]', ["kill"])]),
+    ("[floating] kill", [("[floating]", ["kill"])]),
+    ("[app_id=x]", []),
+    ('exec "a; b"; c', [(None, ["exec", '"a; b"']), (None, ["c"])]),
+    ('title_format "a, b"', [(None, ["title_format", '"a, b"'])]),
+    (r"exec echo a\;b", [(None, ["exec", "echo", r"a\;b"])]),
+]
+
+CRITERIA_ERROR_CASES = [
+    ('[app_id="x] kill', "Quote mismatch in criteria"),
+    ("[app_id=x kill", "No closing brace found in criteria"),
+    ("[] kill", "Criteria is empty"),
+    ("[ ] kill", "Token '' is not recognized"),
+    ("[Foo=x] kill", "Token '' is not recognized"),
+    ("a; [app_id=x", "No closing brace found in criteria"),
+]
+
+
+class LexerTests(unittest.TestCase):
+    """The lexer ports, called directly; no translator run, so no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lexer = load_script()
+
+    def test_split_args(self):
+        for source, expected in SPLIT_ARGS_CASES:
+            with self.subTest(source=source):
+                self.assertEqual(self.lexer.split_args(source), expected)
+
+    def test_strip_quotes(self):
+        for source, expected in STRIP_QUOTES_CASES:
+            with self.subTest(source=source):
+                self.assertEqual(self.lexer.strip_quotes(source), expected)
+
+    def test_argsep(self):
+        for source, delims, expected in ARGSEP_CASES:
+            with self.subTest(source=source, delims=delims):
+                self.assertEqual(self.lexer.argsep(source, delims), expected)
+
+    def test_unescape_string(self):
+        for source, expected in UNESCAPE_CASES:
+            with self.subTest(source=source):
+                self.assertEqual(self.lexer.unescape_string(source), expected)
+
+    def test_join_args(self):
+        for args, expected in JOIN_ARGS_CASES:
+            with self.subTest(args=args):
+                self.assertEqual(self.lexer.join_args(args), expected)
+        with self.assertRaises(ValueError):
+            self.lexer.join_args([])
+
+    def test_split_command_list(self):
+        for source, expected in COMMAND_LIST_CASES:
+            with self.subTest(source=source):
+                commands = self.lexer.split_command_list(source)
+                self.assertEqual(
+                    [(command.criteria, command.argv) for command in commands],
+                    expected,
+                )
+
+    def test_split_command_list_rejects_bad_criteria(self):
+        for source, message in CRITERIA_ERROR_CASES:
+            with self.subTest(source=source):
+                with self.assertRaises(self.lexer.CriteriaError) as caught:
+                    self.lexer.split_command_list(source)
+                self.assertEqual(str(caught.exception), message)
 
 
 if __name__ == "__main__":

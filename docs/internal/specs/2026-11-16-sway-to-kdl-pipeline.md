@@ -6,7 +6,7 @@ Date: 2026-11-16
 No translator change lands with this document. It covers `contrib/sway-to-kdl`
 only and refines the six-layer target pipeline from the task brief (reader,
 lexer, directive AST, handlers, KDL IR, renderer), saying where it departs.
-Line references are to `f9063b4c`. Sway references are to sway 1.12
+Line references are to `f732d7d7`. Sway references are to sway 1.12
 (`8886939`).
 
 ## Problem
@@ -25,7 +25,7 @@ The bugs found in this week's review fall into the layers that are missing:
 | Symptom | Missing layer |
 | --- | --- |
 | `output "Some Name With Spaces" scale 2` emits `output "Some"`. `title_format "a, b"` in a `for_window` emits `sway-for-window-command "title_format \"a"` plus a bogus report. In #42, `xcursor_theme 'Bibata' 32` keeps the quotes. | A lexer that follows sway's rules |
-| `floating enable;` produced an empty command. `426ea5c7` patched it with a filter at `:1143-1146`. | An `argsep` equivalent |
+| `floating enable;` produced an empty command. `c50172c6` patched it with a filter at `:1143-1146`. | An `argsep` equivalent |
 | Two `resize set` commands in one `for_window` emit `default-column-width` twice (`:1243-1285`), and `swayward validate` rejects the duplicate. | An IR that knows which children are singular |
 | `Mode_switch+a` and `Group2+a` pass as modifiers, and `Mod3` is refused. One table (`:14-35`) mixes modifiers with group names. | Sway's modifier list |
 | `input type:touchpad { tap enabled }` silently emits an empty `touchpad {}`. A `{` on the next line produces four bogus reports. | A reader that follows sway's line rules |

@@ -8,6 +8,7 @@ import glob
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -32,6 +33,308 @@ MODIFIER_ALIASES = {
     "Group4": "Group4",
     "Mode_switch": "Mode_switch",
 }
+
+
+# ---------------------------------------------------------------------------
+# Lexer
+#
+# Ports of sway 1.12's argument primitives, one function per C function, with
+# their quirks kept: a backslash toggles the escape state, brackets nest one
+# level deep, and unescape_string's "\0" truncates. The C functions work on
+# NUL-terminated bytes, so every port first cuts its input at the first NUL.
+# Python strings hold code points rather than bytes; every character sway
+# treats specially is ASCII, so the two agree except where noted.
+# ---------------------------------------------------------------------------
+
+# `whitespace` in common/stringop.c:13, and isspace() in the C locale.
+SWAY_WHITESPACE = " \f\n\r\t\v"
+
+
+def _c_string(s: str) -> str:
+    return s.split("\0", 1)[0]
+
+
+def split_args(s: str) -> list[str]:
+    """Sway's `split_args` (common/stringop.c:92-143).
+
+    Splits on runs of whitespace outside '...', "..." and one level of [...].
+    Quote characters and backslashes stay in the tokens, and a backslash makes
+    the next character literal, including whitespace.
+    """
+    s = _c_string(s)
+    argv: list[str] = []
+    in_token = in_string = in_char = in_brackets = escaped = False
+    start = end = 0
+    while start < len(s):
+        if not in_token:
+            while end < len(s) and s[end] in SWAY_WHITESPACE:
+                end += 1
+            start = end
+            in_token = True
+        ch = s[end] if end < len(s) else ""
+        if ch == '"' and not in_char and not escaped:
+            in_string = not in_string
+        elif ch == "'" and not in_string and not escaped:
+            in_char = not in_char
+        elif (
+            ch == "["
+            and not in_string
+            and not in_char
+            and not in_brackets
+            and not escaped
+        ):
+            in_brackets = True
+        elif (
+            ch == "]" and not in_string and not in_char and in_brackets and not escaped
+        ):
+            in_brackets = False
+        elif ch == "\\":
+            escaped = not escaped
+        elif ch == "" or (
+            not in_string
+            and not in_char
+            and not in_brackets
+            and not escaped
+            and ch in SWAY_WHITESPACE
+        ):
+            if end > start:
+                argv.append(s[start:end])
+            in_token = False
+            escaped = False
+            continue
+        if ch != "\\":
+            escaped = False
+        end += 1
+    return argv
+
+
+def strip_quotes(s: str) -> str:
+    """Sway's `strip_quotes` (common/stringop.c:26-50).
+
+    Deletes every unescaped quote character that opens or closes a quoted
+    run, wherever it is; a ' inside "..." stays, and so do backslashes.
+    """
+    out: list[str] = []
+    in_str = in_chr = escaped = False
+    for ch in _c_string(s):
+        if ch == "'" and not in_str and not escaped:
+            in_chr = not in_chr
+            continue
+        if ch == '"' and not in_chr and not escaped:
+            in_str = not in_str
+            continue
+        if ch == "\\":
+            escaped = not escaped
+        else:
+            escaped = False
+        out.append(ch)
+    return "".join(out)
+
+
+def argsep(s: str, delims: str) -> tuple[str, str, str | None]:
+    r"""Sway's `argsep` (common/stringop.c:267-312), without the in-place edit.
+
+    Returns (segment, matched, rest): the text before the first delimiter
+    outside quotes, that delimiter ("" at the end of input), and the text
+    after it (None at the end of input, where C sets *stringp to NULL).
+    Delimiters before any other character are skipped. An escape lasts while
+    the characters sway inspects are adjacent, so in `\";` the ';' is
+    escaped too.
+    """
+    s = _c_string(s)
+    start = end = 0
+    in_string = in_char = escaped = False
+    while True:
+        # argsep_next_interesting (:255-265): the first quote, backslash or
+        # delimiter at or after end.
+        interesting = next(
+            (i for i in range(end, len(s)) if s[i] in "\"'\\" or s[i] in delims),
+            None,
+        )
+        if interesting is None:
+            return s[start:], "", None
+        if escaped and interesting != end:
+            escaped = False
+        ch = s[interesting]
+        if ch == '"' and not in_char and not escaped:
+            in_string = not in_string
+            end = interesting + 1
+        elif ch == "'" and not in_string and not escaped:
+            in_char = not in_char
+            end = interesting + 1
+        elif ch == "\\":
+            escaped = not escaped
+            end = interesting + 1
+        elif not in_string and not in_char and not escaped:
+            end = interesting
+            if end - start:
+                return s[start:end], ch, s[end + 1 :]
+            start += 1
+            end = start
+        else:
+            end += 1
+
+
+_UNESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
+
+
+def unescape_string(s: str) -> str:
+    r"""Sway's `unescape_string` (common/stringop.c:152-234).
+
+    C overwrites each escape with NUL holes and shifts them out at the end,
+    which this port mirrors with "\0" in a list. Hence the quirks:
+
+    - `\0` returns at once, before the shift, so the result ends at the first
+      hole: `a\tb\0` gives "a\t".
+    - `\x` reads at most two decimal digits as hex. A digit leaves a hole
+      where the scan continues, so no escape after it is processed.
+    - An unknown escape stays as written, and `\\` becomes one backslash.
+
+    A trailing backslash makes C read past the terminator (undefined); the
+    port keeps the backslash. `\x80` to `\x99` yield one byte in C and the
+    code point of that value here.
+    """
+    buf = list(_c_string(s))
+    n = len(buf)
+    i = 0
+    while i < n and buf[i] != "\0":
+        if buf[i] == "\\":
+            i += 1
+            if i == n:
+                break
+            ch = buf[i]
+            if ch == "0":
+                buf[i - 1] = "\0"
+                return "".join(buf).split("\0", 1)[0]
+            if ch in _UNESCAPES:
+                buf[i - 1] = _UNESCAPES[ch]
+                buf[i] = "\0"
+            elif ch == "\\":
+                buf[i] = "\0"
+            elif ch == "x":
+                value = 0
+                if i + 1 < n and "0" <= buf[i + 1] <= "9":
+                    value = ord(buf[i + 1]) - ord("0")
+                    if i + 2 < n and "0" <= buf[i + 2] <= "9":
+                        value = value * 0x10 + ord(buf[i + 2]) - ord("0")
+                        buf[i + 2] = "\0"
+                    buf[i + 1] = "\0"
+                buf[i] = "\0"
+                buf[i - 1] = chr(value)
+        i += 1
+    return "".join(ch for ch in buf if ch != "\0")
+
+
+def join_args(args: list[str]) -> str:
+    """Sway's `join_args` (common/stringop.c:236-253).
+
+    C asserts argc > 0 and returns NULL; this raises ValueError instead.
+    """
+    if not args:
+        raise ValueError("argc should be positive")
+    return " ".join(args)
+
+
+@dataclass
+class Command:
+    criteria: str | None  # raw "[...]" token, valid for its ';' segment
+    argv: list[str]  # split_args tokens, quotes kept
+
+
+class CriteriaError(ValueError):
+    """A criteria block sway's criteria_parse rejects; sway runs nothing."""
+
+
+def criteria_length(s: str) -> int:
+    """Length of the raw "[...]" at the start of s, as criteria_parse scans it
+    (sway/criteria.c:780-871).
+
+    Only the extent is ported. Token names and values are not validated, so
+    `[foo=bar]` passes here while sway rejects it; an empty name stops the scan
+    with sway's error, since C would make no progress on it either.
+    """
+    head = 0
+
+    def skip_spaces() -> None:  # :746-750, spaces only
+        nonlocal head
+        while head < len(s) and s[head] == " ":
+            head += 1
+
+    skip_spaces()
+    if not s.startswith("[", head):
+        raise CriteriaError("No criteria")
+    head += 1
+    tokens = 0
+    while head < len(s) and s[head] != "]":
+        skip_spaces()
+        name_start = head
+        while head < len(s) and ("a" <= s[head] <= "z" or s[head] == "_"):
+            head += 1
+        name = s[name_start:head]
+        skip_spaces()
+        if s.startswith("=", head):
+            head += 1
+            skip_spaces()
+            in_quotes = s.startswith('"', head)
+            if in_quotes:
+                head += 1
+                while head < len(s) and (s[head] != '"' or s[head - 1] == "\\"):
+                    head += 1
+                if head == len(s):
+                    raise CriteriaError("Quote mismatch in criteria")
+                head += 1
+            else:
+                while head < len(s) and s[head] not in " ]":
+                    head += 1
+        if not name:
+            raise CriteriaError(f"Token '{name}' is not recognized")
+        tokens += 1
+        skip_spaces()
+    if head == len(s):
+        raise CriteriaError("No closing brace found in criteria")
+    if not tokens:
+        raise CriteriaError("Criteria is empty")
+    return head + 1
+
+
+def split_command_list(s: str) -> list[Command]:
+    """The command-list loop of sway's `execute_command`
+    (sway/commands.c:205-335).
+
+    Criteria are parsed only at the start of a ';' segment and apply to every
+    ',' command in it. Segments are cut with argsep(";,") and empty ones are
+    skipped. Quotes are not stripped: sway does that per command, after
+    looking at argv[0] (:264-272).
+    """
+    commands: list[Command] = []
+    head: str | None = _c_string(s)
+    matched = ";"
+    criteria: str | None = None
+    while head is not None:
+        head = head.lstrip(SWAY_WHITESPACE)
+        if matched == ";":
+            criteria = None
+            if head.startswith("["):
+                length = criteria_length(head)
+                criteria = head[:length]
+                head = head[length:].lstrip(SWAY_WHITESPACE)
+        segment, matched, head = argsep(head, ";,")
+        segment = segment.lstrip(SWAY_WHITESPACE)
+        if not segment:
+            continue
+        commands.append(Command(criteria, split_args(segment)))
+    return commands
 
 
 class Translator:
