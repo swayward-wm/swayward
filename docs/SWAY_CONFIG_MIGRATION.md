@@ -125,12 +125,17 @@ These directives translate in their common forms. Check the generated comments
 for the parts that did not:
 
 - **Outputs:** common mode, position, scale, enable, and disable settings are
-  translated. Wallpaper and unmatched output settings are reported.
+  translated. Wallpaper and unmatched output settings are reported. So are
+  `output *` settings, as swayward has no wildcard output: set them in each
+  output's block. A setting given through both a connector name and a
+  make-model-serial identifier is reported, as swayward uses only the first
+  output block that matches an output.
 - **Window rules:** supported `for_window` effects with an `app_id` criterion
   become `window-rule` blocks. Other criteria or commands are reported.
 - **Includes:** sway include globs are expanded during translation. Included sway
-  directives are translated in place. Missing, repeated, or recursive files are
-  reported. Includes that use command substitution, such as Fedora's stock
+  directives are translated in place. A pattern that matches no file, or a file
+  that cannot be read, is reported on its include line; a file already read is
+  skipped, as sway skips it. Includes that use command substitution, such as Fedora's stock
   `include $(/usr/libexec/sway/layered-include ...)`, are refused; translate the
   drop-in files explicitly or concatenate them into your config first.
 - **Titlebars:** configure the font, Pango markup, padding, border thickness,

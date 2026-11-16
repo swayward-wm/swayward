@@ -9,7 +9,7 @@ input {
     focus-follows-mouse
 }
 
-// sway-to-kdl: <tmp>: cannot read include: [Errno 21] Is a directory: '<tmp>': include
+// sway-to-kdl: <tmp>/config:1: cannot read included file <tmp>: Is a directory: include .
 ==== sway-to-kdl golden: stderr ====
 manual attention: 1 directive(s)
-  <tmp>: cannot read include: [Errno 21] Is a directory: '<tmp>': include
+  <tmp>/config:1: cannot read included file <tmp>: Is a directory: include .

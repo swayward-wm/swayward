@@ -9,7 +9,7 @@ input {
     focus-follows-mouse
 }
 
-// sway-to-kdl: <tmp>/config:1: command needs manual conversion to window-rule properties: for_window [app_id="foo"] resize set 50 ppt 400 px
+// sway-to-kdl: <tmp>/config:1: resize size needs manual conversion: for_window [app_id="foo"] resize set 50 ppt 400 px
 ==== sway-to-kdl golden: stderr ====
 manual attention: 1 directive(s)
-  <tmp>/config:1: command needs manual conversion to window-rule properties: for_window [app_id="foo"] resize set 50 ppt 400 px
+  <tmp>/config:1: resize size needs manual conversion: for_window [app_id="foo"] resize set 50 ppt 400 px

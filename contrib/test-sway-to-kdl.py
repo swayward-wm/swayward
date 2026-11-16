@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -48,14 +49,19 @@ class TranslatorTests(unittest.TestCase):
     def setUp(self):
         self.golden_calls = 0
 
-    def translate(self, source: str):
+    def translate(self, source: "str | bytes", timeout=None):
         with tempfile.TemporaryDirectory() as directory:
             source_path = Path(directory) / "config"
-            source_path.write_text(source)
-            return self.run_translator(source_path, tmp=directory)
+            if isinstance(source, bytes):
+                source_path.write_bytes(source)
+            else:
+                source_path.write_text(source)
+            return self.run_translator(source_path, tmp=directory, timeout=timeout)
 
-    def run_translator(self, path, env=None, tmp=None):
+    def run_translator(self, path, env=None, tmp=None, timeout=None):
         """Run the translator on path and compare it with its golden.
+
+        timeout, in seconds, bounds the run: past it the test errors.
 
         tmp is the test's temporary directory: it is normalised to <tmp>, and
         every file under it before the run is recorded as input. (Read them
@@ -81,15 +87,20 @@ class TranslatorTests(unittest.TestCase):
                 *command,
             ]
         result = subprocess.run(
-            command, text=True, capture_output=True, check=True, env=env
+            command, text=True, capture_output=True, check=True, env=env,
+            timeout=timeout,
         )
         self.golden_calls += 1
         golden = GOLDENS / f"{self._testMethodName}.{self.golden_calls}.golden"
         prefixes = prefix_spellings(ROOT, "<repo>")
         if tmp is not None:
             prefixes += prefix_spellings(tmp, "<tmp>")
+        # An input byte that is not UTF-8 is recorded as a \\xNN escape.
         sections = [
-            golden_section(f"input {input_path}", input_path.read_text())
+            golden_section(
+                f"input {input_path}",
+                input_path.read_bytes().decode("utf-8", "backslashreplace"),
+            )
             for input_path in inputs
         ]
         sections.append(golden_section("stdout", result.stdout))
@@ -2366,6 +2377,366 @@ bindsym Mod5+q workspace 1
         self.assertIn("Unknown key or button 'wheelscrollup'", result.stderr)
         self.assertIn("manual attention: 2 directive(s)", result.stderr)
 
+    def test_dim_inactive_takes_a_number_from_0_to_1(self):
+        # The unfocused opacity, 1 - amount, is a fraction
+        # (swayward-config/src/window_rule.rs:76).
+        result = self.translate(
+            "dim_inactive x\n"
+            "default_dim_inactive 2\n"
+            "dim_inactive nan\n"
+            "dim_inactive 1e400\n"
+            "default_dim_inactive 0.25\n"
+            "for_window [app_id=a] dim_inactive x, opacity 0.5\n"
+            "for_window [app_id=b] dim_inactive -1\n"
+        )
+        out, err = result.stdout, result.stderr
+        for text, name in [
+            ("dim_inactive x", "dim_inactive"),
+            ("default_dim_inactive 2", "default_dim_inactive"),
+            ("dim_inactive nan", "dim_inactive"),
+            ("dim_inactive 1e400", "dim_inactive"),
+            ("for_window [app_id=a] dim_inactive x", "dim_inactive"),
+            ("for_window [app_id=b] dim_inactive -1", "dim_inactive"),
+        ]:
+            with self.subTest(text=text):
+                self.assertIn(f"{name} takes a number from 0 to 1: {text}\n", err)
+        self.assertIn("manual attention: 6 directive(s)", err)
+        self.assertIn("opacity 0.75", out)
+        self.assertIn("opacity 0.5", out)
+        self.assertNotIn("nan", out.replace("dim_inactive nan", ""))
+        self.assertNotIn("inf", out.replace("1e400", ""))
+
+    def test_numbers_sway_cannot_hold_in_an_int_are_reported(self):
+        # Sway reads these with strtol into an int (sway/commands/gaps.c:56,
+        # workspace.c:79, floating_minmax_size.c:24,33, force_display_urgency_hint.c:14,
+        # common/util.c:89), which stores another number past INT_MAX. On
+        # Python 3.11+ int() refuses more than 4300 digits.
+        huge = "9" * 4301
+        lines = [
+            f"gaps inner {huge}",
+            "workspace 1 gaps outer 99999999999",
+            "floating_minimum_size 1 x 2147483648",
+            "force_display_urgency_hint 99999999999999999999",
+            "for_window [app_id=a] resize set 99999999999 5",
+            "for_window [app_id=b] move position 0 -2147483649",
+        ]
+        result = self.translate(
+            "".join(f"{line}\n" for line in lines)
+            + "gaps outer -2147483648\n"
+            + "for_window [app_id=c] move position 2147483647 0\n"
+        )
+        out, err = result.stdout, result.stderr
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIn(
+                    "number out of range: sway stores it in a C int, which cannot "
+                    f"hold it: {line}\n",
+                    err,
+                )
+        self.assertIn(f"manual attention: {len(lines)} directive(s)", err)
+        kdl = "\n".join(line for line in out.splitlines() if "//" not in line)
+        for absent in ["99999", "floating-minimum-size", "urgent-timeout-ms", "app-id=\"b\""]:
+            self.assertNotIn(absent, kdl)
+        self.assertIn("top -2147483648", out)
+        self.assertIn('sway-for-window-command "move position 2147483647 0"', out)
+
+    def test_default_border_width_takes_ascii_digits(self):
+        # str.isdigit() accepts "²", which int() refuses; sway reads the
+        # border width with atoi, ASCII digits (sway/commands/default_border.c:23).
+        result = self.translate(
+            "default_border pixel \u00b2\n"
+            "default_floating_border normal 99999999999999999999\n"
+            "new_window \u0663pixel\n"
+            "default_border pixel 3\n"
+        )
+        self.assertIn("unsupported default border: default_border pixel \u00b2\n", result.stderr)
+        self.assertIn("unsupported default border: default_floating_border normal 999", result.stderr)
+        self.assertIn("unsupported default border: new_window \u0663pixel\n", result.stderr)
+        self.assertIn("manual attention: 3 directive(s)", result.stderr)
+        self.assertIn('default-border "pixel" width=3', result.stdout)
+        self.assertNotIn("\u0663", result.stdout.replace("new_window \u0663pixel", ""))
+
+    def test_input_settings_split_at_sway_whitespace(self):
+        # Sway splits at ASCII whitespace only (common/stringop.c:13), so a
+        # Unicode space is part of a word.
+        result = self.translate(
+            "input * \x1c\n"
+            "input type:pointer \x1c\n"
+            "input type:touchpad {\n    \u00a0\n    tap enabled\n}\n"
+            "input type:keyboard xkb_layout\u2003us\n"
+        )
+        out, err = result.stdout, result.stderr
+        # `*` takes keyboard settings only, and \x1c is none.
+        self.assertIn("config:1: device-specific input selectors", err)
+        self.assertIn("config:2: unhandled input directive: \x1c\n", err)
+        self.assertIn("config:3: unhandled input directive: \u00a0\n", err)
+        self.assertIn("config:7: unhandled input directive: xkb_layout\u2003us\n", err)
+        self.assertIn("manual attention: 4 directive(s)", err)
+        self.assertIn("touchpad {\n", out)
+        self.assertIn("        tap\n", out)
+        self.assertNotIn('layout "us"', out)
+
+    def test_lines_that_are_not_utf8_are_reported(self):
+        # swayward reads its config as UTF-8 text
+        # (swayward-config/src/decode.rs:397,455), so no KDL holds these
+        # bytes; reports print them as escapes.
+        result = self.translate(
+            b"exec foo\xff\n"
+            b"bindsym Mod4+a exec ok\n"
+            b"input type:keyboard {\n"
+            b"    xkb_layout \xfe\n"
+            b"    repeat_rate 25\n"
+            b"}\n"
+            b"mode \xff {\n"
+            b"    bindsym a exec b\n"
+            b"}\n"
+            b"foo\xff bar\n"
+        )
+        out, err = result.stdout, result.stderr
+        reason = (
+            "the line is not valid UTF-8, and swayward reads its config as "
+            "UTF-8 text (swayward-config/src/decode.rs:397,455)"
+        )
+        for line, text in [
+            (1, "exec foo\\xff"),
+            (4, "xkb_layout \\xfe"),
+            (7, "mode \\xff {"),
+            (10, "foo\\xff bar"),
+        ]:
+            with self.subTest(line=line):
+                self.assertIn(f"config:{line}: {reason}: {text}\n", err)
+        self.assertIn("manual attention: 4 directive(s)", err)
+        self.assertIn('Super+a { command "exec ok"; }', out)
+        self.assertIn("repeat-rate 25", out)
+        self.assertNotIn("spawn-sh-at-startup", out)
+        self.assertNotIn("mode", out.replace("mode \\xff", ""))
+
+    def test_blocks_nested_too_deep_are_reported(self):
+        # A block deeper than MAX_BLOCK_DEPTH, 64, is reported whole: 65 is
+        # the first depth refused, 64 the last translated. Sway reads any
+        # depth (sway/config.c:732-869).
+        result = self.translate(
+            "a {\n" * 65
+            + "exec inner\n"
+            + "}\n" * 65
+            + "b {\n" * 64
+            + "exec shallow\n"
+            + "}\n" * 64
+        )
+        self.assertIn(
+            "config:1: blocks nested more than 64 deep are not translated; sway "
+            "reads any depth (sway/sway/config.c:732-869): a {\n",
+            result.stderr,
+        )
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+        self.assertNotIn("inner", result.stdout)
+        # The 64-deep block runs as `b b ... exec shallow`, unhandled.
+        self.assertIn("unhandled: " + "b " * 64 + "exec shallow", result.stderr)
+
+    def test_output_directives_merge_by_name(self):
+        # Sway merges an output config into the earlier one of the same name,
+        # field by field (sway/config/output.c:164-239,258-262); swayward uses
+        # the first output node whose name matches, ignoring case
+        # (swayward-config/src/output.rs:150-151,196-199).
+        result = self.translate(
+            "output DP-1 disable\n"
+            "output HDMI-A-1 scale 1\n"
+            "output DP-1 enable\n"
+            "output DP-1 scale 2\n"
+            'output "DP-1" {\n    mode 800x600\n    transform 90\n}\n'
+            "output DP-1 transform normal\n"
+            "output HDMI-A-1 disable\n"
+            "output dp-1 scale 3\n"
+            "output dp-1 {\n    scale 3\n}\n"
+        )
+        out, err = result.stdout, result.stderr
+        self.assertEqual(out.count('\noutput "'), 2, out)
+        self.assertIn(
+            'output "DP-1" {\n    scale 2\n    mode "800x600"\n    transform "normal"\n}\n',
+            out,
+        )
+        self.assertIn('output "HDMI-A-1" {\n    scale 1\n    off\n}\n', out)
+        self.assertLess(out.index('output "DP-1"'), out.index('output "HDMI-A-1"'))
+        clash = (
+            "sway keeps output dp-1 apart from output DP-1, as it compares "
+            "output names exactly (sway/sway/config/output.c:258), but swayward "
+            "matches them ignoring case and uses the first "
+            "(swayward-config/src/output.rs:150-151,196-199)"
+        )
+        self.assertIn(f"config:11: {clash}: output dp-1 scale 3\n", err)
+        self.assertIn(f"config:12: {clash}: output dp-1 {{ ... }}\n", err)
+        self.assertIn("manual attention: 2 directive(s)", err)
+
+    def test_output_settings_no_kdl_node_holds_are_reported(self):
+        # Sway merges the `*` config, then the connector's, then the
+        # identifier's, and `output *` replaces earlier outputs' settings
+        # (sway/config/output.c:264-268,716-728). swayward-config has no
+        # wildcard output and uses the first node that matches an output
+        # (swayward-config/src/output.rs:150-152,196-237).
+        result = self.translate(
+            "output DP-1 scale 1\n"
+            "output * scale 2\n"
+            "output DP-1 position 5 6\n"
+            "output * bg /wallpaper fill\n"
+            'output "Dell Inc. U2720Q ABC" scale 2\n'
+            "output HDMI-A-1 position 0 0\n"
+            "output HDMI-A-1 scale 1\n"
+            'output "Dell Inc. U2720Q ABC" transform 90\n'
+        )
+        out, err = result.stdout, result.stderr
+        self.assertIn(
+            "config:2: sway applies this scale to every output "
+            "(sway/sway/config/output.c:716-728) and replaces the earlier scale "
+            "of output DP-1 (sway/sway/config/output.c:264-268), but "
+            'swayward-config has no wildcard output: an output "*" node matches '
+            "only a connector named * (swayward-config/src/output.rs:150-152,"
+            "196-199); set it in each output's node: output * scale 2\n",
+            err,
+        )
+        self.assertIn("config:4: unhandled output directive: bg /wallpaper fill\n", err)
+        self.assertIn(
+            "config:7: output HDMI-A-1 and output Dell Inc. U2720Q ABC both set "
+            "scale; if Dell Inc. U2720Q ABC is the output on HDMI-A-1, sway "
+            "applies the identifier's value over the connector's "
+            "(sway/sway/config/output.c:716-728), but swayward uses only the "
+            "first output node that matches it "
+            "(swayward-config/src/output.rs:150-152,196-237); combine them by "
+            "hand: output HDMI-A-1 scale 1\n",
+            err,
+        )
+        self.assertIn(
+            "config:5: output Dell Inc. U2720Q ABC and output DP-1 both set scale; "
+            "if Dell Inc. U2720Q ABC is the output on DP-1,",
+            err,
+        )
+        # Position on the connector and transform on the identifier only:
+        # different settings, not reported.
+        self.assertIn("manual attention: 4 directive(s)", err)
+        self.assertIn('output "DP-1" {\n    scale 1\n    position x=5 y=6\n', out)
+
+    def test_resize_set_amounts_fit_swayward_sizes(self):
+        # cmd_resize_set reads `[width] <w> [px|ppt] [height] <h> [px|ppt]`
+        # with strtol into an int (sway/commands/resize.c:421-448,
+        # common/util.c:89); PresetSize holds an i32 or an f64
+        # (swayward-config/src/layout.rs:198-201). A refused command keeps
+        # the rule's other commands.
+        nines = "9" * 311
+        lines = [
+            f'for_window [app_id="a"] floating enable, resize set +{nines} ppt 1 ppt',
+            'for_window [app_id="b"] resize set +2147483648 ppt 1 ppt',
+            'for_window [app_id="c"] resize set width 2147483648 height 1',
+        ]
+        result = self.translate(
+            "".join(f"{line}\n" for line in lines)
+            + 'for_window [app_id="d"] resize set width +2147483647 height 01 px\n'
+            + 'for_window [app_id="e"] resize set +50 ppt 25ppt\n'
+            + 'for_window [app_id="f"] floating enable, mark --bogus x, opacity 0.5\n'
+        )
+        out, err = result.stdout, result.stderr
+        for line in lines:
+            with self.subTest(line=line):
+                command = line[line.index("resize") :]
+                self.assertIn(
+                    "number out of range: sway stores it in a C int, which cannot "
+                    f"hold it: {line[: line.index(']') + 1]} {command}\n",
+                    err,
+                )
+        self.assertIn(
+            'invalid mark command: for_window [app_id="f"] mark --bogus x\n', err
+        )
+        self.assertIn("manual attention: 4 directive(s)", err)
+        self.assertIn('match app-id="a"\n    open-floating true\n}\n', out)
+        self.assertNotIn('app-id="b"', out.replace('[app_id="b"]', ""))
+        self.assertNotIn('app-id="c"', out.replace('[app_id="c"]', ""))
+        self.assertIn(
+            '    match app-id="d"\n'
+            "    default-column-width { fixed 2147483647; }\n"
+            "    default-window-height { fixed 1; }\n",
+            out,
+        )
+        self.assertIn(
+            '    match app-id="e"\n'
+            "    default-column-width { proportion 0.5; }\n"
+            "    default-window-height { proportion 0.25; }\n",
+            out,
+        )
+        self.assertIn(
+            '    match app-id="f"\n    open-floating true\n    opacity 0.5\n', out
+        )
+
+    def test_border_widths_drop_leading_zeroes_before_int(self):
+        # swayward holds border widths as u16 (swayward-config/src/layout.rs:446,
+        # window_rule.rs:45); int() refuses over 4300 digits on Python 3.11+.
+        result = self.translate(
+            "default_border pixel " + "0" * 4300 + "1\n"
+            "default_floating_border normal 065536\n"
+            "new_window 0002pixel\n"
+            "new_float 65536pixel\n"
+            'for_window [app_id="a"] border pixel 0003\n'
+            'for_window [app_id="b"] border pixel 65536\n'
+        )
+        out, err = result.stdout, result.stderr
+        self.assertIn("unsupported default border: default_floating_border normal 065536\n", err)
+        self.assertIn("unsupported default border: new_float 65536pixel\n", err)
+        self.assertIn('for_window [app_id="b"] border pixel 65536\n', err)
+        self.assertIn("manual attention: 3 directive(s)", err)
+        self.assertNotIn("sway-to-kdl failed", err)
+        self.assertIn('default-border "pixel" width=2\n', out)
+        self.assertIn("sway-border-width 3\n", out)
+        self.assertNotIn("65536", out.replace("65536pixel", "").replace("pixel 65536", "").replace("normal 065536", ""))
+
+    def test_include_failures_are_reported_on_the_include(self):
+        # Sway skips an include it cannot read (sway/config.c:560-565); the
+        # translator reports it on the include and goes on.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "loop").symlink_to("loop")
+            (root / "config").write_text(
+                "include ~nosuchuser-sway-to-kdl/config\n"
+                "include loop\n"
+                "exec after\n"
+            )
+            result = self.run_translator(root / "config", tmp=root)
+        out, err = result.stdout, result.stderr
+        self.assertIn(
+            "<tmp>/config:1: cannot find the home directory in "
+            "~nosuchuser-sway-to-kdl/config: include ~nosuchuser-sway-to-kdl/config\n",
+            normalise(err, prefix_spellings(directory, "<tmp>")),
+        )
+        self.assertIn(
+            "<tmp>/config:2: cannot read included file <tmp>/loop: Too many levels "
+            "of symbolic links: include loop\n",
+            normalise(err, prefix_spellings(directory, "<tmp>")),
+        )
+        self.assertIn("manual attention: 2 directive(s)", err)
+        self.assertIn('spawn-sh-at-startup "after"', out)
+
+    def test_criteria_scan_in_linear_time(self):
+        # A pattern with two ways to match a backslash, as `(?:\\.|[^"])*`,
+        # takes about 2**(n/2) steps on an unclosed value of n backslashes;
+        # the criteria patterns match each character one way.
+        backslashes = "\\" * 40
+        result = self.translate(
+            f'for_window [app_id="{backslashes}] floating enable\n'
+            f'for_window [app_id="{backslashes}"] x {{\n    floating enable\n}}\n'
+            'for_window [title="a \\"b\\" c"] floating enable\n',
+            timeout=5,
+        )
+        out, err = result.stdout, result.stderr
+        self.assertIn(
+            f'config:1: criteria need manual conversion to a window-rule match: '
+            f'for_window [app_id="{backslashes}] floating enable\n',
+            err,
+        )
+        self.assertIn(
+            "config:3: command needs manual conversion to window-rule "
+            f'properties: for_window [app_id="{backslashes}"] x floating enable\n',
+            err,
+        )
+        self.assertIn("manual attention: 2 directive(s)", err)
+        # In a valid value `\"` is an escaped quote (sway/criteria.c:822).
+        self.assertIn('match title="a \\\\\\"b\\\\\\" c"', out)
+
 
 def checking_stale_goldens(method):
     # Runs inside the test body, so a stale golden fails that test. The check
@@ -2774,6 +3145,70 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(nodes[0].raw, ("bar {", "a", "", "# c"))
         nodes = self.read("<commands> {\na\n}\n")[1]
         self.assertEqual(nodes[0].raw, ("<commands> {", "a", "}"))
+
+
+class SafetyNetTests(unittest.TestCase):
+    """Exceptions no handler foresees, raised on purpose; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def parse(self, source):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / "config"
+            path.write_text(source)
+            translator = self.s2k.Translator()
+            translator.parse(path)
+            return path, translator.doc
+
+    def test_a_failing_handler_reports_its_directive(self):
+        s2k = self.s2k
+
+        def broken(translator, directive):
+            raise RuntimeError("boom")
+
+        with unittest.mock.patch.dict(s2k.HANDLERS, {"font": broken}):
+            path, doc = self.parse("font Mono 9\nexec a\nfont {\n    Sans 8\n}\nexec b\n")
+        failed = f"{s2k.TRANSLATOR_FAILED} (RuntimeError('boom'))"
+        self.assertEqual(
+            doc.manual,
+            [f"{path}:1: {failed}: font Mono 9", f"{path}:4: {failed}: font Sans 8"],
+        )
+        out = s2k.render(doc)
+        self.assertIn('spawn-sh-at-startup "a"', out)
+        self.assertIn('spawn-sh-at-startup "b"', out)
+
+    def test_a_failing_reader_reports_and_stops(self):
+        s2k = self.s2k
+        with unittest.mock.patch.object(
+            s2k, "read_config", side_effect=RuntimeError("boom")
+        ):
+            path, doc = self.parse("exec a\n")
+        self.assertEqual(doc.manual, [f"{path}: {s2k.READER_FAILED}: RuntimeError('boom')"])
+
+
+class IncludeChainTests(unittest.TestCase):
+    """A deep include chain, run in process; no goldens, as a golden would
+    record every file of the chain."""
+
+    def test_a_deep_include_chain_is_read_whole(self):
+        # Sway sets no include depth limit (sway/config.c:555-624), and
+        # Translator.parse reads includes with a loop, so 1,000 nested
+        # includes stay clear of Python's recursion limit.
+        s2k = load_script()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            depth = 1000
+            for index in range(depth):
+                (root / f"c{index}").write_text(f"include c{index + 1}\n")
+            (root / f"c{depth}").write_text("exec deepest\n")
+            (root / "config").write_text("include c0\nexec after\n")
+            translator = s2k.Translator()
+            translator.parse(root / "config")
+        self.assertEqual(translator.doc.manual, [])
+        out = s2k.render(translator.doc)
+        self.assertIn('spawn-sh-at-startup "deepest"\nspawn-sh-at-startup "after"\n', out)
 
 
 class IRTests(unittest.TestCase):

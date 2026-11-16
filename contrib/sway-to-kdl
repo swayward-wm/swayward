@@ -7,6 +7,7 @@ import argparse
 import glob
 import json
 import math
+import os
 import re
 import sys
 from dataclasses import dataclass, field, replace
@@ -452,6 +453,24 @@ def read_config(path: Path) -> list[Line | Block]:
     return top
 
 
+# A byte read_config could not decode as UTF-8 (surrogateescape).
+UNDECODABLE = re.compile("[\udc80-\udcff]")
+
+
+def printable(text: str) -> str:
+    """text with each undecodable byte written as a `\\xNN` escape."""
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+
+
+def block_depth(block: Block) -> int:
+    """How deeply blocks nest in block, itself included."""
+    depth, level = 0, [block]
+    while level:
+        depth += 1
+        level = [child for b in level for child in b.body if isinstance(child, Block)]
+    return depth
+
+
 def expand_line(block: str | None, line: str, add_brace: bool) -> str:
     """Sway's `expand_line` (sway/config.c:719-729)."""
     prefix = f"{block} " if block is not None else ""
@@ -512,8 +531,9 @@ def body_lines(nodes: list[Line | Block], prefix: str | None = None) -> list[Lin
 #
 # Variables, includes and the set of files already read, handled in source
 # order as sway does. run() reads each file with read_config, handles set
-# and include itself, and yields a Directive for every other line and for
-# every block, expanded.
+# itself, and yields a Directive for every other line and for every block,
+# expanded. Translator.parse runs an include directive's files through
+# include_files.
 # ---------------------------------------------------------------------------
 
 # config_command keeps quotes in these handlers' arguments
@@ -540,6 +560,13 @@ _ASCII_LOWER = str.maketrans(
 def ascii_lower(s: str) -> str:
     """Lower case as strcasecmp compares in the C locale: ASCII letters only."""
     return s.translate(_ASCII_LOWER)
+
+
+def sway_split(text: str, maxsplit: int = 0) -> list[str]:
+    """text split at runs of sway's whitespace (common/stringop.c:13), as
+    str.split(None, maxsplit) splits at Unicode whitespace."""
+    text = text.strip(SWAY_WHITESPACE)
+    return re.split(f"[{SWAY_WHITESPACE}]+", text, maxsplit=maxsplit) if text else []
 
 
 def unquote_args(args: list[str], strip: bool = True) -> list[str]:
@@ -625,6 +652,40 @@ COMMANDS_BLOCK_REFUSED = (
 )
 
 
+# Sway nests blocks to any depth (sway/config.c:732-869). decodable,
+# body_lines and report_block_ends recurse once per level, so a block nested
+# deeper than this is reported whole rather than reaching Python's recursion
+# limit.
+MAX_BLOCK_DEPTH = 64
+DEEP_BLOCK_REFUSED = (
+    f"blocks nested more than {MAX_BLOCK_DEPTH} deep are not translated; "
+    "sway reads any depth (sway/sway/config.c:732-869)"
+)
+UNDECODABLE_REFUSED = (
+    "the line is not valid UTF-8, and swayward reads its config as UTF-8 text "
+    "(swayward-config/src/decode.rs:397,455)"
+)
+
+
+def decodable(node: Line | Block, doc: Translator) -> Line | Block | None:
+    """node without the lines that are not UTF-8, each reported.
+
+    A block whose header is not UTF-8 is reported whole: every line in it
+    runs under that header's name (sway/config.c:719-729). The raw lines a
+    block keeps are untouched; reports print an undecodable byte as an
+    escape (printable).
+    """
+    header = node if isinstance(node, Line) else node.header
+    if UNDECODABLE.search(header.text):
+        text = header.text if isinstance(node, Line) else f"{header.text} {{"
+        doc.warn(header.pos.path, header.pos.line, text, UNDECODABLE_REFUSED)
+        return None
+    if isinstance(node, Line):
+        return node
+    body = [kept for child in node.body if (kept := decodable(child, doc)) is not None]
+    return replace(node, body=body)
+
+
 class Frontend:
     def __init__(self) -> None:
         self.variables: dict[str, str] = {}
@@ -658,14 +719,24 @@ class Frontend:
         """`set name value`: the value is expanded once, when it is set."""
         self.variables[name] = self.expand(value.strip()).replace(r"\$", "$")
 
-    def run(self, path: Path, doc: Translator) -> Iterator[Directive]:
-        path = path.expanduser().resolve()
+    def run(
+        self, path: Path, doc: Translator, include: Directive | None = None
+    ) -> Iterator[Directive]:
+        """The directives of the file at path; include is the directive that
+        includes it, and a file it cannot read is reported there."""
+        # realpath, as load_include_config compares real paths
+        # (sway/config.c:560-578); a symlink loop then fails to read.
+        path = Path(os.path.realpath(os.path.expanduser(path)))
         if path in self.visited:
             return
         try:
             nodes = read_config(path)
         except OSError as error:
-            doc.warn(path, 0, "include", f"cannot read include: {error}")
+            if include is None:
+                doc.warn(path, 0, "include", f"cannot read include: {error}")
+            else:
+                reason = f"cannot read included file {path}: {error.strerror or error}"
+                doc.warn(include.pos.path, include.pos.line, include.text, reason)
             return
         self.visited.add(path)
         for node in nodes:
@@ -674,6 +745,13 @@ class Frontend:
             ]:
                 header = node.header
                 doc.warn(path, header.pos.line, f"{header.text} {{", COMMANDS_BLOCK_REFUSED)
+                continue
+            if isinstance(node, Block) and block_depth(node) > MAX_BLOCK_DEPTH:
+                header = node.header
+                doc.warn(path, header.pos.line, f"{header.text} {{", DEEP_BLOCK_REFUSED)
+                continue
+            node = decodable(node, doc)
+            if node is None:
                 continue
             yield from self.walk([node], doc)
             if isinstance(node, Block):
@@ -696,13 +774,7 @@ class Frontend:
                 self.define(match.group(1), match.group(2))
                 continue
             expanded = self.expand(node.text).replace(r"\$", "$")
-            directive = Directive.from_line(
-                expand_line(prefix, expanded, False), node.pos
-            )
-            if ascii_lower(directive.name) == "include" and directive.args:
-                yield from self.translate_include(doc, directive)
-                continue
-            yield directive
+            yield Directive.from_line(expand_line(prefix, expanded, False), node.pos)
 
     def report_block_ends(self, block: Block, doc: Translator) -> None:
         if block.end is not None and block.end.text != "}":
@@ -712,21 +784,30 @@ class Frontend:
             if isinstance(node, Block):
                 self.report_block_ends(node, doc)
 
-    def translate_include(self, doc: Translator, d: Directive) -> Iterator[Directive]:
+    def include_files(self, doc: Translator, d: Directive) -> Iterator[Directive]:
+        """The directives of the files include directive d names, in order.
+
+        Sway skips a file it cannot read (sway/config.c:560-565); each one
+        is reported on d, and translation goes on after it.
+        """
         # cmd_include joins its arguments (sway/commands/include.c:9).
         source, line, text = d.pos.path, d.pos.line, d.text
         pattern = join_args(d.args)
         if "`" in pattern or "$(" in pattern:
             doc.warn(source, line, text, "include command substitution is refused")
             return
-        pattern_path = Path(pattern).expanduser()
+        try:
+            pattern_path = Path(pattern).expanduser()
+        except RuntimeError:  # `~user` for no user Python can look up
+            doc.warn(source, line, text, f"cannot find the home directory in {pattern}")
+            return
         if not pattern_path.is_absolute():
             pattern_path = source.parent / pattern_path
         matches = sorted(glob.glob(str(pattern_path)))
         if not matches:
             doc.warn(source, line, text, "include matched no files")
         for included in matches:
-            yield from self.run(Path(included), doc)
+            yield from self.run(Path(included), doc, d)
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +839,71 @@ class Report:
         location = (
             f"{self.pos.path}:{self.pos.line}" if self.pos.line else str(self.pos.path)
         )
-        return f"{location}: {self.reason}: {self.text}"
+        return printable(f"{location}: {self.reason}: {self.text}")
+
+
+INT_MIN, INT_MAX = -(2**31), 2**31 - 1
+
+NUMBER_OUT_OF_RANGE = "number out of range: sway stores it in a C int, which cannot hold it"
+
+
+class NumberError(ValueError):
+    """A number sway reads into a C int that cannot hold it."""
+
+
+def c_int(text: str) -> int:
+    """text, an optional sign and ASCII digits, as the int sway stores.
+
+    Sway reads these numbers with strtol into an int
+    (sway/commands/gaps.c:56, workspace.c:79, floating_minmax_size.c:24,33,
+    force_display_urgency_hint.c:14, common/util.c:89). strtol saturates at
+    LONG_MAX and the conversion keeps the low bits, so sway stores another
+    number for a value outside INT_MIN..INT_MAX; that raises NumberError, as
+    does text of another shape. The digits are measured as text first, so
+    no length reaches int(), which refuses over 4300 digits on Python 3.11+.
+    """
+    match = re.fullmatch(r"([+-]?)0*([0-9]+)", text)
+    if match is None:
+        raise NumberError(f"expected an integer: {text}")
+    sign, digits = match.groups()
+    if len(digits) > len(str(INT_MAX)):
+        raise NumberError(NUMBER_OUT_OF_RANGE)
+    value = int(sign + digits)
+    if not INT_MIN <= value <= INT_MAX:
+        raise NumberError(NUMBER_OUT_OF_RANGE)
+    return value
+
+
+U16_MAX = 65535
+
+
+def border_width(text: str) -> int | None:
+    """text, ASCII digits, as a border width swayward holds, or None.
+
+    swayward stores border widths as u16 (swayward-config/src/layout.rs:446,
+    window_rule.rs:45,49). Leading zeroes are dropped and the rest is
+    measured as text before int(), which refuses over 4300 digits on
+    Python 3.11+.
+    """
+    if re.fullmatch(r"[0-9]+", text) is None:
+        return None
+    digits = text.lstrip("0") or "0"
+    if len(digits) > len(str(U16_MAX)):
+        return None
+    value = int(digits)
+    return value if value <= U16_MAX else None
+
+
+# The decimal forms strtof reads, in ASCII.
+DECIMAL = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
+def unit_fraction(text: str) -> float | None:
+    """text as a decimal number from 0 to 1, or None."""
+    if DECIMAL.fullmatch(text) is None:
+        return None
+    value = float(text)  # an exponent past the float range reads as inf
+    return value if 0.0 <= value <= 1.0 else None
 
 
 def preset_size(name: str, kind: str, value: Value) -> Node:
@@ -925,6 +1070,18 @@ def split_key_combo(combo: str) -> KeyCombo:
     return result
 
 
+# The text of a quoted criteria value: each character matches one way, a
+# backslash only with the character after it, so a scan takes time linear in
+# the line. The (?<!\w) before a criteria token keeps finditer from retrying
+# inside a word.
+QUOTED_VALUE = r'(?:[^"\\]|\\.)*'
+
+TRANSLATOR_FAILED = "sway-to-kdl failed on this directive; translate it by hand"
+READER_FAILED = (
+    "sway-to-kdl failed reading the config and stopped; translate the rest by hand"
+)
+
+
 class Translator:
     def __init__(self) -> None:
         self.frontend = Frontend()
@@ -937,10 +1094,44 @@ class Translator:
         self.doc.note(f"sway-to-kdl: satisfied by swayward defaults: {text.strip()}")
 
     def parse(self, path: Path) -> None:
-        for directive in self.frontend.run(path, self):
-            self.dispatch(directive)
+        """Translate the config at path, with every file it includes.
 
-    def dispatch(self, d: Directive) -> None:
+        The directives come from a stack of sources: the file, then each
+        block body and included file on top of the source that names it, so
+        they run in sway's order (sway/config.c:795-796,
+        sway/commands/include.c:11). A loop over the stack rather than
+        recursion keeps any include depth off Python's recursion limit;
+        sway sets no include depth limit either (sway/config.c:555-624).
+
+        A front-end failure while reading a block body or an included file
+        is reported on the directive that opened it, and translation goes
+        on after it; one while reading the config itself is reported and
+        stops.
+        """
+        stack: list[tuple[Directive | None, Iterator[Directive]]] = [
+            (None, self.frontend.run(path, self))
+        ]
+        while stack:
+            opened_by, source = stack[-1]
+            try:
+                directive = next(source, None)
+            except Exception as error:  # the front end's own failure, unforeseen
+                stack.pop()
+                if opened_by is None:
+                    self.warn(path, 0, repr(error), READER_FAILED)
+                else:
+                    d = opened_by
+                    reason = f"{TRANSLATOR_FAILED} ({error!r})"
+                    self.warn(d.pos.path, d.pos.line, d.text, reason)
+                continue
+            if directive is None:
+                stack.pop()
+                continue
+            nested = self.dispatch(directive)
+            if nested is not None:
+                stack.append((directive, nested))
+
+    def dispatch(self, d: Directive) -> Iterator[Directive] | None:
         """Run d through the handler for its name, ignoring ASCII case
         (sway/commands.c:145-149).
 
@@ -949,18 +1140,33 @@ class Translator:
         without, or one its handler declines, runs line by line with the
         block's name as prefix (sway/config.c:719-729,795-796), and its
         header and closing line run nothing (sway/commands.c:355-366).
+
+        Such a block's lines, and an include's files, are returned as the
+        source parse runs next.
+
+        Every input a handler refuses gets a report of its own. An exception
+        none foresaw becomes one report for the directive that raised it,
+        and translation goes on with the next.
         """
+        try:
+            return self.dispatch_unguarded(d)
+        except Exception as error:
+            self.warn(d.pos.path, d.pos.line, d.text, f"{TRANSLATOR_FAILED} ({error!r})")
+            return None
+
+    def dispatch_unguarded(self, d: Directive) -> Iterator[Directive] | None:
         lowered = d.lowered()
         if d.block is not None:
             block_handler = BLOCK_HANDLERS.get(lowered.name)
             if block_handler is None or not block_handler(self, lowered):
-                prefix = block_name(d.text)
-                for directive in self.frontend.walk(d.block.body, self, prefix):
-                    self.dispatch(directive)
-            return
+                return self.frontend.walk(d.block.body, self, block_name(d.text))
+            return None
+        if lowered.name == "include" and d.args:
+            return self.frontend.include_files(self, d)
         handler = HANDLERS.get(lowered.name)
         if handler is None or not handler(self, lowered):
             self.warn(d.pos.path, d.pos.line, d.text, "unhandled")
+        return None
 
     def h_bar_block(self, d: Directive) -> bool:
         # One report for the whole block, echoing its source lines.
@@ -990,7 +1196,7 @@ class Translator:
     def h_for_window_block(self, d: Directive) -> bool:
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if match := re.fullmatch(
-            r'for_window\s*(\[(?:[^"\]]|"(?:\\.|[^"])*")+\])\s*\{', text
+            rf'for_window\s*(\[(?:[^"\]]|"{QUOTED_VALUE}")+\])\s*\{{', text
         ):
             body = [line.text for line in body_lines(d.block.body)]
             self.translate_for_window_commands(path, line_no, match.group(1), body)
@@ -1005,16 +1211,14 @@ class Translator:
         extra = d.argv[2:-1]  # header words after the selector prefix each line
         if extra:
             body = [expand_line(join_args(extra), item, False) for item in body]
-        self.translate_device_block(d.pos.path, d.pos.line, d.name, d.args[0], body)
+        self.translate_device_block(d, d.args[0], body)
         return True
 
     def h_device(self, d: Directive) -> bool:
         if len(d.argv) < 3:
             return False
         settings = text_after(d.text, d.argv, 2)
-        self.translate_device_block(
-            d.pos.path, d.pos.line, d.name, d.args[0], [settings]
-        )
+        self.translate_device_block(d, d.args[0], [settings])
         return True
 
     def h_bind(self, d: Directive) -> bool:
@@ -1046,7 +1250,7 @@ class Translator:
     def h_for_window(self, d: Directive) -> bool:
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if match := re.match(
-            r'for_window\s*(\[(?:[^"\]]|"(?:\\.|[^"])*")+\])\s+(.+)', text
+            rf'for_window\s*(\[(?:[^"\]]|"{QUOTED_VALUE}")+\])\s+(.+)', text
         ):
             self.translate_for_window(path, line_no, match.group(1), match.group(2))
         elif text.startswith("for_window"):
@@ -1173,10 +1377,14 @@ class Translator:
     def h_floating_size(self, d: Directive) -> bool:
         path, line_no, text = d.pos.path, d.pos.line, d.text
         if match := re.fullmatch(
-            r"(floating_minimum_size|floating_maximum_size)\s+(-?\d+)\s+(x)\s+(-?\d+)",
+            r"(floating_minimum_size|floating_maximum_size)\s+(-?[0-9]+)\s+(x)\s+(-?[0-9]+)",
             text,
         ):
-            width, height = int(match.group(2)), int(match.group(4))
+            try:
+                width, height = c_int(match.group(2)), c_int(match.group(4))
+            except NumberError as error:
+                self.warn(path, line_no, text, str(error))
+                return True
             if width < -1 or height < -1:
                 self.warn(path, line_no, text, "floating size below -1 is unsupported")
             else:
@@ -1430,15 +1638,18 @@ class Translator:
         return True
 
     def h_force_display_urgency_hint(self, d: Directive) -> bool:
-        text = d.text
+        path, line_no, text = d.pos.path, d.pos.line, d.text
         if match := re.fullmatch(
-            r"force_display_urgency_hint\s+(-?\d+)(?:\s*ms)?",
+            r"force_display_urgency_hint\s+(-?[0-9]+)(?:\s*ms)?",
             text,
             re.IGNORECASE,
         ):
-            self.doc.urgent_timeout = Node(
-                "urgent-timeout-ms", [max(0, int(match.group(1)))]
-            )
+            try:
+                timeout = c_int(match.group(1))
+            except NumberError as error:
+                self.warn(path, line_no, text, str(error))
+                return True
+            self.doc.urgent_timeout = Node("urgent-timeout-ms", [max(0, timeout)])
         else:
             return False
         return True
@@ -1527,19 +1738,17 @@ class Translator:
         words = arguments.split()
         style = words[0] if words else ""
         width = None
-        if match := re.fullmatch(r"(\d+)pixel", style):
-            if len(words) != 1:
+        if match := re.fullmatch(r"([0-9]+)pixel", style):
+            width = border_width(match.group(1))
+            if len(words) != 1 or width is None:
                 self.warn(source, line, text, "unsupported default border")
                 return
             style = "pixel"
-            width = match.group(1)
-        elif (
-            len(words) == 2
-            and words[1].isdigit()
-            and int(words[1]) <= 65535
-            and style in {"normal", "pixel"}
-        ):
-            width = words[1]
+        elif len(words) == 2 and style in {"normal", "pixel"}:
+            width = border_width(words[1])
+            if width is None:
+                self.warn(source, line, text, "unsupported default border")
+                return
         elif len(words) != 1 or style not in {"none", "normal", "pixel"}:
             self.warn(source, line, text, "unsupported default border")
             return
@@ -1553,7 +1762,7 @@ class Translator:
         # `default_border` IPC command also writes.
         floating = directive in {"default_floating_border", "new_float"}
         name = "default-floating-border" if floating else "default-border"
-        props = [("width", Raw(width))] if width is not None else []
+        props = [("width", width)] if width is not None else []
         # A config may set the same default twice, and new_window/new_float
         # are i3's aliases of the same settings. KDL rejects a duplicate
         # node, and sway's own behaviour is last-wins.
@@ -2009,7 +2218,7 @@ class Translator:
         self, source: Path, line: int, directive: str, criteria: str
     ) -> list[tuple[str, str | bool]] | None:
         token = re.compile(
-            r'(?:(\w+)=(?:"((?:\\.|[^"])*)"|([^ "\]]+))|(tiling|floating))'
+            rf'(?<!\w)(?:(\w+)=(?:"({QUOTED_VALUE})"|([^ "\]]+))|(tiling|floating))'
         )
         criteria_body = criteria[1:-1].strip()
         matches = list(token.finditer(criteria_body))
@@ -2096,11 +2305,15 @@ class Translator:
 
     @staticmethod
     def split_amounts(words: list[str]) -> list[tuple[int, str]] | None:
-        """Parse sway size amounts such as `5 px`, `5px`, `5 ppt` or `5`."""
+        """Parse sway size amounts such as `5 px`, `5px`, `5 ppt` or `5`.
+
+        None when a word is no amount; NumberError for an amount sway's int
+        cannot hold (common/util.c:89).
+        """
         amounts: list[tuple[int, str]] = []
         index = 0
         while index < len(words):
-            found = re.fullmatch(r"(-?\d+)(px|ppt)?", words[index])
+            found = re.fullmatch(r"(-?[0-9]+)(px|ppt)?", words[index])
             if found is None:
                 return None
             unit = found.group(2)
@@ -2108,26 +2321,34 @@ class Translator:
             if unit is None and index < len(words) and words[index] in {"px", "ppt"}:
                 unit = words[index]
                 index += 1
-            amounts.append((int(found.group(1)), unit or "px"))
+            amounts.append((c_int(found.group(1)), unit or "px"))
         return amounts
 
-    def fixed_resize_set(self, words: list[str]) -> tuple[int, int] | None:
-        if words[:2] != ["resize", "set"]:
-            return None
-        amounts = self.split_amounts(words[2:])
-        if (
-            amounts is None
-            or len(amounts) != 2
-            or any(unit != "px" or value <= 0 for value, unit in amounts)
-        ):
-            return None
-        return amounts[0][0], amounts[1][0]
+    @staticmethod
+    def resize_set_amounts(words: list[str]) -> list[tuple[int, str]] | None:
+        """`resize set`'s width and height amounts, as cmd_resize_set reads
+        them (sway/commands/resize.c:421-448): `[width] <w> [px|ppt]
+        [height] <h> [px|ppt]`, each amount a strtol number with its unit
+        attached or as the next word (common/util.c:80-104).
 
-    def is_move_position_coordinates(self, words: list[str]) -> bool:
-        if words[:2] != ["move", "position"]:
-            return False
-        amounts = self.split_amounts(words[2:])
-        return amounts is not None and len(amounts) == 2
+        None when the words are not a width and a height; NumberError for an
+        amount sway's int cannot hold. An amount without a unit is px.
+        """
+        if len(words) >= 2 and words[0] == "width" and words[1] != "height":
+            words = words[1:]
+        amounts: list[tuple[int, str]] = []
+        for axis in ("width", "height"):
+            if axis == "height" and len(words) >= 2 and words[0] == "height":
+                words = words[1:]
+            found = re.fullmatch(r"([+-]?[0-9]+)(px|ppt)?", words[0]) if words else None
+            if found is None:
+                return None
+            unit, consumed = found.group(2), 1
+            if unit is None and words[1:2] in (["px"], ["ppt"]):
+                unit, consumed = words[1], 2
+            amounts.append((c_int(found.group(1)), unit or "px"))
+            words = words[consumed:]
+        return amounts if not words else None
 
     def translate_for_window(
         self, source: Path, line: int, criteria: str, command: str
@@ -2156,6 +2377,20 @@ class Translator:
                 # Criteria after a `;` select other windows (sway/commands.c:232-251).
                 words = [listed.criteria, *words]
                 directive = f"{listed.criteria} {directive}"
+            amounts = None
+            if words[:2] in (["resize", "set"], ["move", "position"]):
+                parse = (
+                    self.resize_set_amounts
+                    if words[1] == "set"
+                    else self.split_amounts
+                )
+                try:
+                    amounts = parse(words[2:])
+                except NumberError as error:
+                    self.warn(
+                        source, line, f"for_window {criteria} {directive}", str(error)
+                    )
+                    continue
             if words[:1] == ["border"]:
                 if words == ["border", "none"]:
                     rule.set(Node("sway-border", ["none"]))
@@ -2164,10 +2399,10 @@ class Translator:
                 elif (
                     len(words) == 3
                     and words[:2] == ["border", "pixel"]
-                    and words[2].isdigit()
+                    and (width := border_width(words[2])) is not None
                 ):
                     rule.set(Node("sway-border", ["pixel"]))
-                    rule.set(Node("sway-border-width", [Raw(words[2])]))
+                    rule.set(Node("sway-border-width", [width]))
                 else:
                     self.warn(
                         source,
@@ -2223,59 +2458,40 @@ class Translator:
                     self.warn(
                         source,
                         line,
-                        f"for_window {criteria} {command}",
+                        f"for_window {criteria} {directive}",
                         "invalid mark command",
                     )
-                    return
+                    continue
                 rule.add(Node("sway-for-window-command", [directive]))
             elif words[:2] == ["move", "workspace"] and len(words) == 3:
                 rule.set(Node("open-on-workspace", [words[2]]))
-            elif (
-                len(words) == 6
-                and words[:2] == ["resize", "set"]
-                and words[3] == "ppt"
-                and words[5] == "ppt"
-            ):
-                try:
-                    width = int(words[2])
-                    height = int(words[4])
-                except ValueError:
-                    width = height = -1
-                if width > 0 and height > 0:
-                    # PresetSize::Proportion holds an f64
-                    # (swayward-config/src/layout.rs:198-201).
-                    rule.set(
-                        preset_size("default-column-width", "proportion", width / 100)
-                    )
-                    rule.set(
-                        preset_size("default-window-height", "proportion", height / 100)
-                    )
-                else:
+            elif words[:2] == ["resize", "set"] and amounts is not None:
+                (width, width_unit), (height, height_unit) = amounts
+                # PresetSize holds a fixed size as an i32 and a proportion as
+                # an f64 (swayward-config/src/layout.rs:198-201); a C int
+                # (c_int) fits the first, and a C int over 100 is finite.
+                kind = {("px", "px"): "fixed", ("ppt", "ppt"): "proportion"}.get(
+                    (width_unit, height_unit)
+                )
+                if kind is None or width <= 0 or height <= 0:
                     self.warn(
                         source,
                         line,
                         f"for_window {criteria} {directive}",
                         "resize size needs manual conversion",
                     )
-            elif (
-                len(words) in {6, 7}
-                and words[:3] == ["resize", "set", "width"]
-                and words[4] == "height"
-                and words[3].isdigit()
-                and words[5].isdigit()
-                and (len(words) == 6 or words[6] == "px")
-            ):
-                rule.set(preset_size("default-column-width", "fixed", Raw(words[3])))
-                rule.set(preset_size("default-window-height", "fixed", Raw(words[5])))
-            elif (
-                resized := self.fixed_resize_set(words)
-            ) is not None:
-                width, height = resized
-                rule.set(preset_size("default-column-width", "fixed", width))
-                rule.set(preset_size("default-window-height", "fixed", height))
+                    continue
+                if kind == "proportion":
+                    width, height = width / 100, height / 100
+                rule.set(preset_size("default-column-width", kind, width))
+                rule.set(preset_size("default-window-height", kind, height))
             elif words == ["move", "position", "center"]:
                 rule.add(Node("sway-for-window-command", ["move position center"]))
-            elif self.is_move_position_coordinates(words):
+            elif (
+                words[:2] == ["move", "position"]
+                and amounts is not None
+                and len(amounts) == 2
+            ):
                 # swayward parses sway's relative `move position <x> <y>`
                 # with px or ppt units and runs it after the window maps.
                 rule.add(Node("sway-for-window-command", [directive]))
@@ -2297,7 +2513,17 @@ class Translator:
                 # command against the window after it maps.
                 rule.add(Node("sway-for-window-command", [directive]))
             elif words[:1] == ["dim_inactive"] and len(words) == 2:
-                rule.set(Node("opacity", [1.0 - float(words[1])]))
+                # As the top-level dim_inactive (translate_swayfx).
+                amount = unit_fraction(words[1])
+                if amount is None:
+                    self.warn(
+                        source,
+                        line,
+                        f"for_window {criteria} {directive}",
+                        "dim_inactive takes a number from 0 to 1",
+                    )
+                else:
+                    rule.set(Node("opacity", [1.0 - amount]))
             elif words[:1] == ["corner_radius"] and len(words) == 2:
                 rule.set(Node("geometry-corner-radius", [Raw(words[1])]))
                 rule.set(Node("clip-to-geometry", [True]))
@@ -2324,11 +2550,15 @@ class Translator:
         raw_amount: str,
         workspace: str | None = None,
     ) -> None:
-        match = re.fullmatch(r"([+-]?\d+)(?:px)?", raw_amount, re.IGNORECASE)
+        match = re.fullmatch(r"([+-]?[0-9]+)(?:px)?", raw_amount, re.IGNORECASE)
         if match is None:
             self.warn(source, line, text, "gap amount must be an integer with optional px suffix")
             return
-        amount = int(match.group(1))
+        try:
+            amount = c_int(match.group(1))
+        except NumberError as error:
+            self.warn(source, line, text, str(error))
+            return
         kind = kind.lower()
         settings = (
             self.doc.layout
@@ -2353,12 +2583,12 @@ class Translator:
         )
 
     def translate_device_block(
-        self, source: Path, line: int, kind: str, selector: str, body: list[str]
+        self, d: Directive, selector: str, body: list[str]
     ) -> None:
-        if kind == "input":
-            self.translate_input_block(source, line, selector, body)
+        if d.name == "input":
+            self.translate_input_block(d.pos.path, d.pos.line, selector, body)
         else:
-            self.translate_output_block(source, line, selector, body)
+            self.translate_output_block(d, selector, body)
 
     def translate_input_block(
         self, source: Path, line: int, selector: str, body: list[str]
@@ -2371,9 +2601,12 @@ class Translator:
             "type:touchpad": "touchpad",
         }
         target = targets.get(selector)
+        # A setting is the item's first word by sway's whitespace
+        # (common/stringop.c:13); Python's split also breaks at Unicode
+        # spaces, so an item of only those would have no word.
         if selector == "*" and all(
-            item.split(None, 1)[0].startswith("xkb_")
-            or item.split(None, 1)[0] in {"repeat_delay", "repeat_rate"}
+            sway_split(item, 1)[0].startswith("xkb_")
+            or sway_split(item, 1)[0] in {"repeat_delay", "repeat_rate"}
             for item in body
             if item and not item.startswith("#")
         ):
@@ -2421,7 +2654,7 @@ class Translator:
         for item in body:
             if not item or item.startswith("#"):
                 continue
-            words = item.split(None, 1)
+            words = sway_split(item, 1)
             unhandled = Report(pos, "unhandled input directive", item)
             if words[0] == "xkb_numlock" and target == "keyboard":
                 if len(words) == 1:
@@ -2504,10 +2737,47 @@ class Translator:
             set_merged(device, xkb)
 
     def translate_output_block(
-        self, source: Path, line: int, selector: str, body: list[str]
+        self, d: Directive, selector: str, body: list[str]
     ) -> None:
-        pos = Pos(source, line)
-        translated = Node("output", [selector], block=True)
+        """One output directive or block, merged into the output's node.
+
+        Sway merges an output config into the earlier one of the same name,
+        compared exactly, field by field: a later setting wins
+        (sway/config/output.c:164-239,258-262). swayward-config keeps every
+        output node and uses the first whose name matches, ignoring ASCII
+        case (swayward-config/src/decode.rs:114-116, output.rs:150-151,
+        196-199), so each name has one node, at its first mention. Names
+        that differ only in case are one output to swayward and two to
+        sway; a later one is reported. Selectors swayward cannot combine as
+        sway does are reported by report_output_selectors.
+        """
+        pos = d.pos
+        translated = self.doc.outputs.get(selector)
+        if translated is None:
+            clash = next(
+                (
+                    name
+                    for name in self.doc.outputs
+                    if ascii_lower(name) == ascii_lower(selector)
+                ),
+                None,
+            )
+            if clash is not None:
+                text = d.text if d.block is None else f"{d.text} ... }}"
+                self.warn(
+                    pos.path,
+                    pos.line,
+                    text,
+                    f"sway keeps output {selector} apart from output {clash}, "
+                    "as it compares output names exactly "
+                    "(sway/sway/config/output.c:258), but swayward matches "
+                    "them ignoring case and uses the first "
+                    "(swayward-config/src/output.rs:150-151,196-199)",
+                )
+                return
+            translated = Node("output", [selector], block=True)
+            self.doc.outputs[selector] = translated
+            self.doc.body.add(translated)
         words = " ".join(
             item for item in body if item and not item.startswith("#")
         ).split()
@@ -2520,6 +2790,7 @@ class Translator:
             "render_bit_depth": 1,
             "subpixel": 1,
         }
+        fields: set[str] = set()  # the settings this directive translates
         index = 0
         while index < len(words):
             name = words[index]
@@ -2529,6 +2800,7 @@ class Translator:
                 # not. Strip it so the emitted config loads.
                 mode = re.sub(r"(@[0-9.]+)\s*Hz$", r"\1", words[index + 1], flags=re.IGNORECASE)
                 translated.set(Node("mode", [mode]))
+                fields.add("mode")
                 index += 2
             elif name in {"pos", "position"} and index + 1 < len(words):
                 if "," in words[index + 1]:
@@ -2544,6 +2816,7 @@ class Translator:
                     translated.set(
                         Node("position", props=[("x", Raw(x)), ("y", Raw(y))])
                     )
+                    fields.add("position")
                     index += consumed
                 else:
                     consumed = 1
@@ -2565,6 +2838,7 @@ class Translator:
                 }
                 if value in valid:
                     translated.set(Node("transform", [value]))
+                    fields.add("transform")
                 else:
                     translated.report(
                         Report(pos, "unhandled output directive", f"{name} {value}"),
@@ -2573,14 +2847,17 @@ class Translator:
                 index += 2
             elif name == "scale" and index + 1 < len(words):
                 translated.set(Node("scale", [Raw(words[index + 1])]))
+                fields.add("scale")
                 index += 2
             elif name in {"enable", "on"}:
                 # The last enable or disable wins
                 # (sway/commands/output/enable.c:9, disable.c:8).
                 translated.remove("off")
+                fields.add("enabled")
                 index += 1
             elif name in {"disable", "off"}:
                 translated.set(Node("off"))
+                fields.add("enabled")
                 index += 1
             else:
                 argument_count = unsupported_argument_counts.get(name)
@@ -2596,7 +2873,86 @@ class Translator:
                     Report(pos, "unhandled output directive", directive), self.doc
                 )
                 index = end
-        self.doc.body.add(translated)
+        self.report_output_selectors(d, selector, translated, fields)
+        self.doc.output_fields.setdefault(selector, set()).update(fields)
+
+    def report_output_selectors(
+        self, d: Directive, selector: str, translated: Node, fields: set[str]
+    ) -> None:
+        """Report output settings whose effect in sway no KDL node can hold.
+
+        Sway builds an output's config from the `*` config, then the
+        connector's, then the "make model serial" identifier's, each merged
+        over the last (find_output_config_from_list, sway/config/output.c:
+        716-728), and an `output *` setting replaces the same setting of
+        every output stored before it (store_output_config, :264-268).
+        swayward-config has no wildcard output: Outputs::find takes the
+        first node whose name matches the connector, ignoring case, or the
+        identifier (swayward-config/src/output.rs:150-152,196-237), so an
+        `output "*"` node matches only a connector named `*`, and one output
+        never combines a connector node with an identifier node.
+
+        So each translated setting of `output *` is reported, naming the
+        outputs whose earlier setting sway replaces. A setting given through
+        both an identifier selector and a connector selector is reported on
+        the later one: the translator cannot tell whether the two name one
+        output, and if they do, sway and swayward apply different values.
+        Different settings through the two kinds are not reported: a
+        connector for one output and an identifier for another is the usual
+        multi-output config, and each node then holds its output's settings.
+        If the two do name one output, swayward reads only the first node,
+        and that case goes unreported.
+        """
+        if not fields:
+            return
+        text = d.text if d.block is None else f"{d.text} ... }}"
+        settings = ", ".join(sorted(fields))
+        if selector == "*":
+            replaced = [
+                f"{field} of output {name}"
+                for name, earlier in self.doc.output_fields.items()
+                if name != "*"
+                for field in sorted(earlier & fields)
+            ]
+            reason = (
+                f"sway applies this {settings} to every output "
+                "(sway/sway/config/output.c:716-728)"
+            )
+            if replaced:
+                reason += (
+                    f" and replaces the earlier {', '.join(replaced)} "
+                    "(sway/sway/config/output.c:264-268)"
+                )
+            reason += (
+                ", but swayward-config has no wildcard output: an output "
+                '"*" node matches only a connector named * '
+                "(swayward-config/src/output.rs:150-152,196-199); set it in "
+                "each output's node"
+            )
+            translated.report(Report(d.pos, reason, text), self.doc)
+            return
+        # An identifier is "make model serial" (output_get_identifier,
+        # sway/config/output.c:31-38); a connector name has no space.
+        identifier = " " in selector
+        shared = [
+            (name, sorted(earlier & fields))
+            for name, earlier in self.doc.output_fields.items()
+            if name not in {"*", selector}
+            and (" " in name) != identifier
+            and earlier & fields
+        ]
+        for name, both in shared:
+            connector, ident = (name, selector) if identifier else (selector, name)
+            reason = (
+                f"output {selector} and output {name} both set "
+                f"{', '.join(both)}; if {ident} is the output on {connector}, "
+                "sway applies the identifier's value over the connector's "
+                "(sway/sway/config/output.c:716-728), but swayward uses only "
+                "the first output node that matches it "
+                "(swayward-config/src/output.rs:150-152,196-237); combine "
+                "them by hand"
+            )
+            translated.report(Report(d.pos, reason, text), self.doc)
 
     def translate_swayfx(self, source: Path, line: int, text: str) -> bool:
         words = text.split()
@@ -2679,7 +3035,13 @@ class Translator:
                 "SwayFX shadows_on_csd has no exact swayward equivalent; tune layout shadow draw-behind-window",
             )
         elif name in {"dim_inactive", "default_dim_inactive"} and len(words) == 2:
-            opacity = 1.0 - float(words[1])
+            # The unfocused opacity, 1 - amount, is a fraction
+            # (swayward-config/src/window_rule.rs:76).
+            amount = unit_fraction(words[1])
+            if amount is None:
+                self.warn(source, line, text, f"{name} takes a number from 0 to 1")
+                return True
+            opacity = 1.0 - amount
             self.doc.note("SwayFX dim_inactive -> unfocused window opacity")
             self.doc.body.add(
                 Node(
@@ -3080,6 +3442,12 @@ class Document:
         self.body = Node("")  # the top level, in source order
         self.urgent_timeout: Node | None = None  # rendered last in body
         self.workspaces: dict[str, Node] = {}
+        # Output nodes by name, each also in body at its first mention
+        # (Translator.translate_output_block).
+        self.outputs: dict[str, Node] = {}
+        # The settings each output selector has translated, by selector
+        # (Translator.report_output_selectors).
+        self.output_fields: dict[str, set[str]] = {}
         self.manual: list[str] = []
 
     def report(self, report: Report) -> None:
@@ -3196,7 +3564,7 @@ def render_head(node: Node) -> str:
 def render_item(item: Node | Comment, depth: int) -> list[str]:
     indent = INDENT * depth
     if isinstance(item, Comment):
-        return [f"{indent}// {item.text}"]
+        return [f"{indent}// {printable(item.text)}"]
     head = indent + render_head(item)
     if item.inline:
         inner = "".join(f"{render_head(child)}; " for child in item.children)

@@ -38,7 +38,7 @@ window-rule {
     match app-id="f"
     open-on-workspace "3"
 }
-// sway-to-kdl: <tmp>/config:7: resize size needs manual conversion: for_window [app_id="g"] resize set a ppt b ppt
+// sway-to-kdl: <tmp>/config:7: command needs manual conversion to window-rule properties: for_window [app_id="g"] resize set a ppt b ppt
 // sway-to-kdl: <tmp>/config:8: resize size needs manual conversion: for_window [app_id="h"] resize set 0 ppt 0 ppt
 // sway-to-kdl: <tmp>/config:9: command needs manual conversion to window-rule properties: for_window [app_id="i"] resize set 10 abc
 window-rule {
@@ -69,6 +69,6 @@ window-rule {
 manual attention: 5 directive(s)
   <tmp>/config:4: opacity must be between 0 and 1: for_window [app_id="d"] opacity abc
   <tmp>/config:5: opacity must be between 0 and 1: for_window [app_id="e"] opacity 2
-  <tmp>/config:7: resize size needs manual conversion: for_window [app_id="g"] resize set a ppt b ppt
+  <tmp>/config:7: command needs manual conversion to window-rule properties: for_window [app_id="g"] resize set a ppt b ppt
   <tmp>/config:8: resize size needs manual conversion: for_window [app_id="h"] resize set 0 ppt 0 ppt
   <tmp>/config:9: command needs manual conversion to window-rule properties: for_window [app_id="i"] resize set 10 abc
