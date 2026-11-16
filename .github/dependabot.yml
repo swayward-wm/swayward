@@ -33,6 +33,9 @@ updates:
       # ordered-float 5.5 requires Rust 1.90.
       - dependency-name: "ordered-float"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # proptest 1.12 requires Rust 1.88.
+      - dependency-name: "proptest"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
       # tracy-client 0.19 needs a tracy-client-sys feature that no compatible
       # release provides; niri is on 0.18 as well.
       - dependency-name: "tracy-client"
