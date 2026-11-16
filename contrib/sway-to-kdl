@@ -10,7 +10,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 
 MODIFIER_ALIASES = {
@@ -574,11 +574,56 @@ def split_command_list(s: str) -> list[Command]:
 # Front end
 #
 # Variables, includes and the set of files already read, handled in source
-# order as sway does. In S2 run() feeds Translator.parse's elif chain: it
-# reads each file with LegacyReader, handles set and include itself, and
-# yields every other logical line, expanded, with the reader, so the chain
-# can take the block the line opens.
+# order as sway does. run() reads each file with LegacyReader, handles set
+# and include itself, and yields a Directive for every other logical line,
+# expanded, with the reader, so a block handler can take the block the line
+# opens.
 # ---------------------------------------------------------------------------
+
+# config_command keeps quotes in these handlers' arguments
+# (sway/commands.c:409-423).
+QUOTED_ARGUMENT_COMMANDS = frozenset(
+    {
+        "exec",
+        "exec_always",
+        "mode",
+        "bindsym",
+        "bindcode",
+        "bindswitch",
+        "bindgesture",
+        "set",
+        "for_window",
+    }
+)
+
+
+@dataclass
+class Directive:
+    name: str  # argv[0] as written
+    argv: list[str]  # split_args after expansion, quotes kept
+    # config_command's view of argv[1:]: unescaped, with quotes stripped
+    # except under QUOTED_ARGUMENT_COMMANDS; set's variable name is left alone.
+    args: list[str]
+    text: str  # expanded logical text: today's string, used in messages
+    pos: Pos
+    # Always None until the front end reads blocks itself: the block handlers
+    # still take theirs from the LegacyReader.
+    block: Block | None = None
+
+    @classmethod
+    def from_line(cls, text: str, pos: Pos) -> Directive:
+        argv = split_args(text)
+        name = argv[0] if argv else ""
+        command = name.lower()  # find_core_handler ignores case
+        first = 2 if command == "set" else 1
+        args = argv[1:first]
+        for arg in argv[first:]:
+            if command not in QUOTED_ARGUMENT_COMMANDS and arg.startswith(
+                ('"', "'")
+            ):
+                arg = strip_quotes(arg)
+            args.append(unescape_string(arg))
+        return cls(name, argv, args, text, pos)
 
 
 class Frontend:
@@ -612,7 +657,7 @@ class Frontend:
 
     def run(
         self, path: Path, doc: Translator
-    ) -> Iterator[tuple[Path, int, str, LegacyReader]]:
+    ) -> Iterator[tuple[Directive, LegacyReader]]:
         path = path.expanduser().resolve()
         if path in self.visited:
             return
@@ -640,7 +685,7 @@ class Frontend:
             if text.startswith("include "):
                 yield from self.translate_include(doc, path, line_no, text)
                 continue
-            yield path, line_no, text, reader
+            yield Directive.from_line(text, line.pos), reader
 
     def translate_set_block(
         self, doc: Translator, source: Path, line: int, body: list[str]
@@ -657,7 +702,7 @@ class Frontend:
 
     def translate_include(
         self, doc: Translator, source: Path, line: int, text: str
-    ) -> Iterator[tuple[Path, int, str, LegacyReader]]:
+    ) -> Iterator[tuple[Directive, LegacyReader]]:
         pattern = text.removeprefix("include ").strip().strip('"\'')
         if "`" in pattern or "$(" in pattern:
             doc.warn(source, line, text, "include command substitution is refused")
@@ -673,8 +718,9 @@ class Frontend:
 
 
 # ---------------------------------------------------------------------------
-# Translator: the elif chain and its handlers, the state they write, and
-# render()
+# Translator: dispatch, one handler per branch of the old elif chain (in
+# its order), the translate_* helpers they call, the state they write, and
+# render(). The handler tables follow the class.
 # ---------------------------------------------------------------------------
 
 
@@ -716,343 +762,624 @@ class Translator:
         )
 
     def parse(self, path: Path) -> None:
-        for path, line_no, text, reader in self.frontend.run(path, self):
-            if re.match(r"bar\s*\{", text):
-                block = reader.block(text)
-                self.warn(
-                    path,
-                    line_no,
-                    " | ".join(block),
-                    "bar blocks are unsupported; use waybar "
-                    "(docs/SWAY_CONFIG_MIGRATION.md#replace-swaybar)",
+        for directive, reader in self.frontend.run(path, self):
+            self.dispatch(directive, reader)
+
+    def dispatch(self, d: Directive, reader: LegacyReader) -> None:
+        """Today's elif chain, as two lookups keyed by directive name.
+
+        For every name, the chain tried each branch that opens a block before
+        any that does not, so the block handler goes first; either returns
+        False when none of its patterns matches. The SwayFX names were tried
+        only after every sway branch failed; none is a sway name, so they
+        share the table.
+        """
+        key = legacy_handler_key(d.text)
+        block_handler = BLOCK_HANDLERS.get(key)
+        if block_handler is not None and block_handler(self, d, reader):
+            return
+        handler = HANDLERS.get(key)
+        if handler is None or not handler(self, d):
+            self.warn(d.pos.path, d.pos.line, d.text, "unhandled")
+
+    def h_bar_block(self, d: Directive, reader: LegacyReader) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if re.match(r"bar\s*\{", text):
+            block = reader.block(text)
+            self.warn(
+                path,
+                line_no,
+                " | ".join(block),
+                "bar blocks are unsupported; use waybar "
+                "(docs/SWAY_CONFIG_MIGRATION.md#replace-swaybar)",
+            )
+        else:
+            return False
+        return True
+
+    def h_mode_block(self, d: Directive, reader: LegacyReader) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.match(
+            r'mode\s+(--pango_markup\s+)?("[^"]+"|\S+)\s*\{', text
+        ):
+            block = reader.block(text)
+            self.translate_mode(
+                path,
+                line_no,
+                match.group(2).strip('"'),
+                block[1:-1],
+                match.group(1) is not None,
+            )
+        else:
+            return False
+        return True
+
+    def h_bind_block(self, d: Directive, reader: LegacyReader) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"(bindsym|bindcode)(.*?)\s*\{", text):
+            block = reader.block(text)
+            self.translate_bind_block(
+                path, line_no, match.group(1), match.group(2), block[1:-1]
+            )
+        else:
+            return False
+        return True
+
+    def h_exec_block(self, d: Directive, reader: LegacyReader) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"(exec|exec_always)\s*\{", text):
+            block = reader.block(text)
+            self.translate_exec_block(
+                path, line_no, match.group(1), block[1:-1]
+            )
+        else:
+            return False
+        return True
+
+    def h_for_window_block(self, d: Directive, reader: LegacyReader) -> bool:
+        # The chain tried `for_window {` well before `for_window [..] {`;
+        # nothing between them matches a line starting with for_window.
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if re.fullmatch(r"for_window\s*\{", text):
+            block = reader.block(text)
+            self.translate_for_window_block(path, line_no, block[1:-1])
+        elif match := re.fullmatch(
+            r'for_window\s*(\[(?:[^"\]]|"(?:\\.|[^"])*")+\])\s*\{', text
+        ):
+            block = reader.block(text)
+            self.translate_for_window_commands(
+                path, line_no, match.group(1), block[1:-1]
+            )
+        else:
+            return False
+        return True
+
+    def h_device_block(self, d: Directive, reader: LegacyReader) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.match(r"(input|output)\s+(.+?)\s*\{", text):
+            block = reader.block(text)
+            self.translate_device_block(
+                path, line_no, match.group(1), match.group(2), block[1:-1]
+            )
+        else:
+            return False
+        return True
+
+    def h_input(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.match(r"input\s+(\S+)\s+(.+)", text):
+            self.translate_device_block(
+                path, line_no, "input", match.group(1), [match.group(2)]
+            )
+        else:
+            return False
+        return True
+
+    def h_output(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.match(r"output\s+(\S+)\s+(.+)", text):
+            self.translate_device_block(
+                path, line_no, "output", match.group(1), [match.group(2)]
+            )
+        else:
+            return False
+        return True
+
+    def h_bind(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.match(r"(bindsym|bindcode)\s+(.+)", text):
+            self.translate_bind(path, line_no, match.group(1), match.group(2))
+        else:
+            return False
+        return True
+
+    def h_exec(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"(exec|exec_always)(?:\s+(.*))?", text):
+            self.translate_exec(
+                path, line_no, text, match.group(1), match.group(2) or ""
+            )
+        else:
+            return False
+        return True
+
+    def h_nop(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if re.fullmatch(r"nop(?:\s+.*)?", text):
+            self.sections.append(f"// sway {text}")
+        else:
+            return False
+        return True
+
+    def h_unsupported_binding(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if re.match(r"(?:un)?bind(?:gesture|switch)(?:\s|$)", text):
+            self.refuse_unsupported_binding(path, line_no, text)
+        else:
+            return False
+        return True
+
+    def h_for_window(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.match(
+            r'for_window\s*(\[(?:[^"\]]|"(?:\\.|[^"])*")+\])\s+(.+)', text
+        ):
+            self.translate_for_window(path, line_no, match.group(1), match.group(2))
+        elif text.startswith("for_window"):
+            self.warn(
+                path,
+                line_no,
+                text,
+                "criteria need manual conversion to a window-rule match",
+            )
+        else:
+            return False
+        return True
+
+    def h_no_focus(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"no_focus\s+(\[[^]]+\])", text):
+            self.translate_no_focus(path, line_no, match.group(1))
+        else:
+            return False
+        return True
+
+    def h_assign(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.match(r"assign\s+(\[[^]]+\])\s+(?:→|->)?\s*(.+)", text):
+            self.translate_assign(path, line_no, match.group(1), match.group(2))
+        else:
+            return False
+        return True
+
+    def h_workspace(self, d: Directive) -> bool:
+        # The chain tried the case-sensitive `workspace X output` before the
+        # gaps branches and `workspace X gaps`, which ignores case, after them.
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"workspace\s+(.+?)\s+output\s+(.+)", text):
+            workspace = match.group(1).strip(chr(34))
+            outputs = [output.strip(chr(34)) for output in match.group(2).split()]
+            # Sway appends every output to one workspace_config in source
+            # order (sway/commands/workspace.c:153-161).
+            self.workspace_assignments.setdefault(workspace, []).extend(outputs)
+        elif match := re.fullmatch(
+            r"workspace\s+(.+?)\s+gaps\s+(inner|outer|horizontal|vertical|top|right|bottom|left)\s+(.+)",
+            text,
+            re.IGNORECASE,
+        ):
+            self.translate_gaps(
+                path,
+                line_no,
+                text,
+                match.group(2),
+                match.group(3),
+                match.group(1).strip(chr(34)),
+            )
+        else:
+            return False
+        return True
+
+    def h_font(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"font\s+(pango:)?(.+)", text):
+            self.titlebar_pango_markup = match.group(1) is not None
+            self.titlebar_font = match.group(2)
+        else:
+            return False
+        return True
+
+    def h_client_colors(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(
+            r"client\.(focused|focused_inactive|focused_tab_title|unfocused|urgent)\s+(.+)",
+            text,
+        ):
+            self.translate_client_colors(path, line_no, text, match.group(1), match.group(2))
+        else:
+            return False
+        return True
+
+    def h_client_ignored(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"(client\.(?:background|placeholder))(?:\s+.*)?", text):
+            self.warn(
+                path,
+                line_no,
+                text,
+                f"{match.group(1)} is accepted but ignored by sway itself "
+                "(sway/sway/commands.c:51,55; sway/sway/commands/client.c:79-81)",
+            )
+        else:
+            return False
+        return True
+
+    def h_gaps(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(
+            r"gaps\s+(inner|outer|horizontal|vertical|top|right|bottom|left)\s+(.+)",
+            text,
+            re.IGNORECASE,
+        ):
+            self.translate_gaps(path, line_no, text, match.group(1), match.group(2))
+        elif text.lower().startswith("gaps "):
+            self.warn(path, line_no, text, "unsupported runtime or malformed gaps directive")
+        else:
+            return False
+        return True
+
+    def h_default_border(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(
+            r"(default_border|default_floating_border|new_window|new_float)\s+(.+)",
+            text,
+        ):
+            self.translate_default_border(
+                path, line_no, text, match.group(1), match.group(2)
+            )
+        else:
+            return False
+        return True
+
+    def h_floating_size(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(
+            r"(floating_minimum_size|floating_maximum_size)\s+(-?\d+)\s+(x)\s+(-?\d+)",
+            text,
+        ):
+            width, height = int(match.group(2)), int(match.group(4))
+            if width < -1 or height < -1:
+                self.warn(path, line_no, text, "floating size below -1 is unsupported")
+            else:
+                name = match.group(1).replace("_", "-")
+                self.layout_settings.append(f"    {name} {width} {height}")
+        else:
+            return False
+        return True
+
+    def h_default_orientation(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"default_orientation\s+(\S+)", text, re.IGNORECASE):
+            value = match.group(1).lower()
+            if value in {"horizontal", "vertical", "auto"}:
+                self.replace_layout_setting(
+                    "default-orientation", f'    default-orientation "{value}"'
                 )
-            elif match := re.match(
-                r'mode\s+(--pango_markup\s+)?("[^"]+"|\S+)\s*\{', text
-            ):
-                block = reader.block(text)
-                self.translate_mode(
-                    path,
-                    line_no,
-                    match.group(2).strip('"'),
-                    block[1:-1],
-                    match.group(1) is not None,
-                )
-            elif match := re.fullmatch(r"(bindsym|bindcode)(.*?)\s*\{", text):
-                block = reader.block(text)
-                self.translate_bind_block(
-                    path, line_no, match.group(1), match.group(2), block[1:-1]
-                )
-            elif match := re.fullmatch(r"(exec|exec_always)\s*\{", text):
-                block = reader.block(text)
-                self.translate_exec_block(
-                    path, line_no, match.group(1), block[1:-1]
-                )
-            elif re.fullmatch(r"for_window\s*\{", text):
-                block = reader.block(text)
-                self.translate_for_window_block(path, line_no, block[1:-1])
-            elif match := re.match(r"(input|output)\s+(.+?)\s*\{", text):
-                block = reader.block(text)
-                self.translate_device_block(
-                    path, line_no, match.group(1), match.group(2), block[1:-1]
-                )
-            elif match := re.match(r"input\s+(\S+)\s+(.+)", text):
-                self.translate_device_block(
-                    path, line_no, "input", match.group(1), [match.group(2)]
-                )
-            elif match := re.match(r"output\s+(\S+)\s+(.+)", text):
-                self.translate_device_block(
-                    path, line_no, "output", match.group(1), [match.group(2)]
-                )
-            elif match := re.match(r"(bindsym|bindcode)\s+(.+)", text):
-                self.translate_bind(path, line_no, match.group(1), match.group(2))
-            elif match := re.fullmatch(r"(exec|exec_always)(?:\s+(.*))?", text):
-                self.translate_exec(
-                    path, line_no, text, match.group(1), match.group(2) or ""
-                )
-            elif re.fullmatch(r"nop(?:\s+.*)?", text):
-                self.sections.append(f"// sway {text}")
-            elif re.match(r"(?:un)?bind(?:gesture|switch)(?:\s|$)", text):
-                self.refuse_unsupported_binding(path, line_no, text)
-            elif match := re.fullmatch(
-                r'for_window\s*(\[(?:[^"\]]|"(?:\\.|[^"])*")+\])\s*\{', text
-            ):
-                block = reader.block(text)
-                self.translate_for_window_commands(
-                    path, line_no, match.group(1), block[1:-1]
-                )
-            elif match := re.match(
-                r'for_window\s*(\[(?:[^"\]]|"(?:\\.|[^"])*")+\])\s+(.+)', text
-            ):
-                self.translate_for_window(path, line_no, match.group(1), match.group(2))
-            elif text.startswith("for_window"):
+                self.sections.append(f"// sway-to-kdl: sway {text}")
+            else:
                 self.warn(
                     path,
                     line_no,
                     text,
-                    "criteria need manual conversion to a window-rule match",
+                    "expected default_orientation horizontal|vertical|auto",
                 )
-            elif match := re.fullmatch(r"no_focus\s+(\[[^]]+\])", text):
-                self.translate_no_focus(path, line_no, match.group(1))
-            elif match := re.match(r"assign\s+(\[[^]]+\])\s+(?:→|->)?\s*(.+)", text):
-                self.translate_assign(path, line_no, match.group(1), match.group(2))
-            elif match := re.fullmatch(r"workspace\s+(.+?)\s+output\s+(.+)", text):
-                workspace = match.group(1).strip(chr(34))
-                outputs = [output.strip(chr(34)) for output in match.group(2).split()]
-                # Sway appends every output to one workspace_config in source
-                # order (sway/commands/workspace.c:153-161).
-                self.workspace_assignments.setdefault(workspace, []).extend(outputs)
-            elif match := re.fullmatch(r"font\s+(pango:)?(.+)", text):
-                self.titlebar_pango_markup = match.group(1) is not None
-                self.titlebar_font = match.group(2)
-            elif match := re.fullmatch(
-                r"client\.(focused|focused_inactive|focused_tab_title|unfocused|urgent)\s+(.+)",
-                text,
-            ):
-                self.translate_client_colors(path, line_no, text, match.group(1), match.group(2))
-            elif match := re.fullmatch(r"(client\.(?:background|placeholder))(?:\s+.*)?", text):
+        else:
+            return False
+        return True
+
+    def h_workspace_layout(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"workspace_layout\s+(\S+)", text, re.IGNORECASE):
+            value = match.group(1).lower()
+            if value in {"default", "stacking", "tabbed"}:
+                self.layout_settings.append(f'    workspace-layout "{value}"')
+            else:
+                self.warn(path, line_no, text, "unsupported workspace layout")
+        else:
+            return False
+        return True
+
+    def h_hide_edge_borders(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"hide_edge_borders\s+(.+)", text):
+            arguments = match.group(1).split()
+            values = {"none", "vertical", "horizontal", "both", "smart", "smart_no_gaps"}
+            if arguments[:1] == ["--i3"] and len(arguments) == 2 and arguments[1] in values:
+                self.warn(path, line_no, text, "hide_lone_tab has no exact swayward equivalent")
+            elif len(arguments) != 1 or arguments[0] not in values:
                 self.warn(
                     path,
                     line_no,
                     text,
-                    f"{match.group(1)} is accepted but ignored by sway itself "
-                    "(sway/sway/commands.c:51,55; sway/sway/commands/client.c:79-81)",
+                    "expected hide_edge_borders [--i3] none|vertical|horizontal|both|smart|smart_no_gaps",
                 )
-            elif match := re.fullmatch(
-                r"gaps\s+(inner|outer|horizontal|vertical|top|right|bottom|left)\s+(.+)",
-                text,
-                re.IGNORECASE,
-            ):
-                self.translate_gaps(path, line_no, text, match.group(1), match.group(2))
-            elif text.lower().startswith("gaps "):
-                self.warn(path, line_no, text, "unsupported runtime or malformed gaps directive")
-            elif match := re.fullmatch(
-                r"workspace\s+(.+?)\s+gaps\s+(inner|outer|horizontal|vertical|top|right|bottom|left)\s+(.+)",
-                text,
-                re.IGNORECASE,
-            ):
-                self.translate_gaps(
-                    path,
-                    line_no,
-                    text,
-                    match.group(2),
-                    match.group(3),
-                    match.group(1).strip(chr(34)),
+            else:
+                value = arguments[0]
+                edge = "none" if value.startswith("smart") else value
+                self.replace_layout_setting("hide-edge-borders", f'    hide-edge-borders "{edge}"')
+                if value.startswith("smart"):
+                    smart = "on" if value == "smart" else "no-gaps"
+                    self.replace_layout_setting("smart-borders", f'    smart-borders "{smart}"')
+        else:
+            return False
+        return True
+
+    def h_smart_borders(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"smart_borders\s+(\S+)", text):
+            value = match.group(1)
+            enabled = {"1", "yes", "on", "true", "enable", "enabled", "active"}
+            current = next(
+                (
+                    setting.rsplit('"', 2)[1]
+                    for setting in self.layout_settings
+                    if setting.startswith("    smart-borders ")
+                ),
+                "off",
+            )
+            if value == "no_gaps":
+                smart = "no-gaps"
+            elif value.lower() in enabled:
+                smart = "on"
+            elif value.lower() == "toggle":
+                smart = "off" if current == "on" else "on"
+            else:
+                # sway's parse_boolean treats every other value as false.
+                smart = "off"
+            self.replace_layout_setting("smart-borders", f'    smart-borders "{smart}"')
+        else:
+            return False
+        return True
+
+    def h_smart_gaps(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"smart_gaps\s+(\S+)", text, re.IGNORECASE):
+            value = match.group(1).lower()
+            if value == "inverse_outer":
+                value = "inverse-outer"
+            elif value not in {"on", "off"}:
+                self.warn(path, line_no, text, "expected smart_gaps on|off|inverse_outer")
+                return True
+            self.replace_layout_setting("smart-gaps", f'    smart-gaps "{value}"')
+        else:
+            return False
+        return True
+
+    def h_show_marks(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"show_marks\s+(\S+)", text, re.IGNORECASE):
+            self.titlebar_show_marks = match.group(1).lower() in {
+                "1", "yes", "on", "true", "enable", "enabled", "active"
+            }
+        else:
+            return False
+        return True
+
+    def h_title_align(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"title_align\s+(left|center|right)", text):
+            self.titlebar_alignment = match.group(1)
+        else:
+            return False
+        return True
+
+    def h_tiling_drag(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"tiling_drag\s+(\S+)", text, re.IGNORECASE):
+            enabled = match.group(1).lower() in {
+                "1", "yes", "on", "true", "enable", "enabled", "active"
+            }
+            self.inputs.setdefault("", []).append(f"tiling-drag {str(enabled).lower()}")
+        else:
+            return False
+        return True
+
+    def h_tiling_drag_threshold(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"tiling_drag_threshold\s+(\d+)", text):
+            self.inputs.setdefault("", []).append(f"tiling-drag-threshold {match.group(1)}")
+        else:
+            return False
+        return True
+
+    def h_force_focus_wrapping(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"force_focus_wrapping\s+(\S+)", text):
+            enabled = match.group(1).lower() in {
+                "1", "yes", "on", "true", "enable", "enabled", "active"
+            }
+            self.layout_settings.append(
+                f'    focus-wrapping "{"force" if enabled else "yes"}"'
+            )
+        else:
+            return False
+        return True
+
+    def h_popup_during_fullscreen(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"popup_during_fullscreen\s+(\S+?);?", text):
+            value = match.group(1).lower()
+            if value in {"smart", "ignore", "leave_fullscreen"}:
+                self.sections.append(
+                    f"popup-during-fullscreen {self.quote(value)}"
                 )
-            elif match := re.fullmatch(
-                r"(default_border|default_floating_border|new_window|new_float)\s+(.+)",
-                text,
-            ):
-                self.translate_default_border(
-                    path, line_no, text, match.group(1), match.group(2)
-                )
-            elif match := re.fullmatch(
-                r"(floating_minimum_size|floating_maximum_size)\s+(-?\d+)\s+(x)\s+(-?\d+)",
-                text,
-            ):
-                width, height = int(match.group(2)), int(match.group(4))
-                if width < -1 or height < -1:
-                    self.warn(path, line_no, text, "floating size below -1 is unsupported")
-                else:
-                    name = match.group(1).replace("_", "-")
-                    self.layout_settings.append(f"    {name} {width} {height}")
-            elif match := re.fullmatch(r"default_orientation\s+(\S+)", text, re.IGNORECASE):
-                value = match.group(1).lower()
-                if value in {"horizontal", "vertical", "auto"}:
-                    self.replace_layout_setting(
-                        "default-orientation", f'    default-orientation "{value}"'
-                    )
-                    self.sections.append(f"// sway-to-kdl: sway {text}")
-                else:
-                    self.warn(
-                        path,
-                        line_no,
-                        text,
-                        "expected default_orientation horizontal|vertical|auto",
-                    )
-            elif match := re.fullmatch(r"workspace_layout\s+(\S+)", text, re.IGNORECASE):
-                value = match.group(1).lower()
-                if value in {"default", "stacking", "tabbed"}:
-                    self.layout_settings.append(f'    workspace-layout "{value}"')
-                else:
-                    self.warn(path, line_no, text, "unsupported workspace layout")
-            elif match := re.fullmatch(r"hide_edge_borders\s+(.+)", text):
-                arguments = match.group(1).split()
-                values = {"none", "vertical", "horizontal", "both", "smart", "smart_no_gaps"}
-                if arguments[:1] == ["--i3"] and len(arguments) == 2 and arguments[1] in values:
-                    self.warn(path, line_no, text, "hide_lone_tab has no exact swayward equivalent")
-                elif len(arguments) != 1 or arguments[0] not in values:
-                    self.warn(
-                        path,
-                        line_no,
-                        text,
-                        "expected hide_edge_borders [--i3] none|vertical|horizontal|both|smart|smart_no_gaps",
-                    )
-                else:
-                    value = arguments[0]
-                    edge = "none" if value.startswith("smart") else value
-                    self.replace_layout_setting("hide-edge-borders", f'    hide-edge-borders "{edge}"')
-                    if value.startswith("smart"):
-                        smart = "on" if value == "smart" else "no-gaps"
-                        self.replace_layout_setting("smart-borders", f'    smart-borders "{smart}"')
-            elif match := re.fullmatch(r"smart_borders\s+(\S+)", text):
-                value = match.group(1)
-                enabled = {"1", "yes", "on", "true", "enable", "enabled", "active"}
-                current = next(
-                    (
-                        setting.rsplit('"', 2)[1]
-                        for setting in self.layout_settings
-                        if setting.startswith("    smart-borders ")
-                    ),
-                    "off",
-                )
-                if value == "no_gaps":
-                    smart = "no-gaps"
-                elif value.lower() in enabled:
-                    smart = "on"
-                elif value.lower() == "toggle":
-                    smart = "off" if current == "on" else "on"
-                else:
-                    # sway's parse_boolean treats every other value as false.
-                    smart = "off"
-                self.replace_layout_setting("smart-borders", f'    smart-borders "{smart}"')
-            elif match := re.fullmatch(r"smart_gaps\s+(\S+)", text, re.IGNORECASE):
-                value = match.group(1).lower()
-                if value == "inverse_outer":
-                    value = "inverse-outer"
-                elif value not in {"on", "off"}:
-                    self.warn(path, line_no, text, "expected smart_gaps on|off|inverse_outer")
-                    continue
-                self.replace_layout_setting("smart-gaps", f'    smart-gaps "{value}"')
-            elif match := re.fullmatch(r"show_marks\s+(\S+)", text, re.IGNORECASE):
-                self.titlebar_show_marks = match.group(1).lower() in {
-                    "1", "yes", "on", "true", "enable", "enabled", "active"
-                }
-            elif match := re.fullmatch(r"title_align\s+(left|center|right)", text):
-                self.titlebar_alignment = match.group(1)
-            elif match := re.fullmatch(r"tiling_drag\s+(\S+)", text, re.IGNORECASE):
-                enabled = match.group(1).lower() in {
-                    "1", "yes", "on", "true", "enable", "enabled", "active"
-                }
-                self.inputs.setdefault("", []).append(f"tiling-drag {str(enabled).lower()}")
-            elif match := re.fullmatch(r"tiling_drag_threshold\s+(\d+)", text):
-                self.inputs.setdefault("", []).append(f"tiling-drag-threshold {match.group(1)}")
-            elif match := re.fullmatch(r"force_focus_wrapping\s+(\S+)", text):
-                enabled = match.group(1).lower() in {
-                    "1", "yes", "on", "true", "enable", "enabled", "active"
-                }
-                self.layout_settings.append(
-                    f'    focus-wrapping "{"force" if enabled else "yes"}"'
-                )
-            elif match := re.fullmatch(r"popup_during_fullscreen\s+(\S+?);?", text):
-                value = match.group(1).lower()
-                if value in {"smart", "ignore", "leave_fullscreen"}:
-                    self.sections.append(
-                        f"popup-during-fullscreen {self.quote(value)}"
-                    )
-                else:
-                    self.warn(
-                        path,
-                        line_no,
-                        text,
-                        "expected popup_during_fullscreen smart|ignore|leave_fullscreen",
-                    )
-            elif text.startswith("popup_during_fullscreen"):
+            else:
                 self.warn(
                     path,
                     line_no,
                     text,
                     "expected popup_during_fullscreen smart|ignore|leave_fullscreen",
                 )
-            elif match := re.fullmatch(r"workspace_auto_back_and_forth\s+(\S+)", text):
-                enabled = match.group(1).lower() in {
-                    "1", "yes", "on", "true", "enable", "enabled", "active"
-                }
-                self.inputs.setdefault("", []).append(
-                    "workspace-auto-back-and-forth" if enabled
-                    else "workspace-auto-back-and-forth false"
-                )
-            elif match := re.fullmatch(r"focus_follows_mouse\s+(\S+)", text):
-                value = match.group(1)
-                settings = self.inputs.setdefault("", [])
-                settings[:] = [item for item in settings if item != "focus-follows-mouse"]
-                if value == "yes":
-                    settings.append("focus-follows-mouse")
-                elif value == "no":
-                    pass
-                elif value == "always":
-                    self.warn(
-                        path,
-                        line_no,
-                        text,
-                        "focus_follows_mouse always has no exact swayward equivalent",
-                    )
-                else:
-                    self.warn(
-                        path,
-                        line_no,
-                        text,
-                        "expected focus_follows_mouse no|yes|always",
-                    )
-            elif match := re.fullmatch(r"focus_wrapping\s+(\S+)", text, re.IGNORECASE):
-                value = match.group(1).lower()
-                if value in {"1", "yes", "on", "true", "enable", "enabled", "active"}:
-                    self.layout_settings.append('    focus-wrapping "yes"')
-                elif value in {"no", "force", "workspace"}:
-                    self.layout_settings.append(f'    focus-wrapping "{value}"')
-                else:
-                    self.warn(
-                        path,
-                        line_no,
-                        text,
-                        "unknown focus wrapping mode is refused instead of treated as no",
-                    )
-            elif match := re.fullmatch(r"floating_modifier\s+(.+)", text, re.IGNORECASE):
-                self.translate_floating_modifier(path, line_no, text, match.group(1))
-            elif match := re.fullmatch(r"focus_on_window_activation\s+(\S+)", text):
-                value = match.group(1)
-                if value in {"smart", "urgent", "focus", "none"}:
-                    self.sections.append(f"focus-on-window-activation {self.quote(value)}")
-                else:
-                    self.warn(path, line_no, text, "expected focus_on_window_activation smart|urgent|focus|none")
-            elif match := re.fullmatch(
-                r"force_display_urgency_hint\s+(-?\d+)(?:\s*ms)?",
+        elif text.startswith("popup_during_fullscreen"):
+            self.warn(
+                path,
+                line_no,
                 text,
-                re.IGNORECASE,
-            ):
-                self.urgent_timeout_ms = max(0, int(match.group(1)))
-            elif match := re.fullmatch(r"primary_selection\s+(\S+)", text, re.IGNORECASE):
-                enabled = match.group(1).lower() in {
-                    "1", "yes", "on", "true", "enable", "enabled", "active"
-                }
-                if not enabled:
-                    self.sections.append("clipboard { disable-primary; }")
-            elif match := re.fullmatch(r"xwayland\s+(\S+)", text, re.IGNORECASE):
-                # sway's force means start Xwayland immediately rather than
-                # lazily; swayward runs xwayland-satellite, which is on unless
-                # switched off, so only the disabled case emits anything.
-                value = match.group(1).lower()
-                if value in {"disable", "disabled", "no", "false", "0"}:
-                    self.sections.append("xwayland-satellite {\n    off\n}")
-                elif value in {"enable", "enabled", "yes", "true", "1", "force"}:
-                    self.satisfied(text)
-                else:
-                    self.warn(
-                        path, line_no, text, "expected xwayland enable|disable|force"
-                    )
-            elif match := re.fullmatch(r"mouse_warping\s+(\S+)", text, re.IGNORECASE):
-                self.translate_mouse_warping(path, line_no, text, match.group(1))
-            elif match := re.fullmatch(r"swaybg_command\s+(.+)", text):
-                if match.group(1).strip() == "-":
-                    self.satisfied(text)
-                else:
-                    self.warn(
-                        path,
-                        line_no,
-                        text,
-                        "custom swaybg launch command is unsupported",
-                    )
-            elif not self.translate_swayfx(path, line_no, text):
-                self.warn(path, line_no, text, "unhandled")
+                "expected popup_during_fullscreen smart|ignore|leave_fullscreen",
+            )
+        else:
+            return False
+        return True
+
+    def h_workspace_auto_back_and_forth(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"workspace_auto_back_and_forth\s+(\S+)", text):
+            enabled = match.group(1).lower() in {
+                "1", "yes", "on", "true", "enable", "enabled", "active"
+            }
+            self.inputs.setdefault("", []).append(
+                "workspace-auto-back-and-forth" if enabled
+                else "workspace-auto-back-and-forth false"
+            )
+        else:
+            return False
+        return True
+
+    def h_focus_follows_mouse(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"focus_follows_mouse\s+(\S+)", text):
+            value = match.group(1)
+            settings = self.inputs.setdefault("", [])
+            settings[:] = [item for item in settings if item != "focus-follows-mouse"]
+            if value == "yes":
+                settings.append("focus-follows-mouse")
+            elif value == "no":
+                pass
+            elif value == "always":
+                self.warn(
+                    path,
+                    line_no,
+                    text,
+                    "focus_follows_mouse always has no exact swayward equivalent",
+                )
+            else:
+                self.warn(
+                    path,
+                    line_no,
+                    text,
+                    "expected focus_follows_mouse no|yes|always",
+                )
+        else:
+            return False
+        return True
+
+    def h_focus_wrapping(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"focus_wrapping\s+(\S+)", text, re.IGNORECASE):
+            value = match.group(1).lower()
+            if value in {"1", "yes", "on", "true", "enable", "enabled", "active"}:
+                self.layout_settings.append('    focus-wrapping "yes"')
+            elif value in {"no", "force", "workspace"}:
+                self.layout_settings.append(f'    focus-wrapping "{value}"')
+            else:
+                self.warn(
+                    path,
+                    line_no,
+                    text,
+                    "unknown focus wrapping mode is refused instead of treated as no",
+                )
+        else:
+            return False
+        return True
+
+    def h_floating_modifier(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"floating_modifier\s+(.+)", text, re.IGNORECASE):
+            self.translate_floating_modifier(path, line_no, text, match.group(1))
+        else:
+            return False
+        return True
+
+    def h_focus_on_window_activation(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"focus_on_window_activation\s+(\S+)", text):
+            value = match.group(1)
+            if value in {"smart", "urgent", "focus", "none"}:
+                self.sections.append(f"focus-on-window-activation {self.quote(value)}")
+            else:
+                self.warn(path, line_no, text, "expected focus_on_window_activation smart|urgent|focus|none")
+        else:
+            return False
+        return True
+
+    def h_force_display_urgency_hint(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(
+            r"force_display_urgency_hint\s+(-?\d+)(?:\s*ms)?",
+            text,
+            re.IGNORECASE,
+        ):
+            self.urgent_timeout_ms = max(0, int(match.group(1)))
+        else:
+            return False
+        return True
+
+    def h_primary_selection(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"primary_selection\s+(\S+)", text, re.IGNORECASE):
+            enabled = match.group(1).lower() in {
+                "1", "yes", "on", "true", "enable", "enabled", "active"
+            }
+            if not enabled:
+                self.sections.append("clipboard { disable-primary; }")
+        else:
+            return False
+        return True
+
+    def h_xwayland(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"xwayland\s+(\S+)", text, re.IGNORECASE):
+            # sway's force means start Xwayland immediately rather than
+            # lazily; swayward runs xwayland-satellite, which is on unless
+            # switched off, so only the disabled case emits anything.
+            value = match.group(1).lower()
+            if value in {"disable", "disabled", "no", "false", "0"}:
+                self.sections.append("xwayland-satellite {\n    off\n}")
+            elif value in {"enable", "enabled", "yes", "true", "1", "force"}:
+                self.satisfied(text)
+            else:
+                self.warn(
+                    path, line_no, text, "expected xwayland enable|disable|force"
+                )
+        else:
+            return False
+        return True
+
+    def h_mouse_warping(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"mouse_warping\s+(\S+)", text, re.IGNORECASE):
+            self.translate_mouse_warping(path, line_no, text, match.group(1))
+        else:
+            return False
+        return True
+
+    def h_swaybg_command(self, d: Directive) -> bool:
+        path, line_no, text = d.pos.path, d.pos.line, d.text
+        if match := re.fullmatch(r"swaybg_command\s+(.+)", text):
+            if match.group(1).strip() == "-":
+                self.satisfied(text)
+            else:
+                self.warn(
+                    path,
+                    line_no,
+                    text,
+                    "custom swaybg launch command is unsupported",
+                )
+        else:
+            return False
+        return True
+
+    def h_swayfx(self, d: Directive) -> bool:
+        return self.translate_swayfx(d.pos.path, d.pos.line, d.text)
 
     def translate_bind_block(
         self,
@@ -2407,6 +2734,121 @@ class Translator:
                 output += ["    layout {", *settings, "    }"]
             output.append("}")
         return "\n".join(output) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Handler tables
+#
+# Keyed by directive name. A handler returns False when the line is not one
+# it translates; dispatch then reports it as unhandled.
+# ---------------------------------------------------------------------------
+
+Handler = Callable[[Translator, Directive], bool]
+BlockHandler = Callable[[Translator, Directive, LegacyReader], bool]
+
+# The non-ASCII letters that re.IGNORECASE matches with ASCII ones, the same
+# in Python 3.9 and 3.15: `ſmart_gaps on` matched the chain's smart_gaps
+# branch.
+_LEGACY_IGNORECASE = str.maketrans({"İ": "i", "ı": "i", "ſ": "s", "K": "k"})
+
+
+def legacy_handler_key(text: str) -> str:
+    """The table key of the chain branches that could match text.
+
+    Most branches matched a name and then whitespace, `{`, `[` or the end of
+    the line, so the key is the leading run of word characters and dots,
+    folded as re.IGNORECASE folds: a key only routes, and the moved patterns
+    still decide, case included. Three branches matched a bare prefix:
+    `bindsym`/`bindcode` blocks took any options text (`bindsymx {`), and
+    `for_window` and `popup_during_fullscreen` reported any line starting
+    with the name. C3 replaces this with sway's case-insensitive lookup of
+    argv[0].
+    """
+    for prefix in ("bindsym", "bindcode", "for_window", "popup_during_fullscreen"):
+        if text.startswith(prefix):
+            return prefix
+    word = re.match(r"[\w.]*", text).group()
+    return word.translate(_LEGACY_IGNORECASE).lower()
+
+
+BLOCK_HANDLERS: dict[str, BlockHandler] = {
+    "bar": Translator.h_bar_block,
+    "mode": Translator.h_mode_block,
+    "bindsym": Translator.h_bind_block,
+    "bindcode": Translator.h_bind_block,
+    "exec": Translator.h_exec_block,
+    "exec_always": Translator.h_exec_block,
+    "for_window": Translator.h_for_window_block,
+    "input": Translator.h_device_block,
+    "output": Translator.h_device_block,
+}
+
+HANDLERS: dict[str, Handler] = {
+    "input": Translator.h_input,
+    "output": Translator.h_output,
+    "bindsym": Translator.h_bind,
+    "bindcode": Translator.h_bind,
+    "exec": Translator.h_exec,
+    "exec_always": Translator.h_exec,
+    "nop": Translator.h_nop,
+    "bindgesture": Translator.h_unsupported_binding,
+    "unbindgesture": Translator.h_unsupported_binding,
+    "bindswitch": Translator.h_unsupported_binding,
+    "unbindswitch": Translator.h_unsupported_binding,
+    "for_window": Translator.h_for_window,
+    "no_focus": Translator.h_no_focus,
+    "assign": Translator.h_assign,
+    "workspace": Translator.h_workspace,
+    "font": Translator.h_font,
+    "client.focused": Translator.h_client_colors,
+    "client.focused_inactive": Translator.h_client_colors,
+    "client.focused_tab_title": Translator.h_client_colors,
+    "client.unfocused": Translator.h_client_colors,
+    "client.urgent": Translator.h_client_colors,
+    "client.background": Translator.h_client_ignored,
+    "client.placeholder": Translator.h_client_ignored,
+    "gaps": Translator.h_gaps,
+    "default_border": Translator.h_default_border,
+    "default_floating_border": Translator.h_default_border,
+    "new_window": Translator.h_default_border,
+    "new_float": Translator.h_default_border,
+    "floating_minimum_size": Translator.h_floating_size,
+    "floating_maximum_size": Translator.h_floating_size,
+    "default_orientation": Translator.h_default_orientation,
+    "workspace_layout": Translator.h_workspace_layout,
+    "hide_edge_borders": Translator.h_hide_edge_borders,
+    "smart_borders": Translator.h_smart_borders,
+    "smart_gaps": Translator.h_smart_gaps,
+    "show_marks": Translator.h_show_marks,
+    "title_align": Translator.h_title_align,
+    "tiling_drag": Translator.h_tiling_drag,
+    "tiling_drag_threshold": Translator.h_tiling_drag_threshold,
+    "force_focus_wrapping": Translator.h_force_focus_wrapping,
+    "popup_during_fullscreen": Translator.h_popup_during_fullscreen,
+    "workspace_auto_back_and_forth": Translator.h_workspace_auto_back_and_forth,
+    "focus_follows_mouse": Translator.h_focus_follows_mouse,
+    "focus_wrapping": Translator.h_focus_wrapping,
+    "floating_modifier": Translator.h_floating_modifier,
+    "focus_on_window_activation": Translator.h_focus_on_window_activation,
+    "force_display_urgency_hint": Translator.h_force_display_urgency_hint,
+    "primary_selection": Translator.h_primary_selection,
+    "xwayland": Translator.h_xwayland,
+    "mouse_warping": Translator.h_mouse_warping,
+    "swaybg_command": Translator.h_swaybg_command,
+    # SwayFX
+    "blur": Translator.h_swayfx,
+    "blur_xray": Translator.h_swayfx,
+    "blur_passes": Translator.h_swayfx,
+    "blur_radius": Translator.h_swayfx,
+    "titlebar_padding": Translator.h_swayfx,
+    "titlebar_border_thickness": Translator.h_swayfx,
+    "corner_radius": Translator.h_swayfx,
+    "shadows": Translator.h_swayfx,
+    "shadows_on_csd": Translator.h_swayfx,
+    "dim_inactive": Translator.h_swayfx,
+    "default_dim_inactive": Translator.h_swayfx,
+    "layer_effects": Translator.h_swayfx,
+}
 
 
 def main() -> int:
