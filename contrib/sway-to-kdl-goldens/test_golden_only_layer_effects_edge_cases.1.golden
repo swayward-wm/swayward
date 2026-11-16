@@ -21,7 +21,7 @@ layer-rule {
         on
     }
     geometry-corner-radius 4
-    // sway-to-kdl: unhandled layer_effects directive: foo bar
+    // sway-to-kdl: <tmp>/config:2: unhandled layer_effects directive: foo bar
 }
 ==== sway-to-kdl golden: stderr ====
 manual attention: 2 directive(s)

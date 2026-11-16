@@ -10,7 +10,7 @@ input {
     focus-follows-mouse
 }
 
-// sway-to-kdl: <tmp>/config:1: expected floating_modifier <mod> [inverse|normal]: floating_modifier
+// sway-to-kdl: <tmp>/config:1: unhandled: floating_modifier
 ==== sway-to-kdl golden: stderr ====
 manual attention: 1 directive(s)
-  <tmp>/config:1: expected floating_modifier <mod> [inverse|normal]: floating_modifier
+  <tmp>/config:1: unhandled: floating_modifier

@@ -30,10 +30,10 @@ input {
     focus-follows-mouse
 }
 
-// sway-to-kdl: <tmp>/config:5: malformed directive in set block: garbage
+// sway-to-kdl: <tmp>/config:5: unhandled: set garbage
 spawn-sh-at-startup "mako"
-// sway-to-kdl: <tmp>/config:17: grouped for_window entry needs criteria and a command: floating enable
+// sway-to-kdl: <tmp>/config:17: criteria need manual conversion to a window-rule match: for_window floating enable
 ==== sway-to-kdl golden: stderr ====
 manual attention: 2 directive(s)
-  <tmp>/config:5: malformed directive in set block: garbage
-  <tmp>/config:17: grouped for_window entry needs criteria and a command: floating enable
+  <tmp>/config:5: unhandled: set garbage
+  <tmp>/config:17: criteria need manual conversion to a window-rule match: for_window floating enable

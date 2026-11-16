@@ -24,12 +24,12 @@ input {
         xkb {
             layout "us"
         }
-        // sway-to-kdl: unhandled input directive: xkb_numlock
+        // sway-to-kdl: <tmp>/config:5: unhandled input directive: xkb_numlock
     }
     touchpad {
-        // sway-to-kdl: unhandled input directive: mystery on
-        // sway-to-kdl: unhandled input directive: pointer_accel fast
-        // sway-to-kdl: unhandled input directive: scroll_button BTN_FOO
+        // sway-to-kdl: <tmp>/config:9: unhandled input directive: mystery on
+        // sway-to-kdl: <tmp>/config:9: unhandled input directive: pointer_accel fast
+        // sway-to-kdl: <tmp>/config:9: unhandled input directive: scroll_button BTN_FOO
     }
 }
 ==== sway-to-kdl golden: stderr ====

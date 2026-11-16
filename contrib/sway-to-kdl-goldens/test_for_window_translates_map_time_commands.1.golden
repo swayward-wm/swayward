@@ -9,9 +9,7 @@ input {
     focus-follows-mouse
 }
 
-window-rule {
-    match app-id="mapped"
-    sway-for-window-command "mark label"
-}
+// sway-to-kdl: <tmp>/config:1: unhandled: for_window[app_id="mapped"] mark label
 ==== sway-to-kdl golden: stderr ====
-manual attention: none
+manual attention: 1 directive(s)
+  <tmp>/config:1: unhandled: for_window[app_id="mapped"] mark label
