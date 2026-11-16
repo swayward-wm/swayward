@@ -10,6 +10,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 
 MODIFIER_ALIASES = {
@@ -33,6 +34,238 @@ MODIFIER_ALIASES = {
     "Group4": "Group4",
     "Mode_switch": "Mode_switch",
 }
+
+
+# ---------------------------------------------------------------------------
+# Reader
+#
+# read_config segments a file into logical lines and blocks by sway 1.12's
+# rules (sway/config.c:666-869). It expands no variables and runs no
+# includes: sway runs both as directives, in source order, so the front end
+# does. Nothing calls read_config yet. The front end reads with LegacyReader,
+# today's segmentation, which the goldens record; C3 switches it over.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pos:
+    path: Path
+    line: int  # first physical line; 0 = whole file (as warn() reports it)
+
+
+@dataclass(frozen=True)
+class Line:
+    text: str  # logical line: continuation joined, stripped
+    raw: tuple[str, ...]  # the physical lines it came from, unstripped
+    pos: Pos
+
+
+@dataclass
+class Block:
+    header: Line  # text without the trailing "{"
+    body: list[Line | Block]
+    raw: tuple[str, ...]  # header through closing line
+    end: Line | None = None  # the closing line; None if the file ended first
+
+
+def _physical_lines(data: str) -> list[str]:
+    """getline's view of a file: split after each "\\n", which stays."""
+    lines = data.split("\n")
+    physical = [line + "\n" for line in lines[:-1]]
+    if lines[-1]:
+        physical.append(lines[-1])
+    return physical
+
+
+def read_config(path: Path) -> list[Line | Block]:
+    r"""Sway's line and block rules (`read_config`, sway/config.c:732-869).
+
+    - A physical line ending in `\` and a newline is joined with the next,
+      whose leading whitespace stays, unless its first byte is `#`
+      (`getline_with_cont`, :666-694). The result is cut at a NUL, stripped,
+      and skipped when blank or starting with `#`; a later `#` is text.
+    - A line opens a block when the last `split_args` token of the line as
+      config_command sees it is `{` and there are at least two tokens
+      (sway/commands.c:355-360). Inside a block the header prefix supplies
+      the first token (`expand_line`, config.c:719-729), so a lone `{`
+      opens one.
+    - A line whose last character is neither `{` nor `}` takes " {" from the
+      next nonblank physical line when that line is exactly `{`
+      (`detect_brace`, :696-717). Blank lines before it are consumed; a
+      comment stops the search. The " {" joins the line before it is split,
+      so `x "abc` swallows the `{` into its open quote and opens nothing.
+    - A last token of `}` closes the innermost block
+      (sway/commands.c:362-366), whatever precedes it: `X { a }` closes the enclosing block,
+      and at top level it is an unmatched `}` (config.c:842-846) that this
+      returns as a Line. A block still open at the end of the file ends
+      there with no `end`, as sway's stack is dropped silently.
+
+    The `<commands>` dispatch at config.c:805-807 is unreachable in sway 1.12:
+    no handler returns CMD_BLOCK_COMMANDS, so it is not modelled.
+
+    Bytes are decoded as UTF-8 with surrogateescape and only "\n" ends a line,
+    as with getline. A header's text drops the `{` token and the whitespace
+    before it, unless escaped (`\ {`); join_args over its split_args tokens
+    is sway's block name. A header's raw includes the blank and `{` lines
+    detect_brace consumed, and Block.raw every physical line from the header
+    through the closing line, comments included.
+    """
+    physical = _physical_lines(path.read_bytes().decode("utf-8", "surrogateescape"))
+    raw = [line[:-1] if line.endswith("\n") else line for line in physical]
+    top: list[Line | Block] = []
+    stack: list[tuple[Block, int]] = []  # open blocks, with their first index
+    index = 0
+    while index < len(physical):
+        start = index
+        buffer = physical[index]
+        index += 1
+        while (
+            buffer.endswith("\\\n")
+            and not buffer.startswith("#")
+            and index < len(physical)
+        ):
+            buffer = buffer[:-2] + physical[index]
+            index += 1
+        text = _c_string(buffer).strip(SWAY_WHITESPACE)
+        if not text or text.startswith("#"):
+            continue
+        if text[-1] not in "{}":
+            probe = index
+            while probe < len(physical):
+                candidate = _c_string(physical[probe]).strip(SWAY_WHITESPACE)
+                probe += 1
+                if candidate:
+                    if candidate == "{":
+                        text += " {"
+                        index = probe
+                    break
+        line = Line(text, tuple(raw[start:index]), Pos(path, start + 1))
+        parent = stack[-1][0].body if stack else top
+        tokens = split_args(text)
+        if tokens and tokens[-1] == "{" and (len(tokens) > 1 or stack):
+            name = text[:-1].rstrip(SWAY_WHITESPACE)
+            if (len(name) - len(name.rstrip("\\"))) % 2:
+                name = text[: len(name) + 1]  # `\ {`: the space is escaped
+            block = Block(Line(name, line.raw, line.pos), [], ())
+            parent.append(block)
+            stack.append((block, start))
+        elif tokens and tokens[-1] == "}" and stack:
+            block, first = stack.pop()
+            block.end = line
+            block.raw = tuple(raw[first:index])
+        else:
+            parent.append(line)
+    for block, first in stack:
+        block.raw = tuple(raw[first:])
+    return top
+
+
+def expand_line(block: str | None, line: str, add_brace: bool) -> str:
+    """Sway's `expand_line` (sway/config.c:719-729)."""
+    prefix = f"{block} " if block is not None else ""
+    return prefix + line + (" {" if add_brace else "")
+
+
+def flatten(
+    nodes: list[Line | Block], block: str | None = None
+) -> Iterator[tuple[Line, str]]:
+    """The lines read_config hands config_command, with sway's prefix.
+
+    Yields (line, expanded) for every node in read order: a block's header
+    (with " {"), its body, and its closing line. Inside a block the prefix is
+    the block name, join_args over the header's tokens, and it accumulates:
+    `bar {` + `colors {` + `a` runs `bar colors a`. Tokens match sway's;
+    whitespace inside an explicit header line is collapsed.
+    """
+    for node in nodes:
+        if isinstance(node, Line):
+            yield node, expand_line(block, node.text, False)
+            continue
+        yield node.header, expand_line(block, node.header.text, True)
+        name = join_args(split_args(expand_line(block, node.header.text, False)))
+        yield from flatten(node.body, name)
+        if node.end is not None:
+            yield node.end, expand_line(name, node.end.text, False)
+
+
+class LegacyReader:
+    """Today's segmentation, which the goldens record; C2 only.
+
+    next_line is the loop that opened Translator.parse and scan_block its
+    block() helper, both moved verbatim behind a cursor over the file's
+    physical lines. A continuation is joined as `text[:-1] + " " +
+    next.strip()`, and never inside a block body. A block's extent is a raw
+    count of `{` and `}` on physical lines, quoted or commented ones
+    included. take_block builds a Block whose raw is today's block list: the
+    expanded header first, then stripped physical lines, blanks and comments
+    kept. As today, the last line taken counts as the closing line even when
+    the file ended first.
+    """
+
+    def __init__(self, path: Path, lines: list[str]) -> None:
+        self.path = path
+        self.lines = lines
+        self.index = 0
+        self.last: Line | None = None
+
+    @classmethod
+    def open(cls, path: Path) -> LegacyReader:
+        return cls(path, path.read_text().splitlines())
+
+    def next_line(self) -> Line | None:
+        lines = self.lines
+        index = self.index
+        self.last = None
+        while index < len(lines):
+            line_no = index + 1
+            text = lines[index].strip()
+            index += 1
+            if not text or text.startswith("#"):
+                continue
+            while text.endswith("\\") and index < len(lines):
+                text = text[:-1] + " " + lines[index].strip()
+                index += 1
+            self.last = Line(
+                text, tuple(lines[line_no - 1 : index]), Pos(self.path, line_no)
+            )
+            break
+        self.index = index
+        return self.last
+
+    def take_block(self, first: str) -> Block:
+        """The block opened by the line next_line just returned.
+
+        `first` is that line as the caller matched it, variables expanded.
+        """
+        assert self.last is not None, "take_block follows next_line"
+        start = self.index
+        block, self.index = self.scan_block(self.lines, start, first)
+        lines = [
+            Line(text, (self.lines[index],), Pos(self.path, index + 1))
+            for index, text in enumerate(block[1:], start)
+        ]
+        header = first[:-1].rstrip() if first.endswith("{") else first
+        return Block(
+            Line(header, self.last.raw, self.last.pos),
+            list(lines[:-1]),
+            tuple(block),
+            lines[-1] if lines else None,
+        )
+
+    def block(self, first: str) -> list[str]:
+        """Stand-in for Translator.block in S2: today's block list."""
+        return list(self.take_block(first).raw)
+
+    @staticmethod
+    def scan_block(lines: list[str], index: int, first: str) -> tuple[list[str], int]:
+        block = [first]
+        depth = first.count("{") - first.count("}")
+        while depth > 0 and index < len(lines):
+            line = lines[index]
+            block.append(line.strip())
+            depth += line.count("{") - line.count("}")
+            index += 1
+        return block, index
 
 
 # ---------------------------------------------------------------------------
@@ -337,32 +570,21 @@ def split_command_list(s: str) -> list[Command]:
     return commands
 
 
-class Translator:
+# ---------------------------------------------------------------------------
+# Front end
+#
+# Variables, includes and the set of files already read, handled in source
+# order as sway does. In S2 run() feeds Translator.parse's elif chain: it
+# reads each file with LegacyReader, handles set and include itself, and
+# yields every other logical line, expanded, with the reader, so the chain
+# can take the block the line opens.
+# ---------------------------------------------------------------------------
+
+
+class Frontend:
     def __init__(self) -> None:
         self.variables: dict[str, str] = {}
-        self.binds: dict[str, str] = {}
-        self.binding_modes: list[tuple[str, bool, list[str]]] = []
-        # Sway defaults focus_follows_mouse to yes; swayward defaults it off.
-        self.inputs: dict[str, list[str]] = {"": ["focus-follows-mouse"]}
-        self.sections: list[str] = []
-        self.blur_settings: dict[str, str] = {}
-        self.layout_settings: list[str] = []
-        self.workspace_layout_settings: dict[str, list[str]] = {}
-        self.workspace_assignments: dict[str, list[str]] = {}
-        self.titlebar_font: str | None = None
-        self.titlebar_pango_markup = False
-        self.titlebar_show_marks: bool | None = None
-        self.titlebar_alignment: str | None = None
-        self.titlebar_colors: dict[str, tuple[str, str, str]] = {}
-        self.titlebar_padding: tuple[int, int] | None = None
-        self.titlebar_border_thickness: int | None = None
-        self.urgent_timeout_ms: int | None = None
-        self.manual: list[str] = []
         self.visited: set[Path] = set()
-
-    @staticmethod
-    def quote(value: str) -> str:
-        return json.dumps(value, ensure_ascii=False)
 
     def expand(self, text: str) -> str:
         variables = sorted(self.variables, key=len, reverse=True)
@@ -388,6 +610,100 @@ class Translator:
             index += 1
         return "".join(output)
 
+    def run(
+        self, path: Path, doc: Translator
+    ) -> Iterator[tuple[Path, int, str, LegacyReader]]:
+        path = path.expanduser().resolve()
+        if path in self.visited:
+            return
+        try:
+            reader = LegacyReader.open(path)
+        except OSError as error:
+            doc.warn(path, 0, "include", f"cannot read include: {error}")
+            return
+        self.visited.add(path)
+
+        while (line := reader.next_line()) is not None:
+            line_no = line.pos.line
+            text = line.text
+
+            if re.fullmatch(r"set\s*\{", text):
+                block = reader.block(text)
+                self.translate_set_block(doc, path, line_no, block[1:-1])
+                continue
+            if match := re.fullmatch(r"set\s+(\$+[^\s]+)\s+(.+)", text):
+                value = self.expand(match.group(2).strip())
+                self.variables[match.group(1)] = value.replace(r"\$", "$")
+                continue
+            text = self.expand(text).replace(r"\$", "$")
+
+            if text.startswith("include "):
+                yield from self.translate_include(doc, path, line_no, text)
+                continue
+            yield path, line_no, text, reader
+
+    def translate_set_block(
+        self, doc: Translator, source: Path, line: int, body: list[str]
+    ) -> None:
+        for offset, item in enumerate(body, 1):
+            item = item.strip()
+            if not item or item.startswith("#"):
+                continue
+            if match := re.fullmatch(r"(\$+[^\s]+)\s+(.+)", item):
+                value = self.expand(match.group(2).strip())
+                self.variables[match.group(1)] = value.replace(r"\$", "$")
+            else:
+                doc.warn(source, line + offset, item, "malformed directive in set block")
+
+    def translate_include(
+        self, doc: Translator, source: Path, line: int, text: str
+    ) -> Iterator[tuple[Path, int, str, LegacyReader]]:
+        pattern = text.removeprefix("include ").strip().strip('"\'')
+        if "`" in pattern or "$(" in pattern:
+            doc.warn(source, line, text, "include command substitution is refused")
+            return
+        pattern_path = Path(pattern).expanduser()
+        if not pattern_path.is_absolute():
+            pattern_path = source.parent / pattern_path
+        matches = sorted(glob.glob(str(pattern_path)))
+        if not matches:
+            doc.warn(source, line, text, "include matched no files")
+        for included in matches:
+            yield from self.run(Path(included), doc)
+
+
+# ---------------------------------------------------------------------------
+# Translator: the elif chain and its handlers, the state they write, and
+# render()
+# ---------------------------------------------------------------------------
+
+
+class Translator:
+    def __init__(self) -> None:
+        self.frontend = Frontend()
+        self.binds: dict[str, str] = {}
+        self.binding_modes: list[tuple[str, bool, list[str]]] = []
+        # Sway defaults focus_follows_mouse to yes; swayward defaults it off.
+        self.inputs: dict[str, list[str]] = {"": ["focus-follows-mouse"]}
+        self.sections: list[str] = []
+        self.blur_settings: dict[str, str] = {}
+        self.layout_settings: list[str] = []
+        self.workspace_layout_settings: dict[str, list[str]] = {}
+        self.workspace_assignments: dict[str, list[str]] = {}
+        self.titlebar_font: str | None = None
+        self.titlebar_pango_markup = False
+        self.titlebar_show_marks: bool | None = None
+        self.titlebar_alignment: str | None = None
+        self.titlebar_colors: dict[str, tuple[str, str, str]] = {}
+        self.titlebar_padding: tuple[int, int] | None = None
+        self.titlebar_border_thickness: int | None = None
+        self.urgent_timeout_ms: int | None = None
+        self.manual: list[str] = []
+
+    @staticmethod
+    def quote(value: str) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
     def warn(self, source: Path, line: int, text: str, reason: str) -> None:
         location = f"{source}:{line}" if line else str(source)
         item = f"{location}: {reason}: {text.strip()}"
@@ -400,41 +716,9 @@ class Translator:
         )
 
     def parse(self, path: Path) -> None:
-        path = path.expanduser().resolve()
-        if path in self.visited:
-            return
-        try:
-            lines = path.read_text().splitlines()
-        except OSError as error:
-            self.warn(path, 0, "include", f"cannot read include: {error}")
-            return
-        self.visited.add(path)
-
-        index = 0
-        while index < len(lines):
-            line_no = index + 1
-            text = lines[index].strip()
-            index += 1
-            if not text or text.startswith("#"):
-                continue
-            while text.endswith("\\") and index < len(lines):
-                text = text[:-1] + " " + lines[index].strip()
-                index += 1
-
-            if re.fullmatch(r"set\s*\{", text):
-                block, index = self.block(lines, index, text)
-                self.translate_set_block(path, line_no, block[1:-1])
-                continue
-            if match := re.fullmatch(r"set\s+(\$+[^\s]+)\s+(.+)", text):
-                value = self.expand(match.group(2).strip())
-                self.variables[match.group(1)] = value.replace(r"\$", "$")
-                continue
-            text = self.expand(text).replace(r"\$", "$")
-
-            if text.startswith("include "):
-                self.translate_include(path, line_no, text)
-            elif re.match(r"bar\s*\{", text):
-                block, index = self.block(lines, index, text)
+        for path, line_no, text, reader in self.frontend.run(path, self):
+            if re.match(r"bar\s*\{", text):
+                block = reader.block(text)
                 self.warn(
                     path,
                     line_no,
@@ -445,7 +729,7 @@ class Translator:
             elif match := re.match(
                 r'mode\s+(--pango_markup\s+)?("[^"]+"|\S+)\s*\{', text
             ):
-                block, index = self.block(lines, index, text)
+                block = reader.block(text)
                 self.translate_mode(
                     path,
                     line_no,
@@ -454,20 +738,20 @@ class Translator:
                     match.group(1) is not None,
                 )
             elif match := re.fullmatch(r"(bindsym|bindcode)(.*?)\s*\{", text):
-                block, index = self.block(lines, index, text)
+                block = reader.block(text)
                 self.translate_bind_block(
                     path, line_no, match.group(1), match.group(2), block[1:-1]
                 )
             elif match := re.fullmatch(r"(exec|exec_always)\s*\{", text):
-                block, index = self.block(lines, index, text)
+                block = reader.block(text)
                 self.translate_exec_block(
                     path, line_no, match.group(1), block[1:-1]
                 )
             elif re.fullmatch(r"for_window\s*\{", text):
-                block, index = self.block(lines, index, text)
+                block = reader.block(text)
                 self.translate_for_window_block(path, line_no, block[1:-1])
             elif match := re.match(r"(input|output)\s+(.+?)\s*\{", text):
-                block, index = self.block(lines, index, text)
+                block = reader.block(text)
                 self.translate_device_block(
                     path, line_no, match.group(1), match.group(2), block[1:-1]
                 )
@@ -492,7 +776,7 @@ class Translator:
             elif match := re.fullmatch(
                 r'for_window\s*(\[(?:[^"\]]|"(?:\\.|[^"])*")+\])\s*\{', text
             ):
-                block, index = self.block(lines, index, text)
+                block = reader.block(text)
                 self.translate_for_window_commands(
                     path, line_no, match.group(1), block[1:-1]
                 )
@@ -770,19 +1054,6 @@ class Translator:
             elif not self.translate_swayfx(path, line_no, text):
                 self.warn(path, line_no, text, "unhandled")
 
-    def translate_set_block(
-        self, source: Path, line: int, body: list[str]
-    ) -> None:
-        for offset, item in enumerate(body, 1):
-            item = item.strip()
-            if not item or item.startswith("#"):
-                continue
-            if match := re.fullmatch(r"(\$+[^\s]+)\s+(.+)", item):
-                value = self.expand(match.group(2).strip())
-                self.variables[match.group(1)] = value.replace(r"\$", "$")
-            else:
-                self.warn(source, line + offset, item, "malformed directive in set block")
-
     def translate_bind_block(
         self,
         source: Path,
@@ -794,7 +1065,7 @@ class Translator:
         options = options.strip()
         prefix = f"{options} " if options else ""
         for offset, item in enumerate(body, 1):
-            item = self.expand(item.strip()).replace(r"\$", "$")
+            item = self.frontend.expand(item.strip()).replace(r"\$", "$")
             if not item or item.startswith("#"):
                 continue
             self.translate_bind(source, line + offset, kind, prefix + item)
@@ -803,7 +1074,7 @@ class Translator:
         self, source: Path, line: int, directive: str, body: list[str]
     ) -> None:
         for offset, command in enumerate(body, 1):
-            command = self.expand(command.strip()).replace(r"\$", "$")
+            command = self.frontend.expand(command.strip()).replace(r"\$", "$")
             if not command or command.startswith("#"):
                 continue
             self.translate_exec(
@@ -818,7 +1089,7 @@ class Translator:
         self, source: Path, line: int, body: list[str]
     ) -> None:
         for offset, item in enumerate(body, 1):
-            item = self.expand(item.strip()).replace(r"\$", "$")
+            item = self.frontend.expand(item.strip()).replace(r"\$", "$")
             if not item or item.startswith("#"):
                 continue
             match = re.fullmatch(
@@ -840,7 +1111,7 @@ class Translator:
         self, source: Path, line: int, criteria: str, body: list[str]
     ) -> None:
         commands = [
-            self.expand(item.strip()).replace(r"\$", "$")
+            self.frontend.expand(item.strip()).replace(r"\$", "$")
             for item in body
             if item.strip() and not item.strip().startswith("#")
         ]
@@ -966,31 +1237,6 @@ class Translator:
                 f"client.{state} {'/'.join(ignored)} colors have no titlebar equivalent",
             )
 
-    def translate_include(self, source: Path, line: int, text: str) -> None:
-        pattern = text.removeprefix("include ").strip().strip('"\'')
-        if "`" in pattern or "$(" in pattern:
-            self.warn(source, line, text, "include command substitution is refused")
-            return
-        pattern_path = Path(pattern).expanduser()
-        if not pattern_path.is_absolute():
-            pattern_path = source.parent / pattern_path
-        matches = sorted(glob.glob(str(pattern_path)))
-        if not matches:
-            self.warn(source, line, text, "include matched no files")
-        for included in matches:
-            self.parse(Path(included))
-
-    @staticmethod
-    def block(lines: list[str], index: int, first: str) -> tuple[list[str], int]:
-        block = [first]
-        depth = first.count("{") - first.count("}")
-        while depth > 0 and index < len(lines):
-            line = lines[index]
-            block.append(line.strip())
-            depth += line.count("{") - line.count("}")
-            index += 1
-        return block, index
-
     def refuse_unsupported_binding(self, source: Path, line: int, text: str) -> None:
         directive = text.split(None, 1)[0]
         if directive in {"bindgesture", "unbindgesture"}:
@@ -1044,16 +1290,18 @@ class Translator:
             if not text or text.startswith("#"):
                 continue
             if re.fullmatch(r"set\s*\{", text):
-                block, index = self.block(body, index, text)
-                self.translate_set_block(source, line + offset - 1, block[1:-1])
+                block, index = LegacyReader.scan_block(body, index, text)
+                self.frontend.translate_set_block(
+                    self, source, line + offset - 1, block[1:-1]
+                )
                 continue
             if match := re.fullmatch(r"set\s+(\$+[^\s]+)\s+(.+)", text):
-                value = self.expand(match.group(2).strip())
-                self.variables[match.group(1)] = value.replace(r"\$", "$")
+                value = self.frontend.expand(match.group(2).strip())
+                self.frontend.variables[match.group(1)] = value.replace(r"\$", "$")
                 continue
-            text = self.expand(text).replace(r"\$", "$")
+            text = self.frontend.expand(text).replace(r"\$", "$")
             if match := re.fullmatch(r"(bindsym|bindcode)(.*?)\s*\{", text):
-                block, index = self.block(body, index, text)
+                block, index = LegacyReader.scan_block(body, index, text)
                 self.translate_bind_block(
                     source,
                     line + offset - 1,

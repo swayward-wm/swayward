@@ -2041,5 +2041,177 @@ class LexerTests(unittest.TestCase):
                 self.assertEqual(str(caught.exception), message)
 
 
+
+# Case tables for read_config, derived from reading sway 1.12's sway/config.c
+# (read_config :732-869, getline_with_cont :666-694, detect_brace :696-717,
+# expand_line :719-729) and sway/commands.c:355-366. A Line is shaped as
+# (first line, text) and a Block as (first line, header text, body, end text).
+
+READ_CONFIG_CASES = [
+    # Continuation keeps the next line's leading whitespace.
+    ("a \\\n  b\n", [(1, "a   b")]),
+    ("a\\\nb\\\nc\nd\n", [(1, "abc"), (4, "d")]),
+    ("\\\nb\n", [(1, "b")]),
+    # Only a "\" right before "\n" continues; at EOF or before "\r" it stays.
+    ("a \\", [(1, "a \\")]),
+    ("a \\\n", [(1, "a \\")]),
+    ("a\\\r\nb\n", [(1, "a\\"), (2, "b")]),
+    ("a \\ \nb\n", [(1, "a \\"), (2, "b")]),
+    # A line whose first byte is "#" does not continue; an indented one
+    # does, and then swallows the next line into the comment.
+    ("# c \\\nb\n", [(2, "b")]),
+    ("  # c \\\nb\nd\n", [(3, "d")]),
+    # Blank lines and comments are skipped; a later "#" is text.
+    ("a\n\n \t \n# c\n  # d\nb # not a comment\n", [(1, "a"), (6, "b # not a comment")]),
+    # The logical line ends at a NUL; non-UTF-8 bytes survive.
+    ("a\0b\n\0c\nd\n", [(1, "a"), (3, "d")]),
+    ("a \udcff\n", [(1, "a \udcff")]),
+    # A last split_args token of "{" opens a block, with two tokens or more.
+    ("bar {\n  a\n}\n", [(1, "bar", [(2, "a")], "}")]),
+    ("\tbar\t\t{ \n}\n", [(1, "bar", [], "}")]),
+    ('mode "x y" {\n}\n', [(1, 'mode "x y"', [], "}")]),
+    ("{\na\n}\n", [(1, "{"), (2, "a"), (3, "}")]),
+    ("bar{\na\n}\n", [(1, "bar{"), (2, "a"), (3, "}")]),
+    ('exec "a {"\n', [(1, 'exec "a {"')]),
+    ("bar \\{\n", [(1, "bar \\{")]),
+    ("bar \\\\ {\n}\n", [(1, "bar \\\\", [], "}")]),
+    ("\\   {\n}\n", [(1, "\\ ", [], "}")]),
+    ("bar { # c\n}\n", [(1, "bar { # c"), (2, "}")]),
+    # A continuation can form the header.
+    ("bar \\\n{\n a\n}\n", [(1, "bar", [(3, "a")], "}")]),
+    # detect_brace: a line not ending in "{" or "}" takes the next nonblank
+    # line when it is exactly "{", skipping blank lines but not comments.
+    ("bar\n\n  {  \n a\n}\n", [(1, "bar", [(4, "a")], "}")]),
+    ("bar\n# c\n{\na\n}\n", [(1, "bar"), (3, "{"), (4, "a"), (5, "}")]),
+    ("bar\n{ a\n}\n", [(1, "bar"), (2, "{ a"), (3, "}")]),
+    ("bar\n\n\n", [(1, "bar")]),
+    ("bar\n{ \\\n}\n", [(1, "bar"), (2, "{ }")]),
+    ("bar}\n{\n}\n", [(1, "bar}"), (2, "{"), (3, "}")]),
+    # The " {" joins before splitting: an open quote swallows it.
+    ('x "abc\n{\nb\n', [(1, 'x "abc {'), (3, "b")]),
+    # A last token of "}" closes the innermost block, whatever precedes it.
+    ("bar {\na\nfoo }\nb\n", [(1, "bar", [(2, "a")], "foo }"), (4, "b")]),
+    ("a b}\n", [(1, "a b}")]),
+    # X { a } on one line is not a block. At top level it is an unmatched
+    # "}" (config.c:842-846); inside a block it closes that block.
+    ("X { a }\n", [(1, "X { a }")]),
+    ("}\n", [(1, "}")]),
+    ("mode m {\nX { a }\nb\n}\n", [(1, "mode m", [], "X { a }"), (3, "b"), (4, "}")]),
+    # Nested blocks, and a lone "{" inside a block, whose prefix supplies
+    # the first token.
+    (
+        "bar {\n colors {\n  a\n }\n b\n}\n",
+        [(1, "bar", [(2, "colors", [(3, "a")], "}"), (5, "b")], "}")],
+    ),
+    ("bar {\n{\na\n}\n}\n", [(1, "bar", [(2, "", [(3, "a")], "}")], "}")]),
+    ("bar {\nx\n{\n}\n}\n", [(1, "bar", [(2, "x", [], "}")], "}")]),
+    # A block still open at the end of the file ends there, with no end.
+    ("bar {\na\n", [(1, "bar", [(2, "a")], None)]),
+    ("bar {\nc {\n", [(1, "bar", [(2, "c", [], None)], None)]),
+]
+
+# What read_config hands config_command, with expand_line's prefix.
+FLATTEN_CASES = [
+    (
+        'mode "x" {\nbindsym a nop\n}\n',
+        ['mode "x" {', 'mode "x" bindsym a nop', 'mode "x" }'],
+    ),
+    (
+        "bar   {\n colors\n {\n  a  b\n }\n}\n",
+        ["bar {", "bar colors {", "bar colors a  b", "bar colors }", "bar }"],
+    ),
+    ("bar {\n{\na\n}\n}\n", ["bar {", "bar  {", "bar a", "bar }", "bar }"]),
+    ("X { a }\nb\n", ["X { a }", "b"]),
+]
+
+
+class ReaderTests(unittest.TestCase):
+    """read_config and LegacyReader, called directly; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reader = load_script()
+
+    def read(self, source, name="config"):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / name
+        path.write_bytes(source.encode("utf-8", "surrogateescape"))
+        return path, self.reader.read_config(path)
+
+    def shape(self, nodes):
+        shaped = []
+        for node in nodes:
+            if isinstance(node, self.reader.Line):
+                shaped.append((node.pos.line, node.text))
+            else:
+                end = node.end.text if node.end is not None else None
+                shaped.append(
+                    (node.header.pos.line, node.header.text, self.shape(node.body), end)
+                )
+        return shaped
+
+    def test_read_config(self):
+        for source, expected in READ_CONFIG_CASES:
+            with self.subTest(source=source):
+                self.assertEqual(self.shape(self.read(source)[1]), expected)
+
+    def test_flatten_prefixes_block_names(self):
+        for source, expected in FLATTEN_CASES:
+            with self.subTest(source=source):
+                nodes = self.read(source)[1]
+                self.assertEqual(
+                    [text for _, text in self.reader.flatten(nodes)], expected
+                )
+
+    def test_read_config_keeps_physical_lines(self):
+        path, nodes = self.read(
+            "a \\\n  b\nbar\n\n {\n  # c\n\n  x {\n  y\n  }\n}\nz\n"
+        )
+        line, block, last = nodes
+        self.assertEqual(line.raw, ("a \\", "  b"))
+        self.assertEqual(line.pos, self.reader.Pos(path, 1))
+        self.assertEqual(block.header.raw, ("bar", "", " {"))
+        self.assertEqual(
+            block.raw,
+            ("bar", "", " {", "  # c", "", "  x {", "  y", "  }", "}"),
+        )
+        self.assertEqual(block.body[0].raw, ("  x {", "  y", "  }"))
+        self.assertEqual(block.end.raw, ("}",))
+        self.assertEqual(block.end.pos.line, 11)
+        self.assertEqual(last.raw, ("z",))
+
+    def test_read_config_raw_of_open_block_runs_to_eof(self):
+        nodes = self.read("bar {\na\n\n# c\n")[1]
+        self.assertEqual(nodes[0].raw, ("bar {", "a", "", "# c"))
+
+    def test_legacy_reader_joins_and_counts_braces(self):
+        path = Path("config")
+        reader = self.reader.LegacyReader(
+            path, ["a \\", "   b", "", "# c", "x {", ' "{" \\', "", "}", "}", "z"]
+        )
+        line = reader.next_line()
+        self.assertEqual((line.text, line.raw, line.pos.line), ("a  b", ("a \\", "   b"), 1))
+        line = reader.next_line()
+        self.assertEqual(line.text, "x {")
+        block = reader.take_block("x {")
+        self.assertEqual(block.raw, ("x {", '"{" \\', "", "}", "}"))
+        self.assertEqual(block.header.text, "x")
+        self.assertEqual(block.header.pos.line, 5)
+        self.assertEqual(
+            [(body.pos.line, body.text, body.raw) for body in block.body],
+            [(6, '"{" \\', (' "{" \\',)), (7, "", ("",)), (8, "}", ("}",))],
+        )
+        self.assertEqual((block.end.pos.line, block.end.text), (9, "}"))
+        self.assertEqual(reader.next_line().text, "z")
+        self.assertIsNone(reader.next_line())
+
+    def test_legacy_reader_block_without_body(self):
+        reader = self.reader.LegacyReader(Path("config"), ["bar { }", "a"])
+        reader.next_line()
+        block = reader.take_block("bar { }")
+        self.assertEqual((block.raw, block.body, block.end), (("bar { }",), [], None))
+        self.assertEqual(reader.next_line().text, "a")
+
 if __name__ == "__main__":
     unittest.main()
