@@ -1274,7 +1274,7 @@ class Translator:
 
     def h_assign(self, d: Directive) -> bool:
         path, line_no, text = d.pos.path, d.pos.line, d.text
-        match = re.match(r"assign\s+(\[[^]]+\])\s+(?:→|->)?\s*(.+)", text)
+        match = re.match(r"assign\s+(\[[^]]+\])\s+(.+)", text)
         if match is None:
             return False
         # The target is config_command's arguments after the criteria.
@@ -2173,8 +2173,17 @@ class Translator:
         if match is None:
             return
         # cmd_assign tests whole arguments for its keywords, then joins the
-        # rest (sway/commands/assign.c:26-56).
-        if args[:1] == ["->"] or args[:1] and args[0].startswith("→"):
+        # rest (sway/commands/assign.c:26-56). It skips one argument that
+        # starts with `→`, which needs a target after it (:26-33).
+        if args[:1] and args[0].startswith("→"):
+            if len(args) < 2:
+                self.warn(
+                    source,
+                    line,
+                    f"assign {criteria} {args[0]}",
+                    "missing workspace",
+                )
+                return
             args = args[1:]
         property_name = "open-on-workspace"
         if args[:1] == ["output"]:

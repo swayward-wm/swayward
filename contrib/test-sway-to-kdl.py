@@ -1173,6 +1173,22 @@ bindsym Mod5+q workspace 1
                 self.assertIn(expected, result.stdout)
                 self.assertIn("manual attention: none", result.stderr)
 
+    def test_assign_arrow_is_only_sways_prefix(self):
+        # cmd_assign skips one argument that starts with `→` and needs a
+        # target after it; `->` is no keyword and stays in the joined name
+        # (sway/commands/assign.c:26-33,55).
+        result = self.translate('assign [app_id="x"] -> 2\n')
+        self.assertIn('open-on-workspace "-> 2"', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+        for target in ["→", "→2"]:
+            with self.subTest(target=target):
+                result = self.translate(f'assign [app_id="x"] {target}\n')
+                self.assertNotIn("window-rule", result.stdout)
+                self.assertIn(
+                    f'missing workspace: assign [app_id="x"] {target}', result.stdout
+                )
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
     def test_assign_rejects_invalid_workspace_number(self):
         result = self.translate('assign [app_id="special"] workspace number nope\n')
         self.assertNotIn("open-on-workspace", result.stdout)
