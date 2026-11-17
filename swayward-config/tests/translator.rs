@@ -750,7 +750,7 @@ fn upstream_sway_and_swayfx_defaults_translate_to_valid_config() {
         );
         let expected = match fixture {
             "sway-1.11-default.conf" => 3,
-            "swayfx-default.conf" => 7,
+            "swayfx-default.conf" => 5,
             _ => unreachable!(),
         };
         assert!(

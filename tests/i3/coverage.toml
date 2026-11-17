@@ -3385,8 +3385,55 @@ note = "Fresh measurement reaches all four outer assertions through twelve passi
 [files."258-keypress-release.t"]
 assertions = 36
 tap_plan = 36
-pass = 36
-note = "All 36 checks in the byte-identical pinned file run without rejected commands. Release-binding ownership is cleared when another key replaces the active chord, so each mode transition emits exactly one binding event and the press-time owned clone survives the mode change. Bindcode matching now snapshots modifiers before applying the current key transition, matching sway's `code_modifiers` ordering"
+pass = 27
+reason = "i3_only_semantics"
+reason_verified = true
+note = "Assertions 1–27 pass: press and release bindsym/bindcode bindings fire, and Mod1+r enters mode a_mode. Assertions 28–36 are documented skips because the mode config `bindcode 27 --release mode \"default\"` places `--release` after the key; sway reads binding options only before the key (`sway/sway/commands/bind.c:353-383`), so the bound command is `--release mode \"default\"` and releasing keycode 27 neither emits a binding event nor returns to default."
+[[files."258-keypress-release.t".skip]]
+n = 28
+desc = "Received precisely one event"
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
+[[files."258-keypress-release.t".skip]]
+n = 29
+desc = "change is \"run\""
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
+[[files."258-keypress-release.t".skip]]
+n = 30
+desc = "switched back to default 1/2"
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
+[[files."258-keypress-release.t".skip]]
+n = 31
+desc = "Received precisely one event"
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
+[[files."258-keypress-release.t".skip]]
+n = 32
+desc = "change is \"run\""
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
+[[files."258-keypress-release.t".skip]]
+n = 33
+desc = "switched to mode \"a_mode\" 2/2"
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
+[[files."258-keypress-release.t".skip]]
+n = 34
+desc = "Received precisely one event"
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
+[[files."258-keypress-release.t".skip]]
+n = 35
+desc = "change is \"run\""
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
+[[files."258-keypress-release.t".skip]]
+n = 36
+desc = "switched back to default 2/2"
+reason = "sway reads binding options only before the key; `bindcode 27 --release mode \"default\"` binds the command `--release mode \"default\"`, which is not a command"
+citation = "tests/i3/t/258-keypress-release.t:41; sway/sway/commands/bind.c:353-383"
 
 [files."260-invalid-criteria.t"]
 assertions = 2
