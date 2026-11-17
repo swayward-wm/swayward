@@ -681,6 +681,71 @@ bindsym Mod5+q workspace 1
         self.assertIn("unsupported modifier Mod6", result.stdout)
         self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
+    def test_modifier_only_bindsyms_fail_loud_instead_of_emitting_a_modifier_key(self):
+        # sway adds every modifier part to the binding's mask and keeps a
+        # binding with no key (sway/commands/bind.c:428-433); a KDL bind
+        # needs a trigger.
+        reason = (
+            "binding has no key; sway binds modifiers alone, swayward needs a "
+            "trigger key (docs/KNOWN_DEVIATIONS.md#modifier-only-bindings)"
+        )
+        for directive in [
+            "bindsym Mod4 exec menu",
+            "bindsym Mod4+Shift exec menu",
+            "bindsym --release Super exec menu",
+            "bindsym Control+Mod1 nop both",
+            "bindsym Mod3 exec menu",
+            "bindcode Mod4 exec menu",
+        ]:
+            with self.subTest(directive=directive):
+                result = self.translate(f"{directive}\n")
+                self.assertIn(reason, result.stdout)
+                self.assertNotIn("command", result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+        # The modifier keysyms themselves are ordinary keys, not modifier names.
+        result = self.translate("bindsym Super_L exec menu\n")
+        self.assertIn('    Super_L { command "exec menu"; }', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+        result = self.translate(
+            "set $mod Mod4\n"
+            'mode "resize" {\n'
+            "    bindsym $mod mode default\n"
+            "    bindsym Escape mode default\n"
+            "}\n"
+        )
+        self.assertIn(reason, result.stdout)
+        self.assertIn('    Escape { command "mode default"; }', result.stdout)
+        self.assertNotIn("    Mod4 {", result.stdout)
+        self.assertNotIn("    Super {", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+        binary = ROOT / "target" / "debug" / "swayward"
+        if binary.exists():
+            with tempfile.NamedTemporaryFile("w", suffix=".kdl") as config:
+                config.write(result.stdout)
+                config.flush()
+                subprocess.run([binary, "validate", "-c", config.name], check=True,
+                               capture_output=True)
+
+    def test_mode_switch_and_mod3_are_not_modifier_only(self):
+        # Mode_switch selects group 2 and is still a key of the binding
+        # (sway/commands/bind.c:417-427); `mode_switch` is only a key, as the
+        # alias is compared case-sensitively. Mod3 is a modifier
+        # (sway/input/keyboard.c:24-50).
+        result = self.translate("bindsym --release Mod4+mode_switch exec menu\n")
+        self.assertIn(
+            'Super+mode_switch release=true repeat=false { command "exec menu"; }',
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+        result = self.translate("bindsym Mode_switch exec menu\n")
+        self.assertIn("Mode_switch selects XKB group 2 and is also a key", result.stdout)
+        self.assertNotIn("binding has no key", result.stdout)
+        result = self.translate("bindsym Mod3+a exec menu\n")
+        self.assertIn('ISO_Level5_Shift+a { command "exec menu"; }', result.stdout)
+        self.assertNotIn("Mod3 {", result.stdout)
+
     def test_floating_modifier_translates_independently_from_mod_key(self):
         for directive, expected in [
             ("floating_modifier Mod4", 'floating-modifier "Super"'),
@@ -1487,6 +1552,179 @@ bindsym Mod5+q workspace 1
         self.assertIn("needs manual conversion", result.stdout)
         self.assertNotIn("default-column-width", result.stdout)
 
+    def test_seat_cursor_settings_translate_to_the_cursor_block(self):
+        result = self.translate(
+            "seat * hide_cursor 5000\n"
+            "seat * xcursor_theme Adwaita 32\n"
+            "seat seat0 hide_cursor when-typing enable\n"
+        )
+        self.assertIn(
+            "cursor {\n"
+            "    hide-after-inactive-ms 5000\n"
+            '    xcursor-theme "Adwaita"\n'
+            "    xcursor-size 32\n"
+            "    hide-when-typing\n"
+            "}\n",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+        binary = ROOT / "target" / "debug" / "swayward"
+        if binary.exists():
+            with tempfile.NamedTemporaryFile("w", suffix=".kdl") as config:
+                config.write(result.stdout)
+                config.flush()
+                subprocess.run([binary, "validate", "-c", config.name], check=True,
+                               capture_output=True)
+
+        # sway raises a short timeout to 100 ms, resets an unnamed size to 24,
+        # and lets a later directive win (sway/commands/seat/hide_cursor.c:24-32,
+        # xcursor_theme.c:16-29, sway/config/seat.c:41-85).
+        result = self.translate(
+            "seat * {\n"
+            "    hide_cursor 50\n"
+            "    xcursor_theme Big 48\n"
+            "    xcursor_theme Small\n"
+            "    hide_cursor when-typing enable\n"
+            "    hide_cursor when-typing disable\n"
+            "}\n"
+        )
+        self.assertIn("    hide-after-inactive-ms 100\n", result.stdout)
+        self.assertIn('    xcursor-theme "Small"\n', result.stdout)
+        self.assertIn("    xcursor-size 24\n", result.stdout)
+        self.assertNotIn("Big", result.stdout)
+        self.assertNotIn("hide-when-typing", result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+        result = self.translate("seat * hide_cursor 3000\nseat * hide_cursor 0\n")
+        self.assertNotIn("cursor {", result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_untranslatable_seat_directives_stay_fail_loud(self):
+        for source, reason in [
+            ("seat * attach 1:2:mouse\n", "unsupported seat directive"),
+            ("seat * fallback true\n", "unsupported seat directive"),
+            ("seat * cursor move 1 1\n", "unsupported seat directive"),
+            (
+                "seat * hide_cursor\n",
+                "Invalid hide_cursor command (expected at least 1 argument, got 0)",
+            ),
+            (
+                "seat * hide_cursor when-typing enable now\n",
+                "Invalid hide_cursor command (expected at most 2 arguments, got 3)",
+            ),
+            ("seat * hide_cursor soon\n", "Expected an integer timeout"),
+            (
+                "seat * hide_cursor typing enable\n",
+                "Expected 'hide_cursor <timeout>|when-typing [enable|disable]'",
+            ),
+            ("seat * xcursor_theme Big 300\n", "cursor size must be between 1 and 255"),
+            ("seat * xcursor_theme Big large\n", "Expected a positive integer size"),
+            (
+                "seat * xcursor_theme Adwaita Dark 24\n",
+                "Invalid xcursor_theme command (expected at most 2 arguments, got 3)",
+            ),
+            ("seat left hide_cursor 3000\n", "swayward has one seat"),
+            ("seat Seat0 hide_cursor 3000\n", "swayward has one seat"),
+            (
+                "seat - xcursor_theme Adwaita\n",
+                "Current seat alias (-) cannot be used in the config",
+            ),
+            (
+                "seat *\n",
+                "Invalid seat command (expected at least 2 arguments, got 1)",
+            ),
+            # swayward's KDL spellings are not sway seat subcommands.
+            (
+                "seat * hide-after-inactive-ms 100\n",
+                "Unknown/invalid command 'hide-after-inactive-ms'",
+            ),
+            ("seat * xcursor-theme Adwaita\n", "Unknown/invalid command 'xcursor-theme'"),
+        ]:
+            with self.subTest(source=source):
+                result = self.translate(source)
+                self.assertNotIn("cursor {", result.stdout)
+                self.assertIn(reason, result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+        result = self.translate(
+            "seat seat0 {\n    hide_cursor 2000\n    attach 1:2:mouse\n}\n"
+        )
+        self.assertIn("    hide-after-inactive-ms 2000\n", result.stdout)
+        self.assertIn(":3: unsupported seat directive: seat seat0 attach", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_seat_arguments_follow_sways_quoting(self):
+        # config_command strips both quote kinds from every argument
+        # (sway/commands.c:409-423).
+        result = self.translate(
+            "seat * xcursor_theme 'Bibata' 32\n"
+            'seat "*" hide_cursor 3000\n'
+            'seat * hide_cursor when-typing "enable"\n'
+        )
+        self.assertIn(
+            "cursor {\n"
+            '    xcursor-theme "Bibata"\n'
+            "    xcursor-size 32\n"
+            "    hide-after-inactive-ms 3000\n"
+            "    hide-when-typing\n"
+            "}\n",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+        result = self.translate('seat * xcursor_theme "Adwaita Dark"\n')
+        self.assertIn('    xcursor-theme "Adwaita Dark"\n    xcursor-size 24\n', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_seat_numbers_follow_strtol(self):
+        # hide_cursor reads an int with strtol and xcursor_theme an unsigned
+        # with strtoul, each with nothing left over
+        # (sway/commands/seat/hide_cursor.c:24-27, xcursor_theme.c:20-25).
+        for source, expected in [
+            ("seat * hide_cursor 0050\n", "hide-after-inactive-ms 100\n"),
+            ("seat * hide_cursor +5000\n", "hide-after-inactive-ms 5000\n"),
+            ("seat * hide_cursor -5\n", "hide-after-inactive-ms 100\n"),
+            ("seat * hide_cursor 2147483647\n", "hide-after-inactive-ms 2147483647\n"),
+            ("seat * xcursor_theme A 032\n", "xcursor-size 32\n"),
+            ("seat * xcursor_theme A 4294967297\n", "xcursor-size 1\n"),
+            ("seat * xcursor_theme A -4294967295\n", "xcursor-size 1\n"),
+            ("SEAT * HIDE_CURSOR 2000\n", "hide-after-inactive-ms 2000\n"),
+        ]:
+            with self.subTest(source=source):
+                result = self.translate(source)
+                self.assertIn(f"    {expected}", result.stdout)
+                self.assertIn("manual attention: none", result.stderr)
+        for source, reason in [
+            # A timeout past INT_MAX does not fit the u32 swayward stores
+            # either (swayward-config/src/misc.rs:112).
+            ("seat * hide_cursor 99999999999\n", "number out of range"),
+            ("seat * hide_cursor " + "9" * 5000 + "\n", "number out of range"),
+            ("seat * hide_cursor \uff15\uff10\uff10\uff10\n", "Expected an integer timeout"),
+            ("seat * hide_cursor 5s\n", "Expected an integer timeout"),
+            ("seat * xcursor_theme A -1\n", "cursor size must be between 1 and 255"),
+            ("seat * xcursor_theme A 0\n", "cursor size must be between 1 and 255"),
+            ("seat * xcursor_theme A " + "9" * 5000 + "\n", "cursor size must be"),
+            ("seat * xcursor_theme A \u0663\n", "Expected a positive integer size"),
+        ]:
+            with self.subTest(source=source[:60]):
+                result = self.translate(source)
+                self.assertNotIn("cursor {", result.stdout)
+                self.assertIn(reason, result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+        # parse_boolean(value, true) reads toggle as false (hide_cursor.c:38-39).
+        result = self.translate(
+            "seat * hide_cursor when-typing on\nseat * hide_cursor when-typing toggle\n"
+        )
+        self.assertNotIn("cursor {", result.stdout)
+
+    def test_one_line_seat_block_is_reported_by_the_reader(self):
+        # sway takes `X { ... }` on one line as an unmatched block end
+        # (sway/config.c:842-846).
+        result = self.translate("seat * { hide_cursor 1000 }\n")
+        self.assertNotIn("cursor {", result.stdout)
+        self.assertIn("a block opened and closed on one line is unsupported", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
     def test_for_window_preserves_sticky_as_a_map_time_command(self):
         for value in ["enable", "disable", "toggle"]:
             with self.subTest(value=value):
@@ -2051,8 +2289,8 @@ bindsym Mod5+q workspace 1
             "seat * {\n    hide_cursor 1000\n}\n"
         )
         self.assertIn("    touchpad {\n        tap\n    }", result.stdout)
-        self.assertIn("config:7: unhandled: seat * hide_cursor 1000", result.stdout)
-        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+        self.assertIn("cursor {\n    hide-after-inactive-ms 1000\n}", result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
 
     def test_commands_block_takes_the_rest_of_the_file(self):
         # sway/config.c:805-807, sway/commands.c:452-481.
@@ -2775,6 +3013,35 @@ for _name in [n for n in vars(TranslatorTests) if n.startswith("test_")]:
     )
 
 
+class LinearTimeTests(unittest.TestCase):
+    """Runs on inputs too long for a golden, through the CLI with a timeout."""
+
+    def run_bounded(self, source, timeout):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config"
+            path.write_text(source)
+            return subprocess.run(
+                [SCRIPT, path], text=True, capture_output=True, check=True,
+                timeout=timeout,
+            )
+
+    def test_seat_numbers_scan_in_linear_time(self):
+        # A pattern such as `0*([0-9]+)` gives each zero two ways to match
+        # and backtracks quadratically when another character follows the
+        # zeroes: 100,000 of them took about 26 s, and a run takes about
+        # 0.15 s now. Each golden would hold the zeroes three times.
+        zeroes = "0" * 100000
+        for source, reason in [
+            (f"seat * hide_cursor {zeroes}x\n", "Expected an integer timeout"),
+            (f"seat * xcursor_theme A {zeroes}x\n", "Expected a positive integer size"),
+        ]:
+            with self.subTest(source=source[:40]):
+                result = self.run_bounded(source, timeout=5)
+                self.assertNotIn("cursor {", result.stdout)
+                self.assertIn(f"{reason}: {source.strip()}", result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+
 def load_script():
     # The script has no .py suffix, so spec_from_file_location needs a loader.
     loader = importlib.machinery.SourceFileLoader("sway_to_kdl", str(SCRIPT))
@@ -3362,6 +3629,7 @@ SINGULAR_STRUCTS = {
     "workspace": ("workspace.rs", "Workspace"),
     "output": ("output.rs", "Output"),
     "clipboard": ("misc.rs", "ClipboardPart"),
+    "cursor": ("misc.rs", "CursorPart"),
     "xwayland-satellite": ("misc.rs", "XwaylandSatellitePart"),
 }
 

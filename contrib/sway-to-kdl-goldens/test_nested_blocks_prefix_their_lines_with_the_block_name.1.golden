@@ -19,7 +19,8 @@ input {
     }
 }
 
-// sway-to-kdl: <tmp>/config:7: unhandled: seat * hide_cursor 1000
+cursor {
+    hide-after-inactive-ms 1000
+}
 ==== sway-to-kdl golden: stderr ====
-manual attention: 1 directive(s)
-  <tmp>/config:7: unhandled: seat * hide_cursor 1000
+manual attention: none

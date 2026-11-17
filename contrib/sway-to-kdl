@@ -894,6 +894,82 @@ def border_width(text: str) -> int | None:
     return value if value <= U16_MAX else None
 
 
+def strtol_text(text: str) -> tuple[str, str] | None:
+    """The number strtol or strtoul reads from all of text, as its sign and
+    its digits without leading zeroes, or None when characters are left over.
+
+    Sway checks `*end` after the call, so leading whitespace is skipped and
+    nothing may follow the digits; an empty text reads as 0. The value is
+    left as text, so no length reaches int(), which refuses over 4300 digits
+    on Python 3.11+. The text is scanned once: a pattern such as
+    `0*([0-9]+)` gives each zero two ways to match and backtracks
+    quadratically on a long run of zeroes followed by another character.
+    """
+    if text == "":
+        return "", "0"
+    rest = text.lstrip(SWAY_WHITESPACE)
+    sign = rest[:1] if rest[:1] in ("+", "-") else ""
+    digits = rest[len(sign) :]
+    if digits == "" or digits.strip("0123456789") != "":
+        return None
+    return sign, digits.lstrip("0") or "0"
+
+
+def strtoul_size(text: str) -> int | None:
+    """text as strtoul reads it into an unsigned int, as xcursor_theme reads
+    its size (sway/commands/seat/xcursor_theme.c:20-25), or None when
+    characters are left over (strtol_text).
+
+    A minus sign negates in unsigned arithmetic and a number past
+    ULONG_MAX reads as ULONG_MAX, as on a 64-bit long; the unsigned int
+    keeps the low 32 bits.
+    """
+    number = strtol_text(text)
+    if number is None:
+        return None
+    sign, digits = number
+    ulong_max = 2**64 - 1
+    value = int(digits) if len(digits) <= len(str(ulong_max)) else ulong_max + 1
+    if value > ulong_max:
+        value = ulong_max
+    elif sign == "-":
+        value = -value % 2**64
+    return value % 2**32
+
+
+# The subcommands cmd_seat dispatches (sway/commands/seat.c:11-27).
+SEAT_SUBCOMMANDS = frozenset(
+    {
+        "attach", "cursor", "fallback", "hide_cursor", "idle_inhibit",
+        "idle_wake", "keyboard_grouping", "pointer_constraint",
+        "shortcuts_inhibitor", "xcursor_theme",
+    }
+)
+
+
+SWAY_TRUE = frozenset({"1", "yes", "on", "true", "enable", "enabled", "active"})
+
+
+def parse_boolean(value: str, current: bool) -> bool:
+    """Sway's parse_boolean (common/util.c:40-54): its true words ignoring
+    ASCII case, `toggle` as not current, and every other word false."""
+    lowered = ascii_lower(value)
+    if lowered == "toggle":
+        return not current
+    return lowered in SWAY_TRUE
+
+
+def checkarg(args: list[str], name: str, least: int, most: int) -> str | None:
+    """Sway's checkarg message (sway/commands.c:18-41) when the count of
+    args is outside least..most, or None."""
+    count = len(args)
+    if least <= count <= most:
+        return None
+    bound, value = ("at least ", least) if count < least else ("at most ", most)
+    plural = "" if value == 1 else "s"
+    return f"Invalid {name} command (expected {bound}{value} argument{plural}, got {count})"
+
+
 # The decimal forms strtof reads, in ASCII.
 DECIMAL = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 
@@ -1719,6 +1795,96 @@ class Translator:
             return False
         return True
 
+    def h_seat(self, d: Directive) -> bool:
+        """cmd_seat (sway/commands/seat.c:53-81): a seat name, then a
+        subcommand looked up ignoring ASCII case. swayward has one seat, and
+        the cursor block holds its hide_cursor and xcursor_theme settings
+        (swayward-config/src/misc.rs:103-113).
+
+        A later setting wins, as sway merges each seat directive into the
+        seat's config and `seat *` into every seat's (sway/config/seat.c:41-85).
+        """
+
+        def report(reason: str) -> None:
+            self.warn(d.pos.path, d.pos.line, d.text, reason)
+
+        args = d.args
+        error = checkarg(args, "seat", 2, len(args))
+        if error is not None:
+            report(error)
+            return True
+        seat, subcommand, rest = args[0], ascii_lower(args[1]), args[2:]
+        if seat == "-":
+            report("Current seat alias (-) cannot be used in the config")
+        elif subcommand not in SEAT_SUBCOMMANDS:
+            report(f"Unknown/invalid command '{args[1]}'")
+        elif subcommand not in {"hide_cursor", "xcursor_theme"}:
+            report("unsupported seat directive")
+        elif seat not in {"*", "seat0"}:
+            # seat0 is the default seat (sway/input/input-manager.c:28).
+            report("swayward has one seat; only seat * and seat seat0 translate")
+        elif subcommand == "hide_cursor":
+            self.translate_hide_cursor(rest, report)
+        else:
+            self.translate_xcursor_theme(rest, report)
+        return True
+
+    def translate_hide_cursor(
+        self, args: list[str], report: Callable[[str], None]
+    ) -> None:
+        """seat_cmd_hide_cursor (sway/commands/seat/hide_cursor.c:10-48)."""
+        cursor = self.doc.cursor
+        error = checkarg(args, "hide_cursor", 1, 2)
+        if error is not None:
+            report(error)
+        elif len(args) == 1:
+            number = strtol_text(args[0])
+            if number is None:
+                report("Expected an integer timeout")
+                return
+            try:
+                timeout = c_int("".join(number))
+            except NumberError as out_of_range:
+                report(str(out_of_range))
+                return
+            # A timeout below 100 ms other than 0 is raised to 100 ms, and 0
+            # turns hiding off (:24-32), as no hide-after-inactive-ms does.
+            if timeout == 0:
+                cursor.remove("hide-after-inactive-ms")
+            else:
+                cursor.put(Node("hide-after-inactive-ms", [max(timeout, 100)]))
+        elif args[0] != "when-typing":
+            report("Expected 'hide_cursor <timeout>|when-typing [enable|disable]'")
+        elif parse_boolean(args[1], True):
+            cursor.put(Node("hide-when-typing"))
+        else:
+            cursor.remove("hide-when-typing")
+
+    def translate_xcursor_theme(
+        self, args: list[str], report: Callable[[str], None]
+    ) -> None:
+        """seat_cmd_xcursor_theme (sway/commands/seat/xcursor_theme.c:5-32):
+        a theme and a size, 24 when none is given."""
+        error = checkarg(args, "xcursor_theme", 1, 2)
+        if error is not None:
+            report(error)
+            return
+        size = 24
+        if len(args) == 2:
+            number = strtoul_size(args[1])
+            if number is None:
+                report("Expected a positive integer size")
+                return
+            size = number
+        if not 1 <= size <= 255:
+            report(
+                "cursor size must be between 1 and 255; swayward stores it in "
+                "a u8 (swayward-config/src/misc.rs:108)"
+            )
+            return
+        self.doc.cursor.put(Node("xcursor-theme", [args[0]]))
+        self.doc.cursor.put(Node("xcursor-size", [size]))
+
     def h_swayfx(self, d: Directive) -> bool:
         return self.translate_swayfx(d.pos.path, d.pos.line, d.text)
 
@@ -2001,8 +2167,8 @@ class Translator:
             self.warn(source, line, rest, str(error))
             return
         keycode = None
-        if kind == "bindcode":
-            code = combo.keys[-1] if combo.keys else ""
+        if kind == "bindcode" and combo.keys:  # no key: translate_key reports it
+            code = combo.keys[-1]
             if not re.fullmatch(r"[0-9]+", code):
                 self.warn(source, line, rest, "bindcode key must be numeric")
                 return
@@ -2134,9 +2300,11 @@ class Translator:
                 "KDL reads it only as Group2"
             )
         if not combo.keys:
+            # Every part was a modifier, which sway adds to the binding's
+            # mask (sway/commands/bind.c:428-433).
             raise BindError(
                 "binding has no key; sway binds modifiers alone, swayward "
-                "needs a trigger key"
+                "needs a trigger key (docs/KNOWN_DEVIATIONS.md#modifier-only-bindings)"
             )
         if len(combo.keys) > 1:
             extra = next(
@@ -3176,6 +3344,7 @@ HANDLERS: dict[str, Handler] = {
     "xwayland": Translator.h_xwayland,
     "mouse_warping": Translator.h_mouse_warping,
     "swaybg_command": Translator.h_swaybg_command,
+    "seat": Translator.h_seat,
     # SwayFX
     "blur": Translator.h_swayfx,
     "blur_xray": Translator.h_swayfx,
@@ -3394,8 +3563,12 @@ SINGULAR: dict[str, frozenset[str]] = {
         "layout", "max-bpc", "mode", "modeline", "off", "position", "scale",
         "transform", "variable-refresh-rate",
     }),
-    # misc.rs ClipboardPart, XwaylandSatellitePart
+    # misc.rs ClipboardPart, CursorPart, XwaylandSatellitePart
     "clipboard": frozenset({"disable-primary"}),
+    "cursor": frozenset({
+        "hide-after-inactive-ms", "hide-when-typing", "xcursor-size",
+        "xcursor-theme",
+    }),
     "xwayland-satellite": frozenset({"off", "on", "path"}),
 }
 
@@ -3445,6 +3618,7 @@ class Document:
         self.input = Node("input", children=[Node("focus-follows-mouse")])
         # input's device classes, rendered after its own settings.
         self.devices: dict[str, Node] = {}
+        self.cursor = Node("cursor")  # the seat's cursor settings
         self.blur = Node("blur")
         self.layout = Node("layout")
         self.titlebar = Titlebar()  # rendered last in layout
@@ -3597,6 +3771,8 @@ def render(doc: Document) -> str:
     groups.append(
         [Node("input", children=[*doc.input.children, *devices], block=True)]
     )
+    if doc.cursor.children:
+        groups.append([doc.cursor])
     if doc.blur.children:
         groups.append([Comment(BLUR_NOTE), doc.blur])
     titlebar = doc.titlebar.node()

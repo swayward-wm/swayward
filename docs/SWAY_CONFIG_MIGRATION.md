@@ -132,6 +132,10 @@ for the parts that did not:
   output block that matches an output.
 - **Window rules:** supported `for_window` effects with an `app_id` criterion
   become `window-rule` blocks. Other criteria or commands are reported.
+- **Seats:** `hide_cursor` and `xcursor_theme` on `seat *` or `seat seat0`
+  become the `cursor` block, the later setting winning. Swayward has one seat,
+  so other seat names and every other seat directive are reported, as is a
+  cursor size outside 1 to 255.
 - **Includes:** sway include globs are expanded during translation. Included sway
   directives are translated in place. A pattern that matches no file, or a file
   that cannot be read, is reported on its include line; a file already read is
