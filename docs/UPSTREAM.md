@@ -13,10 +13,14 @@ See [`docs/FORK-BASE.md`](https://github.com/swayward-wm/swayward/blob/main/docs
   `release/26.10`). It is protected: no force-push, no deletion. Releases are
   tagged there (`swayward-v<version>`), and fixes for that line, such as a
   beta.2, land there. Users, packagers and Nix inputs that want a stable ref
-  follow a tag or a `release/*` branch.
-- `main` is where development and niri catch-up happen. It only ever
-  fast-forwards, so nobody's checkout breaks, but it absorbs each niri release
-  by **merging-rebase** instead of a merge.
+  follow a tag or a `release/*` branch. Once tagged, a release branch keeps its
+  own commits and is never rewritten; `main` may still rewrite its own commits
+  above its latest release tag even if a release branch shares them.
+- `main` is where development and niri catch-up happen. A merging-rebase push
+  fast-forwards, so nobody's checkout breaks; `main` may be rewritten only
+  above the latest release tag on it, with `--force-with-lease` when nothing
+  else is in flight. It absorbs each niri release by **merging-rebase**
+  instead of a merge.
 
 ### Merging-rebase
 
@@ -54,7 +58,8 @@ Before pushing:
    the slow layout tests.
 3. Update `docs/FORK-BASE.md` to the new tag, and add any new inherited-file
    edits to `docs/data/divergence/`.
-4. `git push origin main`. It is a fast-forward, so no force is needed.
+4. `git push origin main`. A merging-rebase push is a fast-forward, so no
+   force is needed.
 
 Things that behave differently with this history shape:
 
@@ -64,7 +69,14 @@ Things that behave differently with this history shape:
 - "N commits ahead of niri" counts every older copy of the stack. Count the
   patch stack as `<newest marker>..main`.
 - To undo before pushing, `git reset --hard <old tip>`. After pushing, fix
-  forwards: `main` is never force-pushed.
+  forwards when you can; `main` may be rewritten only above the latest release
+  tag on it, with `--force-with-lease` when nothing else is in flight (squash,
+  fold a correction into the commit it corrects). Every swayward sha the
+  oracle pins is reachable from a release tag (T4 pins the frozen RC sha and
+  tags on top of it), so never rewrite a commit at or below that tag. A
+  frozen RC counts as a release tag. A release tag is never moved. T4
+  squashes only oracle commits above the oracle commit pinned by the latest
+  swayward release tag; oracle `main` is otherwise never rewritten.
 
 ### Upstream comes in at niri releases
 
@@ -86,14 +98,15 @@ When resolving a conflict:
    commit, and one resolution silently deleted five tests until
    `cargo test --all` caught it.
 
-### History: before beta1
+### History shape
 
-Until beta1, swayward's commits were rewritten freely and upstream came in
-by merge. The fork base is upstream commit `9e72e491` (2026-09-11), 93 commits
-after `v26.04`; rebasing back onto `v26.04` was rejected because it would
-have discarded upstream fixes we depend on (a screenshot-UI deadlock with a
+The fork base is upstream commit `9e72e491` (2026-09-11), 93 commits after
+`v26.04`; rebasing back onto `v26.04` was rejected because it would have
+discarded upstream fixes we depend on (a screenshot-UI deadlock with a
 tablet, multi-GPU copy formats, GLES2 blur, and others). The first
-merging-rebase starts from that commit.
+merging-rebase starts from that commit. `main` may be rewritten only above
+the latest release tag on it, to keep the replayed stack small; release tags
+never move, and every oracle-pinned swayward sha is reachable from one.
 
 ## Versioning
 

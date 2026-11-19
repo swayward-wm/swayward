@@ -38,5 +38,15 @@ distrobox enter "$NAME" -- sudo dnf install -y \
 	perl-JSON-PP \
 	perl-Test-Simple
 
+# Prefer rustup's cargo over Fedora's /bin/cargo when ~/.cargo/bin exists.
+# Idempotent: tee replaces the file; the snippet is a no-op if already first
+# on PATH (a host-inherited PATH may list it later, behind mise). Login
+# shells (bash -lc) source /etc/profile.d/.
+distrobox enter "$NAME" -- sudo tee /etc/profile.d/swayward-rustup.sh >/dev/null <<'EOF'
+# Prefer rustup's cargo/rustc over the Fedora packages when rustup is installed.
+[ -d "$HOME/.cargo/bin" ] && case "$PATH" in "$HOME/.cargo/bin"|"$HOME/.cargo/bin:"*) ;; *) PATH="$HOME/.cargo/bin:$PATH" ;; esac
+export PATH
+EOF
+
 printf '%s\n' "Done. Build with:" \
 	"  distrobox enter $NAME -- bash -lc 'cd $(pwd) && cargo build'"

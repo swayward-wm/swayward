@@ -71,7 +71,7 @@ Never pin an intermediate commit. The commit recorded here is the only swayward 
 
 1. Drain the integration queue.
 2. Confirm that no launch-blocking fix remains open and that the step 3 version bump is the last source commit on `main`.
-3. Squash before freeze, never after. If the maintainer wants a shorter history, squash swayward `main` now, back up the pre-squash history as a bundle under `$SCRATCH`, and push with `--force-with-lease`. A squash after this step orphans the pinned commit and invalidates every result that names it.
+3. Squash before freeze, never after. If the maintainer wants a shorter history, squash the commits on swayward `main` above the latest release tag now (never a commit at or below it, and only while nothing else is in flight), back up the pre-squash history as a bundle under `$SCRATCH`, and push with `--force-with-lease`. A squash after this step orphans the pinned commit and invalidates every result that names it.
 4. Record the commit that the oracle will measure:
 
    ```sh
@@ -159,16 +159,20 @@ git bundle create "$SCRATCH/sway-ipc-oracle-prelaunch.bundle" --all
 git bundle verify "$SCRATCH/sway-ipc-oracle-prelaunch.bundle"
 ```
 
-Dry-run the one-root tree in a disposable branch before changing `main`:
+Squash only the oracle commits above the oracle commit pinned by the latest swayward release tag, so every tag's pinned oracle sha survives. Dry-run the squash in a disposable branch before changing `main`:
 
 ```sh
+git -C "$SWAYWARD" fetch --tags origin
+export ORACLE_BASE=$(git -C "$SWAYWARD" show "$(git -C "$SWAYWARD" tag --list 'swayward-v*' --sort=-creatordate | head -n1):tests/oracle.toml" \
+  | sed -n 's/^commit = "\(.*\)"$/\1/p')
+git merge-base --is-ancestor "$ORACLE_BASE" HEAD
 export ORACLE_TREE=$(git rev-parse HEAD^{tree})
-export ORACLE_ROOT=$(printf '%s\n\n%s\n%s\n' \
+export ORACLE_SQUASH=$(printf '%s\n\n%s\n%s\n' \
   'sway-ipc-oracle: publish the conformance harness' \
   "Uses i3's unchanged BSD-3-Clause test suite with full credit." \
   'Originated in swayward and remains useful independently.' \
-  | git commit-tree "$ORACLE_TREE")
-git branch launch-squash-dry-run "$ORACLE_ROOT"
+  | git commit-tree "$ORACLE_TREE" -p "$ORACLE_BASE")
+git branch launch-squash-dry-run "$ORACLE_SQUASH"
 test "$(git rev-parse launch-squash-dry-run^{tree})" = "$ORACLE_TREE"
 git switch launch-squash-dry-run
 ./contrib/validate
@@ -176,21 +180,24 @@ git switch launch-repin
 git branch -D launch-squash-dry-run
 ```
 
-Gate: the bundle verifies, the tree hashes match, and validation passes on the disposable root commit.
+Gate: the bundle verifies, the tree hashes match, and validation passes on the disposable squash commit.
 
-When the maintainer approves the exact root commit message, recreate the root commit, move oracle `main` to it, and push with `--force-with-lease`. This is an irreversible publication step. Do not tag the oracle and do not create an oracle GitHub release.
+When the maintainer approves the exact commit message, recreate the squash commit, move oracle `main` to it, and push with `--force-with-lease`. Oracle `main` is otherwise protected and never rewritten: lift its protection for this push only (`gh api -X DELETE repos/swayward-wm/sway-ipc-oracle/branches/main/protection`) and restore it right after the push. This is an irreversible publication step. Do not tag the oracle and do not create an oracle GitHub release.
 
-After the push:
+After the push, restore oracle `main` protection first, even if a later check fails:
 
 ```sh
+printf '%s' '{"required_status_checks":null,"enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null,"allow_force_pushes":false,"allow_deletions":false}' \
+  | gh api -X PUT "repos/swayward-wm/sway-ipc-oracle/branches/main/protection" --input -
+gh api "repos/swayward-wm/sway-ipc-oracle/branches/main/protection" --jq '.allow_force_pushes.enabled'  # false
 git fetch origin
-test "$(git rev-list --count origin/main)" -eq 1
+test "$(git rev-list --count "$ORACLE_BASE..origin/main")" -eq 1
 ./contrib/validate
 ```
 
-Record the new oracle root SHA as `ORACLE_SHA`. Close `oracle-final-squash`, then close `extract-compliance-harness` with the final SHA and reproducibility evidence.
+Record the new oracle squash SHA as `ORACLE_SHA`. Close `oracle-final-squash`, then close `extract-compliance-harness` with the final SHA and reproducibility evidence.
 
-## 7. Pin swayward to the final oracle root
+## 7. Pin swayward to the final oracle commit
 
 **Owner: swayward integrator**
 
@@ -248,7 +255,7 @@ distrobox enter swayward-dev -- bash -lc "
 "
 ```
 
-For changes under `src/layout/`, also run both slow gates with `CARGO_BUILD_JOBS=4`, `RUN_SLOW_TESTS=1`, and `PROPTEST_CASES=20000`, as specified in `AGENTS.md`.
+For changes under `src/layout/`, also run both slow gates with `CARGO_BUILD_JOBS=4`, `RUN_SLOW_TESTS=1`, and `PROPTEST_CASES=20000`, as specified in `AGENTS.md`. For changes to the translator or i3 harness paths listed there, also run the i3 ratchet: `RUN_SLOW_TESTS=1 cargo test -p swayward --lib i3_conformance_non_green_passes_do_not_drop`.
 
 Run `./contrib/sync-github-wiki --check-published` with network access. Search `docs/wiki` for `Since: next release`; only the releasing guide may contain the check's literal text.
 
@@ -284,19 +291,31 @@ Create and push the signed tag:
 ```sh
 git tag -s "swayward-v$VERSION" -m "swayward $VERSION"
 git push origin "swayward-v$VERSION"
+export RELEASE_BRANCH=release/$(printf '%s' "$VERSION" | cut -d. -f1,2)
+git push origin "swayward-v$VERSION^{commit}:refs/heads/$RELEASE_BRANCH"
 ```
 
-History is final at the tag. Turn on branch protection for swayward `main` and oracle `main` so that neither accepts a force-push or deletion, and confirm it:
+A release tag is never moved. Every swayward sha the oracle pins is reachable
+from a release tag (T4 pins the frozen RC sha and tags on top of it). Swayward
+`main` may be rewritten only above the latest release tag on it, with
+`--force-with-lease` when nothing else is in flight; never rewrite a commit at
+or below that tag. `$RELEASE_BRANCH` keeps its own commits and is never
+rewritten; `main` may still rewrite its own commits above its latest release
+tag even if `$RELEASE_BRANCH` shares them. Turn on branch protection for oracle
+`main` and for `$RELEASE_BRANCH` so that neither accepts a force-push or
+deletion, and confirm it:
 
 ```sh
-for repo in swayward-wm/swayward swayward-wm/sway-ipc-oracle; do
+protect() {
   printf '%s' '{"required_status_checks":null,"enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null,"allow_force_pushes":false,"allow_deletions":false}' \
-    | gh api -X PUT "repos/$repo/branches/main/protection" --input -
-  gh api "repos/$repo/branches/main/protection" --jq '.allow_force_pushes.enabled'  # false
-done
+    | gh api -X PUT "repos/$1/branches/$2/protection" --input -
+  gh api "repos/$1/branches/$2/protection" --jq '.allow_force_pushes.enabled'  # false
+}
+protect swayward-wm/sway-ipc-oracle main
+protect swayward-wm/swayward "$RELEASE_BRANCH"
 ```
 
-From here on, the oracle pins only tagged or `main` commits, and neither `main` is squashed or rebased again.
+From here on, the oracle pins only tagged or `main` commits, and oracle `main` is rewritten only by the next T4 squash, above the oracle commit this tag pins.
 
 Dispatch **Prepare release** on that tag and use the version without the `swayward-v` prefix:
 

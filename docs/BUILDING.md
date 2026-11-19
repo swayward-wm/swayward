@@ -54,7 +54,14 @@ distrobox enter swayward-dev -- env CARGO_BUILD_JOBS=4 cargo build --release
 
 The script creates `swayward-dev` from `fedora-toolbox:44` and installs the
 dependencies listed above. Distrobox mounts your home directory at the same
-path, so run Cargo from the repository path inside the container.
+path, so run Cargo from the repository path inside the container. When rustup
+is installed under `~/.cargo`, the container puts that directory first on
+`PATH` so rustup's `cargo` wins over Fedora's. Run the fast gate with
+`RUSTUP_TOOLCHAIN=1.98.0` to match CI's clippy pin:
+
+```sh
+distrobox enter swayward-dev -- bash -lc 'cd <repo> && RUSTUP_TOOLCHAIN=1.98.0 ./contrib/fast-gate'
+```
 
 ## Run a nested session
 

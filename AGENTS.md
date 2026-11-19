@@ -38,11 +38,12 @@ session, and unlike a human watching a screen it runs in CI.
 
 Begin every fix from current `main` (`git checkout --detach main` in a
 worktree), and run `./contrib/fast-gate` before calling it done. It runs nightly
-fmt, clippy, `cargo test --all`, ledger and coverage checks, plus the slow gates
-below when `src/layout/` changed. A fix verified on a stale base or with focused
-tests only broke main four times in one day: two fixes that each passed alone
-collided, and a command change regressed green i3 files that only the full
-conformance runner exercises. `cargo test --all` includes that runner.
+fmt, clippy, `cargo test --all`, ledger and coverage checks, plus the slow layout
+gate when `src/layout/` changed and the i3 ratchet when translator or harness
+paths changed. A fix verified on a stale base or with focused tests only broke
+main four times in one day: two fixes that each passed alone collided, and a
+command change regressed green i3 files that only the full conformance runner
+exercises. `cargo test --all` includes that runner.
 
 Rebase onto the latest `origin/main` immediately before handing a commit over.
 Main moves several times an hour, and most integration conflicts are stale
@@ -63,16 +64,39 @@ commit that moves a pin outside T4 is bounced.
 | T3 | nightly | CI: 200k proptests and the live soak | no new failure |
 | T4 | release candidate, once per milestone | maintainer: full oracle regeneration | oracle `contrib/validate` green, `pending.toml` empty, two runs agree |
 
+Commits that touch the translator (`contrib/sway-to-kdl*`,
+`contrib/test-sway-to-kdl.py`, `swayward-config/`) or the i3 harness
+(`src/tests/i3_conformance/`, `src/tests/i3_conformance.rs`, `tests/i3/`,
+`contrib/coverage-report`) run the i3 pass ratchet inside `./contrib/fast-gate`.
+Never lower i3 coverage records just to make CI pass: a drop is either fixed in
+the same commit or recorded as a sway divergence with a citation (a skip, or a
+fail with its reason).
+
 T4 runs in this order, so the pinned commit survives on main:
 
-1. Squash swayward, if wanted. Squash before the freeze, never after.
+1. Squash swayward, if wanted: only commits above the latest release tag on
+   `main`, pushed with `--force-with-lease` while nothing else is in flight.
+   Squash before the freeze, never after; a rewrite after freeze orphans the
+   sha the oracle is about to pin.
 2. Freeze the RC sha on main.
 3. Pin the RC in the oracle and regenerate every result.
-4. Squash the oracle.
+4. Squash the oracle: only commits above the oracle commit pinned by the
+   latest swayward release tag, so every tag's pinned oracle sha survives.
+   Oracle `main` is otherwise protected and never rewritten.
 5. Repin `tests/oracle.toml` once, then tag swayward HEAD.
 
-History is final at the beta1 tag: from then on main is never rewritten and
-the oracle pins only tagged or on-main commits.
+Every swayward sha the oracle pins is reachable from a release tag: T4 pins
+the frozen RC sha and tags on top of it, so a rewrite above the latest release
+tag on `main` cannot orphan a pinned sha. A frozen RC counts as a release tag.
+`main` may be rewritten only above that tag (squash, fold a correction into
+the commit it corrects; every commit is replayed at each niri merging-rebase,
+so keep commit volume low); never rewrite a commit at or below it. A release
+tag is never moved. Rewrite only with `--force-with-lease` and when nothing
+else is in flight. Once tagged, a `release/<YY.MM>` branch keeps its own
+commits and is never rewritten; `main` may still rewrite its own commits above
+its latest release tag even if a release branch shares them. Fix releases
+tagged on `release/<YY.MM>` branches follow
+[`docs/UPSTREAM.md`](docs/UPSTREAM.md).
 `docs/internal/launch-checklist.md` is the runbook.
 
 For T1, select the affected rows with `contrib/targeted-oracle --out-dir
@@ -222,16 +246,18 @@ clone-local and does not travel. Re-run it in a fresh checkout.
 
 main follows each niri release by merging-rebase
 (`contrib/merging-rebase --apply vXX.YY`): our commits are replayed onto the
-new tag and main still only fast-forwards. Every commit we author is a commit
-each future rebase has to replay and reason through, so our history is a tool
-for rebasing, not a diary of how the work happened. Release lines live on
-protected `release/<YY.MM>` branches.
+new tag and the push fast-forwards main. Apart from that, main is rewritten
+only above the latest release tag on it (see T4 above). Every commit we author
+is a commit each future rebase has to replay and reason through, so our
+history is a tool for rebasing, not a diary of how the work happened. Release
+lines live on protected `release/<YY.MM>` branches.
 
 [`docs/UPSTREAM.md`](docs/UPSTREAM.md) is the full strategy: release tags only,
 never upstream `main`; release branches; the merging-rebase and its history
 shape; and why rebasing onto `v26.04` was rejected.
 
-Rewrite freely while a branch is unmerged. `origin` is ours alone:
+Rewrite freely while a branch is unmerged; on `main`, only above the latest
+release tag; a tagged `release/<YY.MM>` branch, never. `origin` is ours alone:
 
 - **Amend** rather than adding "fix typo" or "address review".
 - **Squash** a task's exploratory commits into the one commit that lands.
@@ -244,8 +270,9 @@ a trivial merge into an archaeology problem.
 **Squashing does not reduce merge cost.** `git merge` compares base, our and
 their *trees*; it never walks our commit list. Measured: two branches with
 byte-identical trees, one of two commits and one squashed to one, produce the
-same conflict and hunk counts against the same upstream change. Squash for
-human legibility, never at the price of a commit's verifiability.
+same conflict and hunk counts against the same upstream change. What squashing
+does reduce is the number of commits each merging-rebase replays. Squash for
+that and for human legibility, never at the price of a commit's verifiability.
 
 What does need rewriting is content that should never have been committed:
 test artefacts, secrets, generated files. Those live in the trees a merge
@@ -282,7 +309,10 @@ or supposedly infallible data.
 - A feature needs executable evidence before it counts as working.
 - Every sway-compatibility fix names the exact oracle scenario/event row that proves it in
   its commit message. If no focused row exists, add and capture one from pinned sway
-  before landing the fix.
+  before landing the fix. Behaviour no IPC request can observe (for example popup
+  placement) is proven instead by a headless protocol test in `src/tests/` that
+  drives a real `wayland-client` and reads the protocol event; the commit message
+  names the test and says why no oracle row can observe it.
 - Stability regressions outrank new features.
 - **An AI does not sign off.** A human reviews every change, checks the
   licensing and is responsible for the result, following the kernel's

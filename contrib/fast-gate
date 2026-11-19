@@ -19,8 +19,21 @@ python3 contrib/test-i3-suite-summary.py
 
 base=${FAST_GATE_BASE:-origin/main}
 if git diff --name-only "$base" -- src/layout/ | grep -q .; then
+    echo "fast-gate: slow layout gate (src/layout/ changed)"
     RUN_SLOW_TESTS=1 PROPTEST_CASES=20000 \
         cargo test -p swayward --lib tiling_tree
     RUN_SLOW_TESTS=1 PROPTEST_CASES=20000 \
         cargo test --release -p swayward --lib random_operations_dont_panic
+fi
+if git diff --name-only "$base" -- \
+    'contrib/sway-to-kdl*' \
+    contrib/test-sway-to-kdl.py \
+    swayward-config/ \
+    src/tests/i3_conformance/ \
+    src/tests/i3_conformance.rs \
+    tests/i3/ \
+    contrib/coverage-report | grep -q .; then
+    echo "fast-gate: i3 ratchet (translator/harness paths changed)"
+    RUN_SLOW_TESTS=1 \
+        cargo test -p swayward --lib i3_conformance_non_green_passes_do_not_drop
 fi

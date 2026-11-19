@@ -45,28 +45,101 @@ jobs:
           # shellcheck disable=SC2024
           sudo systemd-run --scope --quiet --collect --unit="$unit" \
             --uid="$(id -u)" -p MemoryMax=2G -p MemorySwapMax=0 \
+            -p TimeoutStopSec=10s \
             --setenv=XDG_RUNTIME_DIR="$runtime" \
             --setenv=WLR_HEADLESS_OUTPUTS="$WLR_HEADLESS_OUTPUTS" \
             timeout --signal=TERM --kill-after=5s 1800s \
             target/release/swayward -c "$runtime/config.kdl" \
             >"$runtime/compositor.log" 2>&1 &
           compositor=$!
+          # /proc existence needs no signal permission. An unprivileged
+          # kill -0 on the root-owned sudo launcher can fail with EPERM,
+          # which the old loop read as "compositor died" on the first wait
+          # iteration (runs 43707468197, 42016257480), aborting before the
+          # socket appeared and leaving cleanup stuck in wait until the
+          # inner 1800s timeout.
+          launcher_alive() { [ -d "/proc/$compositor" ]; }
+          launcher_is_sudo() {
+            [ "$(cat "/proc/$compositor/comm" 2>/dev/null)" = sudo ]
+          }
           cleanup() {
-            sudo systemctl stop "$unit.scope" 2>/dev/null || true
-            wait "$compositor" 2>/dev/null || true
+            # Always try to stop the scope, even if the launcher is already
+            # gone (sudo SIGKILL'd; timeout killed; spawned children). While
+            # the launcher is alive and stop fails (scope not yet registered),
+            # retry for a bounded time; once the launcher is gone, one more
+            # stop attempt covers a late-registered scope. Each stop/status
+            # is wrapped in timeout; TimeoutStopSec caps systemd's own wait.
+            # Bound wall clock so EXIT never blocks near the job timeout.
+            local stop_deadline=$((SECONDS + 20))
+            local stopped=0
+            while [ "$SECONDS" -lt "$stop_deadline" ]; do
+              if sudo timeout 15 systemctl stop "$unit.scope" 2>/dev/null; then
+                stopped=1
+                break
+              fi
+              if launcher_alive; then
+                sleep 0.25
+                continue
+              fi
+              sudo timeout 15 systemctl stop "$unit.scope" 2>/dev/null && stopped=1
+              break
+            done
+            # After a successful stop, give the launcher a short grace to
+            # exit before escalating to TERM/KILL.
+            if [ "$stopped" -eq 1 ]; then
+              local grace_deadline=$((SECONDS + 5))
+              while launcher_alive && [ "$SECONDS" -lt "$grace_deadline" ]; do
+                sleep 0.25
+              done
+            fi
+            if launcher_alive && launcher_is_sudo; then
+              sudo kill -TERM "$compositor" 2>/dev/null || true
+              local term_deadline=$((SECONDS + 5))
+              while launcher_alive && [ "$SECONDS" -lt "$term_deadline" ]; do
+                sleep 0.25
+              done
+            fi
+            if launcher_alive && launcher_is_sudo; then
+              sudo kill -KILL "$compositor" 2>/dev/null || true
+            fi
+            local wait_deadline=$((SECONDS + 5))
+            while launcher_alive && [ "$SECONDS" -lt "$wait_deadline" ]; do
+              sleep 0.1
+            done
+            if launcher_alive; then
+              echo "cleanup: launcher PID $compositor still alive after ~1 min" >&2
+            else
+              wait "$compositor" 2>/dev/null || true
+            fi
           }
           trap cleanup EXIT
 
           socket=
-          for _ in $(seq 1 120); do
+          deadline=$((SECONDS + 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
             socket=$(find "$runtime" -maxdepth 1 -type s \
               -name 'swayward-ipc.*.sock' -print -quit)
             [ -n "$socket" ] && break
-            kill -0 "$compositor" 2>/dev/null || break
+            if ! launcher_alive; then
+              # One missed check is not death; confirm before giving up.
+              sleep 0.25
+              launcher_alive || break
+            fi
             sleep 0.25
           done
           if [ -z "$socket" ]; then
             echo 'no IPC socket appeared' | tee "$runtime/soak.log"
+            echo "--- diagnostics ---" >&2
+            ls -la "$runtime" >&2 || true
+            echo "--- compositor.log (tail) ---" >&2
+            tail -n 50 "$runtime/compositor.log" 2>/dev/null >&2 || true
+            echo "--- systemctl status $unit.scope ---" >&2
+            sudo timeout 10 systemctl status "$unit.scope" --no-pager >&2 || true
+            if launcher_alive; then
+              echo "launcher PID $compositor is alive" >&2
+            else
+              echo "launcher PID $compositor is dead" >&2
+            fi
             exit 1
           fi
 
