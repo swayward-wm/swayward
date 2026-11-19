@@ -248,10 +248,10 @@ and the failing and unreached assertions counted.
 | Files | 242 |
 | Fully green files | 93 |
 | Declared assertions | 3,171 |
-| Pass | 1,865 |
-| Documented skip | 901 |
+| Pass | 1,843 |
+| Documented skip | 899 |
 | Fail | 349 |
-| Unreached | 56 |
+| Unreached | 80 |
 <!-- end coverage-report -->
 
 Command: `contrib/coverage-report`.

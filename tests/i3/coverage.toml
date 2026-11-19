@@ -3984,11 +3984,15 @@ reason = "i3 makes unqualified bindings NumLock-insensitive; sway requires the a
 citation = "i3/src/bindings.c:378-440; sway/sway/input/seatop_default.c:125-143"
 
 [files."291-swap.t"]
+unreached_premise = "Fresh measurement reaches no assertions: translation rejects `for_window[class=\"mark_A\"] mark A` (no space before `[`). Sway's config_command takes `for_window[class=\"mark_A\"]` as argv[0] and has no such handler (`sway/sway/commands.c:145-160`), so the harness refuses the whole config."
 plan_unknown = true
 assertions = 11
 tap_plan = "none"
-pass = 11
-note = "The fresh unchanged run reaches one liveness check, one cross-workspace `con_id` result, and nine same-workspace mark-swap shape/focus assertions. The initial `swap container with con_id 1` is rejected as expected; its `does_i3_live` pass proves only that the invalid request did not crash. Map-time `mark` rules translate through the existing `sway-for-window-command` path and assign globally uniqu"
+pass = 0
+unreached = 11
+reason = "i3_only_semantics"
+reason_verified = true
+note = "Fresh measurement reaches no assertions because translation rejects the compact `for_window[...]` spelling. The test config line `for_window[class=\"mark_A\"] mark A` becomes argv[0] `for_window[class=\"mark_A\"]`, which sway has no handler for (`sway/sway/commands.c:145-160`), so the harness refuses the config before any TAP."
 
 [files."292-regress-layout-toggle.t"]
 assertions = 1
@@ -4665,22 +4669,14 @@ reason = "i3 reapplies workspace gap assignments on reload. Sway copies gaps onc
 citation = "sway/sway/tree/workspace.c:224-240"
 
 [files."320-mouse-bindings.t"]
+unreached_premise = "Fresh measurement reaches no assertions: translation rejects `for_window[class=\"mark_A\"] mark A` (no space before `[`). Sway's config_command takes `for_window[class=\"mark_A\"]` as argv[0] and has no such handler (`sway/sway/commands.c:145-160`), so the harness refuses the whole config."
 assertions = 13
 tap_plan = 13
-pass = 11
+pass = 0
+unreached = 13
 reason = "i3_only_semantics"
 reason_verified = true
-note = "Fresh measurement after removing assertion interception: 11 pass, 2 documented skip. Raw TAP runs the real comparisons; each retained skip has an assertion-level sway citation below."
-[[files."320-mouse-bindings.t".skip]]
-n = 9
-desc = "unbound button5 outside a mode focuses the target window"
-reason = "Sway forwards an unhandled wheel-axis event to the client and does not run pointer-button focus handling."
-citation = "sway/sway/input/seatop_default.c:740-800"
-[[files."320-mouse-bindings.t".skip]]
-n = 13
-desc = "unbound button5 after leaving a mode focuses the target window"
-reason = "Sway forwards an unhandled wheel-axis event to the client and does not run pointer-button focus handling."
-citation = "sway/sway/input/seatop_default.c:740-800"
+note = "Fresh measurement reaches no assertions because translation rejects the compact `for_window[...]` spelling. The test config line `for_window[class=\"mark_A\"] mark A` becomes argv[0] `for_window[class=\"mark_A\"]`, which sway has no handler for (`sway/sway/commands.c:145-160`), so the harness refuses the config before any TAP."
 
 [files."321-crash-criteria-scratchpad.t"]
 assertions = 6
