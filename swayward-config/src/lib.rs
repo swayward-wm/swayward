@@ -27,6 +27,7 @@ pub mod layout;
 pub mod misc;
 pub mod output;
 pub mod recent_windows;
+pub mod sway_commands;
 pub mod utils;
 pub mod window_rule;
 pub mod workspace;

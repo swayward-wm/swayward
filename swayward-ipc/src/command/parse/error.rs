@@ -24,6 +24,7 @@ pub(super) struct ParseError {
     /// What sway's handler answers instead when the focused node is less
     /// than it needs, for handlers that check focus before their arguments.
     without_view: Option<(FocusedNode, &'static str, ErrorKind)>,
+    unimplemented: bool,
 }
 
 impl ParseError {
@@ -32,6 +33,15 @@ impl ParseError {
     pub(super) fn into_failure(mut self) -> Self {
         self.kind = ErrorKind::Failure;
         self
+    }
+
+    pub(super) fn into_unimplemented(mut self) -> Self {
+        self.unimplemented = true;
+        self
+    }
+
+    pub(super) fn message(&self) -> &str {
+        &self.message
     }
 
     #[cfg(test)]
@@ -63,6 +73,7 @@ impl ParseError {
             without: self
                 .without_view
                 .map(|(needed, message, kind)| (needed, outcome(message.to_owned(), kind))),
+            unimplemented: self.unimplemented,
         }
     }
 }
@@ -83,9 +94,19 @@ fn outcome(message: String, kind: ErrorKind) -> CommandOutcome {
 pub struct ParseFailure {
     outcome: CommandOutcome,
     without: Option<(FocusedNode, CommandOutcome)>,
+    unimplemented: bool,
 }
 
 impl ParseFailure {
+    pub fn is_unimplemented(&self) -> bool {
+        self.unimplemented
+    }
+
+    pub(super) fn with_unimplemented(mut self, unimplemented: bool) -> Self {
+        self.unimplemented = unimplemented;
+        self
+    }
+
     /// The reply sway gives with `focused` in the handler context.
     pub fn resolve(self, focused: FocusedNode) -> CommandOutcome {
         match self.without {
@@ -100,6 +121,7 @@ impl From<CommandOutcome> for ParseFailure {
         Self {
             outcome,
             without: None,
+            unimplemented: false,
         }
     }
 }
@@ -110,6 +132,7 @@ impl From<String> for ParseError {
             message,
             kind: ErrorKind::Invalid,
             without_view: None,
+            unimplemented: false,
         }
     }
 }

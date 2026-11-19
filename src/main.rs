@@ -70,10 +70,27 @@ fn init_process() {
 fn run_subcommand(subcommand: Option<Sub>) -> Result<bool, Box<dyn std::error::Error>> {
     if let Some(subcommand) = subcommand {
         match subcommand {
-            Sub::Validate { config } => {
+            Sub::Validate { config, strict } => {
                 tracy_client::Client::start();
 
-                config_path(config).load().config?;
+                let config = config_path(config).load().config?;
+                // Command strings are opaque to the KDL decoder; without this
+                // a bad one is first reported when its key is pressed.
+                let problems = config.sway_command_problems();
+                for problem in &problems {
+                    if strict {
+                        error!("{problem}");
+                    } else {
+                        warn!("{problem}");
+                    }
+                }
+                if strict && !problems.is_empty() {
+                    return Err(format!(
+                        "config has {} sway command(s) that would be refused",
+                        problems.len()
+                    )
+                    .into());
+                }
                 info!("config is valid");
                 return Ok(true);
             }

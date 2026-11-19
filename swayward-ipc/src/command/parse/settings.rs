@@ -32,10 +32,7 @@ pub(super) fn parse_client_colors(name: &str, args: &[&str]) -> Result<Command, 
     let [border, background, text, ..] = parsed;
 
     if name != "client.focused_tab_title" {
-        return Err(
-            "client colour commands are unsupported because sway window-border colours are not fully rendered"
-                .into(),
-        );
+        return Err(CLIENT_COLOURS.into());
     }
 
     Ok(Command::SetClientColors {
@@ -302,10 +299,7 @@ pub(super) fn parse(name: &str, rest: &[&str]) -> Result<Command, String> {
                 _ => return Err(usage.into()),
             };
             if lone_tab {
-                return Err(
-                    "hide_edge_borders --i3 is unsupported because swayward cannot hide a lone tab's title bar"
-                        .into(),
-                );
+                return Err(HIDE_EDGE_BORDERS_I3.into());
             }
             Ok(Command::SetLayoutOption(option))
         }

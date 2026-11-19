@@ -37,6 +37,8 @@ Edit and save the config file, and swayward applies the changes.
 This includes key bindings, output settings like mode, window rules, and everything else.
 
 You can run `swayward validate` to parse the config and see any errors.
+It also checks the sway command strings in binds and window rules, which are otherwise first parsed when they run.
+A command that would be refused is a warning; `swayward validate --strict` makes it an error.
 
 To use a different config file path, pass it in the `--config` or `-c` argument to `swayward`.
 

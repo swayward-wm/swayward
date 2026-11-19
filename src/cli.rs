@@ -68,6 +68,9 @@ pub enum Sub {
         /// the command line argument takes precedence.
         #[arg(short, long)]
         config: Option<PathBuf>,
+        /// Whether to warn or fail on when when a window rule holds a command sway would refuse to run.
+        #[arg(long)]
+        strict: bool,
     },
     /// Cause a panic to check if the backtraces are good.
     Panic,

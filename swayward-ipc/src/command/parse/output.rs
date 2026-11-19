@@ -2,14 +2,10 @@ use super::*;
 
 pub(super) fn parse_input_command(args: &[&str]) -> Result<Command, String> {
     let [identifier, subcommand, values @ ..] = args else {
-        return Err(
-            "only input <identifier> xkb_switch_layout <next|prev|index> is supported".into(),
-        );
+        return Err(INPUT_SUBCOMMAND.into());
     };
     if *subcommand != "xkb_switch_layout" {
-        return Err(
-            "only input <identifier> xkb_switch_layout <next|prev|index> is supported".into(),
-        );
+        return Err(INPUT_SUBCOMMAND.into());
     }
     let [target] = values else {
         return Err(arity_error(
@@ -221,7 +217,7 @@ fn parse_output_adaptive_sync(
         return Err(if target == "*" {
             "Cannot apply toggle to all outputs"
         } else {
-            "adaptive_sync toggle is not implemented"
+            ADAPTIVE_SYNC_TOGGLE
         }
         .into());
     }

@@ -11,6 +11,7 @@ mod move_resize;
 mod output;
 mod rules;
 mod settings;
+mod unimplemented;
 mod workspace;
 
 use arity::*;
@@ -25,6 +26,7 @@ use output::*;
 use rules::*;
 pub use settings::strtol;
 use settings::*;
+use unimplemented::*;
 use workspace::*;
 
 /// Parse a command list with no variables defined.
@@ -85,7 +87,10 @@ pub fn parse_with_variables(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    results.push(Err(error.into()));
+                    let unimplemented = error.error.as_deref().is_some_and(sway_accepts_criteria);
+                    results.push(Err(
+                        ParseFailure::from(error).with_unimplemented(unimplemented)
+                    ));
                     break;
                 }
             }
@@ -293,6 +298,11 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
         Ok(command) => return Ok(command),
         Err(error) => ParseError::from(error),
     };
+    let error = if sway_accepts(&lower, rest, error.message()) {
+        error.into_unimplemented()
+    } else {
+        error
+    };
     Err(match lower.as_str() {
         // Handlers that check for a focused container before they read their
         // arguments: `sway/sway/commands/border.c:61-67`,
@@ -372,9 +382,7 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
             _ => Err(arity_error(rest.len(), "floating", Expected::EqualTo(1))),
         },
         "urgent" => match rest {
-            [value] if matches!(*value, "allow" | "deny") => {
-                Err("urgent allow|deny requires client urgency-request policy support".into())
-            }
+            [value] if matches!(*value, "allow" | "deny") => Err(URGENT_POLICY.into()),
             [value] => Ok(Command::Urgent((*value).to_owned())),
             _ => Err(arity_error(rest.len(), "urgent", Expected::EqualTo(1))),
         },
@@ -446,9 +454,7 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
         "unbindcode" => parse_bind_command(rest, true, true),
         "bindswitch" => parse_switch_bind_command(rest, false),
         "unbindswitch" => parse_switch_bind_command(rest, true),
-        "bindgesture" | "unbindgesture" => {
-            Err("gesture events have no sway command-binding model".into())
-        }
+        "bindgesture" | "unbindgesture" => Err(GESTURE_BINDINGS.into()),
         "mode" => parse_mode(rest),
         "nop" => Ok(Command::Nop),
         "bar" => parse_bar(rest),

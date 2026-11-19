@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/main.rs", "src/cli.rs", "swayward-config/src/lib.rs"]
+what = "`validate` also parses the sway command strings in binds and window rules and warns about each one that would be refused when run, saying whether it is invalid or not implemented in swayward; a new `--strict` flag turns the warnings into a failure. The config crate gains the `sway_commands` module that does the check."
+why = "A bind's `command` and a rule's `sway-for-window-command` are plain strings to the KDL decoder, so a misspelt one was first reported when its key was pressed. Sway reads them just as late (cmd_bindsym_or_bindcode stores the string, sway/sway/commands/bind.c:488), so a config that loads in sway must not fail by default."
