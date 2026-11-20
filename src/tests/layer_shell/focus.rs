@@ -334,3 +334,51 @@ fn layer_popup_is_constrained_and_parent_unmap_is_safe() {
     f.client(client).dispatch_unchecked();
     assert!(f.client(client).connection.protocol_error().is_none());
 }
+
+/// Sway keeps an exclusive layer focused when the seat focus moves to another
+/// output: `seat_set_focus` drops the layer, moves the workspace focus and
+/// hands the keyboard straight back (`sway/sway/input/seat.c:1255-1264`).
+#[test]
+fn exclusive_layer_keeps_keyboard_when_focus_follows_mouse_crosses_outputs() {
+    let mut config = swayward_config::Config::default();
+    config.input.focus_follows_mouse = Some(swayward_config::input::FocusFollowsMouse {
+        mode: swayward_config::input::FocusFollowsMouseMode::Yes,
+        max_scroll_amount: None,
+    });
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1024, 768));
+    f.add_output(2, (1024, 768));
+    let client = f.add_client();
+
+    f.niri_focus_output(2);
+    f.niri_state().move_cursor((1500., 300.).into());
+    let exclusive = map_layer(
+        &mut f,
+        client,
+        Layer::Overlay,
+        "launcher",
+        LayerConfigureProps {
+            size: Some((100, 50)),
+            kb_interactivity: Some(KeyboardInteractivity::Exclusive),
+            ..Default::default()
+        },
+    );
+    assert_eq!(focused_surface_id(&mut f), exclusive.id().protocol_id());
+
+    let location = (500., 300.).into();
+    let under = f.swayward().contents_under(location);
+    assert_eq!(under.output, Some(f.niri_output(1)));
+    f.swayward().handle_focus_follows_mouse(&under);
+    f.niri_state().move_cursor(location);
+    f.double_roundtrip(client);
+
+    assert_eq!(
+        f.swayward().layout.active_output().cloned(),
+        Some(f.niri_output(1))
+    );
+    assert_eq!(
+        f.swayward().keyboard_focus.surface().map(|s| s.id().protocol_id()),
+        Some(exclusive.id().protocol_id()),
+        "the exclusive layer lost the keyboard when the pointer crossed outputs"
+    );
+}
