@@ -9,7 +9,9 @@ use swayward_ipc::{PositionChange, SizeChange, WindowLayout};
 
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
-use super::tiling_tree::{DetachedSubtree, Direction, NodeId, TilingTree, TilingTreeRenderElement};
+use super::tiling_tree::{
+    output_box_size, DetachedSubtree, Direction, NodeId, TilingTree, TilingTreeRenderElement,
+};
 use super::titlebar::{self, Titlebar, TitlebarSlot, TitlebarState};
 use super::workspace::{InteractiveResize, ResolvedSize};
 use super::{
@@ -851,8 +853,9 @@ impl<W: LayoutElement> FloatingLayout<W> {
         }
         for (tile, pos) in self.tiles_with_offsets() {
             if tile.window().id() == id {
-                // Position within the working area.
-                let mut target = self.working_area;
+                // The output box, as for tiled windows (sway/desktop/xdg_shell.c:44-66), so
+                // the popup may cover a bar.
+                let mut target = Rectangle::from_size(output_box_size(self.view_size));
                 target.loc -= pos;
                 target.loc -= tile.window_loc();
 

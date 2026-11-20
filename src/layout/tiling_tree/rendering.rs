@@ -1,5 +1,13 @@
 use super::{DecorationLayer, *};
 
+/// The size of sway's output box for an output of this logical size. wlroots truncates the
+/// mode divided by the scale (wlr_output_effective_resolution,
+/// wlroots/types/output/output.c:472-477) where `view_size` keeps the fraction, so 2560 px at
+/// scale 1.5 is 1706 wide, not 1706.67.
+pub(crate) fn output_box_size(view_size: Size<f64, Logical>) -> Size<f64, Logical> {
+    view_size.to_i32_floor::<i32>().to_f64()
+}
+
 impl<W: LayoutElement> TilingTree<W> {
     pub fn active_window_visual_rectangle(&self) -> Option<Rectangle<f64, Logical>> {
         let id = self.focus?;
@@ -10,12 +18,14 @@ impl<W: LayoutElement> TilingTree<W> {
         Rectangle::from_size(self.view_size).intersection(rect)
     }
 
+    /// The output box in the coordinates of the window's geometry, which sway unconstrains
+    /// popups against (sway/desktop/xdg_shell.c:44-66).
     pub fn popup_target_rect(&self, window: &W::Id) -> Option<Rectangle<f64, Logical>> {
         let id = self.node_for_window(window)?;
         let tile = self.tile(id)?;
-        let mut target = self.geometry(id)?;
-        target.loc += tile.window_loc();
-        target.size = tile.window_size();
+        let mut target = Rectangle::from_size(output_box_size(self.view_size));
+        target.loc -= self.geometry(id)?.loc;
+        target.loc -= tile.window_loc();
         Some(target)
     }
 

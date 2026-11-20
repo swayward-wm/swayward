@@ -491,3 +491,186 @@ fn client_interactive_resize_requires_floating() {
     let (mut fullscreen, _) = set_up(WindowState::Fullscreen);
     assert!(!request_resize(&mut fullscreen));
 }
+
+fn popup_position(
+    f: &mut Fixture,
+    client: ClientId,
+    parent: &wayland_client::protocol::wl_surface::WlSurface,
+    offset: (i32, i32),
+) -> (i32, i32) {
+    let parent = f.client(client).window(parent).xdg_surface.clone();
+    let surface = f
+        .client(client)
+        .state
+        .create_popup(Some(&parent), Some(offset))
+        .surface
+        .clone();
+    surface.commit();
+    f.double_roundtrip(client);
+    let &(x, y, _, _) = f
+        .client(client)
+        .popup(&surface)
+        .configures_received
+        .last()
+        .unwrap();
+    (x, y)
+}
+
+/// Sway fits a window's popups to its output, expressed in the window's coordinates
+/// (`popup_unconstrain`, sway/desktop/xdg_shell.c:44-66). A tiled window away from the
+/// output origin keeps the popup where the client put it, and a popup may extend past the
+/// window's own edge while it stays on the output.
+#[test]
+fn tiled_popups_are_unconstrained_against_the_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (800, 600));
+    let client = f.add_client();
+    let left = windows::map_window(&mut f, client, windows::WindowSpec::titled("left"));
+    let right = windows::map_window(&mut f, client, windows::WindowSpec::titled("right"));
+
+    let on_left = popup_position(&mut f, client, &left, (100, 100));
+    assert_eq!(popup_position(&mut f, client, &right, (100, 100)), on_left);
+
+    // The 100 px popup straddles the boundary between the two 400 px allocations. The
+    // clients' own surfaces are far smaller, so it is also outside its parent.
+    assert_eq!(
+        popup_position(&mut f, client, &left, (420, 100)),
+        (on_left.0 + 320, on_left.1)
+    );
+}
+
+/// The leftmost and rightmost x, in the parent's coordinates, that a 100 px popup is slid to.
+/// They differ by the width of the box the popup is fitted to, less the popup and the
+/// 8 px margin kept at each end.
+fn popup_x_limits(
+    f: &mut Fixture,
+    client: ClientId,
+    parent: &wayland_client::protocol::wl_surface::WlSurface,
+) -> (i32, i32) {
+    (
+        popup_position(f, client, parent, (-5000, 100)).0,
+        popup_position(f, client, parent, (5000, 100)).0,
+    )
+}
+
+/// Sway's popup box for a floating view is the output too, not the usable area, so the popup
+/// may cover a bar (`popup_unconstrain`, sway/desktop/xdg_shell.c:44-66).
+#[test]
+fn floating_popups_are_unconstrained_against_the_output_not_the_usable_area() {
+    use smithay::desktop::layer_map_for_output;
+    use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
+    use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor;
+
+    use super::client::LayerConfigureProps;
+
+    let mut f = Fixture::new();
+    f.add_output(1, (800, 600));
+    let client = f.add_client();
+    let window = windows::map_window(&mut f, client, windows::WindowSpec::sized(300, 200));
+    f.swayward().layout.toggle_window_floating(None);
+    f.double_roundtrip(client);
+    f.client(client).window(&window).ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let bar = f.client(client).create_layer(None, Layer::Top, "bar");
+    let bar_surface = bar.surface.clone();
+    bar.set_configure_props(LayerConfigureProps {
+        anchor: Some(Anchor::Top | Anchor::Left | Anchor::Right),
+        size: Some((0, 50)),
+        exclusive_zone: Some(50),
+        ..Default::default()
+    });
+    bar.commit();
+    f.double_roundtrip(client);
+    let bar = f.client(client).layer(&bar_surface);
+    bar.attach_new_buffer();
+    bar.set_size(800, 50);
+    bar.ack_last_and_commit();
+    f.double_roundtrip(client);
+    let output = f.niri_output(1);
+    assert_eq!(layer_map_for_output(&output).non_exclusive_zone().loc.y, 50);
+
+    // Slid as far up and as far down as the box allows: the output's 600 px, less the
+    // 100 px popup and the 8 px margin at each end. The usable area is 50 px shorter.
+    let top = popup_position(&mut f, client, &window, (100, -5000)).1;
+    let bottom = popup_position(&mut f, client, &window, (100, 5000)).1;
+    assert_eq!(bottom - top, 600 - 16 - 100);
+}
+
+/// The box is the window's own output, in output-local coordinates: an output placed away
+/// from the layout origin does not shift it.
+#[test]
+fn popups_on_a_second_output_are_unconstrained_against_that_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (800, 600));
+    f.add_output_at(2, (1000, 600), Some((800, 0)));
+    let client = f.add_client();
+    let first = windows::map_window(&mut f, client, windows::WindowSpec::titled("first"));
+    let layout = &mut f.swayward().layout;
+    let output = layout
+        .outputs()
+        .find(|output| output.name() == "headless-2");
+    let output = output.unwrap().clone();
+    layout.focus_output(&output);
+    let second = windows::map_window(&mut f, client, windows::WindowSpec::titled("second"));
+
+    let (first_left, first_right) = popup_x_limits(&mut f, client, &first);
+    let (second_left, second_right) = popup_x_limits(&mut f, client, &second);
+    assert_eq!(first_right - first_left, 800 - 16 - 100);
+    assert_eq!(second_right - second_left, 1000 - 16 - 100);
+    assert_eq!(second_left, first_left);
+
+    assert_eq!(
+        popup_position(&mut f, client, &second, (100, 100)),
+        popup_position(&mut f, client, &first, (100, 100))
+    );
+}
+
+/// wlroots truncates the output box: 2560 px at scale 1.5 is 1706 wide, where the layout's
+/// view size is 1706.67 and rounds to 1707 (wlr_output_effective_resolution,
+/// wlroots/types/output/output.c:472-477).
+#[test]
+fn popup_output_box_is_truncated_at_a_fractional_scale() {
+    let mut f = Fixture::new();
+    f.add_output(1, (2560, 1440));
+    let output = f.niri_output(1);
+    output.change_current_state(
+        None,
+        None,
+        Some(smithay::output::Scale::Fractional(1.5)),
+        None,
+    );
+    f.swayward().output_resized(&output);
+    let client = f.add_client();
+    let window = windows::map_window(&mut f, client, windows::WindowSpec::titled("only"));
+
+    let (left, right) = popup_x_limits(&mut f, client, &window);
+    assert_eq!(right - left, 1706 - 16 - 100);
+}
+
+/// Popup positions and the box are both in window-geometry coordinates, so a client whose
+/// geometry does not start at its surface origin gets the same answers.
+#[test]
+fn popup_box_follows_the_window_geometry_offset() {
+    let mut f = Fixture::new();
+    f.add_output(1, (800, 600));
+    let client = f.add_client();
+    windows::map_window(&mut f, client, windows::WindowSpec::titled("left"));
+    let window = windows::map_window(&mut f, client, windows::WindowSpec::sized(300, 200));
+
+    let mut measure = |geometry: (i32, i32)| {
+        let parent = f.client(client).window(&window);
+        parent
+            .xdg_surface
+            .set_window_geometry(geometry.0, geometry.1, 200, 100);
+        parent.commit();
+        f.double_roundtrip(client);
+        (
+            popup_x_limits(&mut f, client, &window),
+            popup_position(&mut f, client, &window, (100, 100)),
+        )
+    };
+
+    let at_origin = measure((0, 0));
+    assert_eq!(measure((10, 20)), at_origin);
+}

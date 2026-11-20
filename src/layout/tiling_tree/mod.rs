@@ -28,6 +28,7 @@ pub(crate) use depth::TOO_DEEP;
 use geometry::apply_struts;
 use node::Node;
 pub use node::{NodeId, SplitMeta, TreeNode};
+pub(crate) use rendering::output_box_size;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
 use swayward_config::utils::MergeWith as _;

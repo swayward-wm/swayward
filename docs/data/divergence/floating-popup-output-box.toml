@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/layout/floating_tree.rs"]
+what = "fit a floating window's popups to the whole output box, truncated to whole logical pixels, instead of the working area, so such a popup may cover a bar."
+why = "Sway unconstrains every view's popups, floating or tiled, against the output box in the view's coordinates (popup_unconstrain, sway/desktop/xdg_shell.c:44-66), and that box is the truncated wlr_output_effective_resolution (wlroots/types/output/output.c:472-477). niri kept floating popups inside the working area. Popup placement is not visible over IPC, so the evidence is the headless protocol test floating_popups_are_unconstrained_against_the_output_not_the_usable_area in src/tests/xdg_shell.rs."

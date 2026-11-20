@@ -1,21 +1,20 @@
 use super::*;
 
 #[test]
-fn popup_target_uses_its_nested_leaf_allocation() {
+fn popup_target_is_the_output_seen_from_its_nested_leaf() {
     let mut t = tree((1200., 800.), 0.);
     t.add_tile(tile(1, t.view_size()), InsertTarget::Focused);
     let upper = t.add_tile(tile(2, t.view_size()), InsertTarget::Focused);
     t.split(upper, Layout::SplitV);
     let lower = t.add_tile(tile(3, t.view_size()), InsertTarget::Focused);
 
-    let leaf = t.geometry(lower).unwrap();
-    let popup = t.popup_target_rect(&3).unwrap();
+    let window = t.geometry(lower).unwrap().loc + t.tile(lower).unwrap().window_loc();
+    assert!(window.x > 0. && window.y > 0.);
 
     assert_eq!(
-        popup.loc.y,
-        leaf.loc.y + t.tile(lower).unwrap().window_loc().y
+        t.popup_target_rect(&3).unwrap(),
+        Rectangle::new(Point::from((-window.x, -window.y)), t.view_size())
     );
-    assert_eq!(popup.size.h, t.tile(lower).unwrap().window_size().h);
 }
 
 #[test]
