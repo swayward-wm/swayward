@@ -120,6 +120,12 @@ pub struct State {
     pub seat: Option<WlSeat>,
     pub keyboard: Option<WlKeyboard>,
     pub keyboard_enter_serial: Option<u32>,
+    /// Depressed modifier mask from the last `wl_keyboard.modifiers`.
+    pub keyboard_mods_depressed: Option<u32>,
+    /// Depressed modifier mask of every `wl_keyboard.modifiers`, in order.
+    pub keyboard_mods_events: Vec<u32>,
+    /// Evdev key code of every `wl_keyboard.key`, in order.
+    pub keyboard_key_events: Vec<u32>,
     pub shm: Option<WlShm>,
 
     // xdg-shell and related protocols.
@@ -355,6 +361,9 @@ impl Client {
             seat: None,
             keyboard: None,
             keyboard_enter_serial: None,
+            keyboard_mods_depressed: None,
+            keyboard_mods_events: Vec::new(),
+            keyboard_key_events: Vec::new(),
             xdg_wm_base: None,
             xdg_wm_base_version: None,
             xdg_activation: None,

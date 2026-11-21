@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/input/mod.rs", "src/tests/ipc/bindings/real_input.rs", "src/tests/client/core.rs", "src/tests/client/core_protocols.rs"]
+what = "after a key a binding consumed changes the modifier state, send the new state to the focused client with KeyboardHandle::advertise_modifier_state, unless an input method holds a keyboard grab; key suppression is unchanged."
+why = "Sway sends every modifier change to the focused client whether or not a binding consumed the key (handle_modifier_event, sway/sway/input/keyboard.c:693-705), and a client entering while a bound modifier is held gets the full modifier state (sway/sway/input/seat.c:156-171); Smithay's KeyboardHandle::input sends modifiers only with a forwarded key, so a client that entered with Super held never learnt that a bound Super was released. Two gaps remain: sway sends an input method keyboard grab the modifiers (keyboard.c:695-700) while Smithay's grab gets them only with a key, so that case is skipped; and sway forwards the press and release of a release-only binding (keyboard.c:474-490, 548-561, 574-582) while swayward consumes both."

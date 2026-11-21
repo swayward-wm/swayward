@@ -97,8 +97,16 @@ impl Dispatch<WlKeyboard, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        if let wl_keyboard::Event::Enter { serial, .. } = event {
-            state.keyboard_enter_serial = Some(serial);
+        match event {
+            wl_keyboard::Event::Enter { serial, .. } => {
+                state.keyboard_enter_serial = Some(serial);
+            }
+            wl_keyboard::Event::Modifiers { mods_depressed, .. } => {
+                state.keyboard_mods_depressed = Some(mods_depressed);
+                state.keyboard_mods_events.push(mods_depressed);
+            }
+            wl_keyboard::Event::Key { key, .. } => state.keyboard_key_events.push(key),
+            _ => (),
         }
     }
 }
