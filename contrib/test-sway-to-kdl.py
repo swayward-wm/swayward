@@ -1,23 +1,163 @@
 #!/usr/bin/env python3
+import concurrent.futures
+import difflib
+import functools
+import importlib.machinery
+import importlib.util
 import json
+import math
 import os
+import pickle
+import random
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = Path(__file__).with_name("sway-to-kdl")
 
+# Every translator run is compared with a committed golden: the input, stdout
+# and stderr between marker lines. SWAY_TO_KDL_UPDATE_GOLDENS=1 rewrites them;
+# a missing golden fails. SWAY_TO_KDL_TRACE=<dir> runs the translator under
+# `python3 -m trace` and accumulates line counts in <dir>.
+GOLDENS = Path(__file__).with_name("sway-to-kdl-goldens")
+UPDATE_GOLDENS = os.environ.get("SWAY_TO_KDL_UPDATE_GOLDENS") == "1"
+TRACE = os.environ.get("SWAY_TO_KDL_TRACE")
+
+
+def prefix_spellings(path, placeholder):
+    path = Path(path)
+    return [(os.path.abspath(path), placeholder), (str(path.resolve()), placeholder)]
+
+
+def normalise(text, prefixes):
+    # Longest first, so a resolved spelling that extends a given one wins.
+    for prefix, placeholder in sorted(prefixes, key=lambda p: -len(p[0])):
+        text = text.replace(prefix, placeholder)
+    return text
+
+
+def golden_section(name, content):
+    section = f"==== sway-to-kdl golden: {name} ====\n{content}"
+    if content and not content.endswith("\n"):
+        section += "\n==== no newline at end of section ====\n"
+    return section
+
 
 class TranslatorTests(unittest.TestCase):
-    def translate(self, source: str):
+    def setUp(self):
+        self.golden_calls = 0
+
+    def translate(self, source: "str | bytes", timeout=None):
         with tempfile.TemporaryDirectory() as directory:
             source_path = Path(directory) / "config"
-            source_path.write_text(source)
-            return subprocess.run(
-                [SCRIPT, source_path], text=True, capture_output=True, check=True
+            if isinstance(source, bytes):
+                source_path.write_bytes(source)
+            else:
+                source_path.write_text(source)
+            return self.run_translator(source_path, tmp=directory, timeout=timeout)
+
+    def run_translator(self, path, env=None, tmp=None, timeout=None):
+        """Run the translator on path and compare it with its golden.
+
+        timeout, in seconds, bounds the run: past it the test errors.
+
+        tmp is the test's temporary directory: it is normalised to <tmp>, and
+        every file under it before the run is recorded as input. (Read them
+        first: Apple's Python writes bytecode under $HOME, which some tests
+        point into tmp.)
+        """
+        inputs = [Path(path)]
+        if tmp is not None:
+            inputs += sorted(
+                p for p in Path(tmp).rglob("*") if p.is_file() and p != Path(path)
             )
+        command = [SCRIPT, path]
+        if TRACE:
+            trace_dir = Path(TRACE).resolve()
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            counts = trace_dir / "counts"
+            if not counts.exists():
+                # trace reports a missing counts file on stderr; start empty.
+                counts.write_bytes(pickle.dumps(({}, {}, {}), 1))
+            command = [
+                sys.executable, "-m", "trace", "--count", "--missing",
+                "--coverdir", trace_dir, "--file", counts,
+                *command,
+            ]
+        result = subprocess.run(
+            command, text=True, capture_output=True, check=True, env=env,
+            timeout=timeout,
+        )
+        self.golden_calls += 1
+        golden = GOLDENS / f"{self._testMethodName}.{self.golden_calls}.golden"
+        prefixes = prefix_spellings(ROOT, "<repo>")
+        if tmp is not None:
+            prefixes += prefix_spellings(tmp, "<tmp>")
+        # An input byte that is not UTF-8 is recorded as a \\xNN escape.
+        sections = [
+            golden_section(
+                f"input {input_path}",
+                input_path.read_bytes().decode("utf-8", "backslashreplace"),
+            )
+            for input_path in inputs
+        ]
+        sections.append(golden_section("stdout", result.stdout))
+        sections.append(golden_section("stderr", result.stderr))
+        actual = normalise("".join(sections), prefixes)
+        home = os.path.expanduser("~")
+        if home in actual:
+            self.fail(f"{golden.name}: normalised output still contains {home}")
+        if UPDATE_GOLDENS:
+            GOLDENS.mkdir(exist_ok=True)
+            if not golden.exists() or golden.read_text() != actual:
+                golden.write_text(actual)
+        elif not golden.exists():
+            self.fail(
+                f"missing golden contrib/{GOLDENS.name}/{golden.name}; "
+                "rerun with SWAY_TO_KDL_UPDATE_GOLDENS=1 and commit it"
+            )
+        else:
+            expected = golden.read_text()
+            if expected != actual:
+                diff = "".join(
+                    difflib.unified_diff(
+                        expected.splitlines(True),
+                        actual.splitlines(True),
+                        str(golden.name),
+                        "actual",
+                    )
+                )
+                self.fail(f"translator output differs from {golden.name}:\n{diff}")
+        return result
+
+    def check_no_stale_goldens(self):
+        """Fail on, or under UPDATE_GOLDENS delete, goldens past the last call."""
+        stale = []
+        for golden in GOLDENS.glob(f"{self._testMethodName}.*.golden"):
+            n = golden.name.split(".")[1]
+            if n.isdigit() and int(n) > self.golden_calls:
+                stale.append(golden)
+        if UPDATE_GOLDENS:
+            for golden in stale:
+                golden.unlink()
+        elif stale:
+            names = ", ".join(sorted(g.name for g in stale))
+            self.fail(
+                f"stale goldens beyond call {self.golden_calls}: {names}; "
+                "rerun with SWAY_TO_KDL_UPDATE_GOLDENS=1 to delete them"
+            )
+
+    def test_every_golden_belongs_to_a_test(self):
+        tests = {name for name in dir(self) if name.startswith("test_")}
+        for golden in sorted(GOLDENS.glob("*")):
+            with self.subTest(golden=golden.name):
+                self.assertRegex(golden.name, r"^test_\w+\.\d+\.golden$")
+                self.assertIn(golden.name.split(".")[0], tests)
 
     def test_translates_supported_directives_and_reports_the_rest(self):
         result = self.translate(
@@ -136,7 +276,7 @@ bindsym Mod5+q workspace 1
         for expected in [
             'Super+h repeat=false { command "focus left"; }',
             'Super+Return repeat=false { command "exec foot"; }',
-            'h { command "resize shrink width 10 px"; }',
+            'h { command "resize shrink width 10px"; }',
             'Escape { command "mode \\"default\\""; }',
             'spawn-sh-at-startup "mako"',
             'spawn-sh-at-startup "kanshi"',
@@ -338,13 +478,16 @@ bindsym Mod5+q workspace 1
         self.assertIn('Super+x { command "exec fuzzel --show drun"; }', result.stdout)
         self.assertIn("manual attention: none", result.stderr)
 
-    def test_bind_exec_strips_one_pair_of_command_quotes(self):
+    def test_bind_exec_keeps_its_quotes_for_the_command_parser(self):
+        # The command is kept as sway stores it (sway/commands/bind.c:488);
+        # sway's exec strips the quotes when the binding runs
+        # (sway/commands/exec_always.c:40-44).
         result = self.translate(
             'set $term "foot -e \'tmux\'"\n'
             'bindsym Mod4+Return exec $term\n'
         )
         self.assertIn(
-            'Super+Return { command "exec foot -e \'tmux\'"; }', result.stdout
+            'Super+Return { command "exec \\"foot -e \'tmux\'\\""; }', result.stdout
         )
         self.assertIn("manual attention: none", result.stderr)
 
@@ -366,7 +509,7 @@ bindsym Mod5+q workspace 1
         result = self.translate('output DP-1 mode 1920x1080\n')
         self.assertIn('mode "1920x1080"', result.stdout)
 
-    def test_output_legacy_aliases_positions_and_transform_translate(self):
+    def test_output_alias_names_positions_and_transform_translate(self):
         result = self.translate(
             "output DP-1 pos 1920,0 res 1920x1080\n"
             "output DP-2 position 0 0 mode 2560x1440@60Hz\n"
@@ -428,7 +571,7 @@ bindsym Mod5+q workspace 1
             "exec_always $XDG_CONFIG_HOME/sway/start\n"
         )
         self.assertIn(
-            'Super+q { command "exec $HOME/bin/run"; }', result.stdout
+            'Super+q { command "exec \\"$HOME/bin/run\\""; }', result.stdout
         )
         self.assertIn(
             'spawn-sh-at-startup "$XDG_CONFIG_HOME/sway/start"', result.stdout
@@ -518,6 +661,7 @@ bindsym Mod5+q workspace 1
             "bindsym Mod4+i nop mod4\n"
             "bindsym Mod5+k nop mod5\n"
             "bindsym Super+j nop super\n"
+            "bindsym Mod3+z nop mod3\n"
         )
         for key in [
             "Shift+a",
@@ -530,19 +674,80 @@ bindsym Mod5+q workspace 1
             "Super+i",
             "ISO_Level3_Shift+k",
             "Super+j",
+            "ISO_Level5_Shift+z",
         ]:
             self.assertIn(f"    {key} ", result.stdout)
         self.assertIn("manual attention: none", result.stderr)
-
-        for name in ["Mod3"]:
-            refused = self.translate(f"bindsym {name}+z nop x\n")
-            self.assertNotIn("command", refused.stdout)
-            self.assertIn(f"unsupported modifier {name}", refused.stdout)
 
         result = self.translate("bindsym Mod6+a nop unsupported\n")
         self.assertNotIn("command", result.stdout)
         self.assertIn("unsupported modifier Mod6", result.stdout)
         self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_modifier_only_bindsyms_fail_loud_instead_of_emitting_a_modifier_key(self):
+        # sway adds every modifier part to the binding's mask and keeps a
+        # binding with no key (sway/commands/bind.c:428-433); a KDL bind
+        # needs a trigger.
+        reason = (
+            "binding has no key; sway binds modifiers alone, swayward needs a "
+            "trigger key (docs/KNOWN_DEVIATIONS.md#modifier-only-bindings)"
+        )
+        for directive in [
+            "bindsym Mod4 exec menu",
+            "bindsym Mod4+Shift exec menu",
+            "bindsym --release Super exec menu",
+            "bindsym Control+Mod1 nop both",
+            "bindsym Mod3 exec menu",
+            "bindcode Mod4 exec menu",
+        ]:
+            with self.subTest(directive=directive):
+                result = self.translate(f"{directive}\n")
+                self.assertIn(reason, result.stdout)
+                self.assertNotIn("command", result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+        # The modifier keysyms themselves are ordinary keys, not modifier names.
+        result = self.translate("bindsym Super_L exec menu\n")
+        self.assertIn('    Super_L { command "exec menu"; }', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+        result = self.translate(
+            "set $mod Mod4\n"
+            'mode "resize" {\n'
+            "    bindsym $mod mode default\n"
+            "    bindsym Escape mode default\n"
+            "}\n"
+        )
+        self.assertIn(reason, result.stdout)
+        self.assertIn('    Escape { command "mode default"; }', result.stdout)
+        self.assertNotIn("    Mod4 {", result.stdout)
+        self.assertNotIn("    Super {", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+        binary = ROOT / "target" / "debug" / "swayward"
+        if binary.exists():
+            with tempfile.NamedTemporaryFile("w", suffix=".kdl") as config:
+                config.write(result.stdout)
+                config.flush()
+                subprocess.run([binary, "validate", "-c", config.name], check=True,
+                               capture_output=True)
+
+    def test_mode_switch_and_mod3_are_not_modifier_only(self):
+        # Mode_switch selects group 2 and is still a key of the binding
+        # (sway/commands/bind.c:417-427); `mode_switch` is only a key, as the
+        # alias is compared case-sensitively. Mod3 is a modifier
+        # (sway/input/keyboard.c:24-50).
+        result = self.translate("bindsym --release Mod4+mode_switch exec menu\n")
+        self.assertIn(
+            'Super+mode_switch release=true repeat=false { command "exec menu"; }',
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+        result = self.translate("bindsym Mode_switch exec menu\n")
+        self.assertIn("Mode_switch selects XKB group 2 and is also a key", result.stdout)
+        self.assertNotIn("binding has no key", result.stdout)
+        result = self.translate("bindsym Mod3+a exec menu\n")
+        self.assertIn('ISO_Level5_Shift+a { command "exec menu"; }', result.stdout)
+        self.assertNotIn("Mod3 {", result.stdout)
 
     def test_floating_modifier_translates_independently_from_mod_key(self):
         for directive, expected in [
@@ -622,9 +827,9 @@ bindsym Mod5+q workspace 1
         result = self.translate(
             "bindsym Control+Print nop key-press\n"
             "bindsym --release Control+Print nop key-release\n"
-            "bindsym button1 --release nop mouse-release\n"
+            "bindsym --release button1 nop mouse-release\n"
             "mode test {\n"
-            "    bindcode 27 --release nop mode-release\n"
+            "    bindcode --release 27 nop mode-release\n"
             "}\n"
         )
         for binding in [
@@ -643,19 +848,19 @@ bindsym Mod5+q workspace 1
         )
         self.assertIn("manual attention: none", result.stderr)
 
-    def test_mouse_binding_regions_after_key_keep_translating(self):
-        for option, regions in [
-            ("--whole-window", "titlebar+border+contents"),
-            ("--border", "border"),
-            ("--exclude-titlebar", "border+contents"),
-        ]:
+    def test_bind_options_after_the_key_stay_in_the_command(self):
+        # cmd_bindsym_or_bindcode reads options only before the key
+        # (sway/commands/bind.c:353-383).
+        for option in ["--whole-window", "--border", "--exclude-titlebar", "--release"]:
             with self.subTest(option=option):
                 result = self.translate(f"bindsym button1 {option} nop supported\n")
                 self.assertIn(
-                    f'MouseLeft mouse-regions="{regions}" {{ command "nop supported"; }}',
+                    f'MouseLeft {{ command "{option} nop supported"; }}',
                     result.stdout,
                 )
                 self.assertIn("manual attention: none", result.stderr)
+        result = self.translate("bindsym Mod4+a --no-repeat nop a\n")
+        self.assertIn('Super+a { command "--no-repeat nop a"; }', result.stdout)
 
     def test_mouse_binding_region_options_combine_like_sway(self):
         for options, regions in [
@@ -869,12 +1074,130 @@ bindsym Mod5+q workspace 1
     def test_bind_groups_are_preserved_for_symbols_and_codes(self):
         result = self.translate(
             "bindsym Group2+x nop symbol\n"
-            "bindsym Mode_switch+y nop alias\n"
             "bindcode Group3+42 nop code\n"
         )
         self.assertIn('Group2+x { command "nop symbol"; }', result.stdout)
-        self.assertIn('Mode_switch+y { command "nop alias"; }', result.stdout)
         self.assertIn('Group3+code:42 { command "nop code"; }', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_bind_modifiers_and_groups_follow_sways_tables(self):
+        # Modifiers ignore case (sway/input/keyboard.c:24-50); GroupN is
+        # case-sensitive, one only, and Mode_switch is group 2 and a key
+        # (sway/commands/bind.c:398-453).
+        for directive, binding in [
+            ("bindsym Mod3+a nop mod3", 'ISO_Level5_Shift+a { command "nop mod3"; }'),
+            ("bindsym b+MOD4 nop key-first", 'Super+b { command "nop key-first"; }'),
+            ("bindsym Mod4+Group2+c nop group", 'Group2+Super+c { command "nop group"; }'),
+        ]:
+            with self.subTest(directive=directive):
+                result = self.translate(directive + "\n")
+                self.assertIn(binding, result.stdout)
+                self.assertIn("manual attention: none", result.stderr)
+
+        mode_switch = "Mode_switch selects XKB group 2 and is also a key of the binding"
+        for directive, reason in [
+            ("bindsym Mode_switch+y nop alias", mode_switch),
+            ("bindsym Mode_switch nop alone", mode_switch),
+            ("bindsym group2+x nop lower", "unsupported modifier group2"),
+            ("bindsym Group1+Group2+x nop two", "only one group can be specified"),
+            ("bindsym Group2+Mode_switch+x nop two", "only one group can be specified"),
+            ("bindsym Group5+x nop five", "invalid group Group5"),
+            ("bindsym Groupx+x nop junk", "invalid group Groupx"),
+            ("bindsym Group2+button1 nop mouse", "XKB group only to a keyboard key"),
+            ("bindsym Mod4 nop modifier-only", "binding has no key"),
+            ("bindsym Mod4+Shift nop modifiers-only", "binding has no key"),
+        ]:
+            with self.subTest(directive=directive):
+                result = self.translate(directive + "\n")
+                self.assertNotIn("{ command", result.stdout)
+                self.assertIn(f"{reason}", result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_bind_group_of_any_length_is_read_without_crashing(self):
+        # strtol reads any number of digits (sway/commands/bind.c:409-410);
+        # the digits are compared as text, so no length reaches int(), whose
+        # digit limit raises ValueError.
+        result = self.translate(f"bindsym Group{'1' * 5000}+x nop huge\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("{ command", result.stdout)
+        self.assertIn(f"invalid group Group{'1' * 5000}", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+        result = self.translate("bindsym Group002+x nop leading-zeros\n")
+        self.assertIn('Group2+x { command "nop leading-zeros"; }', result.stdout)
+
+    def test_exec_follows_sways_exec_rule(self):
+        # cmd_exec_process strips the quotes of a single quoted argument and
+        # joins anything else (sway/commands/exec_always.c:40-44).
+        for directive, command in [
+            ('exec "a" "b"', '"a" "b"'),
+            ("exec 'one arg'", "one arg"),
+            ("exec --no-startup-id 'one arg'", "one arg"),
+            ("exec 'a'b", "ab"),
+            ('exec echo \\"x\\"', 'echo "x"'),
+            ("exec   a    b", "a b"),
+        ]:
+            with self.subTest(directive=directive):
+                result = self.translate(directive + "\n")
+                self.assertIn(
+                    f"spawn-sh-at-startup {json.dumps(command)}", result.stdout
+                )
+        # A bind's exec keeps its quotes, as sway stores the binding's command
+        # (sway/commands/bind.c:488); the rule applies when the binding runs.
+        result = self.translate(
+            "bindsym Mod4+a exec 'notify-send a; b'\n"
+            'bindsym Mod4+b exec "a" "b"\n'
+        )
+        self.assertIn(
+            'Super+a { command "exec \'notify-send a; b\'"; }', result.stdout
+        )
+        self.assertIn('Super+b { command "exec \\"a\\" \\"b\\""; }', result.stdout)
+
+    def test_bind_command_is_joined_from_unescaped_arguments(self):
+        # config_command unescapes bind arguments and keeps their quotes
+        # (sway/commands.c:409-423); the command is join_args of those after
+        # the key (sway/commands/bind.c:488).
+        result = self.translate(
+            'bindsym Mod4+a exec echo \\"x\\"\n'
+            "bindsym Mod4+b   nop   a    b\n"
+            'bindsym Mod4+d exec notify-send "a   b"\n'
+        )
+        self.assertIn('Super+a { command "exec echo \\"x\\""; }', result.stdout)
+        self.assertIn('Super+b { command "nop a b"; }', result.stdout)
+        self.assertIn(
+            'Super+d { command "exec notify-send \\"a   b\\""; }', result.stdout
+        )
+
+    def test_bind_command_keeps_a_backslash_before_at(self):
+        # unescape_string has no `\@` escape (common/stringop.c:152-233), so
+        # the shell that runs the command removes the backslash, as in sway.
+        result = self.translate(
+            "bindsym Mod4+c exec pactl set-sink-mute \\@DEFAULT_SINK@ toggle\n"
+        )
+        self.assertIn(
+            'Super+c { command "exec pactl set-sink-mute \\\\@DEFAULT_SINK@ toggle"; }',
+            result.stdout,
+        )
+
+    def test_bind_commands_keep_sways_spellings(self):
+        # swayward's parser takes each: `move container to workspace`
+        # (swayward-ipc/src/command/parse/move_resize.rs:80-91), splith and
+        # splitv (parse/mod.rs:366-367) and an attached px unit
+        # (parse/move_resize.rs:433-441).
+        result = self.translate(
+            "bindsym Mod4+1 move container to workspace number 1\n"
+            "bindsym Mod4+h splith\n"
+            "bindsym Mod4+v splitv\n"
+            "bindsym Mod4+r resize grow width 10px\n"
+            "bindsym Mod4+s resize shrink height 5px\n"
+        )
+        for binding in [
+            'Super+1 { command "move container to workspace number 1"; }',
+            'Super+h { command "splith"; }',
+            'Super+v { command "splitv"; }',
+            'Super+r { command "resize grow width 10px"; }',
+            'Super+s { command "resize shrink height 5px"; }',
+        ]:
+            self.assertIn(binding, result.stdout)
         self.assertIn("manual attention: none", result.stderr)
 
     def test_assign_workspace_target_is_preserved(self):
@@ -897,6 +1220,42 @@ bindsym Mod5+q workspace 1
         self.assertEqual(result.stdout.count('open-on-workspace-number "2"'), 2)
         self.assertEqual(result.stdout.count('open-on-workspace "2"'), 1)
         self.assertIn("manual attention: none", result.stderr)
+
+    def test_assign_target_keywords_are_whole_tokens(self):
+        # cmd_assign compares whole argv tokens against `→`, `output`,
+        # `workspace` and `number` before joining the rest
+        # (sway/commands/assign.c:26-56), so a quoted keyword is part of a
+        # workspace name.
+        cases = [
+            ('"output DP-1"', 'open-on-workspace "output DP-1"'),
+            ('"workspace foo"', 'open-on-workspace "workspace foo"'),
+            ('"number 3"', 'open-on-workspace "number 3"'),
+            ("output DP-1", 'open-on-output "DP-1"'),
+            ("workspace foo", 'open-on-workspace "foo"'),
+            ("number 3", 'open-on-workspace-number "3"'),
+            ("→ 2", 'open-on-workspace "2"'),
+        ]
+        for target, expected in cases:
+            with self.subTest(target=target):
+                result = self.translate(f'assign [app_id="x"] {target}\n')
+                self.assertIn(expected, result.stdout)
+                self.assertIn("manual attention: none", result.stderr)
+
+    def test_assign_arrow_is_only_sways_prefix(self):
+        # cmd_assign skips one argument that starts with `→` and needs a
+        # target after it; `->` is no keyword and stays in the joined name
+        # (sway/commands/assign.c:26-33,55).
+        result = self.translate('assign [app_id="x"] -> 2\n')
+        self.assertIn('open-on-workspace "-> 2"', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+        for target in ["→", "→2"]:
+            with self.subTest(target=target):
+                result = self.translate(f'assign [app_id="x"] {target}\n')
+                self.assertNotIn("window-rule", result.stdout)
+                self.assertIn(
+                    f'missing workspace: assign [app_id="x"] {target}', result.stdout
+                )
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
     def test_assign_rejects_invalid_workspace_number(self):
         result = self.translate('assign [app_id="special"] workspace number nope\n')
@@ -922,8 +1281,8 @@ bindsym Mod5+q workspace 1
         self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
     def test_deprecated_default_borders_translate_without_changing_shipped_defaults(self):
-        # new_window and new_float are i3's older spellings of default_border
-        # and default_floating_border. They set a layout default, not a rule
+        # new_window and new_float are i3's aliases of default_border and
+        # default_floating_border. They set a layout default, not a rule
         # matching every window, so they land on layout.default-border.
         result = self.translate("new_window 1pixel\nnew_float normal 3\n")
         self.assertIn('default-border "pixel" width=1', result.stdout)
@@ -1125,6 +1484,29 @@ bindsym Mod5+q workspace 1
         self.assertIn("for_window [app_id=\"foo\"] exec nope", result.stdout)
         self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
+    def test_for_window_ignores_empty_segments_of_a_command_list(self):
+        for command in [
+            "floating enable;",
+            "floating enable,",
+            "floating enable ; ",
+            "floating enable;; border pixel 2;",
+            "; floating enable",
+        ]:
+            with self.subTest(command=command):
+                result = self.translate(f'for_window [app_id="foo"] {command}\n')
+                self.assertIn("open-floating true", result.stdout)
+                self.assertNotIn("needs manual conversion", result.stdout)
+                self.assertIn("manual attention: none", result.stderr)
+
+        result = self.translate('for_window [app_id="foo"] exec nope;\n')
+        self.assertIn('for_window [app_id="foo"] exec nope', result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+        result = self.translate('for_window [app_id="foo"] ;\n')
+        self.assertNotIn("window-rule {", result.stdout)
+        self.assertIn("for_window needs a command", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
     def test_for_window_translates_floating_size_and_center_shape(self):
         result = self.translate(
             'for_window [app_id="foo"] floating enable, '
@@ -1173,6 +1555,179 @@ bindsym Mod5+q workspace 1
         self.assertIn("needs manual conversion", result.stdout)
         self.assertNotIn("default-column-width", result.stdout)
 
+    def test_seat_cursor_settings_translate_to_the_cursor_block(self):
+        result = self.translate(
+            "seat * hide_cursor 5000\n"
+            "seat * xcursor_theme Adwaita 32\n"
+            "seat seat0 hide_cursor when-typing enable\n"
+        )
+        self.assertIn(
+            "cursor {\n"
+            "    hide-after-inactive-ms 5000\n"
+            '    xcursor-theme "Adwaita"\n'
+            "    xcursor-size 32\n"
+            "    hide-when-typing\n"
+            "}\n",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+        binary = ROOT / "target" / "debug" / "swayward"
+        if binary.exists():
+            with tempfile.NamedTemporaryFile("w", suffix=".kdl") as config:
+                config.write(result.stdout)
+                config.flush()
+                subprocess.run([binary, "validate", "-c", config.name], check=True,
+                               capture_output=True)
+
+        # sway raises a short timeout to 100 ms, resets an unnamed size to 24,
+        # and lets a later directive win (sway/commands/seat/hide_cursor.c:24-32,
+        # xcursor_theme.c:16-29, sway/config/seat.c:41-85).
+        result = self.translate(
+            "seat * {\n"
+            "    hide_cursor 50\n"
+            "    xcursor_theme Big 48\n"
+            "    xcursor_theme Small\n"
+            "    hide_cursor when-typing enable\n"
+            "    hide_cursor when-typing disable\n"
+            "}\n"
+        )
+        self.assertIn("    hide-after-inactive-ms 100\n", result.stdout)
+        self.assertIn('    xcursor-theme "Small"\n', result.stdout)
+        self.assertIn("    xcursor-size 24\n", result.stdout)
+        self.assertNotIn("Big", result.stdout)
+        self.assertNotIn("hide-when-typing", result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+        result = self.translate("seat * hide_cursor 3000\nseat * hide_cursor 0\n")
+        self.assertNotIn("cursor {", result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_untranslatable_seat_directives_stay_fail_loud(self):
+        for source, reason in [
+            ("seat * attach 1:2:mouse\n", "unsupported seat directive"),
+            ("seat * fallback true\n", "unsupported seat directive"),
+            ("seat * cursor move 1 1\n", "unsupported seat directive"),
+            (
+                "seat * hide_cursor\n",
+                "Invalid hide_cursor command (expected at least 1 argument, got 0)",
+            ),
+            (
+                "seat * hide_cursor when-typing enable now\n",
+                "Invalid hide_cursor command (expected at most 2 arguments, got 3)",
+            ),
+            ("seat * hide_cursor soon\n", "Expected an integer timeout"),
+            (
+                "seat * hide_cursor typing enable\n",
+                "Expected 'hide_cursor <timeout>|when-typing [enable|disable]'",
+            ),
+            ("seat * xcursor_theme Big 300\n", "cursor size must be between 1 and 255"),
+            ("seat * xcursor_theme Big large\n", "Expected a positive integer size"),
+            (
+                "seat * xcursor_theme Adwaita Dark 24\n",
+                "Invalid xcursor_theme command (expected at most 2 arguments, got 3)",
+            ),
+            ("seat left hide_cursor 3000\n", "swayward has one seat"),
+            ("seat Seat0 hide_cursor 3000\n", "swayward has one seat"),
+            (
+                "seat - xcursor_theme Adwaita\n",
+                "Current seat alias (-) cannot be used in the config",
+            ),
+            (
+                "seat *\n",
+                "Invalid seat command (expected at least 2 arguments, got 1)",
+            ),
+            # swayward's KDL spellings are not sway seat subcommands.
+            (
+                "seat * hide-after-inactive-ms 100\n",
+                "Unknown/invalid command 'hide-after-inactive-ms'",
+            ),
+            ("seat * xcursor-theme Adwaita\n", "Unknown/invalid command 'xcursor-theme'"),
+        ]:
+            with self.subTest(source=source):
+                result = self.translate(source)
+                self.assertNotIn("cursor {", result.stdout)
+                self.assertIn(reason, result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+        result = self.translate(
+            "seat seat0 {\n    hide_cursor 2000\n    attach 1:2:mouse\n}\n"
+        )
+        self.assertIn("    hide-after-inactive-ms 2000\n", result.stdout)
+        self.assertIn(":3: unsupported seat directive: seat seat0 attach", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_seat_arguments_follow_sways_quoting(self):
+        # config_command strips both quote kinds from every argument
+        # (sway/commands.c:409-423).
+        result = self.translate(
+            "seat * xcursor_theme 'Bibata' 32\n"
+            'seat "*" hide_cursor 3000\n'
+            'seat * hide_cursor when-typing "enable"\n'
+        )
+        self.assertIn(
+            "cursor {\n"
+            '    xcursor-theme "Bibata"\n'
+            "    xcursor-size 32\n"
+            "    hide-after-inactive-ms 3000\n"
+            "    hide-when-typing\n"
+            "}\n",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+        result = self.translate('seat * xcursor_theme "Adwaita Dark"\n')
+        self.assertIn('    xcursor-theme "Adwaita Dark"\n    xcursor-size 24\n', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_seat_numbers_follow_strtol(self):
+        # hide_cursor reads an int with strtol and xcursor_theme an unsigned
+        # with strtoul, each with nothing left over
+        # (sway/commands/seat/hide_cursor.c:24-27, xcursor_theme.c:20-25).
+        for source, expected in [
+            ("seat * hide_cursor 0050\n", "hide-after-inactive-ms 100\n"),
+            ("seat * hide_cursor +5000\n", "hide-after-inactive-ms 5000\n"),
+            ("seat * hide_cursor -5\n", "hide-after-inactive-ms 100\n"),
+            ("seat * hide_cursor 2147483647\n", "hide-after-inactive-ms 2147483647\n"),
+            ("seat * xcursor_theme A 032\n", "xcursor-size 32\n"),
+            ("seat * xcursor_theme A 4294967297\n", "xcursor-size 1\n"),
+            ("seat * xcursor_theme A -4294967295\n", "xcursor-size 1\n"),
+            ("SEAT * HIDE_CURSOR 2000\n", "hide-after-inactive-ms 2000\n"),
+        ]:
+            with self.subTest(source=source):
+                result = self.translate(source)
+                self.assertIn(f"    {expected}", result.stdout)
+                self.assertIn("manual attention: none", result.stderr)
+        for source, reason in [
+            # A timeout past INT_MAX does not fit the u32 swayward stores
+            # either (swayward-config/src/misc.rs:112).
+            ("seat * hide_cursor 99999999999\n", "number out of range"),
+            ("seat * hide_cursor " + "9" * 5000 + "\n", "number out of range"),
+            ("seat * hide_cursor \uff15\uff10\uff10\uff10\n", "Expected an integer timeout"),
+            ("seat * hide_cursor 5s\n", "Expected an integer timeout"),
+            ("seat * xcursor_theme A -1\n", "cursor size must be between 1 and 255"),
+            ("seat * xcursor_theme A 0\n", "cursor size must be between 1 and 255"),
+            ("seat * xcursor_theme A " + "9" * 5000 + "\n", "cursor size must be"),
+            ("seat * xcursor_theme A \u0663\n", "Expected a positive integer size"),
+        ]:
+            with self.subTest(source=source[:60]):
+                result = self.translate(source)
+                self.assertNotIn("cursor {", result.stdout)
+                self.assertIn(reason, result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+        # parse_boolean(value, true) reads toggle as false (hide_cursor.c:38-39).
+        result = self.translate(
+            "seat * hide_cursor when-typing on\nseat * hide_cursor when-typing toggle\n"
+        )
+        self.assertNotIn("cursor {", result.stdout)
+
+    def test_one_line_seat_block_is_reported_by_the_reader(self):
+        # sway takes `X { ... }` on one line as an unmatched block end
+        # (sway/config.c:842-846).
+        result = self.translate("seat * { hide_cursor 1000 }\n")
+        self.assertNotIn("cursor {", result.stdout)
+        self.assertIn("a block opened and closed on one line is unsupported", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
     def test_for_window_preserves_sticky_as_a_map_time_command(self):
         for value in ["enable", "disable", "toggle"]:
             with self.subTest(value=value):
@@ -1184,6 +1739,25 @@ bindsym Mod5+q workspace 1
                 self.assertIn(f'sway-for-window-command "sticky {value}"', result.stdout)
                 self.assertIn('sway-border "pixel"', result.stdout)
                 self.assertIn("manual attention: none", result.stderr)
+
+    def test_for_window_preserves_inhibit_idle_as_a_map_time_command(self):
+        for mode in ["focus", "fullscreen", "open", "none", "visible"]:
+            with self.subTest(mode=mode):
+                result = self.translate(
+                    f'for_window [app_id="^mpv$"] inhibit_idle {mode}\n'
+                )
+                self.assertIn('match app-id="^mpv$"', result.stdout)
+                self.assertIn(
+                    f'sway-for-window-command "inhibit_idle {mode}"', result.stdout
+                )
+                self.assertIn("manual attention: none", result.stderr)
+
+        for command in ["inhibit_idle", "inhibit_idle always", "inhibit_idle open now"]:
+            with self.subTest(invalid=command):
+                result = self.translate(f'for_window [app_id="^mpv$"] {command}\n')
+                self.assertNotIn("sway-for-window-command", result.stdout)
+                self.assertIn("command needs manual conversion", result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
     def test_for_window_criteria_accept_inline_regex_with_bracket_class(self):
         result = self.translate(
@@ -1206,11 +1780,11 @@ bindsym Mod5+q workspace 1
     def test_overlong_valid_and_invalid_continued_bindings_are_not_truncated(self):
         payload = "x" * 5000
         valid = self.translate(f"bindsym X nop \\\n{payload}\n")
-        self.assertIn(f'command "nop  {payload}"', valid.stdout)
+        self.assertIn(f'command "nop {payload}"', valid.stdout)
         self.assertIn("manual attention: none", valid.stderr)
 
         invalid = self.translate(f"bindsym X invalid-{payload[:8]} \\\n{payload}\n")
-        self.assertIn(f'command "invalid-{payload[:8]}  {payload}"', invalid.stdout)
+        self.assertIn(f'command "invalid-{payload[:8]} {payload}"', invalid.stdout)
         self.assertIn("manual attention: none", invalid.stderr)
 
     def test_last_line_without_newline_is_translated(self):
@@ -1341,9 +1915,11 @@ bindsym Mod5+q workspace 1
                 self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
     def test_for_window_translates_map_time_commands(self):
+        # Without a space the criteria are part of the command name, which
+        # sway does not know (sway/commands.c:380-391).
         result = self.translate('for_window[app_id="mapped"] mark label\n')
-        self.assertIn('sway-for-window-command "mark label"', result.stdout)
-        self.assertIn("manual attention: none", result.stderr)
+        self.assertIn('unhandled: for_window[app_id="mapped"] mark label', result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
         for action in [
             "kill",
@@ -1400,10 +1976,9 @@ bindsym Mod5+q workspace 1
                 self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
     def test_mouse_warping_maps_every_mode_case_insensitively(self):
-        # output used to be refused for lacking an exact equivalent. swayward
-        # warps to the focused window for both sway modes, which the
-        # mouse_warping IPC command also does, so converting with a recorded
-        # narrowing beats dropping the directive.
+        # swayward warps to the focused window for both sway modes, which the
+        # mouse_warping IPC command also does, so output converts with a
+        # recorded narrowing rather than being dropped.
         for value, expected in [
             ("none", None),
             ("NoNe", None),
@@ -1424,11 +1999,170 @@ bindsym Mod5+q workspace 1
         self.assertIn("expected mouse_warping output|container|none", result.stdout)
         self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
-    def test_duplicate_bind_is_reported_instead_of_silently_overwritten(self):
-        result = self.translate("bindsym Mod4+h focus left\nbindsym Mod4+h focus right\n")
-        self.assertIn('Super+h { command "focus left"; }', result.stdout)
-        self.assertNotIn('command "focus right"', result.stdout)
-        self.assertIn("duplicate binding for Super+h; kept the first", result.stdout)
+    def test_later_duplicate_binding_overwrites_the_earlier(self):
+        # binding_upsert replaces in place and binding_add warns unless
+        # --no-warn (sway/commands/bind.c:263-300).
+        result = self.translate(
+            "bindsym Mod4+h focus left\n"
+            "bindsym Mod4+j focus down\n"
+            "bindsym Mod4+h focus right\n"
+        )
+        self.assertIn(
+            '    Super+h { command "focus right"; }\n'
+            '    Super+j { command "focus down"; }\n',
+            result.stdout,
+        )
+        self.assertNotIn('command "focus left"', result.stdout)
+        self.assertIn(
+            "config:3: overwriting binding Mod4+h for device '*' to "
+            "`focus right` from `focus left`, as sway does",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+
+        # The identity is sway's: modifier bits in any order and spelling,
+        # keysyms ignoring case; --locked makes a different binding.
+        result = self.translate(
+            "bindsym Mod1+Shift+a nop one\n"
+            "bindsym shift+Alt+A nop two\n"
+            "bindsym --locked Mod1+Shift+a nop locked\n"
+            "mode m {\n"
+            "    bindsym x nop x1\n"
+            "    bindsym --no-warn x nop x2\n"
+            "    bindsym y nop y\n"
+            "    bindsym y nop y\n"
+            "}\n"
+        )
+        self.assertIn('Shift+Alt+A { command "nop two"; }', result.stdout)
+        self.assertNotIn('command "nop one"', result.stdout)
+        self.assertIn(
+            'Alt+Shift+a allow-when-locked=true { command "nop locked"; }',
+            result.stdout,
+        )
+        self.assertIn('x { command "nop x2"; }', result.stdout)
+        self.assertNotIn('command "nop x1"', result.stdout)
+        # Only the first overwrite changes anything and warns.
+        self.assertEqual(result.stdout.count("overwriting binding"), 1)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_bindcode_identity_is_the_keycode_number(self):
+        # identify_key reads a keycode with strtol (sway/commands/bind.c:166),
+        # so 024 and 24 are one key and the later binding replaces the
+        # earlier. The digits are compared as text, so no length reaches
+        # int().
+        result = self.translate(
+            "bindcode 024 nop first\n"
+            "bindcode 24 nop second\n"
+            f"bindcode {'0' * 5000}25 nop third\n"
+            f"bindcode {'9' * 5000} nop huge\n"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('code:24 { command "nop second"; }', result.stdout)
+        self.assertIn('code:25 { command "nop third"; }', result.stdout)
+        self.assertNotIn("code:0", result.stdout)
+        self.assertNotIn('command "nop first"', result.stdout)
+        self.assertIn(
+            "config:2: overwriting binding 24 for device '*' to `nop second` "
+            "from `nop first`",
+            result.stdout,
+        )
+        self.assertIn("bindcode keycode must be between 8 and 255: 999", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_mouse_buttons_that_share_a_kdl_trigger_are_reported(self):
+        # Sway compares button codes (sway/input/cursor.c:1203-1226):
+        # button8 is BTN_SIDE, while BTN_BACK and BTN_FORWARD are other
+        # buttons. swayward's KDL gives BTN_SIDE and BTN_BACK one trigger, so
+        # the later of two sway-distinct bindings is reported, not dropped.
+        result = self.translate(
+            "bindsym BTN_SIDE nop side\n"
+            "bindsym BTN_BACK nop back\n"
+            "bindsym button8 nop button8\n"
+            "bindsym BTN_EXTRA nop extra\n"
+            "bindsym BTN_FORWARD nop forward\n"
+        )
+        self.assertIn('MouseBack { command "nop button8"; }', result.stdout)
+        self.assertIn('MouseForward { command "nop extra"; }', result.stdout)
+        self.assertEqual(result.stdout.count("MouseBack {"), 1)
+        self.assertEqual(result.stdout.count("MouseForward {"), 1)
+        self.assertIn(
+            "config:3: overwriting binding button8 for device '*' to "
+            "`nop button8` from `nop side`",
+            result.stdout,
+        )
+        self.assertRegex(
+            result.stdout,
+            r"config:2: sway keeps this apart from the binding at \S*/config:1 "
+            r"\(`nop side`\), but both translate to MouseBack,",
+        )
+        self.assertRegex(
+            result.stdout,
+            r"config:5: sway keeps this apart from the binding at \S*/config:4 "
+            r"\(`nop extra`\), but both translate to MouseForward,",
+        )
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+
+    def test_exclude_titlebar_bindings_keep_sways_region_flags(self):
+        # --exclude-titlebar removes the titlebar sway adds to a mouse
+        # binding (sway/commands/bind.c:459-464), so with --whole-window it
+        # is border+contents, with --border border alone, and alone no
+        # region: sway never runs it (sway/input/seatop_default.c:128-139).
+        result = self.translate(
+            "bindsym --whole-window --exclude-titlebar button1 nop whole\n"
+            "bindsym --exclude-titlebar button1 nop none\n"
+            "bindsym --border --exclude-titlebar button3 nop border\n"
+        )
+        self.assertIn(
+            'MouseLeft mouse-regions="border+contents" { command "nop whole"; }',
+            result.stdout,
+        )
+        self.assertIn(
+            'MouseRight mouse-regions="border" { command "nop border"; }',
+            result.stdout,
+        )
+        self.assertNotIn('command "nop none"', result.stdout)
+        self.assertNotIn("overwriting binding", result.stdout)
+        self.assertIn(
+            "config:2: --exclude-titlebar without --whole-window or --border "
+            "leaves the binding no region, so sway never runs it",
+            result.stdout,
+        )
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+        # --border alone also covers the titlebar in sway, so it differs from
+        # --border --exclude-titlebar; swayward's KDL emits border for both,
+        # and the later is reported.
+        result = self.translate(
+            "bindsym --border --exclude-titlebar button3 nop border\n"
+            "bindsym --border button3 nop titlebar-border\n"
+        )
+        self.assertIn(
+            'MouseRight mouse-regions="border" { command "nop border"; }',
+            result.stdout,
+        )
+        self.assertNotIn('command "nop titlebar-border"', result.stdout)
+        self.assertRegex(
+            result.stdout,
+            r"config:2: sway keeps this apart from the binding at \S*/config:1 "
+            r"\(`nop border`\), but both translate to MouseRight "
+            r"mouse-regions=border,",
+        )
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_last_input_device_option_is_the_bindings_device(self):
+        # cmd_bindsym_or_bindcode replaces the device for each
+        # --input-device (sway/commands/bind.c:370-373).
+        result = self.translate(
+            "bindsym --input-device=a --input-device=b Mod4+q nop one\n"
+            "bindsym --input-device=b Mod4+q nop two\n"
+        )
+        self.assertIn('Super+q input-device="b" { command "nop two"; }', result.stdout)
+        self.assertNotIn('input-device="a"', result.stdout)
+        self.assertIn(
+            "config:2: overwriting binding Mod4+q for device 'b' to `nop two` "
+            "from `nop one`",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
 
     def test_bindcode_is_preserved_as_a_numeric_trigger(self):
         result = self.translate("bindcode --no-repeat 24 kill\n")
@@ -1436,27 +2170,23 @@ bindsym Mod5+q workspace 1
         self.assertIn("manual attention: none", result.stderr)
 
     def test_focus_mode_toggle_translates_now_that_the_command_exists(self):
-        # The translator used to refuse this specific command with "outside
-        # swayward's current command subset". That refusal outlived its reason:
         # Command::FocusModeToggle is implemented (src/command/mod.rs:170) and
-        # docs/SWAY_COMPATIBILITY.md already listed mode_toggle as supported.
+        # docs/SWAY_COMPATIBILITY.md lists mode_toggle as supported, so the
+        # binding translates.
         result = self.translate("bindsym Mod4+a focus mode_toggle\n")
         self.assertIn('Super+a { command "focus mode_toggle"; }', result.stdout)
         self.assertIn("manual attention: none", result.stderr)
 
     def test_checked_in_sway_and_swayfx_defaults_keep_manual_items(self):
         # The counts are pinned because docs/SWAY_CONFIG_MIGRATION.md quotes
-        # them, and it went stale once when a directive started translating.
-        # Lower them when coverage improves; a rise is a regression.
+        # them. Lower them when coverage improves; a rise is a regression.
         fixtures = ROOT / "tests" / "fixtures" / "config"
         for source, expected in [
             (fixtures / "sway-1.11-default.conf", 3),
-            (fixtures / "swayfx-default.conf", 7),
+            (fixtures / "swayfx-default.conf", 5),
         ]:
             with self.subTest(source=source.name):
-                result = subprocess.run(
-                    [SCRIPT, source], text=True, capture_output=True, check=True
-                )
+                result = self.run_translator(source)
                 self.assertIn(
                     f"manual attention: {expected} directive(s)", result.stderr
                 )
@@ -1484,12 +2214,8 @@ bindsym Mod5+q workspace 1
                 "set $file variable\n"
                 "include $file\n"
             )
-            result = subprocess.run(
-                [SCRIPT, root / "config"],
-                text=True,
-                capture_output=True,
-                check=True,
-                env={**os.environ, "HOME": str(home)},
+            result = self.run_translator(
+                root / "config", env={**os.environ, "HOME": str(home)}, tmp=root
             )
         for command in ["absolute", "relative", "tilde", "glob", "variable"]:
             with self.subTest(command=command):
@@ -1501,9 +2227,7 @@ bindsym Mod5+q workspace 1
             root = Path(directory)
             (root / "child").write_text("bindsym Mod4+h focus left\ninclude config\n")
             (root / "config").write_text("include child\ninclude ./child\n")
-            result = subprocess.run(
-                [SCRIPT, root / "config"], text=True, capture_output=True, check=True
-            )
+            result = self.run_translator(root / "config", tmp=root)
         self.assertEqual(result.stdout.count('Super+h { command "focus left"; }'), 1)
         self.assertNotIn("include cycle", result.stdout)
         self.assertIn("manual attention: none", result.stderr)
@@ -1516,12 +2240,2342 @@ bindsym Mod5+q workspace 1
                 (root / "config").write_text(
                     f"include {command.format(marker=marker)}\n"
                 )
-                result = subprocess.run(
-                    [SCRIPT, root / "config"], text=True, capture_output=True, check=True
-                )
+                result = self.run_translator(root / "config", tmp=root)
                 self.assertFalse(marker.exists())
                 self.assertIn("command substitution is refused", result.stdout)
                 self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    # The reader and lexing follow sway: each test below names the rule.
+
+    def test_next_line_brace_opens_a_block(self):
+        # detect_brace (sway/config.c:696-717).
+        result = self.translate(
+            'mode "resize"\n{\n    bindsym Left resize shrink width 10px\n}\n'
+        )
+        self.assertIn('mode "resize" {\n    Left {', result.stdout)
+        self.assertNotIn("binds {", result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_one_line_block_is_reported(self):
+        # A last token of `}` ends a block (sway/commands.c:362-366); outside
+        # one, sway rejects the line (sway/config.c:842-846).
+        result = self.translate("input type:touchpad { tap enabled }\n")
+        self.assertIn(
+            "config:1: sway rejects a line whose last token is `}` outside a block",
+            result.stdout,
+        )
+        self.assertNotIn("touchpad", result.stdout.split("// sway-to-kdl:")[0])
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+        result = self.translate(
+            "input type:touchpad {\n    tap enabled\n    dwt { x }\n}\n"
+        )
+        self.assertIn("        tap\n", result.stdout)
+        self.assertNotIn("dwt", result.stdout.replace("dwt { x }", ""))
+        self.assertIn("config:3: sway ends the block at a line whose last", result.stdout)
+        self.assertIn("config:4: sway rejects a line whose last token", result.stdout)
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+
+    def test_continuation_inside_a_block_joins_lines(self):
+        # getline_with_cont runs for every line (sway/config.c:666-694).
+        result = self.translate(
+            "input type:touchpad {\n    accel_profile \\\n        flat\n}\n"
+        )
+        self.assertIn('accel-profile "flat"', result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_nested_blocks_prefix_their_lines_with_the_block_name(self):
+        # expand_line prefixes each line with the enclosing block's name
+        # (sway/config.c:719-729,795-796).
+        result = self.translate(
+            "input {\n    type:touchpad {\n        tap enabled\n    }\n}\n"
+            "seat * {\n    hide_cursor 1000\n}\n"
+        )
+        self.assertIn("    touchpad {\n        tap\n    }", result.stdout)
+        self.assertIn("cursor {\n    hide-after-inactive-ms 1000\n}", result.stdout)
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_commands_block_takes_the_rest_of_the_file(self):
+        # sway/config.c:805-807, sway/commands.c:452-481.
+        result = self.translate(
+            "<commands> {\n    bindsym a nop\n}\nbindsym Mod4+b nop b\n"
+        )
+        self.assertIn("config:1: sway reads the rest of the file as the body", result.stdout)
+        self.assertNotIn("binds", result.stdout)
+        self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+    def test_directive_names_match_case_insensitively(self):
+        # find_handler compares with strcasecmp (sway/commands.c:145-149), in
+        # the C locale, and the name is the first split_args token.
+        result = self.translate(
+            "BindSym Mod4+Return exec foot\n"
+            "GAPS inner 5\n"
+            "Output DP-1 scale 2\n"
+            'Mode "m" {\n    BINDSYM Escape mode default\n}\n'
+            "\u017fmart_gaps on\n"
+            'for_window[app_id="x"] kill\n'
+        )
+        self.assertIn('Super+Return { command "exec foot"; }', result.stdout)
+        self.assertIn("    gaps 5\n", result.stdout)
+        self.assertIn('output "DP-1" {\n    scale 2\n}', result.stdout)
+        self.assertIn('mode "m" {\n    Escape {', result.stdout)
+        self.assertIn("config:7: unhandled: \u017fmart_gaps on", result.stdout)
+        self.assertIn('config:8: unhandled: for_window[app_id="x"] kill', result.stdout)
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+
+    def test_quoted_names_and_selectors_lose_their_quotes(self):
+        # config_command strips quotes from each argument
+        # (sway/commands.c:409-423); cmd_mode strips its name
+        # (sway/commands/mode.c:42).
+        result = self.translate(
+            'output "Some Name With Spaces" scale 2\n'
+            "mode 'x y' {\n    bindsym a mode default\n}\n"
+            'workspace "my ws" output "DP 1"\n'
+        )
+        self.assertIn('output "Some Name With Spaces" {\n    scale 2\n}', result.stdout)
+        self.assertIn('mode "x y" {', result.stdout)
+        self.assertIn(
+            'workspace "my ws" {\n    sway-output-assignment "DP 1"\n}', result.stdout
+        )
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_command_lists_split_like_sways_argsep(self):
+        # execute_command cuts the list with argsep(";,"), which skips quoted
+        # delimiters (sway/commands.c:253-260, common/stringop.c:267-312).
+        result = self.translate(
+            'for_window [app_id="a"] title_format "a, b"\n'
+            "layer_effects waybar blur enable, shadows enable\n"
+        )
+        self.assertIn(
+            'sway-for-window-command "title_format \\"a, b\\""', result.stdout
+        )
+        self.assertIn(
+            "    background-effect {\n        blur true\n    }\n"
+            "    shadow {\n        on\n    }",
+            result.stdout,
+        )
+        self.assertIn("manual attention: none", result.stderr)
+
+    def test_bar_report_echoes_the_blocks_source_lines(self):
+        result = self.translate(
+            "set $b bar\n$b {\n    position top\n}\nbar main {\n    mode dock\n}\n"
+        )
+        self.assertIn(
+            "config:2: bar blocks are unsupported; use waybar "
+            "(docs/SWAY_CONFIG_MIGRATION.md#replace-swaybar): "
+            "$b { | position top | }",
+            result.stdout,
+        )
+        self.assertIn("config:5: bar blocks are unsupported", result.stdout)
+        self.assertIn("bar main { | mode dock | }", result.stdout)
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+
+    def test_mode_nested_block_lines_keep_their_line_numbers(self):
+        result = self.translate(
+            'mode "m" {\n    bindsym {\n        a nop a\n        a nop b\n    }\n}\n'
+        )
+        self.assertIn(
+            "config:4: overwriting binding a for device '*' to `nop b` from `nop a`",
+            result.stdout,
+        )
+
+    def test_input_and_layer_effects_reports_are_located(self):
+        result = self.translate(
+            "input type:touchpad {\n    mystery on\n}\nlayer_effects waybar foo bar\n"
+        )
+        self.assertRegex(
+            result.stdout, r"// sway-to-kdl: \S*config:1: unhandled input directive: mystery on"
+        )
+        self.assertRegex(
+            result.stdout,
+            r"// sway-to-kdl: \S*config:4: unhandled layer_effects directive: foo bar",
+        )
+
+    # Golden-only inputs: synthetic snippets that reach translator branches no
+    # behavioural test above exercises (found with SWAY_TO_KDL_TRACE). They
+    # assert nothing beyond the golden output they are compared with.
+
+    def test_golden_only_top_level_directives(self):
+        self.translate(
+            "bindsym Mod4+x exec echo \\$HOME\n"
+            "workspace 1 output DP-1 HDMI-A-1\n"
+            'workspace "2" output "DP-2"\n'
+            "floating_minimum_size 100 x 50\n"
+            "floating_maximum_size -2 x 10\n"
+            "smart_borders no_gaps\n"
+            "smart_gaps bogus\n"
+            "force_focus_wrapping yes\n"
+            "force_focus_wrapping no\n"
+            "focus_on_window_activation bogus\n"
+            "default_border none 2\n"
+            "exec --no-startup-id\n"
+        )
+        self.translate("floating_modifier \\\n\n")
+        self.translate("include .\n")
+
+    def test_golden_only_grouped_blocks_skip_comments_and_report_bad_entries(self):
+        self.translate(
+            "set {\n    # comment\n\n    $a b\n    garbage\n}\n"
+            "bindsym {\n    # comment\n    Mod4+a nop a\n}\n"
+            "exec {\n    # comment\n    mako\n}\n"
+            "for_window {\n    # comment\n    floating enable\n}\n"
+        )
+
+    def test_golden_only_mode_body_variables_and_unknown_directives(self):
+        self.translate(
+            'mode "m" {\n'
+            "    set {\n        $x Return\n    }\n"
+            "    set $y Escape\n"
+            "    bindsym $x nop x\n"
+            "    bindsym $y nop y\n"
+            "    gaps inner 4\n"
+            "}\n"
+        )
+
+    def test_golden_only_bind_option_edge_cases(self):
+        self.translate(
+            "bindsym --locked\n"
+            "bindsym Mod4+a --whole-window\n"
+            "bindsym Mod4+b --foo exec x\n"
+        )
+
+    def test_golden_only_client_colors(self):
+        self.translate(
+            "client.focused #ffffff #000000\n"
+            "client.unfocused #111111 #222222 #333333\n"
+            "client.focused_tab_title #444444 #555555 #666666\n"
+        )
+
+    def test_golden_only_criteria_edge_cases(self):
+        self.translate(
+            'assign [class="x"] 1\n'
+            "for_window [ ] kill\n"
+            'for_window [con_mark="x"] kill\n'
+        )
+
+    def test_golden_only_for_window_effects(self):
+        self.translate(
+            'for_window [app_id="a"] floating enable, floating disable\n'
+            'for_window [app_id="b"] layout tabbed\n'
+            'for_window [app_id="c"] opacity 0.5, opacity set 0.25\n'
+            'for_window [app_id="d"] opacity abc\n'
+            'for_window [app_id="e"] opacity 2\n'
+            'for_window [app_id="f"] move workspace 3\n'
+            'for_window [app_id="g"] resize set a ppt b ppt\n'
+            'for_window [app_id="h"] resize set 0 ppt 0 ppt\n'
+            'for_window [app_id="i"] resize set 10 abc\n'
+            'for_window [app_id="j"] opacity 0.5, dim_inactive 0.2\n'
+            'for_window [app_id="k"] corner_radius 5, blur enable, shadows on\n'
+            'for_window [app_id="l"] blur off, shadows off\n'
+        )
+
+    def test_golden_only_input_block_edge_cases(self):
+        self.translate(
+            "input * {\n    xkb_layout us\n    repeat_rate 30\n}\n"
+            "input type:keyboard {\n\n    xkb_numlock\n}\n"
+            "input type:touchpad {\n    mystery on\n    pointer_accel fast\n"
+            "    scroll_button BTN_FOO\n}\n"
+        )
+
+    def test_golden_only_output_block_edge_cases(self):
+        self.translate(
+            "output DP-1 {\n    enable\n    transform 45\n    position 10\n}\n"
+            "output DP-2 position a,b\n"
+            "output DP-3 disable\n"
+            "output DP-4 foo bar scale 2\n"
+        )
+
+    def test_output_off_and_on_are_reported(self):
+        # sway's output subcommands include disable and enable but neither
+        # off nor on, and an unknown one fails the whole output command
+        # (sway/commands/output.c:9-34,87-93).
+        result = self.translate(
+            "output DP-1 off\n"
+            "output DP-2 scale 2 on position 0 0\n"
+            "output DP-3 disable\n"
+            "output DP-4 disable enable\n"
+        )
+        out, err = result.stdout, result.stderr
+        reason = (
+            "sway has no output subcommand {} and rejects the output command "
+            "(sway/sway/commands/output.c:9-34,87-93); use enable or disable"
+        )
+        self.assertIn(f"config:1: {reason.format('off')}: off\n", err)
+        self.assertIn(f"config:2: {reason.format('on')}: on position 0 0\n", err)
+        self.assertIn("manual attention: 2 directive(s)", err)
+        self.assertIn('output "DP-1" {\n    // sway-to-kdl:', out)
+        self.assertNotIn("position", out.replace("on position", ""))
+        self.assertIn('output "DP-3" {\n    off\n}\n', out)
+        self.assertIn('output "DP-4" {\n}\n', out)
+        self.assertEqual(out.count("    off\n"), 1)
+
+    def test_output_scale_and_position_are_checked(self):
+        # sway reads the scale with strtof and each coordinate with strtol,
+        # ASCII only, and fails on characters left over
+        # (sway/commands/output/scale.c:13-17, position.c:13-35); it keeps
+        # x and y in a C int (include/sway/config.h:289). swayward-config
+        # holds a scale greater than 0 and at most 10 and an i32 position
+        # (swayward-config/src/output.rs:57,127-132).
+        result = self.translate(
+            "output DP-1 scale 11\n"
+            "output DP-2 position 2147483648 0\n"
+            'output DP-3 scale "2\n'
+            "output DP-4 position \u0661,2\n"
+            "output DP-5 scale 0 position 1,-2147483649\n"
+            "output DP-6 scale nan\n"
+            "output DP-7 scale 2. position +5,-0\n"
+            "output DP-8 scale 0x1.8p0 pos ,5\n"
+            "output DP-9 scale 10 position -2147483648 2147483647\n"
+            "output DP-10 scale 10.0000001\n"
+            "output DP-11 scale 1e-50\n"
+        )
+        out, err = result.stdout, result.stderr
+        scale = (
+            "output scale takes a number greater than 0 and at most 10 "
+            "(swayward-config/src/output.rs:57, utils.rs:155-178)"
+        )
+        out_of_range = "number out of range: sway stores it in a C int, which cannot hold it"
+        for item in [
+            f"config:1: {scale}: scale 11",
+            f"config:2: {out_of_range}: position 2147483648 0",
+            f'config:3: {scale}: scale "2',
+            "config:4: unhandled output directive: position",
+            "config:4: unhandled output directive: \u0661,2",
+            f"config:5: {scale}: scale 0",
+            f"config:5: {out_of_range}: position 1,-2147483649",
+            f"config:6: {scale}: scale nan",
+            f"config:11: {scale}: scale 1e-50",
+        ]:
+            self.assertIn(f"{item}\n", err)
+        self.assertIn("manual attention: 9 directive(s)", err)
+        for output in [1, 2, 3, 4, 5, 6, 11]:
+            self.assertIn(f'output "DP-{output}" {{\n    // sway-to-kdl:', out)
+        self.assertIn('output "DP-7" {\n    scale 2.0\n    position x=5 y=0\n}', out)
+        self.assertIn('output "DP-8" {\n    scale 1.5\n    position x=0 y=5\n}', out)
+        self.assertIn(
+            'output "DP-9" {\n    scale 10\n'
+            "    position x=-2147483648 y=2147483647\n}",
+            out,
+        )
+        # sway reads the scale as a C float, which rounds 10.0000001 to 10.
+        self.assertIn('output "DP-10" {\n    scale 10.0\n}', out)
+        self.assertEqual(out.count("    scale "), 4)
+        self.assertEqual(out.count("    position "), 3)
+
+    def test_golden_only_swayfx_titlebar_border_thickness(self):
+        self.translate("titlebar_border_thickness 2\ntitlebar_padding 4 4\n")
+        self.translate(
+            "titlebar_border_thickness x\n"
+            "titlebar_border_thickness 99\n"
+        )
+
+    def test_golden_only_layer_effects_edge_cases(self):
+        self.translate(
+            "layer_effects waybar\n"
+            'layer_effects "rofi" blur_xray enable; shadows on; corner_radius 4; foo bar\n'
+        )
+
+    def test_repeated_singular_settings_keep_the_last(self):
+        # A singular KDL child appears once, holding the later directive's
+        # value, as sway's later setting wins; a second node fails to load.
+        result = self.translate(
+            "workspace_layout tabbed\n"
+            "workspace_layout stacking\n"
+            "focus_wrapping no\n"
+            "force_focus_wrapping yes\n"
+            "floating_minimum_size 10 x 10\n"
+            "floating_minimum_size 20 x 20\n"
+            "tiling_drag disable\n"
+            "tiling_drag enable\n"
+            "tiling_drag_threshold 5\n"
+            "tiling_drag_threshold 9\n"
+            "workspace_auto_back_and_forth yes\n"
+            "workspace_auto_back_and_forth no\n"
+            "popup_during_fullscreen ignore\n"
+            "popup_during_fullscreen smart\n"
+            "focus_on_window_activation focus\n"
+            "focus_on_window_activation none\n"
+            "mouse_warping container\n"
+            "mouse_warping none\n"
+            "primary_selection disabled\n"
+            "primary_selection enabled\n"
+            "xwayland disable\n"
+            "xwayland enable\n"
+            "shadows on\n"
+            "shadows off\n"
+            "input type:touchpad {\n"
+            "    tap enabled\n"
+            "    accel_profile flat\n"
+            "    accel_profile adaptive\n"
+            "}\n"
+            "input type:touchpad tap disabled\n"
+            "input type:keyboard {\n"
+            "    xkb_layout us\n"
+            "    xkb_options caps:escape\n"
+            "}\n"
+            "input type:keyboard xkb_layout de\n"
+            "input type:keyboard xkb_numlock disabled\n"
+            "input type:keyboard xkb_numlock enabled\n"
+            "output DP-1 mode 800x600 mode 1920x1080 disable enable scale 1 scale 2\n"
+            'for_window [app_id="a"] border pixel 2, border none, focus, nofocus\n'
+            'for_window [app_id="b"] blur on, shadows on, shadows off, '
+            "move workspace 1, move workspace 2\n"
+            "layer_effects rofi blur enable; blur_xray enable; blur disable\n"
+        )
+        out = result.stdout
+        for line, count in [
+            ('workspace-layout "stacking"', 1),
+            ("workspace-layout", 1),
+            ('focus-wrapping "force"', 1),
+            ("focus-wrapping", 1),
+            ("floating-minimum-size 20 20", 1),
+            ("floating-minimum-size", 1),
+            ("tiling-drag true", 1),
+            ("tiling-drag-threshold 9", 1),
+            ("workspace-auto-back-and-forth false", 1),
+            ('popup-during-fullscreen "smart"', 1),
+            ('focus-on-window-activation "none"', 1),
+            ("warp-mouse-to-focus", 0),
+            ("clipboard", 0),
+            ("xwayland-satellite", 0),
+            ("shadow {\n        off\n    }", 2),  # layout and window-rule
+            ("    tap\n", 0),
+            ('accel-profile "adaptive"', 1),
+            ("accel-profile", 1),
+            ("xkb {", 1),
+            ('layout "de"', 1),
+            ('options "caps:escape"', 1),
+            ("numlock\n", 1),
+            ("numlock false", 0),
+            ('output "DP-1" {\n    mode "1920x1080"\n    scale 2\n}', 1),
+            ('sway-border "none"', 1),
+            ("sway-border-width 2", 1),
+            ("open-focused false", 1),
+            ("open-focused", 1),
+            ('open-on-workspace "2"', 1),
+            ("open-on-workspace", 1),
+            ("background-effect {", 2),
+            ("blur false", 1),
+            ("xray true", 1),
+            ("blur true", 1),
+        ]:
+            with self.subTest(line=line):
+                self.assertEqual(out.count(line), count, out)
+
+    def test_whole_floats_keep_their_decimal_point(self):
+        # accel-speed and scroll-factor are FloatOrInt, a proportion is an
+        # f64 (swayward-config/src/input/libinput.rs:11,46, layout.rs:198-201).
+        result = self.translate(
+            "input type:pointer {\n"
+            "    pointer_accel 1\n"
+            "    scroll_factor 2\n"
+            "}\n"
+            "input type:touchpad pointer_accel nan\n"
+            'for_window [app_id="a"] resize set 100 ppt 50 ppt\n'
+        )
+        self.assertIn("accel-speed 1.0", result.stdout)
+        self.assertIn("scroll-factor 2.0", result.stdout)
+        self.assertIn("proportion 1.0", result.stdout)
+        self.assertIn("proportion 0.5", result.stdout)
+        self.assertNotIn("nan", result.stdout.replace("unhandled input directive: pointer_accel nan", ""))
+        self.assertIn("unhandled input directive: pointer_accel nan", result.stderr)
+
+    def test_workspaces_render_in_first_mention_order(self):
+        # sway keeps workspace_configs in first-mention order
+        # (sway/commands/workspace.c:13-31), and workspace_next_name walks
+        # them in that order (sway/tree/workspace.c:461-480).
+        result = self.translate(
+            "workspace 1 gaps inner 5\n"
+            "workspace 2 output HDMI-A-1\n"
+            "workspace 1 output DP-1 DP-2\n"
+            "workspace 1 output DP-3\n"
+        )
+        out = result.stdout
+        self.assertLess(out.index('workspace "1" {'), out.index('workspace "2" {'))
+        self.assertIn('sway-output-assignment "DP-1" "DP-2" "DP-3"', out)
+        self.assertEqual(out.count("sway-output-assignment"), 2)
+
+    def test_mouse_bindings_are_known_by_their_sway_names(self):
+        # get_mouse_bindsym reads `button` ignoring case and `BTN_` exactly
+        # (sway/input/cursor.c:1203-1226); anything else is a keysym, and
+        # swayward's pointer trigger names are none (sway/commands/bind.c:194-199).
+        result = self.translate(
+            "bindsym Button8 nop back\n"
+            "bindsym MouseBack nop kdl-name\n"
+            "bindsym Mod4+wheelscrollup nop kdl-wheel\n"
+        )
+        self.assertIn('MouseBack { command "nop back"; }', result.stdout)
+        self.assertNotIn("kdl-name;", result.stdout)
+        self.assertNotIn("kdl-wheel;", result.stdout)
+        self.assertIn("Unknown key or button 'MouseBack'", result.stderr)
+        self.assertIn("Unknown key or button 'wheelscrollup'", result.stderr)
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+
+    def test_dim_inactive_takes_a_number_from_0_to_1(self):
+        # The unfocused opacity, 1 - amount, is a fraction
+        # (swayward-config/src/window_rule.rs:76).
+        result = self.translate(
+            "dim_inactive x\n"
+            "default_dim_inactive 2\n"
+            "dim_inactive nan\n"
+            "dim_inactive 1e400\n"
+            "default_dim_inactive 0.25\n"
+            "for_window [app_id=a] dim_inactive x, opacity 0.5\n"
+            "for_window [app_id=b] dim_inactive -1\n"
+        )
+        out, err = result.stdout, result.stderr
+        for text, name in [
+            ("dim_inactive x", "dim_inactive"),
+            ("default_dim_inactive 2", "default_dim_inactive"),
+            ("dim_inactive nan", "dim_inactive"),
+            ("dim_inactive 1e400", "dim_inactive"),
+            ("for_window [app_id=a] dim_inactive x", "dim_inactive"),
+            ("for_window [app_id=b] dim_inactive -1", "dim_inactive"),
+        ]:
+            with self.subTest(text=text):
+                self.assertIn(f"{name} takes a number from 0 to 1: {text}\n", err)
+        self.assertIn("manual attention: 6 directive(s)", err)
+        self.assertIn("opacity 0.75", out)
+        self.assertIn("opacity 0.5", out)
+        self.assertNotIn("nan", out.replace("dim_inactive nan", ""))
+        self.assertNotIn("inf", out.replace("1e400", ""))
+
+    def test_numbers_sway_cannot_hold_in_an_int_are_reported(self):
+        # Sway reads these with strtol into an int (sway/commands/gaps.c:56,
+        # workspace.c:79, floating_minmax_size.c:24,33, force_display_urgency_hint.c:14,
+        # common/util.c:89), which stores another number past INT_MAX. On
+        # Python 3.11+ int() refuses more than 4300 digits.
+        huge = "9" * 4301
+        lines = [
+            f"gaps inner {huge}",
+            "workspace 1 gaps outer 99999999999",
+            "floating_minimum_size 1 x 2147483648",
+            "force_display_urgency_hint 99999999999999999999",
+            "for_window [app_id=a] resize set 99999999999 5",
+            "for_window [app_id=b] move position 0 -2147483649",
+        ]
+        result = self.translate(
+            "".join(f"{line}\n" for line in lines)
+            + "gaps outer -2147483648\n"
+            + "for_window [app_id=c] move position 2147483647 0\n"
+        )
+        out, err = result.stdout, result.stderr
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIn(
+                    "number out of range: sway stores it in a C int, which cannot "
+                    f"hold it: {line}\n",
+                    err,
+                )
+        self.assertIn(f"manual attention: {len(lines)} directive(s)", err)
+        kdl = "\n".join(line for line in out.splitlines() if "//" not in line)
+        for absent in ["99999", "floating-minimum-size", "urgent-timeout-ms", "app-id=\"b\""]:
+            self.assertNotIn(absent, kdl)
+        self.assertIn("top -2147483648", out)
+        self.assertIn('sway-for-window-command "move position 2147483647 0"', out)
+
+    def test_default_border_width_takes_ascii_digits(self):
+        # str.isdigit() accepts "²", which int() refuses; sway reads the
+        # border width with atoi, ASCII digits (sway/commands/default_border.c:23).
+        result = self.translate(
+            "default_border pixel \u00b2\n"
+            "default_floating_border normal 99999999999999999999\n"
+            "new_window \u0663pixel\n"
+            "default_border pixel 3\n"
+        )
+        self.assertIn("unsupported default border: default_border pixel \u00b2\n", result.stderr)
+        self.assertIn("unsupported default border: default_floating_border normal 999", result.stderr)
+        self.assertIn("unsupported default border: new_window \u0663pixel\n", result.stderr)
+        self.assertIn("manual attention: 3 directive(s)", result.stderr)
+        self.assertIn('default-border "pixel" width=3', result.stdout)
+        self.assertNotIn("\u0663", result.stdout.replace("new_window \u0663pixel", ""))
+
+    def test_input_settings_split_at_sway_whitespace(self):
+        # Sway splits at ASCII whitespace only (common/stringop.c:13), so a
+        # Unicode space is part of a word.
+        result = self.translate(
+            "input * \x1c\n"
+            "input type:pointer \x1c\n"
+            "input type:touchpad {\n    \u00a0\n    tap enabled\n}\n"
+            "input type:keyboard xkb_layout\u2003us\n"
+        )
+        out, err = result.stdout, result.stderr
+        # `*` takes keyboard settings only, and \x1c is none.
+        self.assertIn("config:1: device-specific input selectors", err)
+        self.assertIn("config:2: unhandled input directive: \x1c\n", err)
+        self.assertIn("config:3: unhandled input directive: \u00a0\n", err)
+        self.assertIn("config:7: unhandled input directive: xkb_layout\u2003us\n", err)
+        self.assertIn("manual attention: 4 directive(s)", err)
+        self.assertIn("touchpad {\n", out)
+        self.assertIn("        tap\n", out)
+        self.assertNotIn('layout "us"', out)
+
+    def test_lines_that_are_not_utf8_are_reported(self):
+        # swayward reads its config as UTF-8 text
+        # (swayward-config/src/decode.rs:397,455), so no KDL holds these
+        # bytes; reports print them as escapes.
+        result = self.translate(
+            b"exec foo\xff\n"
+            b"bindsym Mod4+a exec ok\n"
+            b"input type:keyboard {\n"
+            b"    xkb_layout \xfe\n"
+            b"    repeat_rate 25\n"
+            b"}\n"
+            b"mode \xff {\n"
+            b"    bindsym a exec b\n"
+            b"}\n"
+            b"foo\xff bar\n"
+        )
+        out, err = result.stdout, result.stderr
+        reason = (
+            "the line is not valid UTF-8, and swayward reads its config as "
+            "UTF-8 text (swayward-config/src/decode.rs:397,455)"
+        )
+        for line, text in [
+            (1, "exec foo\\xff"),
+            (4, "xkb_layout \\xfe"),
+            (7, "mode \\xff {"),
+            (10, "foo\\xff bar"),
+        ]:
+            with self.subTest(line=line):
+                self.assertIn(f"config:{line}: {reason}: {text}\n", err)
+        self.assertIn("manual attention: 4 directive(s)", err)
+        self.assertIn('Super+a { command "exec ok"; }', out)
+        self.assertIn("repeat-rate 25", out)
+        self.assertNotIn("spawn-sh-at-startup", out)
+        self.assertNotIn("mode", out.replace("mode \\xff", ""))
+
+    def test_blocks_nested_too_deep_are_reported(self):
+        # A block deeper than MAX_BLOCK_DEPTH, 64, is reported whole: 65 is
+        # the first depth refused, 64 the last translated. Sway reads any
+        # depth (sway/config.c:732-869).
+        result = self.translate(
+            "a {\n" * 65
+            + "exec inner\n"
+            + "}\n" * 65
+            + "b {\n" * 64
+            + "exec shallow\n"
+            + "}\n" * 64
+        )
+        self.assertIn(
+            "config:1: blocks nested more than 64 deep are not translated; sway "
+            "reads any depth (sway/sway/config.c:732-869): a {\n",
+            result.stderr,
+        )
+        self.assertIn("manual attention: 2 directive(s)", result.stderr)
+        self.assertNotIn("inner", result.stdout)
+        # The 64-deep block runs as `b b ... exec shallow`, unhandled.
+        self.assertIn("unhandled: " + "b " * 64 + "exec shallow", result.stderr)
+
+    def test_output_directives_merge_by_name(self):
+        # Sway merges an output config into the earlier one of the same name,
+        # field by field (sway/config/output.c:164-239,258-262); swayward uses
+        # the first output node whose name matches, ignoring case
+        # (swayward-config/src/output.rs:150-151,196-199).
+        result = self.translate(
+            "output DP-1 disable\n"
+            "output HDMI-A-1 scale 1\n"
+            "output DP-1 enable\n"
+            "output DP-1 scale 2\n"
+            'output "DP-1" {\n    mode 800x600\n    transform 90\n}\n'
+            "output DP-1 transform normal\n"
+            "output HDMI-A-1 disable\n"
+            "output dp-1 scale 3\n"
+            "output dp-1 {\n    scale 3\n}\n"
+        )
+        out, err = result.stdout, result.stderr
+        self.assertEqual(out.count('\noutput "'), 2, out)
+        self.assertIn(
+            'output "DP-1" {\n    scale 2\n    mode "800x600"\n    transform "normal"\n}\n',
+            out,
+        )
+        self.assertIn('output "HDMI-A-1" {\n    scale 1\n    off\n}\n', out)
+        self.assertLess(out.index('output "DP-1"'), out.index('output "HDMI-A-1"'))
+        clash = (
+            "sway keeps output dp-1 apart from output DP-1, as it compares "
+            "output names exactly (sway/sway/config/output.c:258), but swayward "
+            "matches them ignoring case and uses the first "
+            "(swayward-config/src/output.rs:150-151,196-199)"
+        )
+        self.assertIn(f"config:11: {clash}: output dp-1 scale 3\n", err)
+        self.assertIn(f"config:12: {clash}: output dp-1 {{ ... }}\n", err)
+        self.assertIn("manual attention: 2 directive(s)", err)
+
+    def test_output_settings_no_kdl_node_holds_are_reported(self):
+        # Sway merges the `*` config, then the connector's, then the
+        # identifier's, and `output *` replaces earlier outputs' settings
+        # (sway/config/output.c:264-268,716-728). swayward-config has no
+        # wildcard output and uses the first node that matches an output
+        # (swayward-config/src/output.rs:150-152,196-237).
+        result = self.translate(
+            "output DP-1 scale 1\n"
+            "output * scale 2\n"
+            "output DP-1 position 5 6\n"
+            "output * bg /wallpaper fill\n"
+            'output "Dell Inc. U2720Q ABC" scale 2\n'
+            "output HDMI-A-1 position 0 0\n"
+            "output HDMI-A-1 scale 1\n"
+            'output "Dell Inc. U2720Q ABC" transform 90\n'
+        )
+        out, err = result.stdout, result.stderr
+        self.assertIn(
+            "config:2: sway applies this scale to every output "
+            "(sway/sway/config/output.c:716-728) and replaces the earlier scale "
+            "of output DP-1 (sway/sway/config/output.c:264-268), but "
+            'swayward-config has no wildcard output: an output "*" node matches '
+            "only a connector named * (swayward-config/src/output.rs:150-152,"
+            "196-199); set it in each output's node: output * scale 2\n",
+            err,
+        )
+        self.assertIn("config:4: unhandled output directive: bg /wallpaper fill\n", err)
+        self.assertIn(
+            "config:7: output HDMI-A-1 and output Dell Inc. U2720Q ABC both set "
+            "scale; if Dell Inc. U2720Q ABC is the output on HDMI-A-1, sway "
+            "applies the identifier's value over the connector's "
+            "(sway/sway/config/output.c:716-728), but swayward uses only the "
+            "first output node that matches it "
+            "(swayward-config/src/output.rs:150-152,196-237); combine them by "
+            "hand: output HDMI-A-1 scale 1\n",
+            err,
+        )
+        self.assertIn(
+            "config:5: output Dell Inc. U2720Q ABC and output DP-1 both set scale; "
+            "if Dell Inc. U2720Q ABC is the output on DP-1,",
+            err,
+        )
+        # Position on the connector and transform on the identifier only:
+        # different settings, not reported.
+        self.assertIn("manual attention: 4 directive(s)", err)
+        self.assertIn('output "DP-1" {\n    scale 1\n    position x=5 y=6\n', out)
+
+    def test_resize_set_amounts_fit_swayward_sizes(self):
+        # cmd_resize_set reads `[width] <w> [px|ppt] [height] <h> [px|ppt]`
+        # with strtol into an int (sway/commands/resize.c:421-448,
+        # common/util.c:89); PresetSize holds an i32 or an f64
+        # (swayward-config/src/layout.rs:198-201). A refused command keeps
+        # the rule's other commands.
+        nines = "9" * 311
+        lines = [
+            f'for_window [app_id="a"] floating enable, resize set +{nines} ppt 1 ppt',
+            'for_window [app_id="b"] resize set +2147483648 ppt 1 ppt',
+            'for_window [app_id="c"] resize set width 2147483648 height 1',
+        ]
+        result = self.translate(
+            "".join(f"{line}\n" for line in lines)
+            + 'for_window [app_id="d"] resize set width +2147483647 height 01 px\n'
+            + 'for_window [app_id="e"] resize set +50 ppt 25ppt\n'
+            + 'for_window [app_id="f"] floating enable, mark --bogus x, opacity 0.5\n'
+        )
+        out, err = result.stdout, result.stderr
+        for line in lines:
+            with self.subTest(line=line):
+                command = line[line.index("resize") :]
+                self.assertIn(
+                    "number out of range: sway stores it in a C int, which cannot "
+                    f"hold it: {line[: line.index(']') + 1]} {command}\n",
+                    err,
+                )
+        self.assertIn(
+            'invalid mark command: for_window [app_id="f"] mark --bogus x\n', err
+        )
+        self.assertIn("manual attention: 4 directive(s)", err)
+        self.assertIn('match app-id="a"\n    open-floating true\n}\n', out)
+        self.assertNotIn('app-id="b"', out.replace('[app_id="b"]', ""))
+        self.assertNotIn('app-id="c"', out.replace('[app_id="c"]', ""))
+        self.assertIn(
+            '    match app-id="d"\n'
+            "    default-column-width { fixed 2147483647; }\n"
+            "    default-window-height { fixed 1; }\n",
+            out,
+        )
+        self.assertIn(
+            '    match app-id="e"\n'
+            "    default-column-width { proportion 0.5; }\n"
+            "    default-window-height { proportion 0.25; }\n",
+            out,
+        )
+        self.assertIn(
+            '    match app-id="f"\n    open-floating true\n    opacity 0.5\n', out
+        )
+
+    def test_border_widths_drop_leading_zeroes_before_int(self):
+        # swayward holds border widths as u16 (swayward-config/src/layout.rs:446,
+        # window_rule.rs:45); int() refuses over 4300 digits on Python 3.11+.
+        result = self.translate(
+            "default_border pixel " + "0" * 4300 + "1\n"
+            "default_floating_border normal 065536\n"
+            "new_window 0002pixel\n"
+            "new_float 65536pixel\n"
+            'for_window [app_id="a"] border pixel 0003\n'
+            'for_window [app_id="b"] border pixel 65536\n'
+        )
+        out, err = result.stdout, result.stderr
+        self.assertIn("unsupported default border: default_floating_border normal 065536\n", err)
+        self.assertIn("unsupported default border: new_float 65536pixel\n", err)
+        self.assertIn('for_window [app_id="b"] border pixel 65536\n', err)
+        self.assertIn("manual attention: 3 directive(s)", err)
+        self.assertNotIn("sway-to-kdl failed", err)
+        self.assertIn('default-border "pixel" width=2\n', out)
+        self.assertIn("sway-border-width 3\n", out)
+        self.assertNotIn("65536", out.replace("65536pixel", "").replace("pixel 65536", "").replace("normal 065536", ""))
+
+    def test_include_failures_are_reported_on_the_include(self):
+        # Sway skips an include it cannot read (sway/config.c:560-565); the
+        # translator reports it on the include and goes on.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "loop").symlink_to("loop")
+            (root / "config").write_text(
+                "include ~nosuchuser-sway-to-kdl/config\n"
+                "include loop\n"
+                "exec after\n"
+            )
+            result = self.run_translator(root / "config", tmp=root)
+        out, err = result.stdout, result.stderr
+        self.assertIn(
+            "<tmp>/config:1: cannot find the home directory in "
+            "~nosuchuser-sway-to-kdl/config: include ~nosuchuser-sway-to-kdl/config\n",
+            normalise(err, prefix_spellings(directory, "<tmp>")),
+        )
+        self.assertIn(
+            "<tmp>/config:2: cannot read included file <tmp>/loop: Too many levels "
+            "of symbolic links: include loop\n",
+            normalise(err, prefix_spellings(directory, "<tmp>")),
+        )
+        self.assertIn("manual attention: 2 directive(s)", err)
+        self.assertIn('spawn-sh-at-startup "after"', out)
+
+    def test_criteria_scan_in_linear_time(self):
+        # A pattern with two ways to match a backslash, as `(?:\\.|[^"])*`,
+        # takes about 2**(n/2) steps on an unclosed value of n backslashes;
+        # the criteria patterns match each character one way.
+        backslashes = "\\" * 40
+        result = self.translate(
+            f'for_window [app_id="{backslashes}] floating enable\n'
+            f'for_window [app_id="{backslashes}"] x {{\n    floating enable\n}}\n'
+            'for_window [title="a \\"b\\" c"] floating enable\n',
+            timeout=5,
+        )
+        out, err = result.stdout, result.stderr
+        self.assertIn(
+            f'config:1: criteria need manual conversion to a window-rule match: '
+            f'for_window [app_id="{backslashes}] floating enable\n',
+            err,
+        )
+        self.assertIn(
+            "config:3: command needs manual conversion to window-rule "
+            f'properties: for_window [app_id="{backslashes}"] x floating enable\n',
+            err,
+        )
+        self.assertIn("manual attention: 2 directive(s)", err)
+        # In a valid value `\"` is an escaped quote (sway/criteria.c:822).
+        self.assertIn('match title="a \\\\\\"b\\\\\\" c"', out)
+
+
+def checking_stale_goldens(method):
+    # Runs inside the test body, so a stale golden fails that test. The check
+    # is skipped when the body raised (failure, error, skip) or a subTest
+    # failed: its call count is then incomplete. A failed subTest does not
+    # raise; it leaves _outcome.success false, on Python 3.9 through 3.15.
+    @functools.wraps(method)
+    def wrapper(self):
+        method(self)
+        outcome = getattr(self, "_outcome", None)
+        if outcome is None or outcome.success:
+            self.check_no_stale_goldens()
+
+    return wrapper
+
+
+for _name in [n for n in vars(TranslatorTests) if n.startswith("test_")]:
+    setattr(
+        TranslatorTests, _name, checking_stale_goldens(getattr(TranslatorTests, _name))
+    )
+
+
+class LinearTimeTests(unittest.TestCase):
+    """Runs on inputs too long for a golden, through the CLI with a timeout."""
+
+    def run_bounded(self, source, timeout):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config"
+            path.write_text(source)
+            return subprocess.run(
+                [SCRIPT, path], text=True, capture_output=True, check=True,
+                timeout=timeout,
+            )
+
+    def test_seat_numbers_scan_in_linear_time(self):
+        # A pattern such as `0*([0-9]+)` gives each zero two ways to match
+        # and backtracks quadratically when another character follows the
+        # zeroes: 100,000 of them took about 26 s, and a run takes about
+        # 0.15 s now. Each golden would hold the zeroes three times.
+        zeroes = "0" * 100000
+        for source, reason in [
+            (f"seat * hide_cursor {zeroes}x\n", "Expected an integer timeout"),
+            (f"seat * xcursor_theme A {zeroes}x\n", "Expected a positive integer size"),
+        ]:
+            with self.subTest(source=source[:40]):
+                result = self.run_bounded(source, timeout=5)
+                self.assertNotIn("cursor {", result.stdout)
+                self.assertIn(f"{reason}: {source.strip()}", result.stdout)
+                self.assertIn("manual attention: 1 directive(s)", result.stderr)
+
+
+class NumberTests(unittest.TestCase):
+    """The number readers, called directly; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def test_c_int_matches_the_pattern_it_replaced(self):
+        # c_int once matched `([+-]?)0*([0-9]+)`; the scan must agree with it
+        # on every input, the error message included.
+        s2k = self.s2k
+
+        def by_pattern(text):
+            match = re.fullmatch(r"([+-]?)0*([0-9]+)", text)
+            if match is None:
+                raise s2k.NumberError(f"expected an integer: {text}")
+            sign, digits = match.groups()
+            if len(digits) > len(str(s2k.INT_MAX)):
+                raise s2k.NumberError(s2k.NUMBER_OUT_OF_RANGE)
+            value = int(sign + digits)
+            if not s2k.INT_MIN <= value <= s2k.INT_MAX:
+                raise s2k.NumberError(s2k.NUMBER_OUT_OF_RANGE)
+            return value
+
+        def outcome(function, text):
+            try:
+                return function(text)
+            except s2k.NumberError as error:
+                return str(error)
+
+        rng = random.Random(20261116)
+        alphabet = "0000123456789+- x\n\u0661"
+        cases = ["2147483647", "-2147483648", "2147483648", "-0", "+", ""]
+        cases += [
+            "".join(rng.choice(alphabet) for _ in range(rng.randrange(14)))
+            for _ in range(5000)
+        ]
+        for text in cases:
+            self.assertEqual(outcome(s2k.c_int, text), outcome(by_pattern, text), text)
+
+    def test_c_int_scans_in_linear_time(self):
+        # `0*([0-9]+)` gives each zero two ways to match and backtracks
+        # quadratically when another character follows the zeroes: 100,000
+        # of them take about 30 s.
+        code = (
+            "import importlib.machinery, importlib.util, sys\n"
+            f"loader = importlib.machinery.SourceFileLoader('s2k', {str(SCRIPT)!r})\n"
+            "module = importlib.util.module_from_spec("
+            "importlib.util.spec_from_loader('s2k', loader))\n"
+            "sys.modules['s2k'] = module\n"
+            "loader.exec_module(module)\n"
+            "try:\n"
+            "    module.c_int('0' * 100000 + 'x')\n"
+            "except module.NumberError as error:\n"
+            "    print(str(error)[:21])\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], text=True, capture_output=True,
+            check=True, timeout=5,
+        )
+        self.assertEqual(result.stdout, "expected an integer: \n")
+
+    def test_strtof_value_reads_what_strtof_reads(self):
+        strtof_value = self.s2k.strtof_value
+        for text, value in [
+            ("2", 2.0), ("2.", 2.0), (".5", 0.5), ("+1e1", 10.0), ("-1.5", -1.5),
+            ("0x1.8p1", 3.0), ("0X.8", 0.5), ("1e999", math.inf),
+            ("0x1p99999", math.inf), ("-Infinity", -math.inf), ("", 0.0),
+            (" \t2", 2.0),
+            # A C float: 1.1 rounds to the nearest float, 10.0000001 to 10
+            # and 1e-50 to 0.
+            ("1.1", 1.10000002384185791015625), ("10.0000001", 10.0),
+            ("1e-50", 0.0), ("-1e-50", -0.0),
+            # The double nearest each of these is the midpoint of two
+            # floats; strtof rounds the text once, to the side it lies on.
+            ("1.000000059604644775390625000000000000001", 1 + 2**-23),
+            ("1.000000178813934326171874999999999999999", 1 + 2**-23),
+            ("0x1.000001000000000001p0", 1 + 2**-23),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(strtof_value(text), value)
+        self.assertTrue(math.isnan(strtof_value("NaN(x_1)")))
+        for text in [
+            '"2', "2x", "0x", "0x1p", "1e", ".", "+", "infinit", "1_0",
+            "\u0662", "2 ", " ", "nan(",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNone(strtof_value(text))
+
+
+def load_script():
+    # The script has no .py suffix, so spec_from_file_location needs a loader.
+    loader = importlib.machinery.SourceFileLoader("sway_to_kdl", str(SCRIPT))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves annotations through sys.modules on Python 3.9.
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+# Case tables for the lexer ports, derived from reading sway 1.12's
+# common/stringop.c and sway/commands.c:205-335. Inputs are raw strings so a
+# backslash in a case is one backslash in the input.
+
+SPLIT_ARGS_CASES = [
+    ("", []),
+    ("   ", []),
+    ("a b", ["a", "b"]),
+    ("  a \t\n\f\v\r b  ", ["a", "b"]),
+    ('a "b c" d', ["a", '"b c"', "d"]),
+    ("a 'b c' d", ["a", "'b c'", "d"]),
+    ('"it\'s" x', ['"it\'s"', "x"]),
+    ("'say \"hi\"' x", ["'say \"hi\"'", "x"]),
+    ('a"b c"d e', ['a"b c"d', "e"]),
+    # A backslash makes the next character literal, whitespace included, and
+    # stays in the token; a second backslash toggles the escape off.
+    (r"a\ b c", [r"a\ b", "c"]),
+    (r'"a\"b c" d', [r'"a\"b c"', "d"]),
+    (r"a\\ b", [r"a\\", "b"]),
+    (r"a\\\ b", [r"a\\\ b"]),
+    (r"\"a b", [r'\"a', "b"]),
+    # Brackets are one level deep, and only outside quotes.
+    ('[app_id="a b"] kill', ['[app_id="a b"]', "kill"]),
+    ("[a [b c] d", ["[a [b c]", "d"]),
+    ("[a] ]b c", ["[a]", "]b", "c"]),
+    ("a[b c]d e", ["a[b c]d", "e"]),
+    ('"[" a', ['"["', "a"]),
+    (r"\[a b]", [r"\[a", "b]"]),
+    # Unterminated runs end at the end of input.
+    ('a "b c', ["a", '"b c']),
+    ("a 'b c", ["a", "'b c"]),
+    ("[x y", ["[x y"]),
+    ("a\\", ["a\\"]),
+    ("x {", ["x", "{"]),
+    ("a\0b c", ["a"]),
+]
+
+STRIP_QUOTES_CASES = [
+    ('"a b"', "a b"),
+    ("'a b'", "a b"),
+    ('"it\'s"', "it's"),
+    ("'say \"hi\"'", 'say "hi"'),
+    ('a"b"c', "abc"),
+    ('"a" \'b\'', "a b"),
+    ('""', ""),
+    ('"unterminated', "unterminated"),
+    # Backslashes stay; an escaped quote stays; the escape toggles.
+    (r'"a\"b"', r"a\"b"),
+    (r'\"a', r'\"a'),
+    (r'\\"a"', r"\\a"),
+    ("plain", "plain"),
+    ('"a"\0"b"', "a"),
+]
+
+# (input, delims, (segment, matched, rest))
+ARGSEP_CASES = [
+    ("a;b", ";,", ("a", ";", "b")),
+    ("a,b", ";,", ("a", ",", "b")),
+    ("a", ";,", ("a", "", None)),
+    ("", ";,", ("", "", None)),
+    (";", ";,", ("", "", None)),
+    (";;a;b", ";,", ("a", ";", "b")),
+    (",;a", ";,", ("a", "", None)),
+    ("a;", ";,", ("a", ";", "")),
+    (" ; a", ";,", (" ", ";", " a")),
+    ('"a;b";c', ";,", ('"a;b"', ";", "c")),
+    ("'a;b';c", ";,", ("'a;b'", ";", "c")),
+    ("'a\"b';c", ";,", ("'a\"b'", ";", "c")),
+    ('a "b;c', ";,", ('a "b;c', "", None)),
+    (r"a\;b;c", ";,", (r"a\;b", ";", "c")),
+    (r"a\\;b", ";,", (r"a\\", ";", "b")),
+    (r"a\ ;b", ";,", (r"a\ ", ";", "b")),
+    # The escape survives an escaped character when the next interesting
+    # character is adjacent: the ';' after \" is escaped too.
+    (r'a\";b', ";,", (r'a\";b', "", None)),
+    (r'a\"x;b', ";,", (r'a\"x', ";", "b")),
+    (r"a\;;b", ";,", (r"a\;;b", "", None)),
+    (r'a\"\";b', ";,", (r'a\"\";b', "", None)),
+    # argsep knows nothing of brackets.
+    ("[x=1;] y;z", ";,", ("[x=1", ";", "] y;z")),
+    ("a b", " ", ("a", " ", "b")),
+    ("a;\0b", ";,", ("a", ";", "")),
+]
+
+UNESCAPE_CASES = [
+    ("plain", "plain"),
+    (r"a\nb", "a\nb"),
+    (r"\t\r\f\v\a\b", "\t\r\f\v\a\b"),
+    (r"\'\"\?", "'\"?"),
+    (r"a\\b", r"a\b"),
+    (r"\\\\", r"\\"),
+    (r"\\n", r"\n"),
+    (r"\q", r"\q"),
+    ("a\\", "a\\"),
+    # \0 returns before the holes are shifted out.
+    (r"a\0b", "a"),
+    (r"a\tb\0c", "a\t"),
+    (r"\n\0", "\n"),
+    # \x reads up to two decimal digits as hex and ends the scan.
+    (r"\x41", "A"),
+    (r"\x4", "\x04"),
+    (r"\x41\n", "A\\n"),
+    (r"\x4\n", "\x04\\n"),
+    (r"\x4a\n", "\x04a\\n"),
+    (r"\xa\n", "a\n"),
+    (r"\x00b", "b"),
+    (r"\x", ""),
+    ("a\0\\n", "a"),
+]
+
+JOIN_ARGS_CASES = [
+    (["a"], "a"),
+    (["a", "b c"], "a b c"),
+    (["", "x"], " x"),
+]
+
+# (input, [(criteria, argv), ...])
+COMMAND_LIST_CASES = [
+    ("", []),
+    (" ; ,; ", []),
+    ("kill", [(None, ["kill"])]),
+    ("  a  ", [(None, ["a"])]),
+    ("floating enable;", [(None, ["floating", "enable"])]),
+    ("a,", [(None, ["a"])]),
+    ("a;;b", [(None, ["a"]), (None, ["b"])]),
+    ("a; ;b", [(None, ["a"]), (None, ["b"])]),
+    ("a , b", [(None, ["a"]), (None, ["b"])]),
+    (
+        '[app_id="a b"] kill; focus',
+        [('[app_id="a b"]', ["kill"]), (None, ["focus"])],
+    ),
+    (
+        '[app_id="x"] floating enable, resize set 10 10',
+        [
+            ('[app_id="x"]', ["floating", "enable"]),
+            ('[app_id="x"]', ["resize", "set", "10", "10"]),
+        ],
+    ),
+    (
+        "[app_id=x] a, b; c",
+        [("[app_id=x]", ["a"]), ("[app_id=x]", ["b"]), (None, ["c"])],
+    ),
+    # Criteria are only parsed after ';' (or at the start).
+    (
+        '[app_id="x"] a, [title="y"] b',
+        [('[app_id="x"]', ["a"]), ('[app_id="x"]', ['[title="y"]', "b"])],
+    ),
+    ("a, ;[app_id=x] b", [(None, ["a"]), (None, ["[app_id=x]", "b"])]),
+    # The criteria are cut before argsep, so a ';' inside them is fine, and
+    # argsep skips a ';' straight after them.
+    ('[title="a;b"] kill', [('[title="a;b"]', ["kill"])]),
+    ("[app_id=x];kill", [("[app_id=x]", ["kill"])]),
+    (r'[title="a\"b"] kill', [(r'[title="a\"b"]', ["kill"])]),
+    ("[floating] kill", [("[floating]", ["kill"])]),
+    ("[app_id=x]", []),
+    ('exec "a; b"; c', [(None, ["exec", '"a; b"']), (None, ["c"])]),
+    ('title_format "a, b"', [(None, ["title_format", '"a, b"'])]),
+    (r"exec echo a\;b", [(None, ["exec", "echo", r"a\;b"])]),
+]
+
+CRITERIA_ERROR_CASES = [
+    ('[app_id="x] kill', "Quote mismatch in criteria"),
+    ("[app_id=x kill", "No closing brace found in criteria"),
+    ("[] kill", "Criteria is empty"),
+    ("[ ] kill", "Token '' is not recognized"),
+    ("[Foo=x] kill", "Token '' is not recognized"),
+    ("a; [app_id=x", "No closing brace found in criteria"),
+]
+
+
+class LexerTests(unittest.TestCase):
+    """The lexer ports, called directly; no translator run, so no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lexer = load_script()
+
+    def test_split_args(self):
+        for source, expected in SPLIT_ARGS_CASES:
+            with self.subTest(source=source):
+                self.assertEqual(self.lexer.split_args(source), expected)
+
+    def test_strip_quotes(self):
+        for source, expected in STRIP_QUOTES_CASES:
+            with self.subTest(source=source):
+                self.assertEqual(self.lexer.strip_quotes(source), expected)
+
+    def test_argsep(self):
+        for source, delims, expected in ARGSEP_CASES:
+            with self.subTest(source=source, delims=delims):
+                self.assertEqual(self.lexer.argsep(source, delims), expected)
+
+    def test_unescape_string(self):
+        for source, expected in UNESCAPE_CASES:
+            with self.subTest(source=source):
+                self.assertEqual(self.lexer.unescape_string(source), expected)
+
+    def test_join_args(self):
+        for args, expected in JOIN_ARGS_CASES:
+            with self.subTest(args=args):
+                self.assertEqual(self.lexer.join_args(args), expected)
+        with self.assertRaises(ValueError):
+            self.lexer.join_args([])
+
+    def test_split_command_list(self):
+        for source, expected in COMMAND_LIST_CASES:
+            with self.subTest(source=source):
+                commands = self.lexer.split_command_list(source)
+                self.assertEqual(
+                    [(command.criteria, command.argv) for command in commands],
+                    expected,
+                )
+
+    def test_split_command_list_rejects_bad_criteria(self):
+        for source, message in CRITERIA_ERROR_CASES:
+            with self.subTest(source=source):
+                with self.assertRaises(self.lexer.CriteriaError) as caught:
+                    self.lexer.split_command_list(source)
+                self.assertEqual(str(caught.exception), message)
+
+
+
+# Case tables for read_config, derived from reading sway 1.12's sway/config.c
+# (read_config :732-869, getline_with_cont :666-694, detect_brace :696-717,
+# expand_line :719-729) and sway/commands.c:355-366. A Line is shaped as
+# (first line, text) and a Block as (first line, header text, body, end text).
+
+READ_CONFIG_CASES = [
+    # Continuation keeps the next line's leading whitespace.
+    ("a \\\n  b\n", [(1, "a   b")]),
+    ("a\\\nb\\\nc\nd\n", [(1, "abc"), (4, "d")]),
+    ("\\\nb\n", [(1, "b")]),
+    # Only a "\" right before "\n" continues; at EOF or before "\r" it stays.
+    ("a \\", [(1, "a \\")]),
+    ("a \\\n", [(1, "a \\")]),
+    ("a\\\r\nb\n", [(1, "a\\"), (2, "b")]),
+    ("a \\ \nb\n", [(1, "a \\"), (2, "b")]),
+    # A line whose first byte is "#" does not continue; an indented one
+    # does, and then swallows the next line into the comment.
+    ("# c \\\nb\n", [(2, "b")]),
+    ("  # c \\\nb\nd\n", [(3, "d")]),
+    # Blank lines and comments are skipped; a later "#" is text.
+    ("a\n\n \t \n# c\n  # d\nb # not a comment\n", [(1, "a"), (6, "b # not a comment")]),
+    # The logical line ends at a NUL; non-UTF-8 bytes survive.
+    ("a\0b\n\0c\nd\n", [(1, "a"), (3, "d")]),
+    ("a \udcff\n", [(1, "a \udcff")]),
+    # A last split_args token of "{" opens a block, with two tokens or more.
+    ("bar {\n  a\n}\n", [(1, "bar", [(2, "a")], "}")]),
+    ("\tbar\t\t{ \n}\n", [(1, "bar", [], "}")]),
+    ('mode "x y" {\n}\n', [(1, 'mode "x y"', [], "}")]),
+    ("{\na\n}\n", [(1, "{"), (2, "a"), (3, "}")]),
+    ("bar{\na\n}\n", [(1, "bar{"), (2, "a"), (3, "}")]),
+    ('exec "a {"\n', [(1, 'exec "a {"')]),
+    ("bar \\{\n", [(1, "bar \\{")]),
+    ("bar \\\\ {\n}\n", [(1, "bar \\\\", [], "}")]),
+    ("\\   {\n}\n", [(1, "\\ ", [], "}")]),
+    ("bar { # c\n}\n", [(1, "bar { # c"), (2, "}")]),
+    # A continuation can form the header.
+    ("bar \\\n{\n a\n}\n", [(1, "bar", [(3, "a")], "}")]),
+    # detect_brace: a line not ending in "{" or "}" takes the next nonblank
+    # line when it is exactly "{", skipping blank lines but not comments.
+    ("bar\n\n  {  \n a\n}\n", [(1, "bar", [(4, "a")], "}")]),
+    ("bar\n# c\n{\na\n}\n", [(1, "bar"), (3, "{"), (4, "a"), (5, "}")]),
+    ("bar\n{ a\n}\n", [(1, "bar"), (2, "{ a"), (3, "}")]),
+    ("bar\n\n\n", [(1, "bar")]),
+    ("bar\n{ \\\n}\n", [(1, "bar"), (2, "{ }")]),
+    ("bar}\n{\n}\n", [(1, "bar}"), (2, "{"), (3, "}")]),
+    # The " {" joins before splitting: an open quote swallows it.
+    ('x "abc\n{\nb\n', [(1, 'x "abc {'), (3, "b")]),
+    # A last token of "}" closes the innermost block, whatever precedes it.
+    ("bar {\na\nfoo }\nb\n", [(1, "bar", [(2, "a")], "foo }"), (4, "b")]),
+    ("a b}\n", [(1, "a b}")]),
+    # X { a } on one line is not a block. At top level it is an unmatched
+    # "}" (config.c:842-846); inside a block it closes that block.
+    ("X { a }\n", [(1, "X { a }")]),
+    ("}\n", [(1, "}")]),
+    ("mode m {\nX { a }\nb\n}\n", [(1, "mode m", [], "X { a }"), (3, "b"), (4, "}")]),
+    # Nested blocks, and a lone "{" inside a block, whose prefix supplies
+    # the first token.
+    (
+        "bar {\n colors {\n  a\n }\n b\n}\n",
+        [(1, "bar", [(2, "colors", [(3, "a")], "}"), (5, "b")], "}")],
+    ),
+    ("bar {\n{\na\n}\n}\n", [(1, "bar", [(2, "", [(3, "a")], "}")], "}")]),
+    ("bar {\nx\n{\n}\n}\n", [(1, "bar", [(2, "x", [], "}")], "}")]),
+    # A block still open at the end of the file ends there, with no end.
+    ("bar {\na\n", [(1, "bar", [(2, "a")], None)]),
+    ("bar {\nc {\n", [(1, "bar", [(2, "c", [], None)], None)]),
+    # A top-level block named exactly <commands> takes the rest of the file
+    # as Lines (config.c:805-807); nested, or spelt otherwise, it is a block.
+    (
+        "<commands> {\na {\n}\nb\n\nc\n{\n",
+        [(1, "<commands>", [(2, "a {"), (3, "}"), (4, "b"), (6, "c {")], None)],
+    ),
+    ("<commands>\n{\n}\n", [(1, "<commands>", [(3, "}")], None)]),
+    ("bar {\n<commands> {\n}\n}\n", [(1, "bar", [(2, "<commands>", [], "}")], "}")]),
+    ('"<commands>" {\n}\n', [(1, '"<commands>"', [], "}")]),
+]
+
+# What read_config hands config_command, with expand_line's prefix.
+FLATTEN_CASES = [
+    (
+        'mode "x" {\nbindsym a nop\n}\n',
+        ['mode "x" {', 'mode "x" bindsym a nop', 'mode "x" }'],
+    ),
+    (
+        "bar   {\n colors\n {\n  a  b\n }\n}\n",
+        ["bar {", "bar colors {", "bar colors a  b", "bar colors }", "bar }"],
+    ),
+    ("bar {\n{\na\n}\n}\n", ["bar {", "bar  {", "bar a", "bar }", "bar }"]),
+    ("X { a }\nb\n", ["X { a }", "b"]),
+]
+
+
+class ReaderTests(unittest.TestCase):
+    """read_config, called directly; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reader = load_script()
+
+    def read(self, source, name="config"):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / name
+        path.write_bytes(source.encode("utf-8", "surrogateescape"))
+        return path, self.reader.read_config(path)
+
+    def shape(self, nodes):
+        shaped = []
+        for node in nodes:
+            if isinstance(node, self.reader.Line):
+                shaped.append((node.pos.line, node.text))
+            else:
+                end = node.end.text if node.end is not None else None
+                shaped.append(
+                    (node.header.pos.line, node.header.text, self.shape(node.body), end)
+                )
+        return shaped
+
+    def test_read_config(self):
+        for source, expected in READ_CONFIG_CASES:
+            with self.subTest(source=source):
+                self.assertEqual(self.shape(self.read(source)[1]), expected)
+
+    def test_flatten_prefixes_block_names(self):
+        for source, expected in FLATTEN_CASES:
+            with self.subTest(source=source):
+                nodes = self.read(source)[1]
+                self.assertEqual(
+                    [text for _, text in self.reader.flatten(nodes)], expected
+                )
+
+    def test_read_config_keeps_physical_lines(self):
+        path, nodes = self.read(
+            "a \\\n  b\nbar\n\n {\n  # c\n\n  x {\n  y\n  }\n}\nz\n"
+        )
+        line, block, last = nodes
+        self.assertEqual(line.raw, ("a \\", "  b"))
+        self.assertEqual(line.pos, self.reader.Pos(path, 1))
+        self.assertEqual(block.header.raw, ("bar", "", " {"))
+        self.assertEqual(
+            block.raw,
+            ("bar", "", " {", "  # c", "", "  x {", "  y", "  }", "}"),
+        )
+        self.assertEqual(block.body[0].raw, ("  x {", "  y", "  }"))
+        self.assertEqual(block.end.raw, ("}",))
+        self.assertEqual(block.end.pos.line, 11)
+        self.assertEqual(last.raw, ("z",))
+
+    def test_read_config_raw_of_open_block_runs_to_eof(self):
+        nodes = self.read("bar {\na\n\n# c\n")[1]
+        self.assertEqual(nodes[0].raw, ("bar {", "a", "", "# c"))
+        nodes = self.read("<commands> {\na\n}\n")[1]
+        self.assertEqual(nodes[0].raw, ("<commands> {", "a", "}"))
+
+
+class SafetyNetTests(unittest.TestCase):
+    """Exceptions no handler foresees, raised on purpose; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def parse(self, source):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / "config"
+            path.write_text(source)
+            translator = self.s2k.Translator()
+            translator.parse(path)
+            return path, translator.doc
+
+    def test_a_failing_handler_reports_its_directive(self):
+        s2k = self.s2k
+
+        def broken(translator, directive):
+            raise RuntimeError("boom")
+
+        with unittest.mock.patch.dict(s2k.HANDLERS, {"font": broken}):
+            path, doc = self.parse("font Mono 9\nexec a\nfont {\n    Sans 8\n}\nexec b\n")
+        failed = f"{s2k.TRANSLATOR_FAILED} (RuntimeError('boom'))"
+        self.assertEqual(
+            doc.manual,
+            [f"{path}:1: {failed}: font Mono 9", f"{path}:4: {failed}: font Sans 8"],
+        )
+        out = s2k.render(doc)
+        self.assertIn('spawn-sh-at-startup "a"', out)
+        self.assertIn('spawn-sh-at-startup "b"', out)
+
+    def test_a_failing_reader_reports_and_stops(self):
+        s2k = self.s2k
+        with unittest.mock.patch.object(
+            s2k, "read_config", side_effect=RuntimeError("boom")
+        ):
+            path, doc = self.parse("exec a\n")
+        self.assertEqual(doc.manual, [f"{path}: {s2k.READER_FAILED}: RuntimeError('boom')"])
+
+
+class IncludeChainTests(unittest.TestCase):
+    """A deep include chain, run in process; no goldens, as a golden would
+    record every file of the chain."""
+
+    def test_a_deep_include_chain_is_read_whole(self):
+        # Sway sets no include depth limit (sway/config.c:555-624), and
+        # Translator.parse reads includes with a loop, so 1,000 nested
+        # includes stay clear of Python's recursion limit.
+        s2k = load_script()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            depth = 1000
+            for index in range(depth):
+                (root / f"c{index}").write_text(f"include c{index + 1}\n")
+            (root / f"c{depth}").write_text("exec deepest\n")
+            (root / "config").write_text("include c0\nexec after\n")
+            translator = s2k.Translator()
+            translator.parse(root / "config")
+        self.assertEqual(translator.doc.manual, [])
+        out = s2k.render(translator.doc)
+        self.assertIn('spawn-sh-at-startup "deepest"\nspawn-sh-at-startup "after"\n', out)
+
+    def test_a_path_that_cannot_be_resolved_is_reported_on_its_include(self):
+        # Resolving the path of a match can fail, as on Python 3.9, whose
+        # realpath recurses once per symlink; the failure is reported on
+        # the include and the later matches are still read.
+        s2k = load_script()
+        realpath = os.path.realpath
+        for error in [
+            RecursionError("maximum recursion depth exceeded"),
+            OSError(40, "Too many levels of symbolic links"),
+            RuntimeError("boom"),
+        ]:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                (root / "inc").mkdir()
+                (root / "inc" / "a").write_text("exec first\n")
+                (root / "inc" / "b").write_text("exec second\n")
+                (root / "inc" / "c").write_text("exec third\n")
+                (root / "config").write_text("include inc/*\nexec after\n")
+
+                def failing(path, *args, **kwargs):
+                    if os.path.basename(path) == "b":
+                        raise error
+                    return realpath(path, *args, **kwargs)
+
+                translator = s2k.Translator()
+                with unittest.mock.patch.object(s2k.os.path, "realpath", failing):
+                    translator.parse(root / "config")
+                detail = (
+                    error.strerror
+                    if isinstance(error, OSError)
+                    else f"{type(error).__name__}: {error}"
+                )
+                self.assertEqual(
+                    translator.doc.manual,
+                    [
+                        f"{root}/config:1: cannot resolve included file "
+                        f"{root}/inc/b: {detail}: include inc/*"
+                    ],
+                )
+                spawns = [
+                    line
+                    for line in s2k.render(translator.doc).splitlines()
+                    if line.startswith("spawn-sh-at-startup")
+                ]
+                self.assertEqual(
+                    spawns,
+                    [
+                        'spawn-sh-at-startup "first"',
+                        'spawn-sh-at-startup "third"',
+                        'spawn-sh-at-startup "after"',
+                    ],
+                )
+
+    def test_a_deep_symlink_chain_does_not_stop_the_include(self):
+        # 1,100 symlinks pass Python 3.9's recursion limit in realpath; a
+        # later Python resolves them. Either way the next match is read.
+        s2k = load_script()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "inc").mkdir()
+            (root / "target").write_text("exec deep\n")
+            depth = 1100
+            (root / f"l{depth}").symlink_to("target")
+            for index in reversed(range(depth)):
+                (root / f"l{index}").symlink_to(f"l{index + 1}")
+            (root / "inc" / "a").symlink_to(root / "l0")
+            (root / "inc" / "b").write_text("exec second\n")
+            (root / "config").write_text("include inc/*\n")
+            translator = s2k.Translator()
+            translator.parse(root / "config")
+        out = s2k.render(translator.doc)
+        self.assertIn('spawn-sh-at-startup "second"\n', out)
+        for item in translator.doc.manual:
+            self.assertRegex(
+                item, rf"^{re.escape(str(root))}/config:1: cannot resolve included file "
+            )
+        self.assertLessEqual(len(translator.doc.manual), 1)
+
+
+class IRTests(unittest.TestCase):
+    """The KDL IR and renderer, called directly; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def names(self, node):
+        return [(child.name, child.args) for child in node.children]
+
+    def test_add_set_and_put_order_children(self):
+        Node = self.s2k.Node
+        node = Node("x", children=[Node("a", [1]), Node("b"), Node("a", [2])])
+        node.add(Node("b", [3]))
+        self.assertEqual(self.names(node), [("a", [1]), ("b", []), ("a", [2]), ("b", [3])])
+        node.set(Node("a", [4]))  # drop every "a", append
+        self.assertEqual(self.names(node), [("b", []), ("b", [3]), ("a", [4])])
+        node.put(Node("b", [5]))  # replace the first "b" in place
+        self.assertEqual(self.names(node), [("b", [5]), ("b", [3]), ("a", [4])])
+        node.put(Node("c"))
+        self.assertEqual(node.get("c").args, [])
+        node.put(Node("d"), "c")  # an alias names the same slot
+        self.assertEqual([child.name for child in node.children], ["b", "b", "a", "d"])
+        self.assertEqual(node.get("b").args, [5])
+        self.assertIsNone(node.get("c"))
+
+    def test_add_refuses_a_singular_child(self):
+        Node, Comment = self.s2k.Node, self.s2k.Comment
+        for parent, child in [("layout", "gaps"), ("", "clipboard"), ("window-rule", "opacity")]:
+            with self.subTest(parent=parent, child=child):
+                node = Node(parent)
+                with self.assertRaisesRegex(ValueError, "singular"):
+                    node.add(Node(child))
+                node.add(Comment("a comment joins any parent"))
+                node.add(Node("not-singular"))
+                node.set(Node(child))
+                self.assertEqual(len(node.children), 3)
+
+    def test_set_merged_keeps_earlier_children(self):
+        Node = self.s2k.Node
+        layout = Node("layout", children=[Node("outer-gaps", children=[Node("top", [1]), Node("left", [2])]), Node("gaps", [3])])
+        self.s2k.set_merged(layout, Node("outer-gaps", children=[Node("left", [4]), Node("right", [5])]))
+        self.assertEqual([c.name for c in layout.children], ["gaps", "outer-gaps"])
+        self.assertEqual(self.names(layout.get("outer-gaps")), [("top", [1]), ("left", [4]), ("right", [5])])
+
+    def test_render_quotes_values_and_shapes_nodes(self):
+        s2k = self.s2k
+        Node, Comment, Raw = s2k.Node, s2k.Comment, s2k.Raw
+        node = Node(
+            "rule",
+            ["é \"q\"", 3, 1.0, 0.25, True, Raw("007")],
+            [("k", False), ("k", "v")],
+            [
+                Comment("note"),
+                Node("36", children=[Node("command", ["x"])], inline=True),
+                Node("empty", block=True),
+                Node("leaf"),
+            ],
+        )
+        self.assertEqual(
+            s2k.render_item(node, 1),
+            [
+                '    rule "é \\"q\\"" 3 1.0 0.25 true 007 k=false k="v" {',
+                "        // note",
+                '        "36" { command "x"; }',
+                "        empty {",
+                "        }",
+                "        leaf",
+                "    }",
+            ],
+        )
+
+    def test_render_keeps_the_group_order(self):
+        s2k = self.s2k
+        doc = s2k.Document()
+        doc.body.add(s2k.Node("spawn-sh-at-startup", ["a"]))
+        doc.urgent_timeout = s2k.Node("urgent-timeout-ms", [5])
+        doc.body.add(s2k.Node("spawn-sh-at-startup", ["b"]))
+        doc.device("touchpad")
+        doc.input.set(s2k.Node("tiling-drag", [False]))
+        doc.titlebar.alignment = "left"
+        doc.layout.set(s2k.Node("gaps", [1]))
+        self.assertEqual(
+            s2k.render(doc).split("\n")[3:],
+            [
+                "",
+                "input {",
+                "    focus-follows-mouse",
+                "    tiling-drag false",
+                "    touchpad {",
+                "    }",
+                "}",
+                "",
+                "layout {",
+                "    gaps 1",
+                "    titlebar {",
+                '        alignment "left"',
+                "    }",
+                "}",
+                "",
+                'spawn-sh-at-startup "a"',
+                'spawn-sh-at-startup "b"',
+                "urgent-timeout-ms 5",
+                "",
+            ],
+        )
+
+
+# The struct that decodes each SINGULAR parent, under swayward-config/src.
+# "" (the top level) is decoded by hand in decode.rs and checked separately;
+# binds, mode and default-column-width decode by hand and have no entry.
+SINGULAR_STRUCTS = {
+    "input": ("input/mod.rs", "InputPart"),
+    "keyboard": ("input/keyboard.rs", "KeyboardPart"),
+    "xkb": ("input/keyboard.rs", "Xkb"),
+    "touchpad": ("input/libinput.rs", "Touchpad"),
+    "mouse": ("input/libinput.rs", "Mouse"),
+    "tablet": ("input/tablet.rs", "Tablet"),
+    "touch": ("input/tablet.rs", "Touch"),
+    "layout": ("layout.rs", "LayoutPart"),
+    "outer-gaps": ("layout.rs", "OuterGapsPart"),
+    "titlebar": ("appearance/titlebar.rs", "TitlebarPart"),
+    "focused": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "focused-inactive": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "focused-tab-title": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "unfocused": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "urgent": ("appearance/titlebar.rs", "TitlebarColorsPart"),
+    "blur": ("appearance/effects.rs", "BlurPart"),
+    "background-effect": ("appearance/effects.rs", "BackgroundEffectRule"),
+    "shadow": ("appearance/border.rs", "ShadowRule"),
+    "window-rule": ("window_rule.rs", "WindowRule"),
+    "layer-rule": ("layer_rule.rs", "LayerRule"),
+    "workspace": ("workspace.rs", "Workspace"),
+    "output": ("output.rs", "Output"),
+    "clipboard": ("misc.rs", "ClipboardPart"),
+    "cursor": ("misc.rs", "CursorPart"),
+    "xwayland-satellite": ("misc.rs", "XwaylandSatellitePart"),
+}
+
+CONFIG_SRC = ROOT / "swayward-config" / "src"
+
+
+RAW_STRING_START = re.compile(r'b?r(#*)"')
+
+
+def blank(text):
+    """text with every character but a newline replaced by a space."""
+    return re.sub(r"[^\n]", " ", text)
+
+
+def strip_rust_comments(text, literals=True):
+    """text with its `//` and (nested) `/* */` comments blanked out.
+
+    A comment becomes a space, or the newlines it spans, so line numbers
+    hold. String, raw string and character literals are kept, so a `//`
+    inside one is text; with literals=False their contents are blanked too,
+    quotes kept. A `'` that does not close a one-character literal starts a
+    lifetime.
+    """
+
+    def literal(source, quote_open, quote_close):
+        if literals or len(source) < quote_open + quote_close:
+            return source
+        inner = source[quote_open : len(source) - quote_close]
+        return source[:quote_open] + blank(inner) + source[len(source) - quote_close :]
+
+    out = []
+    index = 0
+    while index < len(text):
+        raw = RAW_STRING_START.match(text, index)
+        if raw and (index == 0 or not re.match(r"\w", text[index - 1])):
+            close = text.find('"' + raw.group(1), raw.end())
+            end = len(text) if close < 0 else close + 1 + len(raw.group(1))
+            closing = 0 if close < 0 else 1 + len(raw.group(1))
+            out.append(literal(text[index:end], raw.end() - index, closing))
+            index = end
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            out.append(" ")
+        elif text.startswith("/*", index):
+            start = index
+            depth = 0
+            while index < len(text):
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                    if not depth:
+                        break
+                else:
+                    index += 1
+            out.append("\n" * text.count("\n", start, index) or " ")
+        elif text[index] == '"':
+            found = re.match(r'"(?:\\.|[^"\\])*"', text[index:], re.S)
+            end = index + (found.end() if found else 1)
+            out.append(literal(text[index:end], 1, 1) if found else text[index:end])
+            index = end
+        elif text[index] == "'":
+            found = re.match(r"'(?:\\.[^']*|[^'\\])'", text[index:])
+            end = index + (found.end() if found else 1)
+            out.append(literal(text[index:end], 1, 1) if found else text[index:end])
+            index = end
+        else:
+            out.append(text[index])
+            index += 1
+    return "".join(out)
+
+
+def knuffel_child_names_in(text, struct, where="<text>"):
+    """The kebab-cased names of struct's `#[knuffel(child...)]` fields.
+
+    Reads Rust source text: knuffel names a child after its field, `_` as
+    `-`. Comments are dropped before the struct is found, so a commented `}`
+    cannot end its body early, and an attribute may be spaced or split over
+    lines, with comments inside, wherever Rust allows. Returns None when the
+    struct is not found as `pub struct Name {`.
+    """
+    found = re.search(
+        rf"^pub struct {struct} \{{[ \t]*\n(.*?)^\}}",
+        strip_rust_comments(text),
+        re.S | re.M,
+    )
+    if found is None:
+        return None
+    body = found.group(1)
+    attribute = r"#\s*\[\s*knuffel\s*\((.*?)\)\s*\]"
+    fields = re.finditer(
+        attribute + r"\s*"
+        r"(?:#\s*\[[^\]]*\]\s*)*"  # other attributes
+        r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:r#)?(\w+)\s*:",  # the field
+        body,
+        re.S,
+    )
+    names = [
+        field.replace("_", "-")
+        for argument, field in (match.groups() for match in fields)
+        if re.match(r"\s*child\b", argument)
+    ]
+    # Every child attribute pairs with a field, or the pattern above missed one.
+    children = re.findall(r"#\s*\[\s*knuffel\s*\(\s*child\b", body)
+    if len(names) != len(children):
+        raise AssertionError(f"{where} {struct}: unpaired #[knuffel(child)] attribute")
+    return names
+
+
+def knuffel_child_names(path, struct):
+    """knuffel_child_names_in for path under swayward-config/src."""
+    return knuffel_child_names_in((CONFIG_SRC / path).read_text(), struct, path)
+
+
+def cfg_attr_knuffel_lines(text):
+    """The lines where a `cfg_attr(...)` holding `knuffel(` starts.
+
+    knuffel_child_names_in reads only plain `#[knuffel(...)]` attributes, so
+    a child field behind cfg_attr would escape the SINGULAR check. Comments
+    and the contents of string and character literals are blanked first, so
+    a parenthesis or `knuffel(` inside a literal is not counted.
+    """
+    text = strip_rust_comments(text, literals=False)
+    lines = []
+    for found in re.finditer(r"\bcfg_attr\s*\(", text):
+        depth, index = 1, found.end()
+        while index < len(text) and depth:
+            depth += {"(": 1, ")": -1}.get(text[index], 0)
+            index += 1
+        if re.search(r"\bknuffel\s*\(", text[found.end() : index]):
+            lines.append(text.count("\n", 0, found.start()) + 1)
+    return lines
+
+
+class NoCompatibilityHelpersTests(unittest.TestCase):
+    def test_no_compatibility_helper_names_remain(self):
+        # No name with this prefix remains in either file; the prefix is
+        # built so this file does not match itself.
+        prefix = "leg" + "acy_"
+        for path in [SCRIPT, Path(__file__)]:
+            with self.subTest(path=path.name):
+                self.assertNotIn(prefix, path.read_text().lower())
+
+
+class SingularTests(unittest.TestCase):
+    """SINGULAR against the Rust config structs, read as text, without Cargo.
+
+    Scope: the parents listed in SINGULAR_STRUCTS and the top level. It does
+    not find which parents the translator emits; a new emitted parent needs
+    an entry here by hand.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def test_every_singular_parent_names_its_struct(self):
+        self.assertEqual(set(self.s2k.SINGULAR), {"", *SINGULAR_STRUCTS})
+
+    def test_singular_mirrors_knuffel_child_fields(self):
+        cfg_attr = [
+            f"{path.relative_to(ROOT)}:{line}"
+            for path in sorted(CONFIG_SRC.rglob("*.rs"))
+            for line in cfg_attr_knuffel_lines(path.read_text())
+        ]
+        self.assertEqual(
+            cfg_attr,
+            [],
+            "#[cfg_attr(..., knuffel(...))] is invisible to this check, so a "
+            "child field behind it would escape SINGULAR; write the knuffel "
+            "attribute unconditionally or teach knuffel_child_names_in to read it",
+        )
+        for parent, (path, struct) in SINGULAR_STRUCTS.items():
+            with self.subTest(parent=parent, struct=struct):
+                names = knuffel_child_names(path, struct)
+                self.assertIsNotNone(names, f"no `pub struct {struct} {{` in {path}")
+                self.assertTrue(names, f"{struct} has no #[knuffel(child)] field")
+                self.assertEqual(len(names), len(set(names)))
+                self.assertEqual(self.s2k.SINGULAR[parent], frozenset(names))
+
+    def test_knuffel_child_names_reads_a_multi_line_commented_attribute(self):
+        # `child` need not follow the parenthesis: a parse that required it
+        # would miss this field and let SINGULAR drift past it.
+        source = (
+            "pub struct Synthetic {\n"
+            "    #[knuffel(\n"
+            "        // note\n"
+            "        child, unwrap(argument)\n"
+            "    )]\n"
+            "    pub noted: u8,\n"
+            "}\n"
+        )
+        self.assertEqual(knuffel_child_names_in(source, "Synthetic"), ["noted"])
+
+    def test_knuffel_child_names_reads_every_spelling_of_the_attribute(self):
+        # A synthetic struct: the guard must see a child field however its
+        # attribute is spelled, or a new singular field drifts silently.
+        source = (
+            "pub struct Synthetic {\n"
+            "    #[knuffel(child)]\n"
+            "    pub plain: bool,\n"
+            "    #[knuffel(\n"
+            "        // note\n"
+            "        child, unwrap(argument)\n"
+            "    )]\n"
+            "    pub multi_line: u8,\n"
+            "    # [ knuffel ( /* why */ child , default ) ]\n"
+            "    pub(crate) spaced: u8,\n"
+            "    #[knuffel(child, default = \"// not a comment\")]\n"
+            "    /// docs\n"
+            "    #[allow(dead_code)]\n"
+            "    pub r#after_attributes: u8,\n"
+            "    // #[knuffel(child)]\n"
+            "    /* #[knuffel(child)] */\n"
+            "    #[knuffel(children)]\n"
+            "    pub repeated: Vec<u8>,\n"
+            "    #[knuffel(argument)]\n"
+            "    pub child: u8,\n"
+            "}\n"
+        )
+        self.assertEqual(
+            knuffel_child_names_in(source, "Synthetic"),
+            ["plain", "multi-line", "spaced", "after-attributes"],
+        )
+
+    def test_knuffel_child_names_reads_past_a_commented_closing_brace(self):
+        # Comments are stripped from the whole file before the body is cut at
+        # the first line starting with `}`, so this commented brace cannot
+        # hide `second`, and the raw string's `/*` stays text.
+        source = (
+            'const BEFORE: &str = r#"say "/*" and //"#;\n'
+            "pub struct Synthetic {\n"
+            "    #[knuffel(child)]\n"
+            "    pub first: bool,\n"
+            "/*\n"
+            "}\n"
+            "*/\n"
+            "    #[knuffel(child)]\n"
+            "    pub second: bool,\n"
+            "}\n"
+        )
+        self.assertEqual(
+            knuffel_child_names_in(source, "Synthetic"), ["first", "second"]
+        )
+
+    def test_cfg_attr_knuffel_lines_finds_every_spelling(self):
+        source = (
+            "#[derive(knuffel::Decode)]\n"
+            "pub struct Synthetic {\n"
+            "    #[cfg_attr(test, knuffel(child))]\n"
+            "    pub one_line: bool,\n"
+            "    /* a\n"
+            "       b */\n"
+            "    # [ cfg_attr (\n"
+            "        all(test, feature = \"x\"),\n"
+            "        knuffel ( child )\n"
+            "    ) ]\n"
+            "    pub split: bool,\n"
+            "    // #[cfg_attr(test, knuffel(child))]\n"
+            "    /* #[cfg_attr(test, knuffel(child))] */\n"
+            "    #[cfg_attr(test, derive(Debug))]\n"
+            "    #[knuffel(child)]\n"
+            "    pub plain: bool,\n"
+            "}\n"
+        )
+        self.assertEqual(cfg_attr_knuffel_lines(source), [3, 7])
+
+    def test_cfg_attr_knuffel_lines_ignores_parentheses_in_literals(self):
+        # A `)` inside a string literal does not close the cfg_attr, so the
+        # knuffel( after it is still inside.
+        source = (
+            "pub struct Synthetic {\n"
+            '    #[cfg_attr(all(), doc = ")", knuffel(child))]\n'
+            "    pub string: bool,\n"
+            '    #[cfg_attr(all(), doc = r#")"#, knuffel(child))]\n'
+            "    pub raw_string: bool,\n"
+            "    #[cfg_attr(all(), doc = ')', knuffel(child))]\n"
+            "    pub character: bool,\n"
+            '    #[cfg_attr(all(), doc = "knuffel(child)")]\n'
+            "    pub only_in_a_string: bool,\n"
+            "}\n"
+        )
+        self.assertEqual(cfg_attr_knuffel_lines(source), [2, 4, 6])
+
+    def test_knuffel_child_names_rejects_an_unpaired_child_attribute(self):
+        source = (
+            "pub struct Synthetic {\n"
+            "    #[knuffel(child)]\n"
+            "    #[knuffel(\n"
+            "        child,\n"
+            "    )]\n"
+            "    pub only_one_field: u8,\n"
+            "}\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "unpaired"):
+            knuffel_child_names_in(source, "Synthetic")
+
+    def test_singular_top_level_mirrors_config_decode(self):
+        # decode.rs rejects a second node of any top-level name except the
+        # multipart sections listed in its `matches!(name, ...)`.
+        text = (CONFIG_SRC / "decode.rs").read_text()
+        multipart = re.search(r"if !matches!\(\s*name,(.*?)\)\s*&&", text, re.S)
+        self.assertIsNotNone(multipart, "decode.rs: no multipart matches!(name, ...)")
+        multipart = set(re.findall(r'"([a-z-]+)"', multipart.group(1)))
+        start = text.index("match name {", text.index("if !matches!("))
+        end = text.index("name => {", start)
+        arms = set(re.findall(r'^\s*"([a-z-]+)" =>', text[start:end], re.M))
+        self.assertTrue({"output", "window-rule", "include"} <= multipart <= arms)
+        self.assertEqual(self.s2k.SINGULAR[""], frozenset(arms - multipart))
+
+
+# ---------------------------------------------------------------------------
+# Fuzz smoke test
+#
+# A small seeded generator of edge-case inputs: continuations, unbalanced and
+# deep blocks, bytes that are not UTF-8, NUL, Unicode digits and spaces, long
+# numbers, odd bindings, `resize set`, dim_inactive and border values, input
+# and output settings, criteria quoting, and includes that are missing or
+# loop. Each seed builds one config through random.Random(seed), so
+# fuzz_case(seed) returns the same config, files and symlinks on every run and
+# Python version. Large runs are done by hand with a bigger seed range.
+# ---------------------------------------------------------------------------
+
+FUZZ_SEEDS = range(300)
+
+# Configs the checks run on every time: criteria holding an unclosed quoted
+# run of 40 or 2,000 backslashes, on which a pattern with two ways to match a
+# backslash takes exponential time, and one of each `resize set` form
+# cmd_resize_set reads (sway/commands/resize.c:421-448).
+FUZZ_FIXED_CONFIGS = [
+    *(
+        f'{rule} [app_id="' + "\\" * count + f']{rest}\n'
+        for rule, rest in [
+            ("for_window", " floating enable"), ("assign", " workspace 2"),
+            ("no_focus", ""),
+        ]
+        for count in (40, 2000)
+    ),
+    "for_window [app_id=x] resize set 10 20\n",
+    "for_window [app_id=x] resize set width 10px 20 px\n",
+    "for_window [app_id=x] resize set 10 ppt height 20ppt\n",
+    "for_window [app_id=x] resize set width 10 px height 20\n",
+]
+
+# "\udcXX" is a lone byte 0xXX once the case is encoded with surrogateescape:
+# none of these is valid UTF-8.
+FUZZ_BAD_BYTES = ["\udcff", "\udc80", "\udcc3", "\udcfe\udcff"]
+FUZZ_SPACES = [
+    " ", "\t", "\x0b", "\x0c", "\r", "\x1c", "\x1f", "\x85", "\u00a0", "\u2003",
+    "\u2028", "\u3000",
+]
+# U+0663 and U+FF11 are Unicode digits, U+00B2 is a superscript two.
+FUZZ_DIGITS = ["\u0663", "\u0663\u0664", "\uff11", "\u00b2"]
+FUZZ_WORDS = [
+    "", "x", "-", "--", "on", "off", "yes", "no", "enable", "disable", "toggle",
+    "none", "smart", "normal", "pixel", "px", "ppt", "ms", "$x", "$", "$$", "\\$x",
+    '"', "'", '"a b"', "'a b'", '""', "\\", "[", "]", "{", "}", ";", ",", "→",
+    "->", "é", "😀", "\u200b", "\x00", "a\x00b",
+]
+FUZZ_MODIFIERS = [
+    "Mod1", "Mod2", "Mod3", "Mod4", "Mod5", "mod4", "MOD4", "Shift", "Lock",
+    "Control", "Ctrl", "Alt", "Super", "Mode_switch", "Group1", "Group2", "Group3",
+    "Group4", "Group5", "Group0", "Group", "$mod", "", "Mod6",
+]
+FUZZ_KEYS = [
+    "a", "Return", "XF86AudioMute", "button1", "button3", "button9", "BTN_LEFT",
+    "BTN_BOGUS", "36", "0", "-1", "", "+", "Mod4",
+]
+FUZZ_BIND_OPTIONS = [
+    "--locked", "--release", "--no-repeat", "--to-code", "--whole-window",
+    "--border", "--exclude-titlebar", "--no-warn", "--inhibited", "--input-device=",
+    '--input-device="a b"', "--input-device=1:2:x", "--bogus", "--", "-",
+]
+FUZZ_CRITERIA = [
+    "[app_id=foot]", '[title="a ] b"]', '[class="a\\"b"]', "[title='x y']",
+    '[app_id="]', "[app_id=]", "[=x]", "[a", "[app_id=x", "[]", "[floating]",
+    "[urgent=latest]", "[con_id=1]", "[app_id=x;y]", "[app_id=x] [title=y]",
+    '[con_mark="\\\\"]', '[title="\\', "[app_id=\udcff]",
+]
+FUZZ_COMMANDS = [
+    "kill", "exec foot", 'exec "echo \\"x\\""', "floating enable", "nop",
+    "mode default", "border pixel 3", "move position center", "opacity 0.5",
+    "mark --add x", "sticky enable", "title_format %title", "move workspace 3",
+    "layout tabbed", "", "floating enable; kill", "kill,", ";;",
+]
+FUZZ_INPUT_SETTINGS = [
+    "xkb_layout", "xkb_variant", "xkb_options", "xkb_numlock", "xkb_capslock",
+    "repeat_delay", "repeat_rate", "tap", "dwt", "natural_scroll", "accel_profile",
+    "pointer_accel", "scroll_factor", "scroll_button", "scroll_method",
+    "click_method", "tap_button_map", "events", "left_handed", "bogus",
+]
+FUZZ_INPUT_SELECTORS = [
+    "*", "type:keyboard", "type:touchpad", "type:pointer", '"type:touchpad"',
+    "1:2:x", '"Some Name"', "", "\udcff",
+]
+FUZZ_OUTPUT_NAMES = [
+    "*", "DP-1", '"DP-1"', "dp-1", "HDMI-A-1", '"Some Name"', "--", "", "\udcff",
+    "$out",
+]
+FUZZ_OUTPUT_SETTINGS = [
+    "mode", "res", "resolution", "mode --custom", "pos", "position", "scale",
+    "scale_filter", "transform", "enable", "disable", "on", "off", "toggle", "bg",
+    "background", "adaptive_sync", "dpms", "power", "subpixel", "max_render_time",
+    "render_bit_depth", "allow_tearing", "bogus",
+]
+FUZZ_OUTPUT_VALUES = [
+    "1920x1080", "1920x1080@60Hz", "1920x1080@59.951Hz", "0x0", "x", "1x",
+    "1920x1080@", "@60Hz", "0 0", "1920,0", "-10 20", "10 x", "90", "flipped-270",
+    "~/w.png fill", "rgb", "#000000 solid_color",
+]
+
+
+def fuzz_number(rng):
+    """A number argument, often one a naive int() or float() mishandles."""
+    choice = rng.random()
+    if choice < 0.3:
+        return str(rng.choice([0, 1, 2, 3, 10, 50, 100, 800, 1920, -1, -5]))
+    if choice < 0.45:
+        # A long run of zeroes before a digit or a non-digit, on which a
+        # backtracking number regex takes quadratic time.
+        return "0" * rng.randint(60, 6000) + rng.choice(["1", "x", "", ".5"])
+    if choice < 0.55:
+        # Past 4300 digits int() raises on Python 3.11 and later.
+        return "9" * rng.choice([rng.randint(20, 4300), rng.randint(4301, 6000)])
+    if choice < 0.7:
+        return rng.choice(FUZZ_DIGITS)
+    return rng.choice([
+        "-0", "+7", "007", "0.5", "1.5", "-0.5", ".5", "1e400", "-1e400", "1e-400",
+        "nan", "NaN", "inf", "-inf", "0x10", "1_000", "99999999999", "",
+        "1" + rng.choice(FUZZ_SPACES) + "2", "x",
+    ])
+
+
+def fuzz_word(rng):
+    choice = rng.random()
+    if choice < 0.5:
+        return rng.choice(FUZZ_WORDS)
+    if choice < 0.7:
+        return fuzz_number(rng)
+    if choice < 0.85:
+        return rng.choice(FUZZ_BAD_BYTES)
+    return rng.choice(FUZZ_SPACES)
+
+
+def fuzz_bind(rng):
+    name = rng.choice(["bindsym", "bindcode", "BindSym", "BINDCODE"])
+    options = [rng.choice(FUZZ_BIND_OPTIONS) for _ in range(rng.choice([0, 0, 1, 2, 3]))]
+    modifiers = [rng.choice(FUZZ_MODIFIERS) for _ in range(rng.choice([0, 1, 1, 2, 3]))]
+    key = "+".join(modifiers + [rng.choice(FUZZ_KEYS + [fuzz_word(rng)])])
+    command = rng.choice(FUZZ_COMMANDS + [fuzz_resize(rng), "--release exec x"])
+    return " ".join([name, *options, key, command])
+
+
+def fuzz_resize(rng):
+    def size():
+        return fuzz_number(rng) + rng.choice(["", " px", " ppt", "px", "ppt", " x"])
+
+    form = rng.choice([
+        "{} {}", "width {} {}", "{} height {}", "width {} height {}", "width {}",
+        "height {}", "height {} width {}", "{}", "", "{} {} {}", "width",
+        "width {} height",
+    ])
+    return ("resize set " + form.format(size(), size(), size())).rstrip()
+
+
+def fuzz_criteria_rule(rng):
+    name = rng.choice(["for_window", "assign", "no_focus", "For_Window"])
+    rest = rng.choice(FUZZ_COMMANDS + [
+        fuzz_resize(rng), "output DP-1", "number 3", "workspace number x", "→", "-> 2",
+        "→ 2", "dim_inactive " + fuzz_number(rng),
+    ])
+    return f"{name}{rng.choice([' ', '', '  '])}{rng.choice(FUZZ_CRITERIA)} {rest}"
+
+
+def fuzz_dim_inactive(rng):
+    value = rng.choice([fuzz_number(rng), fuzz_word(rng), "0.5 0.5", "0.2", "1", "2"])
+    return f"{rng.choice(['dim_inactive', 'default_dim_inactive'])} {value}"
+
+
+def fuzz_border(rng):
+    width = fuzz_number(rng)
+    return rng.choice([
+        f"default_border pixel {width}", f"default_border normal {width}",
+        f"default_border {width}pixel", f"default_floating_border pixel {width}",
+        f"new_window pixel {width}", f"new_float normal {width}",
+        f"for_window [app_id=x] border pixel {width}", f"titlebar_padding {width}",
+        f"titlebar_border_thickness {width}", f"gaps inner {width}",
+        f"workspace 1 gaps outer {width}", f"floating_minimum_size {width} x {width}",
+        f"force_display_urgency_hint {width} ms", f"seat * hide_cursor {width}",
+    ])
+
+
+def fuzz_input(rng):
+    selector = rng.choice(FUZZ_INPUT_SELECTORS)
+    setting = rng.choice(FUZZ_INPUT_SETTINGS)
+    gap = rng.choice(FUZZ_SPACES)
+    value = rng.choice([fuzz_word(rng), "us,de", "enabled", "flat", "lrm", "BTN_LEFT"])
+    choice = rng.random()
+    if choice < 0.2:
+        return f"input {selector}{rng.choice(['', ' '])}{gap}"
+    if choice < 0.6:
+        return f"input {selector} {setting}{gap}{value}"
+    return f"input {selector} {{\n{gap}{setting}{gap}{value}{gap}\n}}"
+
+
+def fuzz_output(rng):
+    name = rng.choice(FUZZ_OUTPUT_NAMES)
+    settings = [
+        f"{rng.choice(FUZZ_OUTPUT_SETTINGS)} "
+        f"{rng.choice(FUZZ_OUTPUT_VALUES + [fuzz_word(rng), fuzz_number(rng)])}".rstrip()
+        for _ in range(rng.randint(0, 3))
+    ]
+    if rng.random() < 0.5:
+        return f"output {name} " + " ".join(settings)
+    return "\n".join([f"output {name} {{", *settings, "}"])
+
+
+def fuzz_include(rng, files, links):
+    """An include of something missing or looping; the files and symlinks it
+    names go into files and links, each a dict from name to content or target."""
+    choice = rng.choice(["missing", "glob", "self", "cycle", "symlink", "dir", "subst"])
+    if choice == "missing":
+        return "include " + rng.choice(["missing", "missing/x.conf", '"no such"', "''"])
+    if choice == "glob":
+        return "include " + rng.choice(["nomatch*", "*", "inc*", "[", "**", "sub/*"])
+    if choice == "self":
+        return "include " + rng.choice(["config", "./config", "*"])
+    if choice == "cycle":
+        files["a.conf"] = "include b.conf\nexec a\n"
+        files["b.conf"] = "include a.conf\nexec b\n" + fuzz_line(rng, files, links, 1)
+        return "include a.conf"
+    if choice == "symlink":
+        links.update(loop="loop", ping="pong", pong="ping")
+        return "include " + rng.choice(["loop", "ping", "*"])
+    if choice == "dir":
+        files["sub/x.conf"] = fuzz_line(rng, files, links, 1)
+        return "include " + rng.choice(["sub", "sub/", "sub/*", "."])
+    return "include " + rng.choice(["$(x)", "`x`", "$undefined"])
+
+
+def fuzz_continuation(rng, files, links, depth):
+    text = fuzz_line(rng, files, links, depth + 1)
+    split = rng.randint(0, len(text))
+    joint = "\\\n" + rng.choice(["", " ", "\t", "    ", "\\\n"])
+    return text[:split] + joint + text[split:]
+
+
+def fuzz_block(rng, files, links, depth):
+    head = rng.choice([
+        "mode x", 'mode --pango_markup "a b"', "bar", "input *", "output DP-1",
+        "for_window [app_id=x]", "bindsym", "bindsym --locked", "seat *", "unknown",
+        "<commands>", "",
+    ])
+    opener = rng.choice([" {", "{", "\n{", " { }", " {  # c", " { kill }"])
+    body = [fuzz_line(rng, files, links, depth + 1) for _ in range(rng.randint(0, 3))]
+    closer = rng.choice(["}", "}", "} # x", "  }", "", "}\n}", "} x"])
+    return "\n".join([head + opener, *body, closer])
+
+
+def fuzz_deep(rng):
+    # Up to 1,200 levels, past both MAX_BLOCK_DEPTH and Python's recursion limit.
+    depth = rng.choice([rng.randint(60, 70), rng.randint(65, 1200)])
+    closed = rng.choice([depth, depth, rng.randint(0, depth), depth + 3])
+    return rng.choice(["a {\n", "mode m {\n", "{\n"]) * depth + "}\n" * closed
+
+
+def fuzz_line(rng, files, links, depth=0):
+    if depth > 3:
+        return rng.choice(["exec x", "kill", "", "}"])
+    choice = rng.randrange(14)
+    if choice == 0:
+        return fuzz_continuation(rng, files, links, depth)
+    if choice == 1:
+        return fuzz_block(rng, files, links, depth)
+    if choice == 2:
+        return fuzz_deep(rng)
+    if choice == 3:
+        return fuzz_bind(rng)
+    if choice == 4:
+        return rng.choice(["for_window [app_id=x] ", "bindsym Mod4+r "]) + fuzz_resize(rng)
+    if choice == 5:
+        return fuzz_dim_inactive(rng)
+    if choice == 6:
+        return fuzz_border(rng)
+    if choice == 7:
+        return fuzz_input(rng)
+    if choice == 8:
+        return fuzz_criteria_rule(rng)
+    if choice == 9:
+        return fuzz_include(rng, files, links)
+    if choice == 10:
+        return fuzz_output(rng)
+    if choice == 11:
+        return rng.choice(["set $x ", "set $mod ", "exec ", "nop ", "font "]) + fuzz_word(rng)
+    if choice == 12:
+        # A known word with a stray byte, NUL or odd space spliced in.
+        text = rng.choice(["bindsym Mod4+a exec x", "output DP-1 scale 2", "exec a b"])
+        split = rng.randint(0, len(text))
+        return text[:split] + rng.choice(FUZZ_BAD_BYTES + FUZZ_SPACES + ["\x00"]) + text[split:]
+    return " ".join(fuzz_word(rng) for _ in range(rng.randint(1, 4)))
+
+
+def fuzz_case(seed):
+    """The config for seed as bytes, with the extra files and symlinks it needs."""
+    rng = random.Random(seed)
+    files, links = {}, {}
+    lines = [fuzz_line(rng, files, links) for _ in range(rng.randint(1, 8))]
+    text = rng.choice(["\n", "\r\n"]).join(lines) + rng.choice(["\n", "", "\\", "\n\\\n"])
+    encode = functools.partial(str.encode, encoding="utf-8", errors="surrogateescape")
+    return encode(text), {name: encode(body) for name, body in files.items()}, links
+
+
+class FuzzSmokeTests(unittest.TestCase):
+    """Seeded generated configs through the CLI; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def run_case(self, seed):
+        """None when the translator handles seed's config, else what went wrong."""
+        return self.run_config(*fuzz_case(seed))
+
+    def run_config(self, config, files=None, links=None):
+        """None when the translator handles config, given as bytes, with its
+        extra files and symlinks, else what went wrong."""
+        files, links = files or {}, links or {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").write_bytes(config)
+            for name, body in files.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes(body)
+            for name, target in links.items():
+                (root / name).symlink_to(target)
+            # sys.executable, so the suite's Python also runs the translator.
+            try:
+                result = subprocess.run(
+                    [sys.executable, SCRIPT, root / "config"], capture_output=True,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                return "timed out after 30 s"
+        try:
+            result.stdout.decode("utf-8")
+            stderr = result.stderr.decode("utf-8")
+        except UnicodeDecodeError as error:
+            return f"output is not UTF-8: {error}"
+        problems = []
+        # main returns 0 whether or not directives need manual attention.
+        if result.returncode != 0:
+            problems.append(f"exit status {result.returncode}")
+        if "Traceback (most recent call last)" in stderr:
+            problems.append("traceback")
+        if self.s2k.TRANSLATOR_FAILED in stderr or self.s2k.READER_FAILED in stderr:
+            problems.append("safety-net report")
+        if "manual attention: " not in stderr:
+            problems.append("no manual-attention summary")
+        if not problems:
+            return None
+        return f"{', '.join(problems)}\nstderr tail:\n{stderr[-2000:]}"
+
+    def test_generated_configs_translate_without_crashing(self):
+        workers = min(8, os.cpu_count() or 1)
+        with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+            outcomes = list(pool.map(self.run_case, FUZZ_SEEDS))
+        failures = [(s, o) for s, o in zip(FUZZ_SEEDS, outcomes) if o is not None]
+        report = []
+        for seed, outcome in failures[:3]:
+            config, files, links = fuzz_case(seed)
+            report.append(
+                f"seed {seed}: {outcome}\nconfig: {config!r}\n"
+                f"files: {files!r}\nsymlinks: {links!r}"
+            )
+        self.assertEqual(
+            [seed for seed, _ in failures], [],
+            f"{len(failures)} of {len(FUZZ_SEEDS)} generated configs failed\n\n"
+            + "\n\n".join(report),
+        )
+
+    def test_fixed_configs_translate_without_crashing(self):
+        configs = [config.encode() for config in FUZZ_FIXED_CONFIGS]
+        workers = min(8, os.cpu_count() or 1)
+        with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+            outcomes = list(pool.map(self.run_config, configs))
+        failures = [
+            f"config: {config[:120]!r}\n{outcome}"
+            for config, outcome in zip(configs, outcomes)
+            if outcome is not None
+        ]
+        self.assertEqual(
+            failures, [],
+            f"{len(failures)} of {len(configs)} fixed configs failed\n\n"
+            + "\n\n".join(failures[:3]),
+        )
 
 
 if __name__ == "__main__":

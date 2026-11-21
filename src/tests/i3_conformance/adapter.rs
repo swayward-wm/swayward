@@ -340,6 +340,117 @@ pub(super) fn only_ignorable_translation_warnings(test: &str, stderr: &str) -> b
         })
 }
 
+/// Binding options sway's `cmd_bind` accepts before the key
+/// (`sway/sway/commands/bind.c:353-383`). i3 also accepts them after the key;
+/// sway then treats them as the start of the command.
+fn is_sway_bind_option(token: &str) -> bool {
+    matches!(
+        token,
+        "--release"
+            | "--locked"
+            | "--inhibited"
+            | "--whole-window"
+            | "--border"
+            | "--to-code"
+            | "--exclude-titlebar"
+            | "--no-warn"
+            | "--no-repeat"
+    ) || token.starts_with("--input-device=")
+}
+
+/// Whitespace-separated token with its byte range inside the trimmed line.
+fn whitespace_tokens(trimmed: &str) -> Vec<(&str, usize)> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (index, ch) in trimmed.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(begin) = start.take() {
+                tokens.push((&trimmed[begin..index], begin));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(begin) = start {
+        tokens.push((&trimmed[begin..], begin));
+    }
+    tokens
+}
+
+/// Rewrite one i3 config line whose spelling is valid in i3 but rejected by
+/// sway's argv split. Everything else is returned unchanged.
+///
+/// - `for_window[` → `for_window [` (`sway/sway/commands.c:145-160`). No pinned test uses compact
+///   `assign[` / `no_focus[`, so those are left alone.
+/// - On `bindsym` / `bindcode`, move recognised `--option` tokens that sit after the key to before
+///   the key (`sway/sway/commands/bind.c:353-383`). The command remainder after those options is
+///   kept as the original substring so interior whitespace and quotes stay byte-identical.
+pub(super) fn adapt_i3_config_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    if let Some(rest) = trimmed.strip_prefix("for_window") {
+        if rest.starts_with('[') {
+            return format!("{indent}for_window {rest}");
+        }
+    }
+
+    let tokens = whitespace_tokens(trimmed);
+    let Some((verb, _)) = tokens.first().copied() else {
+        return line.to_owned();
+    };
+    if !matches!(verb, "bindsym" | "bindcode") {
+        return line.to_owned();
+    }
+
+    let mut index = 1;
+    while index < tokens.len() && is_sway_bind_option(tokens[index].0) {
+        index += 1;
+    }
+    if index >= tokens.len() {
+        return line.to_owned();
+    }
+    let key_index = index;
+    index += 1;
+    let trailing_start = index;
+    while index < tokens.len() && is_sway_bind_option(tokens[index].0) {
+        index += 1;
+    }
+    if trailing_start == index {
+        return line.to_owned();
+    }
+
+    let mut rewritten = String::new();
+    rewritten.push_str(indent);
+    rewritten.push_str(verb);
+    for (token, _) in tokens[1..key_index]
+        .iter()
+        .chain(tokens[trailing_start..index].iter())
+    {
+        rewritten.push(' ');
+        rewritten.push_str(token);
+    }
+    rewritten.push(' ');
+    rewritten.push_str(tokens[key_index].0);
+    if index < tokens.len() {
+        rewritten.push(' ');
+        rewritten.push_str(&trimmed[tokens[index].1..]);
+    }
+    rewritten
+}
+
+/// Adapt i3-only config spellings before `sway-to-kdl`, line by line.
+///
+/// Files that rely on this rewrite declare `adapt = ["i3_config_syntax"]` in
+/// `tests/i3/coverage.toml`; `every_harness_adaptation_has_a_sway_citation`
+/// requires each such row to carry a sway citation.
+pub(super) fn adapt_i3_config_syntax(config: &str) -> String {
+    config
+        .lines()
+        .map(adapt_i3_config_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(super) fn translate_config_file(
     test: &str,
     config: &str,
@@ -347,7 +458,7 @@ pub(super) fn translate_config_file(
 ) -> Result<(PathBuf, swayward_config::Config), String> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let path = scratch.unique_path("config", "kdl");
-    let config = config
+    let config = adapt_i3_config_syntax(config)
         .lines()
         .filter(|line| {
             !matches!(

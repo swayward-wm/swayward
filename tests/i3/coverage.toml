@@ -3383,10 +3383,12 @@ reason_verified = true
 note = "Fresh measurement reaches all four outer assertions through twelve passing TAP checks. Before creating the Fixture, the runner now gives this file a real `us,ru` XKB keymap with `grp:alt_shift_toggle`; `set_xkb_group(1)` therefore switches Smithay to an existing Russian layout rather than an out-of-range group on the default one-layout keymap. The test-local `setxkbmap` executable only stands in for the external X-server setup command. Both unqualified bindings fire in groups 1 and 2, matching sway's wildcard group handling (`sway/sway/input/keyboard.c:150-272,455-472`)."
 
 [files."258-keypress-release.t"]
+adapt = ["i3_config_syntax"]
+citation = "sway/sway/commands.c:145-160; sway/sway/commands/bind.c:353-383"
 assertions = 36
 tap_plan = 36
 pass = 36
-note = "All 36 checks in the byte-identical pinned file run without rejected commands. Release-binding ownership is cleared when another key replaces the active chord, so each mode transition emits exactly one binding event and the press-time owned clone survives the mode change. Bindcode matching now snapshots modifiers before applying the current key transition, matching sway's `code_modifiers` ordering"
+note = "Harness adapts i3-only config syntax (binding options after the key). Re-measured with no coverage skips: all 36 assertions pass, including mode-local `bindcode --release 27 mode \"default\"` after the adapter rewrites the i3 option order."
 
 [files."260-invalid-criteria.t"]
 assertions = 2
@@ -3937,11 +3939,211 @@ reason = "i3 makes unqualified bindings NumLock-insensitive; sway requires the a
 citation = "i3/src/bindings.c:378-440; sway/sway/input/seatop_default.c:125-143"
 
 [files."291-swap.t"]
+adapt = ["i3_config_syntax"]
+citation = "sway/sway/commands.c:145-160; sway/sway/commands/bind.c:353-383"
 plan_unknown = true
-assertions = 11
+assertions = 138
 tap_plan = "none"
-pass = 11
-note = "The fresh unchanged run reaches one liveness check, one cross-workspace `con_id` result, and nine same-workspace mark-swap shape/focus assertions. The initial `swap container with con_id 1` is rejected as expected; its `does_i3_live` pass proves only that the invalid request did not crash. Map-time `mark` rules translate through the existing `sway-for-window-command` path and assign globally uniqu"
+pass = 96
+fail = 3
+reason = "Fresh measurement reaches 138 assertions then aborts on an X11 urgency hint: 96 pass, 39 documented skip, 3 open swayward fails on sticky/fullscreen floating swap (tracked as swayward-bugs/swap-sticky-fullscreen)."
+reason_verified = true
+note = "Harness adapts i3-only config syntax (`for_window[…]`). Fresh measurement: 96 pass; 4 i3_only_semantics focus skips (8, 11, 42, 46) where sway's swap_focus swaps no focus-stack positions: same-workspace swaps re-set the unchanged focus as a no-op (8, 11) and cross-workspace swaps focus the other container (42, 46), so IPC focus arrays, built from the seat stack, lead to the window i3 would not pick; 28 x11_absolute_geometry rect skips (97-108, 115-118, 121-124, 130-133, 135-138); 7 i3_floating_wrapper skips (109-113, 120, 125) that descend through i3's floating_nodes→nodes child; 3 open swayward fails (128, 129, 134) on sticky/fullscreen floating swap, tracked as a bug rather than a wrapper or X11 artefact. Later urgency checks are unreached."
+[[files."291-swap.t".skip]]
+n = 8
+desc = "B is still focused after different-parent same-workspace swap (A is V1's focus head)"
+reason = "Sway's same-workspace swap_focus re-sets the unchanged seat focus on B, which returns early; swap_places re-parents without touching the seat stack, so ws focus leads to V2 and V2's to X (now X, A), and get_focused returns X, not i3's B."
+citation = "tests/i3/t/291-swap.t:119-136; sway/sway/commands/swap.c:51,91; sway/sway/tree/container.c:1718-1764,1787-1788,1839-1840,1855,1864; sway/sway/input/seat.c:1130-1134,1273-1276; sway/sway/ipc-json.c:786-807,827-832"
+[[files."291-swap.t".skip]]
+n = 11
+desc = "B is still focused after different-parent same-workspace swap (Y is V1's focus head)"
+reason = "Sway's same-workspace swap_focus re-sets the unchanged seat focus on B, which returns early; swap_places re-parents without touching the seat stack, so ws focus leads to V2 and V2's to X (now X, A), and get_focused returns X, not i3's B."
+citation = "tests/i3/t/291-swap.t:151-168; sway/sway/commands/swap.c:51,91; sway/sway/tree/container.c:1718-1764,1787-1788,1839-1840,1855,1864; sway/sway/input/seat.c:1130-1134,1273-1276; sway/sway/ipc-json.c:786-807,827-832"
+[[files."291-swap.t".skip]]
+n = 42
+desc = "F is still focused after cross-workspace fullscreen swap"
+reason = "Sway's cross-workspace swap_focus focuses A, the container now on the visible workspace, and swaps no focus-stack positions; B keeps its old stack entry above F, so ws1's focus array leads to B and get_focused returns B, not i3's F."
+citation = "tests/i3/t/291-swap.t:235-252; sway/sway/commands/swap.c:51,91; sway/sway/tree/container.c:1199-1206,1785-1786,1830-1833,1839-1840,1855,1884-1885; sway/sway/input/seat.c:1130-1134,1177-1192; sway/sway/ipc-json.c:786-807,827-832"
+[[files."291-swap.t".skip]]
+n = 46
+desc = "The container of the stacked windows remains focused in ws1"
+reason = "Sway's cross-workspace swap_focus focuses A on the visible workspace and swaps no focus-stack positions; B, inserted into fullscreen V1, keeps its stack entry above F, so ws1 focus leads to V1 and V1's to B, and get_focused returns B, not i3's F."
+citation = "tests/i3/t/291-swap.t:269-290; sway/sway/commands/swap.c:51,91; sway/sway/tree/container.c:1199-1206,1397-1408,1785-1786,1830-1833,1839-1840,1855,1884-1885; sway/sway/input/seat.c:1130-1134,1177-1192; sway/sway/ipc-json.c:786-807,827-832"
+[[files."291-swap.t".skip]]
+n = 97
+desc = "A got B's rect: width matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,529-536; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 98
+desc = "A got B's rect: height matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,529-536; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 99
+desc = "A got B's rect: x matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,529-536; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 100
+desc = "A got B's rect: y matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,529-536; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 101
+desc = "B got A's rect: width matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,529-536; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 102
+desc = "B got A's rect: height matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,529-536; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 103
+desc = "B got A's rect: x matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,529-536; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 104
+desc = "B got A's rect: y matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,529-536; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 105
+desc = "A got B's rect: width matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,543-550; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 106
+desc = "A got B's rect: height matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,543-550; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 107
+desc = "A got B's rect: x matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,543-550; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 108
+desc = "A got B's rect: y matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,543-550; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 109
+desc = "B is on the first workspace via floating wrapper child"
+reason = "The lookup descends through i3's floating_nodes→nodes wrapper child; sway serializes the floating leaf directly."
+citation = "tests/i3/t/291-swap.t:552-555; sway/sway/ipc-json.c:533-540"
+[[files."291-swap.t".skip]]
+n = 110
+desc = "B is now fullscreened via floating wrapper child"
+reason = "The lookup descends through i3's floating_nodes→nodes wrapper child; sway serializes the floating leaf directly."
+citation = "tests/i3/t/291-swap.t:552-555; sway/sway/ipc-json.c:533-540"
+[[files."291-swap.t".skip]]
+n = 111
+desc = "A is on the second workspace via floating wrapper child"
+reason = "The lookup descends through i3's floating_nodes→nodes wrapper child; sway serializes the floating leaf directly."
+citation = "tests/i3/t/291-swap.t:557-560; sway/sway/ipc-json.c:533-540"
+[[files."291-swap.t".skip]]
+n = 112
+desc = "A is not fullscreened anymore via floating wrapper child"
+reason = "The lookup descends through i3's floating_nodes→nodes wrapper child; sway serializes the floating leaf directly."
+citation = "tests/i3/t/291-swap.t:557-560; sway/sway/ipc-json.c:533-540"
+[[files."291-swap.t".skip]]
+n = 113
+desc = "B is floating on the first workspace via floating wrapper child"
+reason = "The lookup descends through i3's floating_nodes→nodes wrapper child; sway serializes the floating leaf directly."
+citation = "tests/i3/t/291-swap.t:596-598; sway/sway/ipc-json.c:533-540"
+[[files."291-swap.t".skip]]
+n = 115
+desc = "B got A's rect: width matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,600; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 116
+desc = "B got A's rect: height matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,600; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 117
+desc = "B got A's rect: x matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,600; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 118
+desc = "B got A's rect: y matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,600; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 120
+desc = "B is floating, bottom via floating wrapper child"
+reason = "The lookup descends through i3's floating_nodes→nodes wrapper child; sway serializes the floating leaf directly."
+citation = "tests/i3/t/291-swap.t:622-623; sway/sway/ipc-json.c:533-540"
+[[files."291-swap.t".skip]]
+n = 121
+desc = "B got A's rect: width matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,624; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 122
+desc = "B got A's rect: height matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,624; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 123
+desc = "B got A's rect: x matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,624; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 124
+desc = "B got A's rect: y matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,624; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 125
+desc = "F is floating, top via floating wrapper child"
+reason = "The lookup descends through i3's floating_nodes→nodes wrapper child; sway serializes the floating leaf directly."
+citation = "tests/i3/t/291-swap.t:626-627; sway/sway/ipc-json.c:533-540"
+[[files."291-swap.t".skip]]
+n = 130
+desc = "A got B's rect: width matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,654; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 131
+desc = "A got B's rect: height matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,654; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 132
+desc = "A got B's rect: x matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,654; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 133
+desc = "A got B's rect: y matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,654; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 135
+desc = "B got A's rect: width matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,658; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 136
+desc = "B got A's rect: height matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,658; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 137
+desc = "B got A's rect: x matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,658; sway/sway/tree/container.c:874-910"
+[[files."291-swap.t".skip]]
+n = 138
+desc = "B got A's rect: y matches"
+reason = "The assertion compares absolute floating rectangles set through X11; native xdg_toplevel cannot choose that desktop position."
+citation = "tests/i3/t/291-swap.t:43-52,658; sway/sway/tree/container.c:874-910"
 
 [files."292-regress-layout-toggle.t"]
 assertions = 1
@@ -4618,12 +4820,14 @@ reason = "i3 reapplies workspace gap assignments on reload. Sway copies gaps onc
 citation = "sway/sway/tree/workspace.c:224-240"
 
 [files."320-mouse-bindings.t"]
+adapt = ["i3_config_syntax"]
+citation = "sway/sway/commands.c:145-160; sway/sway/commands/bind.c:353-383"
 assertions = 13
 tap_plan = 13
 pass = 11
 reason = "i3_only_semantics"
 reason_verified = true
-note = "Fresh measurement after removing assertion interception: 11 pass, 2 documented skip. Raw TAP runs the real comparisons; each retained skip has an assertion-level sway citation below."
+note = "Harness adapts i3-only config syntax (`for_window[…]` and binding options after the key). Fresh measurement: 11 pass, 2 documented skip."
 [[files."320-mouse-bindings.t".skip]]
 n = 9
 desc = "unbound button5 outside a mode focuses the target window"

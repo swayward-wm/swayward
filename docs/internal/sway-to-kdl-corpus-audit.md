@@ -25,6 +25,13 @@ by git. The runner checks out exact commits, verifies both hashes, and translate
 under a temporary `HOME` and XDG directory set. It only reads config files;
 `exec` directives become KDL text and are never run.
 
+Each run also writes `<entry>.kdl` and `<entry>.stderr` to `--outputs DIR`
+(default `.cache/sway-to-kdl-corpus/outputs`), with the temporary root and
+the checkout normalised to `<sterile>` and `<repo>`. Compare two runs with
+`diff -r`. The translated output copies corpus text, so it is never committed.
+Without a swayward binary the runner skips validation and still writes the
+outputs.
+
 Result from 2026-09-24 after the two fixes in this audit:
 
 | Entry | Exit | Manual attention | Parse | Validate | Classification |

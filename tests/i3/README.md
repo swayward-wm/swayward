@@ -72,6 +72,8 @@ not silently discard unsupported directives.
 
 The adapter removes only the exact test-only `bar { # Disable i3bar. i3bar_command : }` block used by i3 tests that do not need a bar. Sway has no `i3bar_command`, and the headless fixture starts no bar, so retaining the block would change nothing except making translation fail. Arbitrary bar blocks remain fail-loud in the product translator. Five upstream files mention `i3bar_command`; only `504-move-workspace-to-output.t` is otherwise protocol-portable. `201-config-parser.t` tests bar parser errors, `264-dock-criteria.t` and `526-reconfigure-dock.t` require X11 docks, and `555-i3bar-workspace-output-assignment.t` launches a real i3bar command.
 
+Before translation, the adapter also rewrites two i3-only config spellings sway's argv split rejects: compact `for_window[…]` gains a space before `[`, and `bindsym`/`bindcode` options that sit after the key move before it while the command remainder stays byte-identical (`sway/sway/commands.c:145-160`; `sway/sway/commands/bind.c:353-383`). Files that rely on that rewrite declare `adapt = ["i3_config_syntax"]` in `coverage.toml` (`258-keypress-release.t`, `291-swap.t`, `320-mouse-bindings.t`).
+
 The runner handles i3's `fake-outputs` test directive separately because it
 configures i3's test server rather than normal sway configuration. Each
 `WIDTHxHEIGHT+X+Y` entry creates a real headless output named `fake-N` through

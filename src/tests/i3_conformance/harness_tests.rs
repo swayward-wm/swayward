@@ -380,6 +380,59 @@ pub(super) fn a_file_loaded_config_keeps_its_per_file_overrides() {
 }
 
 #[test]
+pub(super) fn adapts_i3_only_config_syntax_before_translation() {
+    assert_eq!(
+        adapt_i3_config_line(r#"for_window[app_id="mark_A"] mark A"#),
+        r#"for_window [app_id="mark_A"] mark A"#
+    );
+    assert_eq!(
+        adapt_i3_config_line(r#"for_window [app_id="mark_A"] mark A"#),
+        r#"for_window [app_id="mark_A"] mark A"#
+    );
+    assert_eq!(
+        adapt_i3_config_line(r#"    bindcode 27 --release mode "default""#),
+        r#"    bindcode --release 27 mode "default""#
+    );
+    assert_eq!(
+        adapt_i3_config_line("bindsym button1 --whole-window [con_mark=A] focus"),
+        "bindsym --whole-window button1 [con_mark=A] focus"
+    );
+    // Command remainder keeps repeated spaces and the quoted string intact.
+    assert_eq!(
+        adapt_i3_config_line(r#"bindcode 27 --release mode  "default""#),
+        r#"bindcode --release 27 mode  "default""#
+    );
+    assert_eq!(
+        adapt_i3_config_line("bindsym --release Control+Print nop Control+Print"),
+        "bindsym --release Control+Print nop Control+Print"
+    );
+    // `--no-auto-back-and-forth` is a workspace argument, not a bind option.
+    assert_eq!(
+        adapt_i3_config_line("bindsym Mod1+1 workspace --no-auto-back-and-forth number 3:three"),
+        "bindsym Mod1+1 workspace --no-auto-back-and-forth number 3:three"
+    );
+
+    let config = translate_config(
+        "",
+        "for_window[app_id=\"mark_A\"] mark A\n\
+         bindcode 27 --release mode \"default\"\n\
+         bindsym button1 --whole-window [con_mark=A] focus\n",
+    )
+    .unwrap();
+    assert!(config.window_rules.iter().any(|rule| {
+        rule.sway_for_window_commands
+            .iter()
+            .any(|command| command == "mark A")
+    }));
+    assert!(config
+        .binds
+        .0
+        .iter()
+        .any(|bind| bind.release && matches!(&bind.action, swayward_config::Action::SwayCommand(command) if command.contains("mode"))));
+    assert_eq!(config.binds.0.len(), 2);
+}
+
+#[test]
 pub(super) fn i3_config_translation_rejects_unhandled_directives() {
     let error = translate_config("", "font monospace\nmystery value\n").unwrap_err();
     assert!(error.contains("manual attention: 1 directive(s)"));
