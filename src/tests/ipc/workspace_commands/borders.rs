@@ -986,6 +986,46 @@ fn border_command_updates_rendering_and_tree_metadata() {
     }
 }
 
+/// `border pixel ""` succeeds without a width, so the command list goes on to
+/// the next command.
+#[test]
+fn border_pixel_with_an_empty_width_continues_the_command_list() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let client = f.add_client();
+    let window = f.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    f.roundtrip(client);
+    let window = f.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(client);
+
+    let outcomes = crate::command::execute(f.niri_state(), r#"border pixel ""; mark after"#);
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert!(
+        outcomes.iter().all(|outcome| outcome.success),
+        "{outcomes:?}"
+    );
+    let swayward = f.swayward();
+    let mapped = swayward.layout.focus().unwrap();
+    assert_eq!(
+        swayward
+            .layout
+            .window_border(&mapped.window)
+            .map(|(style, _)| style),
+        Some(swayward_ipc::command::BorderStyle::Pixel)
+    );
+    assert_eq!(
+        swayward
+            .marks_by_window
+            .get(&mapped.id())
+            .map(Vec::as_slice),
+        Some(["after".to_owned()].as_slice())
+    );
+}
+
 /// A hidden scratchpad window keeps its border thickness under `border none`,
 /// as sway reports `c->current.border_thickness` (sway/ipc-json.c:760-761).
 /// Oracle row scratchpad_border_none_keeps_thickness; differential seed 1199.

@@ -57,9 +57,7 @@ pub(super) fn parse_bar(rest: &[&str]) -> Result<Command, String> {
         return Err(arity_error(rest.len(), "bar", Expected::AtLeast(2)));
     };
     if *first != "id" && is_subcommand(second) {
-        return Err(
-            "bar configuration is unsupported because swayward does not manage bars".into(),
-        );
+        return Err(BAR_CONFIGURATION.into());
     }
     // These two comparisons are case-sensitive strcmp in sway.
     if *first != "mode" && *first != "hidden_state" {

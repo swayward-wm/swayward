@@ -11,6 +11,7 @@ mod move_resize;
 mod output;
 mod rules;
 mod settings;
+mod unimplemented;
 mod workspace;
 
 use arity::*;
@@ -25,6 +26,7 @@ use output::*;
 use rules::*;
 pub use settings::strtol;
 use settings::*;
+use unimplemented::*;
 use workspace::*;
 
 /// Parse a command list with no variables defined.
@@ -85,7 +87,13 @@ pub fn parse_with_variables(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    results.push(Err(error.into()));
+                    let unimplemented = error
+                        .error
+                        .as_deref()
+                        .is_some_and(|message| sway_accepts_criteria(message, text));
+                    results.push(Err(
+                        ParseFailure::from(error).with_unimplemented(unimplemented)
+                    ));
                     break;
                 }
             }
@@ -132,7 +140,20 @@ pub fn parse_with_variables(
             // depend on the focus earlier commands leave behind, so the
             // caller decides once it has resolved it. Sway stops only on
             // CMD_INVALID (`sway/sway/commands.c:295-299`).
-            Err(error) => results.push(Err(error.into_failure_reply())),
+            Err(error) => {
+                // Sway never substitutes the command name, so an unknown one
+                // is refused whatever variables are set.
+                let name = quoted_command_name(text)
+                    .map(str::to_owned)
+                    .or_else(|| words(text).into_iter().next());
+                let unknown_name = name.is_some_and(|name| {
+                    error.message_is(&format!("Unknown/invalid command '{name}'"))
+                });
+                let references_variable = !unknown_name && references_variable(text);
+                results.push(Err(error
+                    .into_failure_reply()
+                    .with_variable_reference(references_variable)));
+            }
         }
         if matches!(delimiter, Some(';') | Some('\0')) {
             criteria = None;
@@ -293,6 +314,11 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
         Ok(command) => return Ok(command),
         Err(error) => ParseError::from(error),
     };
+    let error = if sway_accepts(&lower, rest, error.message(), input) {
+        error.into_unimplemented()
+    } else {
+        error
+    };
     Err(match lower.as_str() {
         // Handlers that check for a focused container before they read their
         // arguments: `sway/sway/commands/border.c:61-67`,
@@ -328,7 +354,8 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
         // `sway/sway/commands/focus_follows_mouse.c:17-18`,
         // `sway/sway/commands/mouse_warping.c:16-17`,
         // `sway/sway/commands/move.c:674-680`,
-        // `sway/sway/commands/split.c:80-81` and
+        // `sway/sway/commands/split.c:80-81`,
+        // `sway/sway/commands/input/xkb_switch_layout.c:66-71` and
         // `sway/sway/commands/titlebar_border_thickness.c:17`,
         // `sway/sway/commands/titlebar_padding.c:17,26`.
         "focus_follows_mouse" if error.message_is(FOCUS_FOLLOWS_MOUSE_USAGE) => {
@@ -337,6 +364,12 @@ fn parse_words(args: &[&str], input: &str) -> Result<Command, ParseError> {
         "mouse_warping" if error.message_is(MOUSE_WARPING_USAGE) => error.into_failure(),
         "move" if error.message_is(INVALID_DISTANCE) => error.into_failure(),
         "split" if error.message_is(SPLIT_INVALID) => error.into_failure(),
+        "input"
+            if error.message_is(INVALID_LAYOUT_ARGUMENT)
+                || error.message_is(INVALID_LAYOUT_INDEX) =>
+        {
+            error.into_failure()
+        }
         "titlebar_border_thickness" | "titlebar_padding" if error.message_is(INVALID_SIZE) => {
             error.into_failure()
         }
@@ -372,9 +405,7 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
             _ => Err(arity_error(rest.len(), "floating", Expected::EqualTo(1))),
         },
         "urgent" => match rest {
-            [value] if matches!(*value, "allow" | "deny") => {
-                Err("urgent allow|deny requires client urgency-request policy support".into())
-            }
+            [value] if matches!(*value, "allow" | "deny") => Err(URGENT_POLICY.into()),
             [value] => Ok(Command::Urgent((*value).to_owned())),
             _ => Err(arity_error(rest.len(), "urgent", Expected::EqualTo(1))),
         },
@@ -446,9 +477,7 @@ fn parse_command(lower: &str, name: &str, rest: &[&str], input: &str) -> Result<
         "unbindcode" => parse_bind_command(rest, true, true),
         "bindswitch" => parse_switch_bind_command(rest, false),
         "unbindswitch" => parse_switch_bind_command(rest, true),
-        "bindgesture" | "unbindgesture" => {
-            Err("gesture events have no sway command-binding model".into())
-        }
+        "bindgesture" | "unbindgesture" => Err(GESTURE_BINDINGS.into()),
         "mode" => parse_mode(rest),
         "nop" => Ok(Command::Nop),
         "bar" => parse_bar(rest),

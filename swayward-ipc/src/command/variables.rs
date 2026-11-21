@@ -57,6 +57,48 @@ pub fn expand_variables(input: &str, variables: &[(String, String)]) -> String {
     out
 }
 
+/// Whether running `command`, one command with its criteria already split
+/// off, would look a variable up. Sway substitutes from argv[1], or argv[2]
+/// for `set` (`sway/sway/commands.c:282-285`), and scans each argument as
+/// `do_var_replacement` does (`sway/sway/config.c:893-909`): a `$` after a
+/// single backslash is skipped, one after two backslashes is not, and `$$`
+/// is a literal dollar.
+pub(super) fn references_variable(command: &str) -> bool {
+    let args = super::lexer::sway_split_args(command);
+    let skip = if args
+        .first()
+        .is_some_and(|name| name.eq_ignore_ascii_case("set"))
+    {
+        2
+    } else {
+        1
+    };
+    args.iter().skip(skip).any(|arg| {
+        let bytes = arg.as_bytes();
+        let mut i = 0;
+        while let Some(&byte) = bytes.get(i) {
+            if byte != b'$' {
+                i += 1;
+                continue;
+            }
+            let escaped = i
+                .checked_sub(1)
+                .is_some_and(|before| bytes.get(before) == Some(&b'\\'))
+                && (i == 1
+                    || i.checked_sub(2)
+                        .is_some_and(|before| bytes.get(before) != Some(&b'\\')));
+            if escaped {
+                i += 1;
+            } else if bytes.get(i + 1) == Some(&b'$') {
+                i += 2;
+            } else {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 /// Insert or replace a variable and keep sway's longest-name-first order.
 pub fn set_variable(variables: &mut Vec<(String, String)>, name: String, value: String) {
     match variables.iter_mut().find(|(existing, _)| *existing == name) {

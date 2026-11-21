@@ -23,7 +23,10 @@ pub(super) fn parse_border(args: &[&str]) -> Result<Border, String> {
         _ => return Err(SYNTAX.into()),
     };
     match args {
-        [_] => {}
+        // An empty width word leaves the width unset. Sway reads it with
+        // atoi as 0 (sway/sway/commands/border.c:91-92); that difference is
+        // the backlog row pr44-empty-numeric-args.
+        [_] | [_, ""] => {}
         [_, value] if !matches!(style, BorderStyle::None | BorderStyle::Csd) => {
             width = Some(value.parse().map_err(|_| SYNTAX.to_owned())?);
         }

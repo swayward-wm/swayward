@@ -63,6 +63,24 @@ fn empty_layout_argument_failures_match_sway() {
     }
 }
 
+/// Sway answers a bad layout with CMD_FAILURE and runs the rest of the list
+/// (`sway/sway/commands/input/xkb_switch_layout.c:66-71`,
+/// `sway/sway/commands.c:295-299`).
+#[test]
+fn bad_xkb_switch_layout_target_fails_and_the_list_continues() {
+    let mut fixture = crate::tests::fixture::Fixture::new();
+    fixture.add_output(1, (1920, 1080));
+    for input in [
+        "input * XKB_SWITCH_LAYOUT bogus; nop",
+        "input * xkb_switch_layout bogus; nop",
+    ] {
+        let outcome = execute(fixture.niri_state(), input);
+        assert_eq!(outcome.len(), 2, "{input}");
+        assert_eq!(outcome[0], failure("Invalid argument."), "{input}");
+        assert!(outcome[1].success, "{input}");
+    }
+}
+
 #[test]
 fn invalid_setting_values_match_sway() {
     let mut fixture = crate::tests::fixture::Fixture::new();

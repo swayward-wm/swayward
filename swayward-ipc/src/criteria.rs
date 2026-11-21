@@ -144,6 +144,48 @@ impl Criteria {
         Self::parse(raw, Some(u64::MAX)).map(drop)
     }
 
+    /// Whether sway accepts `raw`, criteria swayward refuses for an X11-only
+    /// token. Sway requires that token's value (`sway/criteria.c:635-642`),
+    /// compiles a class, instance or window_role pattern and reads `id` as a
+    /// number (`sway/criteria.c:673-691`); every other token is checked as
+    /// [`Self::validate`] checks it.
+    pub(crate) fn sway_accepts_x11_only(raw: &str) -> bool {
+        let Some(pairs) = raw
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .and_then(|body| parse_pairs(body).ok())
+        else {
+            return false;
+        };
+        let mut criteria = Self::default();
+        let mut x11 = false;
+        for (name, value) in &pairs {
+            let value = value.as_deref();
+            let accepted = match name.as_str() {
+                "class" | "instance" | "window_role" => {
+                    x11 = true;
+                    required(name, value).and_then(Pattern::parse).is_ok()
+                }
+                "id" => match required(name, value).and_then(|value| number::<u64>(name, value)) {
+                    Ok(id) => {
+                        x11 |= id != 0;
+                        true
+                    }
+                    Err(_) => false,
+                },
+                "window_type" => {
+                    x11 = true;
+                    required(name, value).is_ok()
+                }
+                _ => criteria.apply_pair(name, value, Some(u64::MAX)).is_ok(),
+            };
+            if !accepted {
+                return false;
+            }
+        }
+        x11 || !criteria.is_empty()
+    }
+
     /// Sway's `criteria_is_empty` (`sway/criteria.c:19-42`) tests the parsed
     /// fields, not the tokens, so a zero `con_id` or `pid` counts as absent.
     /// `con_id=__focused__` with nothing focused resolves to 0 and is empty.

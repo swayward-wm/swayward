@@ -70,10 +70,27 @@ fn init_process() {
 fn run_subcommand(subcommand: Option<Sub>) -> Result<bool, Box<dyn std::error::Error>> {
     if let Some(subcommand) = subcommand {
         match subcommand {
-            Sub::Validate { config } => {
+            Sub::Validate { config, strict } => {
                 tracy_client::Client::start();
 
-                config_path(config).load().config?;
+                let config = config_path(config).load().config?;
+                // Command strings are opaque to the KDL decoder; without this
+                // a bad one is first reported when its key is pressed.
+                let problems = config.sway_command_problems();
+                for problem in &problems {
+                    if strict {
+                        error!("{problem}");
+                    } else {
+                        warn!("{problem}");
+                    }
+                }
+                if strict && !problems.is_empty() {
+                    return Err(format!(
+                        "config has {} sway command(s) that would be refused",
+                        problems.len()
+                    )
+                    .into());
+                }
                 info!("config is valid");
                 return Ok(true);
             }
@@ -492,6 +509,29 @@ mod tests {
         assert_eq!(
             ipc_socket_environment(path),
             [("SWAYSOCK", path), ("I3SOCK", path)]
+        );
+    }
+
+    /// A refused bind command is a warning unless `--strict` is passed.
+    #[test]
+    fn validate_fails_on_refused_commands_only_when_strict() {
+        let dir = env::temp_dir().join(format!("swayward-validate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.kdl");
+        std::fs::write(&path, r#"binds { Mod+A { command "kil"; }; }"#).unwrap();
+        let validate = |strict: &[&str]| {
+            let args = ["swayward", "validate", "-c", path.to_str().unwrap()];
+            let cli = Cli::try_parse_from(args.iter().chain(strict)).unwrap();
+            run_subcommand(cli.subcommand).map_err(|error| error.to_string())
+        };
+        let default = validate(&[]);
+        let strict = validate(&["--strict"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(default, Ok(true));
+        assert_eq!(
+            strict,
+            Err("config has 1 sway command(s) that would be refused".to_owned())
         );
     }
 

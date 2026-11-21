@@ -15,6 +15,77 @@ fn parses_all_title_format_placeholders() {
     );
 }
 
+/// Sway keeps an empty quoted argument (`sway/common/stringop.c:92-142`)
+/// and joins arguments with spaces (`sway/common/stringop.c:236-253`).
+#[test]
+fn empty_quoted_arguments_are_kept_like_sway() {
+    assert_eq!(
+        command("title_format \"\""),
+        Command::TitleFormat(String::new())
+    );
+    assert_eq!(
+        command("title_format '' \"\""),
+        Command::TitleFormat(" ".into())
+    );
+    assert_eq!(
+        command("set $empty \"\""),
+        Command::Set {
+            name: "$empty".into(),
+            value: String::new(),
+        }
+    );
+    let variables = [("$x".to_owned(), "1".to_owned())];
+    let parsed = parse_with_variables("title_format \"\" \"\"", &variables)
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(parsed.command, Command::TitleFormat(" ".into()));
+}
+
+#[test]
+fn border_pixel_with_an_empty_width_sets_no_width() {
+    assert_eq!(
+        command("border pixel \"\""),
+        Command::Border(crate::command::Border {
+            style: BorderStyle::Pixel,
+            width: None
+        })
+    );
+}
+
+/// Sway looks input subcommands up with `strcasecmp`
+/// (`sway/sway/commands.c:145-149`, `sway/sway/commands/input.c:42`).
+#[test]
+fn input_subcommand_is_matched_case_insensitively() {
+    assert_eq!(
+        command("input * XKB_SWITCH_LAYOUT next"),
+        Command::InputSwitchLayout {
+            identifier: "*".into(),
+            target: XkbLayoutTarget::Next,
+        }
+    );
+}
+
+/// A bad layout is CMD_FAILURE, so the rest of the list still runs
+/// (`sway/sway/commands/input/xkb_switch_layout.c:66-71`,
+/// `sway/sway/commands.c:295-299`).
+#[test]
+fn bad_xkb_switch_layout_targets_fail_without_stopping_the_list() {
+    for (input, error) in [
+        ("input * XKB_SWITCH_LAYOUT bogus; nop", "Invalid argument."),
+        ("input * xkb_switch_layout bogus; nop", "Invalid argument."),
+        ("input * xkb_switch_layout -1; nop", "Invalid layout index."),
+    ] {
+        let parsed = parse(input);
+        assert_eq!(parsed.len(), 2, "{input}");
+        let outcome = parsed[0].as_ref().unwrap_err();
+        assert_eq!(outcome.error.as_deref(), Some(error), "{input}");
+        assert_eq!(outcome.parse_error, Some(false), "{input}");
+        assert_eq!(parsed[1].as_ref().unwrap().command, Command::Nop, "{input}");
+    }
+}
+
 #[test]
 fn parses_workspace_rename_forms() {
     assert_eq!(

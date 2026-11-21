@@ -33,12 +33,7 @@ pub(super) fn parse_switch_bind_command(args: &[&str], unbind: bool) -> Result<C
             // unbind accepts and ignores it. Adding such a binding would
             // require replaying tracked switch state during reload.
             "--reload" if unbind => {}
-            "--reload" => {
-                return Err(
-                    "bindswitch --reload requires tracked per-device switch state during reload"
-                        .into(),
-                )
-            }
+            "--reload" => return Err(BINDSWITCH_RELOAD.into()),
             option => return Err(format!("unsupported {name} option {option}")),
         }
         index += 1;
@@ -179,7 +174,7 @@ pub(super) fn parse_mode(args: &[&str]) -> Result<Command, String> {
                 "unbindswitch" => parse_switch_bind_command(rest, true)?,
                 // Same refusal as the top-level form: swayward has no gesture
                 // command-binding table to insert into.
-                _ => return Err("gesture events have no sway command-binding model".into()),
+                _ => return Err(GESTURE_BINDINGS.into()),
             }))
         }
         [name, ..] => return Err(format!("Unknown/invalid command '{name}'")),

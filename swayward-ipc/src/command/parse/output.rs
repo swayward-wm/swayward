@@ -1,15 +1,16 @@
 use super::*;
 
+pub(super) const INVALID_LAYOUT_ARGUMENT: &str = "Invalid argument.";
+pub(super) const INVALID_LAYOUT_INDEX: &str = "Invalid layout index.";
+
 pub(super) fn parse_input_command(args: &[&str]) -> Result<Command, String> {
     let [identifier, subcommand, values @ ..] = args else {
-        return Err(
-            "only input <identifier> xkb_switch_layout <next|prev|index> is supported".into(),
-        );
+        return Err(INPUT_SUBCOMMAND.into());
     };
-    if *subcommand != "xkb_switch_layout" {
-        return Err(
-            "only input <identifier> xkb_switch_layout <next|prev|index> is supported".into(),
-        );
+    // Sway looks input subcommands up case-insensitively
+    // (`sway/sway/commands.c:145-149`, `sway/sway/commands/input.c:42`).
+    if !subcommand.eq_ignore_ascii_case("xkb_switch_layout") {
+        return Err(INPUT_SUBCOMMAND.into());
     }
     let [target] = values else {
         return Err(arity_error(
@@ -22,11 +23,11 @@ pub(super) fn parse_input_command(args: &[&str]) -> Result<Command, String> {
         "next" => XkbLayoutTarget::Next,
         "prev" => XkbLayoutTarget::Prev,
         value => {
-            let index: i64 = value.parse().map_err(|_| "Invalid argument.")?;
+            let index: i64 = value.parse().map_err(|_| INVALID_LAYOUT_ARGUMENT)?;
             if index < 0 {
-                return Err("Invalid layout index.".into());
+                return Err(INVALID_LAYOUT_INDEX.into());
             }
-            XkbLayoutTarget::Index(index.try_into().map_err(|_| "Invalid argument.")?)
+            XkbLayoutTarget::Index(index.try_into().map_err(|_| INVALID_LAYOUT_ARGUMENT)?)
         }
     };
     Ok(Command::InputSwitchLayout {
@@ -221,7 +222,7 @@ fn parse_output_adaptive_sync(
         return Err(if target == "*" {
             "Cannot apply toggle to all outputs"
         } else {
-            "adaptive_sync toggle is not implemented"
+            ADAPTIVE_SYNC_TOGGLE
         }
         .into());
     }

@@ -24,6 +24,7 @@ pub(super) struct ParseError {
     /// What sway's handler answers instead when the focused node is less
     /// than it needs, for handlers that check focus before their arguments.
     without_view: Option<(FocusedNode, &'static str, ErrorKind)>,
+    unimplemented: bool,
 }
 
 impl ParseError {
@@ -32,6 +33,15 @@ impl ParseError {
     pub(super) fn into_failure(mut self) -> Self {
         self.kind = ErrorKind::Failure;
         self
+    }
+
+    pub(super) fn into_unimplemented(mut self) -> Self {
+        self.unimplemented = true;
+        self
+    }
+
+    pub(super) fn message(&self) -> &str {
+        &self.message
     }
 
     #[cfg(test)]
@@ -63,6 +73,8 @@ impl ParseError {
             without: self
                 .without_view
                 .map(|(needed, message, kind)| (needed, outcome(message.to_owned(), kind))),
+            unimplemented: self.unimplemented,
+            references_variable: false,
         }
     }
 }
@@ -83,9 +95,31 @@ fn outcome(message: String, kind: ErrorKind) -> CommandOutcome {
 pub struct ParseFailure {
     outcome: CommandOutcome,
     without: Option<(FocusedNode, CommandOutcome)>,
+    unimplemented: bool,
+    references_variable: bool,
 }
 
 impl ParseFailure {
+    pub fn is_unimplemented(&self) -> bool {
+        self.unimplemented
+    }
+
+    pub(super) fn with_unimplemented(mut self, unimplemented: bool) -> Self {
+        self.unimplemented = unimplemented;
+        self
+    }
+
+    /// Whether the rejected command reads a variable, so the same text may
+    /// be accepted once a variable is set at run time.
+    pub fn references_variable(&self) -> bool {
+        self.references_variable
+    }
+
+    pub(super) fn with_variable_reference(mut self, references_variable: bool) -> Self {
+        self.references_variable = references_variable;
+        self
+    }
+
     /// The reply sway gives with `focused` in the handler context.
     pub fn resolve(self, focused: FocusedNode) -> CommandOutcome {
         match self.without {
@@ -100,6 +134,8 @@ impl From<CommandOutcome> for ParseFailure {
         Self {
             outcome,
             without: None,
+            unimplemented: false,
+            references_variable: false,
         }
     }
 }
@@ -110,6 +146,7 @@ impl From<String> for ParseError {
             message,
             kind: ErrorKind::Invalid,
             without_view: None,
+            unimplemented: false,
         }
     }
 }

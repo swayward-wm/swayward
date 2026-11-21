@@ -57,9 +57,7 @@ pub(super) fn parse_swap(args: &[&str]) -> Result<Command, String> {
     }
     let value = join_words(value);
     let target = if kind.eq_ignore_ascii_case("id") {
-        return Err(
-            "swap container with id is unsupported because X11 window IDs are unavailable".into(),
-        );
+        return Err(SWAP_ID.into());
     } else if kind.eq_ignore_ascii_case("con_id") {
         SwapTarget::ConId(value)
     } else if kind.eq_ignore_ascii_case("mark") {

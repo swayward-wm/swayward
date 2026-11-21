@@ -55,9 +55,13 @@ pub(super) fn criteria_end(input: &str) -> Option<usize> {
     None
 }
 
+/// Split `input` into arguments with their quotes removed. A quoted empty
+/// argument such as `""` stays an empty word, as sway's `split_args` keeps
+/// it (`sway/common/stringop.c:92-142`).
 pub(super) fn words(input: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
+    let mut started = false;
     let mut quote = None;
     let mut escaped = false;
     for ch in input.chars() {
@@ -68,6 +72,7 @@ pub(super) fn words(input: &str) -> Vec<String> {
         }
         if ch == '\\' {
             word.push(ch);
+            started = true;
             escaped = true;
             continue;
         }
@@ -81,15 +86,18 @@ pub(super) fn words(input: &str) -> Vec<String> {
         }
         if matches!(ch, '\'' | '"') {
             quote = Some(ch);
+            started = true;
         } else if ch.is_whitespace() {
-            if !word.is_empty() {
+            if started {
                 words.push(std::mem::take(&mut word));
+                started = false;
             }
         } else {
             word.push(ch);
+            started = true;
         }
     }
-    if !word.is_empty() {
+    if started {
         words.push(word);
     }
     words
