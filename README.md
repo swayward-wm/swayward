@@ -271,3 +271,4 @@ backend, protocol and portal work. See [Fork base](docs/FORK-BASE.md).
 Licensed under **GPL-3.0-or-later**. The i3 tests in
 [sway-ipc-oracle](https://github.com/swayward-wm/sway-ipc-oracle) keep their
 upstream BSD licence.
+Code ported from sway carries sway's MIT notice in [`THIRD-PARTY.md`](THIRD-PARTY.md).

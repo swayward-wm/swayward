@@ -189,3 +189,23 @@ fn pretty_output_is_swaymsgs_summary() {
     let (output, _) = run(&["-p", "-t", "get_version"], Some(VERSION), &[]);
     assert_eq!(stdout(&output), "sway version 1.12-oracle\n");
 }
+
+#[test]
+fn version_prints_the_swayward_version_without_connecting() {
+    for flag in ["--version", "-v"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_swaywardmsg"))
+            .arg(flag)
+            .env("SWAYSOCK", "/nonexistent/swaywardmsg-version-test.sock")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{flag}: {output:?}");
+        assert_eq!(
+            stdout(&output),
+            format!("swaywardmsg {}\n", swayward_ipc::version::version())
+        );
+        assert!(stdout(&output).starts_with(&format!(
+            "swaywardmsg {} (",
+            swayward_ipc::version::SWAYWARD_VERSION
+        )));
+    }
+}

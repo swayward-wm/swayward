@@ -114,4 +114,4 @@ git diff --quiet "$rebased" main || die "the result differs from the plain rebas
 
 echo "done: main is $(git rev-parse --short main); marker $(git rev-parse --short "$marker")"
 echo "review: git range-diff $(git rev-parse --short "$base")..$(git rev-parse --short "$old_tip") $(git rev-parse --short "$marker")..main"
-echo "then: ./contrib/fast-gate, update docs/FORK-BASE.md, and push main (a fast-forward)"
+echo "then: ./contrib/fast-gate, update docs/FORK-BASE.md and NIRI_BASE in src/utils/mod.rs, and push main (a fast-forward)"

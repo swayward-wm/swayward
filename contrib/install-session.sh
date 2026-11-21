@@ -190,7 +190,7 @@ if ! "$BIN" validate -c "$CONFDIR/config.kdl" >/dev/null 2>&1; then
 fi
 
 echo
-echo "binary:   $BIN ($("$BIN" --version))"
+echo "binary:   $BIN ($("$BIN" -V))"
 echo "launcher: $LAUNCHER"
 echo "config:   $CONFDIR/config.kdl"
 echo "portals:  $PORTALCONF"

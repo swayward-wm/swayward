@@ -56,8 +56,10 @@ Before pushing:
    `git range-diff <old marker>..<old tip> <new marker>..main`.
 2. Run `./contrib/fast-gate`. A rebase touches `src/layout/`, so it also runs
    the slow layout tests.
-3. Update `docs/FORK-BASE.md` to the new tag, and add any new inherited-file
-   edits to `docs/data/divergence/`.
+3. Update `docs/FORK-BASE.md` to the new tag and `NIRI_BASE` in
+   `src/utils/mod.rs` to match it (`swayward --version` prints it, and a test
+   fails until the two agree), and add any new inherited-file edits to
+   `docs/data/divergence/`.
 4. `git push origin main`. A merging-rebase push is a fast-forward, so no
    force is needed.
 
@@ -116,13 +118,20 @@ releases. Prereleases carry a SemVer suffix and a human name:
     26.10.0-beta.1   # Cargo.toml and the tag swayward-v26.10.0-beta.1
     beta1            # swayward --version and GET_VERSION human_readable
 
-`src/utils/version()` renders the human name followed by the build commit.
-`get_version` over IPC reports that string, `"variant": "swayward"`, and the
-numeric fields `1.0.0`, which name the sway protocol family rather than the
-swayward release.
+`swayward_ipc::version::version()` renders the human name followed by the
+build commit. `get_version` over IPC reports that string, `"variant":
+"swayward"`, and the numeric fields `1.0.0`, which name the sway protocol
+family rather than the swayward release.
 
-The version says which swayward release this is, not which niri release it is
-based on. `FORK-BASE.md` records the niri base.
+The version says which swayward release this is, not which niri release it
+is based on. `FORK-BASE.md` records the niri base, and `swayward --version`
+adds it as a second line, `niri base: 9e72e491 (93 commits after v26.04)`,
+from `NIRI_BASE` in `src/utils/mod.rs`. `swayward -V` prints the first line
+only; `swaywardmsg --version` prints `swaywardmsg <name> (<commit>)`.
+
+The commit is `git describe` of the build tree. A build without `.git` reads
+`unknown commit` unless the packager sets `SWAYWARD_BUILD_COMMIT`; the RPM
+spec, the PKGBUILD and the flake set it to the source commit.
 
 A release is tagged `swayward-v<version>`. The prefix keeps our tags apart
 from niri's `vYY.MM` tags, which the repository fetches for every upstream

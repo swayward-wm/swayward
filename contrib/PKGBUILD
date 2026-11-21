@@ -17,7 +17,7 @@ pkgrel=1
 pkgdesc="An i3/sway-compatible Wayland compositor, built in Rust on Smithay"
 arch=('x86_64' 'aarch64')
 url="https://github.com/swayward-wm/swayward"
-license=('GPL-3.0-or-later')
+license=('GPL-3.0-or-later' 'MIT')
 
 # Arch enables LTO by default. libspa-sys generates a C shim for SPA's static
 # inline functions (wrap_static_fns), and LTO discards those objects before
@@ -88,6 +88,10 @@ build() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  # The tag tarball has no .git, so name the tag it was cut from: the string
+  # `git describe` prints on that commit. check() sets the same value, so its
+  # build reuses the crates compiled here.
+  export SWAYWARD_BUILD_COMMIT="swayward-v$_tagver"
   # Exclude swayward-visual-tests: it is a GTK4 developer tool, not part of
   # the compositor, and building it would drag gtk4 and gdk-pixbuf into the
   # package's build dependencies for no runtime benefit.
@@ -98,6 +102,7 @@ build() {
 check() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
+  export SWAYWARD_BUILD_COMMIT="swayward-v$_tagver"
   # The i3 conformance suite needs Perl modules that are not build
   # dependencies, so run the Rust tests only.
   # makepkg's unprivileged user defaults to 1024 open files even when the
@@ -172,4 +177,5 @@ package() {
     "$pkgdir/usr/share/swayward/default-config.kdl"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 THIRD-PARTY.md "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY.md"
 }

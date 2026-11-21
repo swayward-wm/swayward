@@ -25,13 +25,17 @@
 %global __cargo_common_opts %{?_smp_mflags} -Z avoid-dev-deps --locked
 
 %global version {{{ git_dir_version }}}
+# The source commit as `git describe` names it, the same string a build from a
+# Git checkout reports. rpkg expands this while the repository is present; the
+# build itself runs from a tarball. Empty when Git cannot describe the tree.
+%global build_commit {{{ git describe --always 2>/dev/null || true }}}%{nil}
 
 Name:           swayward
 Version:        %{version}
 Release:        1%{?dist}
 Summary:        An i3/sway-compatible Wayland compositor
 
-SourceLicense:  GPL-3.0-or-later
+SourceLicense:  GPL-3.0-or-later AND MIT
 
 # (MIT OR Apache-2.0) AND BSD-3-Clause
 # (MIT OR Apache-2.0) AND Unicode-3.0
@@ -137,8 +141,10 @@ sed -i 's/^offline = true$//' .cargo/config.toml
 # Final step in leaving alone our debug settings.
 sed -i 's/.*please-remove-me$//' .cargo/config.toml
 
-# Set the commit string.
-sed -i 's/\[env\]/[env]\nSWAYWARD_BUILD_COMMIT="%{version}"/' .cargo/config.toml
+# Set the commit string. Without one the binary reports "unknown commit".
+if [ -n "%{build_commit}" ]; then
+  sed -i 's/\[env\]/[env]\nSWAYWARD_BUILD_COMMIT="%{build_commit}"/' .cargo/config.toml
+fi
 
 %build
 %cargo_build
@@ -180,7 +186,7 @@ install -Dm644 -t %{buildroot}%{zsh_completions_dir} ./_swayward
 %endif
 
 %files
-%license LICENSE
+%license LICENSE THIRD-PARTY.md
 %doc README.md
 %doc docs/wiki
 %{_bindir}/swayward

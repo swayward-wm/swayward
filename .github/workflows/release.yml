@@ -106,6 +106,8 @@ jobs:
           tar cJf swayward-${{ github.event.inputs.version }}-vendored-dependencies.tar.xz vendor .cargo
 
       - name: Build
+        # The checkout carries .git, so the binaries name the tag through
+        # git describe; verify-ubuntu fails on "unknown commit".
         run: cargo build --all --frozen --release
 
       - name: Fetch the pinned oracle
@@ -136,6 +138,7 @@ jobs:
           install -Dm644 resources/swayward-shutdown.target "$stage/share/swayward-shutdown.target"
           install -Dm644 resources/default-config.kdl "$stage/share/default-config.kdl"
           install -Dm644 LICENSE "$stage/LICENSE"
+          install -Dm644 THIRD-PARTY.md "$stage/THIRD-PARTY.md"
 
           # Record what the binary actually needs, measured rather than
           # guessed, so an installer can check before unpacking.
@@ -205,11 +208,16 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y ./artifact/swayward_${{ github.event.inputs.version }}_amd64.deb
-          swayward --version
-          swaywardmsg --version
           tar xzf artifact/swayward-${{ github.event.inputs.version }}-ubuntu24.04-x86_64.tar.gz
-          ./swayward-${{ github.event.inputs.version }}-ubuntu24.04-x86_64/bin/swayward --version
-          ./swayward-${{ github.event.inputs.version }}-ubuntu24.04-x86_64/bin/swaywardmsg --version
+          # Every shipped binary names the commit it was built from.
+          bin=./swayward-${{ github.event.inputs.version }}-ubuntu24.04-x86_64/bin
+          for binary in swayward swaywardmsg "$bin/swayward" "$bin/swaywardmsg"; do
+            version=$("$binary" --version)
+            printf '%s\n' "$version"
+            case $version in
+              *"unknown commit"*) echo "::error::$binary does not name its commit"; exit 1 ;;
+            esac
+          done
 
   build-rpm:
     needs: validate
@@ -284,8 +292,13 @@ jobs:
       - name: Install and execute RPM
         run: |
           dnf install -y --setopt=install_weak_deps=False artifact/*.rpm
-          swayward --version
-          swaywardmsg --version
+          for binary in swayward swaywardmsg; do
+            version=$("$binary" --version)
+            printf '%s\n' "$version"
+            case $version in
+              *"unknown commit"*) echo "::error::$binary does not name its commit"; exit 1 ;;
+            esac
+          done
 
   build-arch:
     needs: validate
@@ -362,8 +375,13 @@ jobs:
         run: |
           pacman -Sy --noconfirm
           pacman -U --noconfirm artifact/*.pkg.tar.zst
-          swayward --version
-          swaywardmsg --version
+          for binary in swayward swaywardmsg; do
+            version=$("$binary" --version)
+            printf '%s\n' "$version"
+            case $version in
+              *"unknown commit"*) echo "::error::$binary does not name its commit"; exit 1 ;;
+            esac
+          done
 
   draft-release:
     needs: [verify-ubuntu, verify-rpm, verify-arch]

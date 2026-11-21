@@ -224,7 +224,9 @@
                 "-Wl,--pop-state"
               ]
             );
-            SWAYWARD_BUILD_COMMIT = revision;
+            # Empty when the flake source has no Git revision; swayward then reports
+            # "unknown commit".
+            SWAYWARD_BUILD_COMMIT = self.shortRev or self.dirtyShortRev or "";
           };
 
           passthru = {
@@ -234,7 +236,10 @@
           meta = {
             description = "i3-compatible Wayland compositor based on niri";
             homepage = "https://github.com/swayward-wm/swayward";
-            license = lib.licenses.gpl3Plus;
+            license = with lib.licenses; [
+              gpl3Plus
+              mit
+            ];
             mainProgram = "swayward";
             platforms = lib.platforms.linux;
           };

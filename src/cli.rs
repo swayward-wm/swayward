@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
-use crate::utils::version;
+use crate::utils::{long_version, version};
 
 #[derive(Parser)]
-#[command(author, version = version(), about, long_about = None)]
+#[command(author, version = version(), long_version = long_version(), about, long_about = None)]
 #[command(args_conflicts_with_subcommands = true)]
 #[command(subcommand_value_name = "SUBCOMMAND")]
 #[command(subcommand_help_heading = "Subcommands")]
@@ -40,15 +40,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_flag_reports_swayward_version_independently_of_niri_base() {
+    fn version_flag_reports_the_swayward_version_then_the_niri_base() {
         let Err(error) = Cli::try_parse_from(["swayward", "--version"]) else {
             panic!("--version should exit through clap")
         };
-        let output = error.to_string();
 
         assert_eq!(error.kind(), ErrorKind::DisplayVersion);
-        assert!(output.starts_with(&format!("swayward {} (", crate::utils::SWAYWARD_VERSION)));
-        assert!(output.ends_with(")\n"));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "swayward {}\nniri base: {}\n",
+                crate::utils::version(),
+                crate::utils::NIRI_BASE
+            )
+        );
+        assert!(
+            crate::utils::version().starts_with(&format!("{} (", crate::utils::SWAYWARD_VERSION))
+        );
+    }
+
+    #[test]
+    fn short_version_flag_prints_only_the_version_line() {
+        let Err(error) = Cli::try_parse_from(["swayward", "-V"]) else {
+            panic!("-V should exit through clap")
+        };
+
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert_eq!(
+            error.to_string(),
+            format!("swayward {}\n", crate::utils::version())
+        );
+    }
+
+    #[test]
+    fn niri_base_matches_the_fork_base_record() {
+        let record = include_str!("../docs/FORK-BASE.md");
+        let commit = record
+            .split("commit ")
+            .nth(1)
+            .and_then(|rest| rest.get(..40))
+            .expect("docs/FORK-BASE.md names the full base commit");
+        let short = crate::utils::NIRI_BASE.split_whitespace().next().unwrap();
+
+        assert!(
+            short.len() >= 8 && commit.starts_with(short),
+            "NIRI_BASE {:?} does not match docs/FORK-BASE.md (commit {commit})",
+            crate::utils::NIRI_BASE
+        );
     }
 }
 

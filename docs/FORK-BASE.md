@@ -15,5 +15,8 @@ To follow a later niri release (the next target must be a tag after
 
     contrib/merging-rebase --apply vXX.YY
 
+`swayward --version` prints this base from `NIRI_BASE` in `src/utils/mod.rs`.
+Update it with this file; a test fails while the two disagree.
+
 See [Divergence from upstream niri](DIVERGENCE.md) for every edit to an
 inherited file.

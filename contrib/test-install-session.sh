@@ -9,8 +9,8 @@ export HOME
 mkdir -p "$HOME/build"
 cat >"$HOME/build/swayward" <<'EOF'
 #!/bin/sh
-[ "$1" = validate ] || [ "$1" = --version ]
-[ "$1" != --version ] || echo 'swayward test'
+[ "$1" = validate ] || [ "$1" = -V ]
+[ "$1" != -V ] || echo 'swayward test'
 EOF
 cp "$HOME/build/swayward" "$HOME/build/swaywardmsg"
 chmod +x "$HOME/build/swayward" "$HOME/build/swaywardmsg"
