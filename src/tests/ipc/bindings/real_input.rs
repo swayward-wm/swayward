@@ -737,3 +737,215 @@ workspace "2" {}"#,
         "an overview arrow was rejected while Num Lock was on"
     );
 }
+
+/// Hold Super, launch an exclusive layer surface with a chord, release Super,
+/// and return the depressed modifier mask the layer client ends up with.
+fn depressed_mods_after_chord_launch(binds: &str) -> Option<u32> {
+    use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
+    use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::KeyboardInteractivity;
+
+    let config = swayward_config::Config::parse_mem(binds).unwrap();
+    let mut fixture = Fixture::with_config(config);
+    fixture.add_output(1, (1280, 720));
+    let client = fixture.add_client();
+    fixture.double_roundtrip(client);
+
+    // Super down, then `d` down and up: the chord that starts the launcher.
+    key_event(&mut fixture, 133, true);
+    key_event(&mut fixture, 40, true);
+    key_event(&mut fixture, 40, false);
+
+    // The launcher maps while Super is still held.
+    let layer = fixture
+        .client(client)
+        .create_layer(None, Layer::Overlay, "launcher");
+    let surface = layer.surface.clone();
+    layer.set_configure_props(crate::tests::client::LayerConfigureProps {
+        size: Some((100, 50)),
+        kb_interactivity: Some(KeyboardInteractivity::Exclusive),
+        ..Default::default()
+    });
+    layer.commit();
+    fixture.double_roundtrip(client);
+    let layer = fixture.client(client).layer(&surface);
+    layer.attach_new_buffer();
+    layer.set_size(100, 50);
+    layer.ack_last_and_commit();
+    fixture.double_roundtrip(client);
+    assert_eq!(
+        fixture
+            .swayward()
+            .keyboard_focus
+            .surface()
+            .map(|s| s.id().protocol_id()),
+        Some(surface.id().protocol_id())
+    );
+    let held = fixture.client(client).state.keyboard_mods_depressed;
+    assert_ne!(held.unwrap_or(0), 0, "the launcher entered with Super held");
+
+    key_event(&mut fixture, 133, false);
+    fixture.double_roundtrip(client);
+    fixture.client(client).state.keyboard_mods_depressed
+}
+
+/// A focused client must learn that a modifier was released even when the
+/// release itself is consumed by a bind on the bare modifier key. Otherwise a
+/// launcher opened by `Super+d` believes Super is held and drops typed text.
+#[test]
+fn bare_modifier_bind_still_tells_the_focused_client_the_modifier_was_released() {
+    let chord_only = r#"binds { Super+d { command "nop launch"; }; }"#;
+    assert_eq!(depressed_mods_after_chord_launch(chord_only), Some(0));
+
+    let with_bare_super = r#"binds {
+        Super+d { command "nop launch"; }
+        Super_L repeat=false { command "nop show"; }
+        Super_L release=true { command "nop hide"; }
+    }"#;
+    assert_eq!(depressed_mods_after_chord_launch(with_bare_super), Some(0));
+}
+
+/// Map one window under `binds` and return it with its client once it holds
+/// the keyboard and has no keyboard events recorded.
+fn focused_window_with_binds(
+    binds: &str,
+) -> (
+    Fixture,
+    crate::tests::client::ClientId,
+    smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    wayland_client::protocol::wl_surface::WlSurface,
+) {
+    let config = swayward_config::Config::parse_mem(binds).unwrap();
+    let mut fixture = Fixture::with_config(config);
+    fixture.add_output(1, (1280, 720));
+    let client = fixture.add_client();
+    let window = fixture.client(client).create_window();
+    window.commit();
+    let surface = window.surface.clone();
+    fixture.roundtrip(client);
+    let window = fixture.client(client).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    fixture.double_roundtrip(client);
+
+    let server_surface = fixture
+        .swayward()
+        .keyboard_focus
+        .surface()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        server_surface.id().protocol_id(),
+        surface.id().protocol_id(),
+        "the window holds the keyboard"
+    );
+    let state = &mut fixture.client(client).state;
+    state.keyboard_mods_events.clear();
+    state.keyboard_key_events.clear();
+    (fixture, client, server_surface, surface)
+}
+
+/// Press, then release, the left Super key, and return the client's depressed
+/// masks after each, along with every key event the client received.
+fn tap_super(
+    fixture: &mut Fixture,
+    client: crate::tests::client::ClientId,
+) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+    key_event(fixture, 133, true);
+    fixture.double_roundtrip(client);
+    let after_press = fixture.client(client).state.keyboard_mods_events.clone();
+    key_event(fixture, 133, false);
+    fixture.double_roundtrip(client);
+    let state = &fixture.client(client).state;
+    (
+        after_press,
+        state.keyboard_mods_events.clone(),
+        state.keyboard_key_events.clone(),
+    )
+}
+
+/// A client that already holds the keyboard learns about both sides of a bare
+/// modifier bind through `wl_keyboard.modifiers` alone, as in sway: the bound
+/// key's press and release are consumed, the modifier change is not
+/// (sway/input/keyboard.c:693-705).
+#[test]
+fn bare_modifier_bind_reports_press_and_release_modifiers_without_key_events() {
+    let (mut fixture, client, _, _) =
+        focused_window_with_binds(r#"binds { Super_L { command "nop show"; }; }"#);
+
+    let (after_press, after_release, keys) = tap_super(&mut fixture, client);
+    assert_eq!(after_press, [64], "Mod4 is depressed after the bound press");
+    assert_eq!(
+        after_release,
+        [64, 0],
+        "Mod4 is released after the bound release"
+    );
+    assert_eq!(keys, Vec::<u32>::new(), "the bound key itself is not sent");
+}
+
+/// A forwarded modifier key carries its own modifiers event, so the client
+/// gets exactly one per change; a bound key that does not change the
+/// modifiers adds none.
+#[test]
+fn forwarded_modifier_and_bound_chord_send_no_extra_modifiers_events() {
+    let (mut fixture, client, _, _) =
+        focused_window_with_binds(r#"binds { Super+d { command "nop launch"; }; }"#);
+
+    key_event(&mut fixture, 133, true);
+    key_event(&mut fixture, 40, true);
+    key_event(&mut fixture, 40, false);
+    fixture.double_roundtrip(client);
+    let state = &fixture.client(client).state;
+    assert_eq!(state.keyboard_mods_events, [64]);
+    assert_eq!(
+        state.keyboard_key_events,
+        [125],
+        "only the Super press is sent"
+    );
+
+    key_event(&mut fixture, 133, false);
+    fixture.double_roundtrip(client);
+    let state = &fixture.client(client).state;
+    assert_eq!(state.keyboard_mods_events, [64, 0]);
+    assert_eq!(state.keyboard_key_events, [125, 125]);
+}
+
+/// A client holding an `xdg_popup.grab` keyboard grab learns about a bare
+/// modifier bind like any focused client. Before any key is forwarded the
+/// grab leaves the keyboard focus on the popup's root; `wl_keyboard.modifiers`
+/// goes to the client that owns the focus, which is the grabbing client.
+#[test]
+fn bare_modifier_bind_reports_modifiers_to_a_client_with_a_popup_grab() {
+    let (mut fixture, client, server_root, root) =
+        focused_window_with_binds(r#"binds { Super_L { command "nop show"; }; }"#);
+
+    let parent = fixture.client(client).window(&root).xdg_surface.clone();
+    let seat = fixture.client(client).state.seat.clone().unwrap();
+    let serial = fixture.client(client).state.keyboard_enter_serial.unwrap();
+    let popup = fixture.client(client).create_popup(&parent);
+    popup.xdg_popup.grab(&seat, serial);
+    popup.surface.commit();
+    fixture.double_roundtrip(client);
+    assert!(
+        fixture
+            .swayward()
+            .popup_grab
+            .as_ref()
+            .is_some_and(|grab| grab.has_keyboard_grab),
+        "the popup holds a keyboard grab"
+    );
+    let keyboard = fixture.swayward().seat.get_keyboard().unwrap();
+    assert!(keyboard.is_grabbed());
+    assert_eq!(keyboard.current_focus(), Some(server_root));
+    let state = &mut fixture.client(client).state;
+    state.keyboard_mods_events.clear();
+    state.keyboard_key_events.clear();
+
+    let (after_press, after_release, keys) = tap_super(&mut fixture, client);
+    assert_eq!(after_press, [64]);
+    assert_eq!(after_release, [64, 0]);
+    assert_eq!(keys, Vec::<u32>::new());
+    assert!(
+        fixture.swayward().popup_grab.is_some(),
+        "the grab survives the bind"
+    );
+}

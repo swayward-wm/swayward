@@ -35,6 +35,7 @@ use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Serial, Transform, SERIAL_COUNTER};
+use smithay::wayland::input_method::InputMethodSeat;
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 use swayward_config::{
@@ -556,7 +557,8 @@ impl State {
         let Some(keyboard) = self.swayward.seat.get_keyboard() else {
             return;
         };
-        let Some(Some(bind)) = keyboard.input(
+        let mods_before = keyboard.modifier_state();
+        let intercepted = keyboard.input(
             self,
             event.key_code(),
             event.state(),
@@ -701,14 +703,30 @@ impl State {
 
                 res
             },
-        ) else {
-            return;
-        };
+        );
 
-        self.handle_bind(bind.clone());
+        // Smithay reports a modifier change only along with a forwarded key. Sway reports every
+        // change to the focused client, including one made by a key a binding consumed
+        // (sway/input/keyboard.c:693-705), so a client that entered while Super was held learns
+        // that it was released. wl_keyboard.modifiers reaches every keyboard of the focused
+        // surface's client, so a client holding a popup keyboard grab receives it when that client
+        // already has keyboard focus; installing a grab keeps the existing focus, so a layer-rooted
+        // popup grab whose layer lacks focus leaves the modifiers going to the current focus. An
+        // input method keyboard grab gets modifiers only with a key, so it is left out here.
+        let advertise_mods = intercepted.is_some()
+            && keyboard.modifier_state() != mods_before
+            && !self.swayward.seat.input_method().keyboard_grabbed();
 
-        if pressed {
-            self.start_key_repeat(bind);
+        if let Some(Some(bind)) = intercepted {
+            self.handle_bind(bind.clone());
+
+            if pressed {
+                self.start_key_repeat(bind);
+            }
+        }
+
+        if advertise_mods {
+            keyboard.advertise_modifier_state(self);
         }
     }
 
