@@ -334,3 +334,170 @@ fn layer_popup_is_constrained_and_parent_unmap_is_safe() {
     f.client(client).dispatch_unchecked();
     assert!(f.client(client).connection.protocol_error().is_none());
 }
+
+fn two_outputs_with_focus_follows_mouse() -> (Fixture, ClientId) {
+    let mut config = swayward_config::Config::default();
+    config.input.focus_follows_mouse = Some(swayward_config::input::FocusFollowsMouse {
+        mode: swayward_config::input::FocusFollowsMouseMode::Yes,
+        max_scroll_amount: None,
+    });
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1024, 768));
+    f.add_output(2, (1024, 768));
+    let client = f.add_client();
+
+    f.niri_focus_output(2);
+    f.niri_state().move_cursor((1500., 300.).into());
+    (f, client)
+}
+
+/// Moves the pointer from output 2 onto an empty area of output 1 the way
+/// pointer motion does: focus-follows-mouse runs on the new contents, then the
+/// cursor moves.
+fn hover_empty_area_of_output_1(f: &mut Fixture, client: ClientId) {
+    let location = (500., 300.).into();
+    let under = f.swayward().contents_under(location);
+    assert_eq!(under.output, Some(f.niri_output(1)));
+    assert!(under.window.is_none() && under.layer.is_none());
+    f.swayward().handle_focus_follows_mouse(&under);
+    f.niri_state().move_cursor(location);
+    f.double_roundtrip(client);
+}
+
+/// Sway's seat focus is NULL while a layer holds the keyboard, and
+/// focus-follows-mouse switches outputs only with a non-NULL seat focus
+/// (`sway/sway/input/seatop_default.c:539-586`), so crossing onto an empty
+/// output keeps the active output and the exclusive layer's keyboard.
+#[test]
+fn exclusive_layer_keeps_keyboard_when_focus_follows_mouse_crosses_outputs() {
+    let (mut f, client) = two_outputs_with_focus_follows_mouse();
+    let exclusive = map_layer(
+        &mut f,
+        client,
+        Layer::Overlay,
+        "launcher",
+        LayerConfigureProps {
+            size: Some((100, 50)),
+            kb_interactivity: Some(KeyboardInteractivity::Exclusive),
+            ..Default::default()
+        },
+    );
+    assert_eq!(focused_surface_id(&mut f), exclusive.id().protocol_id());
+
+    hover_empty_area_of_output_1(&mut f, client);
+
+    assert_eq!(
+        f.swayward().layout.active_output().cloned(),
+        Some(f.niri_output(2))
+    );
+    assert_eq!(
+        f.swayward()
+            .keyboard_focus
+            .surface()
+            .map(|s| s.id().protocol_id()),
+        Some(exclusive.id().protocol_id()),
+        "the exclusive layer lost the keyboard when the pointer crossed outputs"
+    );
+}
+
+/// The same rule holds for an on-demand layer: any layer holding the keyboard
+/// leaves sway's seat focus NULL (`sway/sway/input/seat.c:1283-1288`).
+#[test]
+fn on_demand_layer_keeps_keyboard_when_focus_follows_mouse_crosses_outputs() {
+    let (mut f, client) = two_outputs_with_focus_follows_mouse();
+    let on_demand = map_layer(
+        &mut f,
+        client,
+        Layer::Overlay,
+        "on-demand",
+        LayerConfigureProps {
+            size: Some((100, 50)),
+            kb_interactivity: Some(KeyboardInteractivity::OnDemand),
+            ..Default::default()
+        },
+    );
+    assert_eq!(focused_surface_id(&mut f), on_demand.id().protocol_id());
+
+    hover_empty_area_of_output_1(&mut f, client);
+
+    assert_eq!(
+        f.swayward().layout.active_output().cloned(),
+        Some(f.niri_output(2))
+    );
+    assert_eq!(focused_surface_id(&mut f), on_demand.id().protocol_id());
+}
+
+/// Hovering a keyboard-interactive layer focuses it whatever the seat focus
+/// is (`sway/sway/input/seatop_default.c:556-562`), so moving from a focused
+/// layer on output 2 onto one on output 1 switches outputs and the keyboard.
+#[test]
+fn focus_follows_mouse_onto_interactive_layer_on_other_output_takes_keyboard() {
+    let (mut f, client) = two_outputs_with_focus_follows_mouse();
+    f.niri_focus_output(1);
+    let target = map_layer(
+        &mut f,
+        client,
+        Layer::Overlay,
+        "target",
+        LayerConfigureProps {
+            size: Some((100, 50)),
+            kb_interactivity: Some(KeyboardInteractivity::OnDemand),
+            ..Default::default()
+        },
+    );
+    f.niri_focus_output(2);
+    let current = map_layer(
+        &mut f,
+        client,
+        Layer::Overlay,
+        "current",
+        LayerConfigureProps {
+            size: Some((100, 50)),
+            kb_interactivity: Some(KeyboardInteractivity::OnDemand),
+            ..Default::default()
+        },
+    );
+    assert_eq!(focused_surface_id(&mut f), current.id().protocol_id());
+
+    let location = (512., 384.).into();
+    let under = f.swayward().contents_under(location);
+    assert_eq!(under.output, Some(f.niri_output(1)));
+    assert_eq!(
+        under
+            .layer
+            .as_ref()
+            .map(|layer| layer.wl_surface().id().protocol_id()),
+        Some(target.id().protocol_id())
+    );
+    f.swayward().handle_focus_follows_mouse(&under);
+    f.niri_state().move_cursor(location);
+    f.double_roundtrip(client);
+
+    assert_eq!(
+        f.swayward().layout.active_output().cloned(),
+        Some(f.niri_output(1))
+    );
+    assert_eq!(focused_surface_id(&mut f), target.id().protocol_id());
+}
+
+/// Without a layer holding the keyboard, crossing onto an empty output
+/// switches the active output (`sway/sway/input/seatop_default.c:566-572`).
+#[test]
+fn focus_follows_mouse_crossing_onto_empty_output_switches_outputs_without_layer() {
+    let (mut f, client) = two_outputs_with_focus_follows_mouse();
+    assert_eq!(
+        f.swayward().layout.active_output().cloned(),
+        Some(f.niri_output(2))
+    );
+
+    hover_empty_area_of_output_1(&mut f, client);
+
+    assert_eq!(
+        f.swayward().layout.active_output().cloned(),
+        Some(f.niri_output(1))
+    );
+    assert!(!matches!(
+        f.swayward().keyboard_focus,
+        crate::swayward::KeyboardFocus::LayerShell { .. }
+    ));
+}

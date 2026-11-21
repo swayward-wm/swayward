@@ -1,0 +1,5 @@
+[[edit]]
+migrated = false
+paths = ["src/swayward/focus.rs"]
+what = "focus-follows-mouse does not switch the active output while a layer surface holds the keyboard, unless the pointer is over a keyboard-interactive layer surface."
+why = "Sway's seat focus is NULL while a layer holds the keyboard (sway/input/seat.c:1283-1288, :1431-1440), and check_focus_follows_mouse switches outputs only with a non-NULL focus (sway/input/seatop_default.c:564-586); a hovered keyboard-interactive layer is focused first (:556-562). Hovering a window still focuses it. No oracle row can observe this: ffm runs only from pointer motion; headless tests in src/tests/layer_shell/focus.rs."

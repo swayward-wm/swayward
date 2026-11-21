@@ -19,7 +19,19 @@ impl Swayward {
         let current_focus = self.contents_under(pointer.current_location());
 
         if let Some(output) = &new_focus.output {
-            if current_focus.output.as_ref() != Some(output) {
+            // Sway focuses a hovered keyboard-interactive layer whatever the
+            // seat focus is (`sway/sway/input/seatop_default.c:556-562`).
+            // Otherwise it switches outputs only with a non-NULL seat focus,
+            // and the seat focus is NULL while a layer holds the keyboard
+            // (`sway/sway/input/seatop_default.c:564-586`).
+            let hovers_interactive_layer = new_focus
+                .layer
+                .as_ref()
+                .is_some_and(|layer| layer.can_receive_keyboard_focus());
+            if current_focus.output.as_ref() != Some(output)
+                && (hovers_interactive_layer
+                    || !matches!(self.keyboard_focus, KeyboardFocus::LayerShell { .. }))
+            {
                 self.layout.focus_output(output);
             }
         }

@@ -263,6 +263,22 @@ compatibility does not determine the capture backend choice.
 cast target. RemoteDesktop is disabled because swayward does not implement
 remote control or input injection.
 
+### Launcher keyboard focus across outputs
+
+**Infrastructure gap.**
+
+A layer-shell surface that asks for exclusive keyboard interactivity, such as a
+launcher like `fuzzel`, keeps the keyboard in sway while the seat focus moves to
+another output: `seat_set_focus` focuses the new node and then hands the
+keyboard straight back to the layer (`sway/sway/input/seat.c:1255-1264`).
+
+With `focus_follows_mouse` enabled and such a launcher open, moving the pointer
+onto a window on another output gives that window the keyboard in swayward, so
+typing goes to the window instead of the launcher. Moving the pointer onto an
+empty area of another output already matches sway: the active output and the
+keyboard stay where they were. Close the launcher before moving the pointer to
+another output's windows. A fix to match sway is planned.
+
 ## IPC requests and commands
 
 ### Version identity
