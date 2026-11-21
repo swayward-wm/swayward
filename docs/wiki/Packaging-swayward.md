@@ -116,7 +116,8 @@ flake's Git revision.
 
 The public version is the human release name, such as `beta2`. Cargo's package
 version is the same swayward release as ordered Semantic Versioning, such as
-`26.10.0-beta.2`; it no longer tracks the niri merge-base version.
+`26.10.0-beta.2`. Its `YY.MM` names the niri release the line is based on;
+the 26.10 line, based on a niri commit after `v26.04`, is the exception.
 
 When building in a packaging system, there's usually no repository, so the git description is unavailable and the version will show "unknown commit".
 In this case, please set it to the commit or release tag you build from:

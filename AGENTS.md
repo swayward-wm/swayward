@@ -22,6 +22,10 @@ On the operator's machine the three `swayward-wm` repos live side by side:
 | `~/hacking/swayward-wm/oracle` | `swayward-wm/sway-ipc-oracle` |
 | `~/hacking/swayward-wm/org` | `swayward-wm/.github`, the org profile and logo |
 
+Unfinished maintainer work lives in
+[`docs/internal/BACKLOG.md`](docs/internal/BACKLOG.md) (migrated from
+`mu -w swayward`). Do not treat that workstream as the live backlog.
+
 Worktrees, scratch output and extra target directories go beside them under
 `~/hacking/swayward-wm/`, never inside a repo. See "Scratch space lives on
 disk" for where.
@@ -37,24 +41,25 @@ session, and unlike a human watching a screen it runs in CI.
 ## Start from main, finish on the fast gate
 
 Begin every fix from current `main` (`git checkout --detach main` in a
-worktree), and run `./contrib/fast-gate` before calling it done. It runs nightly
-fmt, clippy, `cargo test --all`, ledger and coverage checks, plus the slow layout
+worktree). A fix for a release line in rc or stable starts on
+`release/<YY.MM>` instead, or is cherry-picked there, per `docs/UPSTREAM.md`.
+Run `./contrib/fast-gate` before calling it done. It runs nightly fmt, clippy, `cargo test --all`, ledger and coverage checks, plus the slow layout
 gate when `src/layout/` changed and the i3 ratchet when translator or harness
 paths changed. A fix verified on a stale base or with focused tests only broke
 main four times in one day: two fixes that each passed alone collided, and a
 command change regressed green i3 files that only the full conformance runner
 exercises. `cargo test --all` includes that runner.
 
-Rebase onto the latest `origin/main` immediately before handing a commit over.
-Main moves several times an hour, and most integration conflicts are stale
+Rebase onto the latest `origin/main` (or `origin/release/<YY.MM>` for a line
+fix) immediately before handing a commit over. Main moves several times an hour, and most integration conflicts are stale
 bases.
 
 ### What each kind of commit needs
 
 **Rule zero: never pin intermediate commits.** The oracle's `pins.toml`
-swayward sha and swayward's `tests/oracle.toml` change once per milestone, at
-the release candidate (T4). Every other commit leaves both pins alone; a
-commit that moves a pin outside T4 is bounced.
+swayward sha and swayward's `tests/oracle.toml` change only at a T4. Every
+other commit leaves both pins alone; a commit that moves a pin outside T4 is
+bounced.
 
 | Tier | When | Who runs what | Passes when |
 |---|---|---|---|
@@ -62,7 +67,7 @@ commit that moves a pin outside T4 is bounced.
 | T1 | behavior change | author: T0, plus `contrib/targeted-oracle --baseline <last T2 sweep dir> --out-dir <scratch> --run` and the cited rows | 0 new mismatches; cited rows match |
 | T2 | a landed behavior batch, at most every 2 h | integrator: `contrib/oracle-sweep`, then `contrib/oracle-sweep-diff` against the baseline | 0 lost, 0 missing |
 | T3 | nightly | CI: 200k proptests and the live soak | no new failure |
-| T4 | release candidate, once per milestone | maintainer: full oracle regeneration | oracle `contrib/validate` green, `pending.toml` empty, two runs agree |
+| T4 | each beta and rc (including a patch or feature release's rc), and a patch release that changes measured behaviour (`docs/UPSTREAM.md`, "Release lifecycle") | maintainer: full oracle regeneration | oracle `contrib/validate` green, `pending.toml` empty, two runs agree |
 
 Commits that touch the translator (`contrib/sway-to-kdl*`,
 `contrib/test-sway-to-kdl.py`, `swayward-config/`) or the i3 harness
@@ -78,10 +83,11 @@ T4 runs in this order, so the pinned commit survives on main:
    `main`, pushed with `--force-with-lease` while nothing else is in flight.
    Squash before the freeze, never after; a rewrite after freeze orphans the
    sha the oracle is about to pin.
-2. Freeze the RC sha on main.
+2. Freeze the RC sha on main (for a beta or rc1), or on `release/<YY.MM>`
+   (for a later rc, a patch or feature release; skip step 1 there).
 3. Pin the RC in the oracle and regenerate every result.
-4. Squash the oracle: only commits above the oracle commit pinned by the
-   latest swayward release tag, so every tag's pinned oracle sha survives.
+4. Squash the oracle: only commits above the newest oracle commit pinned by
+   any swayward release tag, so every tag's pinned oracle sha survives.
    Oracle `main` is otherwise protected and never rewritten.
 5. Repin `tests/oracle.toml` once, then tag swayward HEAD.
 

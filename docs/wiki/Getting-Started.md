@@ -1,5 +1,16 @@
 ## Install
 
+### Which version should I use?
+
+Use a release: a `swayward-v*` tag, which the packages below are built from,
+or a line's `release/YY.MM` branch, such as `release/26.10`, for the latest
+fixes on that line. `main` is the development branch and is not meant for
+users. [Release
+lifecycle](https://github.com/swayward-wm/swayward/blob/main/docs/UPSTREAM.md#release-lifecycle)
+says how versions name their niri base and which lines get fixes.
+
+### Packages
+
 Prebuilt x86_64 packages are on the [releases
 page](https://github.com/swayward-wm/swayward/releases), where `VERSION` is the
 release version. There is no COPR repository or AUR package yet. Both wait until
@@ -37,13 +48,15 @@ The tarball is built on Ubuntu 24.04 and needs GLIBC 2.39 or newer and
 `-vendored-dependencies.tar.xz` archive is also attached, for building offline
 rather than installing.
 
-With Nix, install the current repository version on any supported Linux system:
+With Nix, install a release on any supported Linux system:
 
 ```sh
-nix profile install github:swayward-wm/swayward
+nix profile install github:swayward-wm/swayward/swayward-vVERSION
 ```
 
-On NixOS, you can also consume `github:swayward-wm/swayward` as a flake input.
+On NixOS, you can also consume `github:swayward-wm/swayward/swayward-vVERSION`
+as a flake input, or `github:swayward-wm/swayward?ref=release/26.10` to follow
+a line's fixes.
 The flake exports the `swayward` and `swayward-debug` packages, an overlay, and
 a development shell.
 

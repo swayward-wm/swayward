@@ -11,6 +11,7 @@ them beside the code means they are versioned with it and reviewed with it.
 | Document | What it is for |
 | --- | --- |
 | [`STANCE.md`](STANCE.md) | What swayward is, what it values, and how it asks to be judged. |
+| [`BACKLOG.md`](BACKLOG.md) | Maintainer backlog (migrated from `mu -w swayward`). Split by audience: deviations, bugs, eng leftovers, launch, post-beta. |
 | [`specs/`](specs) | Design records. The foundation spec is the design of record for the fork. |
 
 Anything user-facing belongs in [`docs/wiki/`](../wiki), which is published,

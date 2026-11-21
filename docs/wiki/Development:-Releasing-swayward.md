@@ -2,8 +2,11 @@
 
 `Cargo.toml` is the source of truth for the public version. Swayward uses
 three-part Semantic Versioning. Add a hyphenated suffix for a prerelease, such
-as `26.10.0-beta.1`. The version follows swayward releases. It does not claim
-parity with the niri version in `docs/FORK-BASE.md`.
+as `26.10.0-beta.1`. The version is `YY.MM.N`: `YY.MM` names the niri
+release the line is based on, and `N` counts swayward releases on that base.
+`docs/FORK-BASE.md` and the release notes name the exact niri base. The
+[release lifecycle](https://github.com/swayward-wm/swayward/blob/main/docs/UPSTREAM.md#release-lifecycle)
+defines the stages, from betas to patch releases.
 
 Tag releases as `swayward-v<version>`, for example
 `swayward-v26.10.0-beta.1`. Do not use an unprefixed `v<version>` tag. The
@@ -72,9 +75,10 @@ thing without promising a release of our own.
 
 Releases are cut from the release line's branch, `release/<YY.MM>` (for
 example `release/26.10`). Create it from `main` for a new line; it is
-protected against force-push and deletion. Later fixes for that line are
-committed there, not taken from `main`, which follows niri by merging-rebase
-(see [docs/UPSTREAM.md](https://github.com/swayward-wm/swayward/blob/main/docs/UPSTREAM.md)).
+protected against force-push and deletion. It follows `main` until the line's
+first release candidate. After that, fixes land on the branch, cherry-picked
+from `main` or forward-ported to it, and the branch is never rebased onto niri
+(see [docs/UPSTREAM.md](https://github.com/swayward-wm/swayward/blob/main/docs/UPSTREAM.md#release-lifecycle)).
 
 After the final audit, confirm that the release commit is the audited commit
 on the release branch and the working tree is clean. Creating the real beta

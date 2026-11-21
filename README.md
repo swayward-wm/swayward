@@ -135,10 +135,18 @@ install commands.
 There is no COPR repository or AUR package. Both wait until the release packages
 have survived real installations.
 
-To install the current source with Nix:
+### Which version should I use?
+
+Use a release: a `swayward-v*` tag, which the release-page packages are built
+from, or a line's `release/YY.MM` branch, such as `release/26.10`, for the
+latest fixes on that line. `main` is the development branch and is not meant
+for users. [Release lifecycle](docs/UPSTREAM.md#release-lifecycle) says how
+versions name their niri base and which lines get fixes.
+
+To install a release with Nix, where `VERSION` is the release version:
 
 ```sh
-nix profile install github:swayward-wm/swayward
+nix profile install github:swayward-wm/swayward/swayward-vVERSION
 ```
 
 The repository flake provides `swayward`, `swayward-debug`, and a development

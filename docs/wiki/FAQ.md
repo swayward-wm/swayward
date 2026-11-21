@@ -248,10 +248,11 @@ Ubuntu 24.04 `.deb`, one RPM for each supported Fedora release (currently 44 and
 installs each package in a clean container before drafting the release. See
 [Getting started](./Getting-Started.md) for the install commands.
 
-The repository also provides a Nix flake. Install the current source with
-`nix profile install github:swayward-wm/swayward`, or use the flake as a NixOS
-input. `nix flake check` runs the tests that work in the Nix sandbox; tests
-that need the fetched oracle or an EGL display run in CI. You can also [build
+The repository also provides a Nix flake. Install a release with
+`nix profile install github:swayward-wm/swayward/swayward-vVERSION`, or use a
+release tag or `release/*` branch of the flake as a NixOS input. `nix flake
+check` runs the tests that work in the Nix sandbox; tests that need the
+fetched oracle or an EGL display run in CI. You can also [build
 from
 source](https://github.com/swayward-wm/swayward/blob/main/docs/BUILDING.md).
 

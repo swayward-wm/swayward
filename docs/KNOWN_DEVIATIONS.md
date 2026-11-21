@@ -410,6 +410,43 @@ The difference is narrow but real: a script that runs `reload` to return
 displays to their configured state works in sway and does not work in swayward.
 Reapply the output configuration explicitly rather than relying on the reset.
 
+### Output identifier selectors
+
+**Infrastructure gap.**
+
+Sway lets an `output` command name outputs by identifier,
+`"<make> <model> <serial>"` with `Unknown` for a missing field
+(`sway/sway/config/output.c:31-38`). It stores the command under that name and
+applies it to every output with that identifier
+(`sway/sway/config/output.c:241-294,703-732`). Headless outputs and outputs
+without EDID data all have the identifier `Unknown Unknown Unknown`.
+
+Swayward never matches an identifier against an output that reports no make,
+model or serial. On headless outputs,
+`output "Unknown Unknown Unknown" scale 1.5` succeeds but leaves the scale at
+1.0, and `output "Unknown Unknown Unknown" toggle` fails with "Cannot apply
+toggle to unknown output". The oracle row `output_identifier_unknown`
+(sway-ipc-oracle `db931de8`) measures the difference. Name such outputs by
+connector, for example `output DP-1 scale 1.5`. A fix to match sway is
+planned.
+
+### Workspace layout after re-enabling an output
+
+**Infrastructure gap.**
+
+Without a `default_orientation`, sway gives a new workspace a vertical layout
+when its output is taller than it is wide
+(`sway/sway/tree/workspace.c:219`, `sway/sway/tree/output.c:441-450`). When
+`output <name> toggle` re-enables an output, sway creates the output's
+workspace before it updates the output's cached size, which is still 0x0 from
+the disable (`sway/sway/config/output.c:677-678,1085-1092`). The re-created
+workspace is therefore `splith`, even on a portrait output.
+
+Swayward keeps the output's real size while it is disabled, so on a portrait
+output the re-created workspace is `splitv`. Landscape outputs agree. The
+oracle row `output_toggle_reenable` (sway-ipc-oracle `088ce65c`) measures the
+difference. A fix to match sway is planned.
+
 ## Layout and Xwayland
 
 Sway rejects `layout toggle stacked` because its two-token form accepts only
