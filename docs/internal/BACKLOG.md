@@ -60,7 +60,6 @@ Likely user-visible or command-gap. Confirm on current `main` + oracle/i3 harnes
 | Item | Hint |
 | --- | --- |
 | AGENTS.md vs `ci.yml` on 200k proptest cadence | Was `ci-proptest-cadence-truth` |
-| Packaged builds: version string / commit; `swaywardmsg --version` | Was `version-string-packaged-builds` |
 | `contrib/dev-run.sh` stray `/proc/PID/cmdline` at teardown | Was `devrun-stray-proc-error` |
 | Nightly oracle sweep job (skip unless `main` moved) | Was `nightly-sway-ipc-sweep` |
 | Capture-check empty log when a test launches sway | Was `capture-check-launch-with-config` |

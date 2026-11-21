@@ -3493,7 +3493,6 @@ dependencies = [
  "drm-ffi",
  "fastrand",
  "futures-util",
- "git-version",
  "glam",
  "input",
  "insta",
@@ -3556,6 +3555,7 @@ name = "swayward-ipc"
 version = "26.10.0-beta.2"
 dependencies = [
  "clap",
+ "git-version",
  "pcre2",
  "schemars",
  "serde",

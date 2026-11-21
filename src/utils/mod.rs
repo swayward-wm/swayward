@@ -12,7 +12,6 @@ use std::{f64, fmt};
 use anyhow::{ensure, Context};
 use bitflags::bitflags;
 use directories::UserDirs;
-use git_version::git_version;
 use smithay::backend::renderer::utils::{
     with_renderer_surface_state, RendererSurfaceStateUserData,
 };
@@ -140,22 +139,19 @@ impl ResizeEdge {
     }
 }
 
-/// Swayward's human release name. Cargo carries the same release as ordered SemVer
-/// (beta2 is `26.10.0-beta.2`).
-pub const SWAYWARD_VERSION: &str = "beta2";
+pub use swayward_ipc::version::{version, SWAYWARD_VERSION};
+
+/// The niri commit swayward is based on, for the second line of
+/// `swayward --version`. `docs/FORK-BASE.md` is the record; the merging-rebase
+/// runbook updates both.
+pub const NIRI_BASE: &str = "9e72e491 (93 commits after v26.04)";
 
 /// Numeric IPC identity for clients that model sway's GET_VERSION fields.
 pub const SWAYWARD_IPC_VERSION: (u32, u32, u32) = (1, 0, 0);
 
-pub fn version() -> String {
-    if let Some(v) = option_env!("SWAYWARD_BUILD_VERSION_STRING") {
-        return String::from(v);
-    }
-
-    let commit =
-        option_env!("SWAYWARD_BUILD_COMMIT").unwrap_or(git_version!(fallback = "unknown commit"));
-
-    format!("{SWAYWARD_VERSION} ({commit})")
+/// `swayward --version`: the version line, then the niri base.
+pub fn long_version() -> String {
+    format!("{}\nniri base: {NIRI_BASE}", version())
 }
 
 pub fn get_monotonic_time() -> Duration {

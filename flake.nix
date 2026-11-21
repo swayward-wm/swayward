@@ -224,7 +224,9 @@
                 "-Wl,--pop-state"
               ]
             );
-            SWAYWARD_BUILD_COMMIT = revision;
+            # Empty when the flake source has no Git revision; swayward then reports
+            # "unknown commit".
+            SWAYWARD_BUILD_COMMIT = self.shortRev or self.dirtyShortRev or "";
           };
 
           passthru = {

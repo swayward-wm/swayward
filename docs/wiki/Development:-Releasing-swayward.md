@@ -105,8 +105,9 @@ with generated release notes and these files:
 - an Arch Linux `.pkg.tar.zst`.
 
 The package jobs install their artifact in a separate clean job and run both
-`swayward --version` and `swaywardmsg --version`. The draft is created only
-after every installation check passes.
+`swayward --version` and `swaywardmsg --version`, failing if either reports
+`unknown commit`. The draft is created only after every installation check
+passes.
 
 The workflow builds on `ubuntu-24.04`, and the binary tarball targets that
 distribution rather than Linux in general. The runner's glibc 2.39 becomes

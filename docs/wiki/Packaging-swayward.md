@@ -100,23 +100,29 @@ The swayward version string includes its public version and the output of
 build of the beta2 tag, and a build a few commits after it, look like this:
 
 ```
-$ swayward --version
+$ swayward -V
 swayward beta2 (swayward-v26.10.0-beta.2)
 swayward beta2 (swayward-v26.10.0-beta.2-12-g1a2b3c4d)
 ```
 
-The RPM recipe sets the description to the package version, so a Fedora build
-reports `swayward beta2 (26.10.0~beta.2)`.
+`swayward --version` adds a second line naming the niri commit swayward is
+based on, such as `niri base: 9e72e491 (93 commits after v26.04)`.
+`swaywardmsg --version` prints the same string as `swayward -V`, prefixed
+with `swaywardmsg`.
+
+The RPM recipe records `git describe` while rpkg still has the repository,
+the PKGBUILD names the release tag it downloads, and the Nix flake uses the
+flake's Git revision.
 
 The public version is the human release name, such as `beta2`. Cargo's package
 version is the same swayward release as ordered Semantic Versioning, such as
 `26.10.0-beta.2`; it no longer tracks the niri merge-base version.
 
 When building in a packaging system, there's usually no repository, so the git description is unavailable and the version will show "unknown commit".
-In this case, please set it manually:
+In this case, please set it to the commit or release tag you build from:
 
 ```
-$ export SWAYWARD_BUILD_COMMIT="e35c630"
+$ export SWAYWARD_BUILD_COMMIT="swayward-v26.10.0-beta.2"
 ...proceed to build swayward
 ```
 

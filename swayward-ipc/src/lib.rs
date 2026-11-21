@@ -36,6 +36,7 @@ pub mod socket;
 pub mod state;
 pub mod sway_socket;
 mod tree;
+pub mod version;
 pub mod wire;
 
 pub use event::*;

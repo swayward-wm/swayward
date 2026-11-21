@@ -238,7 +238,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             return Ok(ExitCode::SUCCESS);
         }
         Invocation::Version => {
-            println!("swaywardmsg {}", env!("CARGO_PKG_VERSION"));
+            println!("swaywardmsg {}", swayward_ipc::version::version());
             return Ok(ExitCode::SUCCESS);
         }
         Invocation::Execute(options) => options,

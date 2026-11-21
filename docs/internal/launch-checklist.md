@@ -32,7 +32,7 @@ Complete `launch-beta-version-contract` before editing release metadata. The mai
 The exact values:
 
 - signed Git tag: `swayward-v26.10.0-beta.1`;
-- `swayward --version` and `GET_VERSION.human_readable`: `swayward beta1 (<git describe>)`; the `GET_VERSION` numeric fields stay `1.0.0`;
+- `swayward -V` and `GET_VERSION.human_readable`: `swayward beta1 (<git describe>)`; `swayward --version` adds `niri base: <NIRI_BASE>`; the `GET_VERSION` numeric fields stay `1.0.0`;
 - Cargo workspace version: `26.10.0-beta.1`;
 - Debian and RPM: `26.10.0~beta.1`; Arch `pkgver`: `26.10.0beta1` with `_tagver=26.10.0-beta.1`;
 - release workflow input: `26.10.0-beta.1`;
@@ -326,7 +326,7 @@ gh workflow run release.yml \
 gh run list --workflow release.yml --limit 1
 ```
 
-Gate: the validation, Ubuntu, Debian, Fedora, Arch, and clean-install jobs pass. Download the artifacts, verify checksums, review generated notes, and add the bounded beta limitations from `docs/RELEASE-NOTES-beta1.md`. Publish the draft only after maintainer review.
+Gate: the validation, Ubuntu, Debian, Fedora, Arch, and clean-install jobs pass, and each clean-install job's `swayward --version` and `swaywardmsg --version` name the tag rather than `unknown commit` (the RPM spec, the PKGBUILD and `release.yml` supply the commit; see `docs/UPSTREAM.md`, Versioning). Download the artifacts, verify checksums, review generated notes, and add the bounded beta limitations from `docs/RELEASE-NOTES-beta1.md`. Publish the draft only after maintainer review.
 
 The release body is the user-facing notes: drop the `DRAFT` heading and the
 maintainer-review paragraph from `docs/RELEASE-NOTES-beta1.md` when copying
