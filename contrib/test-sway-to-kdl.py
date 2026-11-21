@@ -5,6 +5,7 @@ import functools
 import importlib.machinery
 import importlib.util
 import json
+import math
 import os
 import pickle
 import random
@@ -2484,6 +2485,83 @@ bindsym Mod5+q workspace 1
             "output DP-4 foo bar scale 2\n"
         )
 
+    def test_output_off_and_on_are_reported(self):
+        # sway's output subcommands include disable and enable but neither
+        # off nor on, and an unknown one fails the whole output command
+        # (sway/commands/output.c:9-34,87-93).
+        result = self.translate(
+            "output DP-1 off\n"
+            "output DP-2 scale 2 on position 0 0\n"
+            "output DP-3 disable\n"
+            "output DP-4 disable enable\n"
+        )
+        out, err = result.stdout, result.stderr
+        reason = (
+            "sway has no output subcommand {} and rejects the output command "
+            "(sway/sway/commands/output.c:9-34,87-93); use enable or disable"
+        )
+        self.assertIn(f"config:1: {reason.format('off')}: off\n", err)
+        self.assertIn(f"config:2: {reason.format('on')}: on position 0 0\n", err)
+        self.assertIn("manual attention: 2 directive(s)", err)
+        self.assertIn('output "DP-1" {\n    // sway-to-kdl:', out)
+        self.assertNotIn("position", out.replace("on position", ""))
+        self.assertIn('output "DP-3" {\n    off\n}\n', out)
+        self.assertIn('output "DP-4" {\n}\n', out)
+        self.assertEqual(out.count("    off\n"), 1)
+
+    def test_output_scale_and_position_are_checked(self):
+        # sway reads the scale with strtof and each coordinate with strtol,
+        # ASCII only, and fails on characters left over
+        # (sway/commands/output/scale.c:13-17, position.c:13-35); it keeps
+        # x and y in a C int (include/sway/config.h:289). swayward-config
+        # holds a scale greater than 0 and at most 10 and an i32 position
+        # (swayward-config/src/output.rs:57,127-132).
+        result = self.translate(
+            "output DP-1 scale 11\n"
+            "output DP-2 position 2147483648 0\n"
+            'output DP-3 scale "2\n'
+            "output DP-4 position \u0661,2\n"
+            "output DP-5 scale 0 position 1,-2147483649\n"
+            "output DP-6 scale nan\n"
+            "output DP-7 scale 2. position +5,-0\n"
+            "output DP-8 scale 0x1.8p0 pos ,5\n"
+            "output DP-9 scale 10 position -2147483648 2147483647\n"
+            "output DP-10 scale 10.0000001\n"
+            "output DP-11 scale 1e-50\n"
+        )
+        out, err = result.stdout, result.stderr
+        scale = (
+            "output scale takes a number greater than 0 and at most 10 "
+            "(swayward-config/src/output.rs:57, utils.rs:155-178)"
+        )
+        out_of_range = "number out of range: sway stores it in a C int, which cannot hold it"
+        for item in [
+            f"config:1: {scale}: scale 11",
+            f"config:2: {out_of_range}: position 2147483648 0",
+            f'config:3: {scale}: scale "2',
+            "config:4: unhandled output directive: position",
+            "config:4: unhandled output directive: \u0661,2",
+            f"config:5: {scale}: scale 0",
+            f"config:5: {out_of_range}: position 1,-2147483649",
+            f"config:6: {scale}: scale nan",
+            f"config:11: {scale}: scale 1e-50",
+        ]:
+            self.assertIn(f"{item}\n", err)
+        self.assertIn("manual attention: 9 directive(s)", err)
+        for output in [1, 2, 3, 4, 5, 6, 11]:
+            self.assertIn(f'output "DP-{output}" {{\n    // sway-to-kdl:', out)
+        self.assertIn('output "DP-7" {\n    scale 2.0\n    position x=5 y=0\n}', out)
+        self.assertIn('output "DP-8" {\n    scale 1.5\n    position x=0 y=5\n}', out)
+        self.assertIn(
+            'output "DP-9" {\n    scale 10\n'
+            "    position x=-2147483648 y=2147483647\n}",
+            out,
+        )
+        # sway reads the scale as a C float, which rounds 10.0000001 to 10.
+        self.assertIn('output "DP-10" {\n    scale 10.0\n}', out)
+        self.assertEqual(out.count("    scale "), 4)
+        self.assertEqual(out.count("    position "), 3)
+
     def test_golden_only_swayfx_titlebar_border_thickness(self):
         self.translate("titlebar_border_thickness 2\ntitlebar_padding 4 4\n")
         self.translate(
@@ -3044,6 +3122,96 @@ class LinearTimeTests(unittest.TestCase):
                 self.assertIn("manual attention: 1 directive(s)", result.stderr)
 
 
+class NumberTests(unittest.TestCase):
+    """The number readers, called directly; no goldens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s2k = load_script()
+
+    def test_c_int_matches_the_pattern_it_replaced(self):
+        # c_int once matched `([+-]?)0*([0-9]+)`; the scan must agree with it
+        # on every input, the error message included.
+        s2k = self.s2k
+
+        def by_pattern(text):
+            match = re.fullmatch(r"([+-]?)0*([0-9]+)", text)
+            if match is None:
+                raise s2k.NumberError(f"expected an integer: {text}")
+            sign, digits = match.groups()
+            if len(digits) > len(str(s2k.INT_MAX)):
+                raise s2k.NumberError(s2k.NUMBER_OUT_OF_RANGE)
+            value = int(sign + digits)
+            if not s2k.INT_MIN <= value <= s2k.INT_MAX:
+                raise s2k.NumberError(s2k.NUMBER_OUT_OF_RANGE)
+            return value
+
+        def outcome(function, text):
+            try:
+                return function(text)
+            except s2k.NumberError as error:
+                return str(error)
+
+        rng = random.Random(20261116)
+        alphabet = "0000123456789+- x\n\u0661"
+        cases = ["2147483647", "-2147483648", "2147483648", "-0", "+", ""]
+        cases += [
+            "".join(rng.choice(alphabet) for _ in range(rng.randrange(14)))
+            for _ in range(5000)
+        ]
+        for text in cases:
+            self.assertEqual(outcome(s2k.c_int, text), outcome(by_pattern, text), text)
+
+    def test_c_int_scans_in_linear_time(self):
+        # `0*([0-9]+)` gives each zero two ways to match and backtracks
+        # quadratically when another character follows the zeroes: 100,000
+        # of them take about 30 s.
+        code = (
+            "import importlib.machinery, importlib.util, sys\n"
+            f"loader = importlib.machinery.SourceFileLoader('s2k', {str(SCRIPT)!r})\n"
+            "module = importlib.util.module_from_spec("
+            "importlib.util.spec_from_loader('s2k', loader))\n"
+            "sys.modules['s2k'] = module\n"
+            "loader.exec_module(module)\n"
+            "try:\n"
+            "    module.c_int('0' * 100000 + 'x')\n"
+            "except module.NumberError as error:\n"
+            "    print(str(error)[:21])\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], text=True, capture_output=True,
+            check=True, timeout=5,
+        )
+        self.assertEqual(result.stdout, "expected an integer: \n")
+
+    def test_strtof_value_reads_what_strtof_reads(self):
+        strtof_value = self.s2k.strtof_value
+        for text, value in [
+            ("2", 2.0), ("2.", 2.0), (".5", 0.5), ("+1e1", 10.0), ("-1.5", -1.5),
+            ("0x1.8p1", 3.0), ("0X.8", 0.5), ("1e999", math.inf),
+            ("0x1p99999", math.inf), ("-Infinity", -math.inf), ("", 0.0),
+            (" \t2", 2.0),
+            # A C float: 1.1 rounds to the nearest float, 10.0000001 to 10
+            # and 1e-50 to 0.
+            ("1.1", 1.10000002384185791015625), ("10.0000001", 10.0),
+            ("1e-50", 0.0), ("-1e-50", -0.0),
+            # The double nearest each of these is the midpoint of two
+            # floats; strtof rounds the text once, to the side it lies on.
+            ("1.000000059604644775390625000000000000001", 1 + 2**-23),
+            ("1.000000178813934326171874999999999999999", 1 + 2**-23),
+            ("0x1.000001000000000001p0", 1 + 2**-23),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(strtof_value(text), value)
+        self.assertTrue(math.isnan(strtof_value("NaN(x_1)")))
+        for text in [
+            '"2', "2x", "0x", "0x1p", "1e", ".", "+", "infinit", "1_0",
+            "\u0662", "2 ", " ", "nan(",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNone(strtof_value(text))
+
+
 def load_script():
     # The script has no .py suffix, so spec_from_file_location needs a loader.
     loader = importlib.machinery.SourceFileLoader("sway_to_kdl", str(SCRIPT))
@@ -3494,6 +3662,84 @@ class IncludeChainTests(unittest.TestCase):
         self.assertEqual(translator.doc.manual, [])
         out = s2k.render(translator.doc)
         self.assertIn('spawn-sh-at-startup "deepest"\nspawn-sh-at-startup "after"\n', out)
+
+    def test_a_path_that_cannot_be_resolved_is_reported_on_its_include(self):
+        # Resolving the path of a match can fail, as on Python 3.9, whose
+        # realpath recurses once per symlink; the failure is reported on
+        # the include and the later matches are still read.
+        s2k = load_script()
+        realpath = os.path.realpath
+        for error in [
+            RecursionError("maximum recursion depth exceeded"),
+            OSError(40, "Too many levels of symbolic links"),
+            RuntimeError("boom"),
+        ]:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                (root / "inc").mkdir()
+                (root / "inc" / "a").write_text("exec first\n")
+                (root / "inc" / "b").write_text("exec second\n")
+                (root / "inc" / "c").write_text("exec third\n")
+                (root / "config").write_text("include inc/*\nexec after\n")
+
+                def failing(path, *args, **kwargs):
+                    if os.path.basename(path) == "b":
+                        raise error
+                    return realpath(path, *args, **kwargs)
+
+                translator = s2k.Translator()
+                with unittest.mock.patch.object(s2k.os.path, "realpath", failing):
+                    translator.parse(root / "config")
+                detail = (
+                    error.strerror
+                    if isinstance(error, OSError)
+                    else f"{type(error).__name__}: {error}"
+                )
+                self.assertEqual(
+                    translator.doc.manual,
+                    [
+                        f"{root}/config:1: cannot resolve included file "
+                        f"{root}/inc/b: {detail}: include inc/*"
+                    ],
+                )
+                spawns = [
+                    line
+                    for line in s2k.render(translator.doc).splitlines()
+                    if line.startswith("spawn-sh-at-startup")
+                ]
+                self.assertEqual(
+                    spawns,
+                    [
+                        'spawn-sh-at-startup "first"',
+                        'spawn-sh-at-startup "third"',
+                        'spawn-sh-at-startup "after"',
+                    ],
+                )
+
+    def test_a_deep_symlink_chain_does_not_stop_the_include(self):
+        # 1,100 symlinks pass Python 3.9's recursion limit in realpath; a
+        # later Python resolves them. Either way the next match is read.
+        s2k = load_script()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "inc").mkdir()
+            (root / "target").write_text("exec deep\n")
+            depth = 1100
+            (root / f"l{depth}").symlink_to("target")
+            for index in reversed(range(depth)):
+                (root / f"l{index}").symlink_to(f"l{index + 1}")
+            (root / "inc" / "a").symlink_to(root / "l0")
+            (root / "inc" / "b").write_text("exec second\n")
+            (root / "config").write_text("include inc/*\n")
+            translator = s2k.Translator()
+            translator.parse(root / "config")
+        out = s2k.render(translator.doc)
+        self.assertIn('spawn-sh-at-startup "second"\n', out)
+        for item in translator.doc.manual:
+            self.assertRegex(
+                item, rf"^{re.escape(str(root))}/config:1: cannot resolve included file "
+            )
+        self.assertLessEqual(len(translator.doc.manual), 1)
 
 
 class IRTests(unittest.TestCase):

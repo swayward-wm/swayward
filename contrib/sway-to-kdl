@@ -9,8 +9,10 @@ import json
 import math
 import os
 import re
+import struct
 import sys
 from dataclasses import dataclass, field, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Iterator, Union
 
@@ -725,8 +727,21 @@ class Frontend:
         """The directives of the file at path; include is the directive that
         includes it, and a file it cannot read is reported there."""
         # realpath, as load_include_config compares real paths
-        # (sway/config.c:560-578); a symlink loop then fails to read.
-        path = Path(os.path.realpath(os.path.expanduser(path)))
+        # (sway/config.c:560-578); a symlink loop then fails to read. A path
+        # that cannot be resolved, as a symlink chain deeper than Python's
+        # recursion limit on Python 3.9, is reported as one that cannot be
+        # read, so the include's remaining matches are still read.
+        try:
+            path = Path(os.path.realpath(os.path.expanduser(path)))
+        except (RecursionError, OSError, RuntimeError) as error:
+            detail = error.strerror if isinstance(error, OSError) else None
+            detail = detail or f"{type(error).__name__}: {error}"
+            if include is None:
+                doc.warn(path, 0, "include", f"cannot resolve include: {detail}")
+            else:
+                reason = f"cannot resolve included file {path}: {detail}"
+                doc.warn(include.pos.path, include.pos.line, include.text, reason)
+            return
         if path in self.visited:
             return
         try:
@@ -859,13 +874,21 @@ def c_int(text: str) -> int:
     force_display_urgency_hint.c:14, common/util.c:89). strtol saturates at
     LONG_MAX and the conversion keeps the low bits, so sway stores another
     number for a value outside INT_MIN..INT_MAX; that raises NumberError, as
-    does text of another shape. The digits are measured as text first, so
-    no length reaches int(), which refuses over 4300 digits on Python 3.11+.
+    does text of another shape. The text is scanned once, as in strtol_text.
     """
-    match = re.fullmatch(r"([+-]?)0*([0-9]+)", text)
-    if match is None:
+    sign = text[:1] if text[:1] in ("+", "-") else ""
+    digits = text[len(sign) :]
+    if digits == "" or digits.strip("0123456789") != "":
         raise NumberError(f"expected an integer: {text}")
-    sign, digits = match.groups()
+    return int_in_range(sign, digits.lstrip("0") or "0")
+
+
+def int_in_range(sign: str, digits: str) -> int:
+    """sign and ASCII digits without leading zeroes as a C int, or
+    NumberError when an int cannot hold them. The digits are measured as
+    text first, so no length reaches int(), which refuses over 4300 digits
+    on Python 3.11+.
+    """
     if len(digits) > len(str(INT_MAX)):
         raise NumberError(NUMBER_OUT_OF_RANGE)
     value = int(sign + digits)
@@ -935,6 +958,110 @@ def strtoul_size(text: str) -> int | None:
     elif sign == "-":
         value = -value % 2**64
     return value % 2**32
+
+
+# The text strtof converts, in ASCII and the C locale: an optional sign, then
+# a decimal or hexadecimal number, an infinity or a NaN (C11 7.22.1.3). Each
+# alternative matches its text one way, so a failed match does not backtrack.
+STRTOF = re.compile(
+    r"[+-]?(?:"
+    r"0[xX](?:[0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?|\.[0-9a-fA-F]+)(?:[pP][+-]?[0-9]+)?"
+    r"|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+    r"|(?i:inf(?:inity)?|nan(?:\([0-9A-Za-z_]*\))?)"
+    r")"
+)
+
+
+def float32(value: float) -> float:
+    """value rounded to the nearest C float, ties to even; one past the
+    float range is an infinity."""
+    try:
+        return struct.unpack("f", struct.pack("f", value))[0]
+    except OverflowError:
+        return math.copysign(math.inf, value)
+
+
+def float32_step(value: float, up: bool) -> float:
+    """The C float next to value, a non-negative finite C float."""
+    (bits,) = struct.unpack("I", struct.pack("f", value))
+    return struct.unpack("f", struct.pack("I", bits + 1 if up else bits - 1))[0]
+
+
+def exact_number(unsigned: str) -> Fraction:
+    """The exact value of a decimal or hexadecimal STRTOF number without a
+    sign."""
+    if ascii_lower(unsigned[:2]) != "0x":
+        return Fraction(unsigned)
+    mantissa, _, exponent = ascii_lower(unsigned[2:]).partition("p")
+    whole, _, fraction = mantissa.partition(".")
+    value = Fraction(int(whole + fraction or "0", 16), 16 ** len(fraction))
+    return value * Fraction(2) ** int(exponent or "0")
+
+
+def strtof_value(text: str) -> float | None:
+    """The C float strtof reads from all of text, as the output scale reads
+    it (sway/commands/output/scale.c:13-17), or None when characters are
+    left over.
+
+    Leading whitespace is skipped and an empty text reads as 0, as with
+    strtol_text. A number past the float range reads as an infinity and
+    one below its smallest step as 0.
+    """
+    if text == "":
+        return 0.0
+    rest = text.lstrip(SWAY_WHITESPACE)
+    if STRTOF.fullmatch(rest) is None:
+        return None
+    negative = rest[:1] == "-"
+    unsigned = rest.lstrip("+-")
+    lowered = ascii_lower(unsigned)
+    if lowered.startswith("inf"):
+        value = math.inf
+    elif lowered.startswith("nan"):
+        value = math.nan
+    else:
+        try:
+            double = (
+                float.fromhex(unsigned) if lowered.startswith("0x") else float(unsigned)
+            )
+        except OverflowError:
+            double = math.inf
+        value = float32(double)
+        # strtof rounds the text once. Rounding it to a double first can
+        # land on the midpoint of two floats when the text lies to one side
+        # of it; the exact value then picks the side.
+        if math.isfinite(value) and value != double:
+            low, high = sorted((value, float32_step(value, value < double)))
+            if double == (low + high) / 2 and math.isfinite(high):
+                exact = exact_number(unsigned)
+                if exact != Fraction(double):
+                    value = high if exact > Fraction(double) else low
+    return -value if negative else value
+
+
+def float32_text(value: float) -> str:
+    """The shortest decimal that reads as the C float value."""
+    for digits in range(1, 10):
+        text = f"{value:.{digits}g}"
+        if float32(float(text)) == value:
+            return text
+    return repr(value)
+
+
+# A number in KDL 1, the syntax knuffel reads, without `_` separators.
+KDL_NUMBER = re.compile(r"[+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+
+OUTPUT_SCALE_MAX = 10.0
+
+OUTPUT_SCALE_REFUSED = (
+    "output scale takes a number greater than 0 and at most 10 "
+    "(swayward-config/src/output.rs:57, utils.rs:155-178)"
+)
+
+OUTPUT_ON_OFF_REFUSED = (
+    "sway has no output subcommand {name} and rejects the output command "
+    "(sway/sway/commands/output.c:9-34,87-93); use enable or disable"
+)
 
 
 # The subcommands cmd_seat dispatches (sway/commands/seat.c:11-27).
@@ -2980,20 +3107,31 @@ class Translator:
                 fields.add("mode")
                 index += 2
             elif name in {"pos", "position"} and index + 1 < len(words):
+                # strtol reads x, then a comma and y, or y from the next
+                # word (sway/commands/output/position.c:13-35).
+                x_number = y_number = None
                 if "," in words[index + 1]:
                     x, y = words[index + 1].split(",", 1)
+                    x_number, y_number = strtol_text(x), strtol_text(y)
                     consumed = 2
                 elif index + 2 < len(words):
                     x, y = words[index + 1 : index + 3]
+                    x_number, y_number = strtol_text(x), strtol_text(y)
                     consumed = 3
-                else:
-                    x = y = ""
-                    consumed = 0
-                if re.fullmatch(r"-?\d+", x) and re.fullmatch(r"-?\d+", y):
-                    translated.set(
-                        Node("position", props=[("x", Raw(x)), ("y", Raw(y))])
-                    )
-                    fields.add("position")
+                if x_number is not None and y_number is not None:
+                    try:
+                        # sway keeps both in a C int (include/sway/config.h:289),
+                        # swayward an i32 (swayward-config/src/output.rs:127-132).
+                        x_value = int_in_range(*x_number)
+                        y_value = int_in_range(*y_number)
+                    except NumberError as error:
+                        directive = " ".join(words[index : index + consumed])
+                        translated.report(Report(pos, str(error), directive), self.doc)
+                    else:
+                        translated.set(
+                            Node("position", props=[("x", x_value), ("y", y_value)])
+                        )
+                        fields.add("position")
                     index += consumed
                 else:
                     consumed = 1
@@ -3023,19 +3161,40 @@ class Translator:
                     )
                 index += 2
             elif name == "scale" and index + 1 < len(words):
-                translated.set(Node("scale", [Raw(words[index + 1])]))
-                fields.add("scale")
+                value = words[index + 1]
+                scale = strtof_value(value)
+                if scale is None or not 0.0 < scale <= OUTPUT_SCALE_MAX:
+                    translated.report(
+                        Report(pos, OUTPUT_SCALE_REFUSED, f"{name} {value}"), self.doc
+                    )
+                else:
+                    # The text stays when swayward reads it as a double
+                    # inside its bound that rounds to sway's float.
+                    if (
+                        KDL_NUMBER.fullmatch(value) is None
+                        or float(value) > OUTPUT_SCALE_MAX
+                        or float32(float(value)) != scale
+                    ):
+                        value = repr(float(float32_text(scale)))
+                    translated.set(Node("scale", [Raw(value)]))
+                    fields.add("scale")
                 index += 2
-            elif name in {"enable", "on"}:
+            elif name == "enable":
                 # The last enable or disable wins
                 # (sway/commands/output/enable.c:9, disable.c:8).
                 translated.remove("off")
                 fields.add("enabled")
                 index += 1
-            elif name in {"disable", "off"}:
+            elif name == "disable":
                 translated.set(Node("off"))
                 fields.add("enabled")
                 index += 1
+            elif name in {"on", "off"}:
+                # No sway subcommand; sway rejects the whole output command.
+                remainder = " ".join(words[index:])
+                reason = OUTPUT_ON_OFF_REFUSED.format(name=name)
+                translated.report(Report(pos, reason, remainder), self.doc)
+                break
             else:
                 argument_count = unsupported_argument_counts.get(name)
                 if argument_count is None:
@@ -3373,9 +3532,10 @@ HANDLERS: dict[str, Handler] = {
 class Raw:
     """Source text emitted verbatim and unchecked: a gap in typed validation.
 
-    Used for output `scale`, `position`, `geometry-corner-radius`, blur
-    `passes` and `offset`, generic input values, and digit strings that are
-    emitted as written (`width=007`).
+    Used for `geometry-corner-radius`, blur `passes` and `offset`, generic
+    input values, and digit strings that are emitted as written
+    (`width=007`). An output `scale` is Raw too, but checked first
+    (strtof_value, KDL_NUMBER).
     """
 
     text: str

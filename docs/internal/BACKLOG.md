@@ -116,15 +116,6 @@ Triage note (2026-10-28): scratch evidence under `scratch/g16` and
 | Map `src/swayward/config_reload.rs` and `src/utils/mod.rs` in `tests/oracle-targets.toml` | `contrib/targeted-oracle` exits 2 on them (unmapped). Until mapped, use a full sweep diff against the rolling baseline. Was `oracle-targets-map` |
 | Oracle `contrib/tests/pr-check` self-test fails in the pinned container | `PermissionError` case raises `KeyError: 'resolved'` (likely running as root); passes in distrobox. Was `oracle-prcheck-root` |
 
-### sway-to-kdl translator
-
-| Item | Hint |
-| --- | --- |
-| `output` scale / position arguments not checked against swayward types or KDL syntax | `scale 11` (max 10), `position 2147483648 0` (i32), `scale "2` (unterminated string), Unicode digits emitted unquoted; no manual-attention report. Was `kdl-output-arg-check` |
-| Accepts KDL-only `output X off` / `on`; sway accepts only `disable` / `enable` | `sway/commands/output.c`. Was `kdl-output-off-on` |
-| Deep symlink include chains raise `RecursionError` (Python 3.9) | ~1,100 symlinks; path resolution sits outside the per-file `OSError` handler and aborts the remaining glob matches. Was `kdl-symlink-recursion` |
-| `c_int` uses a backtracking-prone regex | Replace with the linear scan used by `strtol_text`. Low: inputs are pre-cleaned, no known slow input. Was `kdl-c-int-regex` |
-
 ## Post-beta
 
 Parked on purpose until after the beta launch path. Several are already

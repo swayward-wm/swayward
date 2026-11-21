@@ -125,10 +125,14 @@ These directives translate in their common forms. Check the generated comments
 for the parts that did not:
 
 - **Outputs:** common mode, position, scale, enable, and disable settings are
-  translated. Wallpaper and unmatched output settings are reported. So are
-  `output *` settings, as swayward has no wildcard output: set them in each
-  output's block. A setting given through both a connector name and a
-  make-model-serial identifier is reported, as swayward uses only the first
+  translated. Wallpaper and unmatched output settings are reported, as are a
+  scale that is not greater than 0 and at most 10, a position outside a
+  32-bit integer, and the subcommands `on` and `off`, which sway rejects:
+  write `enable` or `disable`. (`disable` becomes the KDL `off` child, and an
+  enabled output has no `off`.) So are `output *` settings, as
+  swayward has no wildcard output: set them in each output's block. A
+  setting given through both a connector name and a make-model-serial
+  identifier is reported, as swayward uses only the first
   output block that matches an output.
 - **Window rules:** supported `for_window` effects with an `app_id` criterion
   become `window-rule` blocks. Other criteria or commands are reported.
@@ -138,8 +142,9 @@ for the parts that did not:
   cursor size outside 1 to 255.
 - **Includes:** sway include globs are expanded during translation. Included sway
   directives are translated in place. A pattern that matches no file, or a file
-  that cannot be read, is reported on its include line; a file already read is
-  skipped, as sway skips it. Includes that use command substitution, such as Fedora's stock
+  that cannot be read or whose path cannot be resolved, is reported on its
+  include line, and the pattern's other files are still read; a file already
+  read is skipped, as sway skips it. Includes that use command substitution, such as Fedora's stock
   `include $(/usr/libexec/sway/layered-include ...)`, are refused; translate the
   drop-in files explicitly or concatenate them into your config first.
 - **Titlebars:** configure the font, Pango markup, padding, border thickness,
