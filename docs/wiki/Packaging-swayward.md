@@ -97,12 +97,12 @@ You may also want to set the `RUN_SLOW_TESTS=1` environment variable to run the 
 
 The swayward version string includes its public version and the output of
 `git describe --always` for the source tree, which names the nearest tag. A
-build of the beta2 tag, and a build a few commits after it, look like this:
+build of the beta3 tag, and a build a few commits after it, look like this:
 
 ```
 $ swayward -V
-swayward beta2 (swayward-v26.10.0-beta.2)
-swayward beta2 (swayward-v26.10.0-beta.2-12-g1a2b3c4d)
+swayward beta3 (swayward-v26.10.0-beta.3)
+swayward beta3 (swayward-v26.10.0-beta.3-12-g1a2b3c4d)
 ```
 
 `swayward --version` adds a second line naming the niri commit swayward is
@@ -114,16 +114,16 @@ The RPM recipe records `git describe` while rpkg still has the repository,
 the PKGBUILD names the release tag it downloads, and the Nix flake uses the
 flake's Git revision.
 
-The public version is the human release name, such as `beta2`. Cargo's package
+The public version is the human release name, such as `beta3`. Cargo's package
 version is the same swayward release as ordered Semantic Versioning, such as
-`26.10.0-beta.2`. Its `YY.MM` names the niri release the line is based on;
+`26.10.0-beta.3`. Its `YY.MM` names the niri release the line is based on;
 the 26.10 line, based on a niri commit after `v26.04`, is the exception.
 
 When building in a packaging system, there's usually no repository, so the git description is unavailable and the version will show "unknown commit".
 In this case, please set it to the commit or release tag you build from:
 
 ```
-$ export SWAYWARD_BUILD_COMMIT="swayward-v26.10.0-beta.2"
+$ export SWAYWARD_BUILD_COMMIT="swayward-v26.10.0-beta.3"
 ...proceed to build swayward
 ```
 
@@ -131,7 +131,7 @@ You can also override the version string entirely. Preserve the public
 swayward version and the source description:
 
 ```
-$ export SWAYWARD_BUILD_VERSION_STRING="beta2 (swayward-v26.10.0-beta.2)"
+$ export SWAYWARD_BUILD_VERSION_STRING="beta3 (swayward-v26.10.0-beta.3)"
 ...proceed to build swayward
 ```
 

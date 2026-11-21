@@ -7,8 +7,8 @@
 use git_version::git_version;
 
 /// Swayward's human release name. Cargo carries the same release as ordered SemVer
-/// (beta2 is `26.10.0-beta.2`).
-pub const SWAYWARD_VERSION: &str = "beta2";
+/// (beta3 is `26.10.0-beta.3`).
+pub const SWAYWARD_VERSION: &str = "beta3";
 
 /// The release name followed by the commit this binary was built from.
 ///
@@ -39,8 +39,8 @@ mod tests {
     #[test]
     fn the_override_replaces_the_whole_string() {
         assert_eq!(
-            format_version(Some("beta2 (packaged)"), Some("1a2b3c4d"), "described"),
-            "beta2 (packaged)"
+            format_version(Some("beta3 (packaged)"), Some("1a2b3c4d"), "described"),
+            "beta3 (packaged)"
         );
     }
 
@@ -55,8 +55,8 @@ mod tests {
     #[test]
     fn without_a_packager_commit_git_describe_or_its_fallback_is_used() {
         assert_eq!(
-            format_version(None, None, "swayward-v26.10.0-beta.2-12-g1a2b3c4d"),
-            format!("{SWAYWARD_VERSION} (swayward-v26.10.0-beta.2-12-g1a2b3c4d)")
+            format_version(None, None, "swayward-v26.10.0-beta.3-12-g1a2b3c4d"),
+            format!("{SWAYWARD_VERSION} (swayward-v26.10.0-beta.3-12-g1a2b3c4d)")
         );
         assert_eq!(
             format_version(None, None, "unknown commit"),
