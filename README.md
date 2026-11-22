@@ -35,16 +35,16 @@ black-box runners that record sway itself. Anyone can rerun it from a clean
 checkout.
 
 <!-- i3-suite-summary:sway-compat generated from the pinned oracle; do not edit by hand -->
-Swayward snapshot `swayward-1fd3c25b` against sway 1.12, from oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6).
+Swayward snapshot `swayward-fc39ac88` against sway 1.12, from oracle [`92945a6e`](https://github.com/swayward-wm/sway-ipc-oracle/tree/92945a6ea5137be392f0db677b45b822c9bb505b).
 
-| Sway-compatibility corpus (reference: sway 1.12) | Match | Mismatch |
-|---|---:|---:|
-| Hand-picked state scenarios | 4,908 | 9 |
-| Event streams | 45 | 0 |
-| States reached by i3's test sequences | 4,148 | 12 |
-| Random 20-step sequences | 466 | 34 |
-| Malformed commands | 195 | 0 |
-| Broken IPC framing | 6 | 4 |
+| Sway-compatibility corpus (reference: sway 1.12) | Match | Mismatch | Unstable |
+|---|---:|---:|---:|
+| Hand-picked state scenarios | 4,970 | 17 | 0 |
+| Event streams | 45 | 0 | 0 |
+| States reached by i3's test sequences | 4,151 | 9 | 0 |
+| Random 20-step sequences | 466 | 33 | 1 |
+| Malformed commands | 195 | 0 | 0 |
+| Broken IPC framing | 6 | 4 | 0 |
 <!-- end i3-suite-summary:sway-compat -->
 
 The oracle lists every mismatch with its reason. A random sequence records

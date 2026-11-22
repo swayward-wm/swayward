@@ -67,11 +67,11 @@ COMPAT = {
     "wire-fuzz": "Broken IPC framing",
 }
 # Published docs that embed generated blocks; --write and --check default to these.
+# Release notes keep the figures measured for their release, so none is listed.
 DOCS = [
     "README.md",
     "docs/I3_SUITE_RESULTS.md",
     "docs/wiki/Testing-and-Conformance.md",
-    "docs/RELEASE-NOTES-beta1.md",
 ]
 BEGIN = "<!-- i3-suite-summary:{} generated from the pinned oracle; do not edit by hand -->"
 END = "<!-- end i3-suite-summary:{} -->"

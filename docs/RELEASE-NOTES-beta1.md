@@ -169,7 +169,6 @@ These figures are generated from the oracle revision pinned in
 [`tests/oracle.toml`](../tests/oracle.toml), and `fast-gate` fails if they
 differ from its committed results. They are regenerated at the release cut.
 
-<!-- i3-suite-summary:sway-ipc generated from the pinned oracle; do not edit by hand -->
 Oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6), swayward snapshot `swayward-1fd3c25b`. The sway 1.12 column replays sway's own captures as a self-check.
 
 | Corpus | Scope | sway 1.12 self-check | swayward match | swayward mismatch | swayward unstable | swayward n.a. |
@@ -182,7 +181,6 @@ Oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327
 | Wire fuzz | 10 cases | 10 match | 6 | 4 | 0 | 0 |
 
 Every swayward mismatch is classified in the oracle's `sway-ipc/classifications/`.
-<!-- end i3-suite-summary:sway-ipc -->
 
 The i3 suite is context for where sway differs from i3, not a sway
 compatibility measure. Its outcomes are in

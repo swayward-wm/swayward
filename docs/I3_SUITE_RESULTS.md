@@ -25,15 +25,15 @@ The table holds swayward only. Sway 1.12's figures, from the same oracle
 revision and stable filter, are in its own block on the oracle's results page.
 
 <!-- i3-suite-summary:i3-suite generated from the pinned oracle; do not edit by hand -->
-Oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6), swayward snapshot `swayward-1fd3c25b`, stable filter over 3,755 assertions:
+Oracle [`92945a6e`](https://github.com/swayward-wm/sway-ipc-oracle/tree/92945a6ea5137be392f0db677b45b822c9bb505b), swayward snapshot `swayward-fc39ac88`, stable filter over 3,755 assertions:
 
 | Compositor | pass | skip | fail | unreached | unstable | flaky | total |
 |---| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| swayward `1fd3c25b` | 1,470 | 12 | 780 | 1,469 | 0 | 24 | 3,755 |
+| swayward `fc39ac88` | 1,470 | 12 | 780 | 1,469 | 0 | 24 | 3,755 |
 
 swayward review: 2,261 non-pass rows; 2,191 verified, 70 unverified, 70 of them unclassified.
 
-Each compositor, sway 1.12 included, has its own block on the oracle's [results page](https://github.com/swayward-wm/sway-ipc-oracle/blob/27560327227afd9ff05ea40f3c527b7333e714a6/docs/results.md).
+Each compositor, sway 1.12 included, has its own block on the oracle's [results page](https://github.com/swayward-wm/sway-ipc-oracle/blob/92945a6ea5137be392f0db677b45b822c9bb505b/docs/results.md).
 <!-- end i3-suite-summary:i3-suite -->
 
 The table uses the oracle's stable filter, so each row's columns sum to the
@@ -80,14 +80,14 @@ is the closer measure of sway compatibility because each scenario starts from
 the same state and compares sway-shaped replies or event sequences.
 
 <!-- i3-suite-summary:sway-ipc generated from the pinned oracle; do not edit by hand -->
-Oracle [`27560327`](https://github.com/swayward-wm/sway-ipc-oracle/tree/27560327227afd9ff05ea40f3c527b7333e714a6), swayward snapshot `swayward-1fd3c25b`. The sway 1.12 column replays sway's own captures as a self-check.
+Oracle [`92945a6e`](https://github.com/swayward-wm/sway-ipc-oracle/tree/92945a6ea5137be392f0db677b45b822c9bb505b), swayward snapshot `swayward-fc39ac88`. The sway 1.12 column replays sway's own captures as a self-check.
 
 | Corpus | Scope | sway 1.12 self-check | swayward match | swayward mismatch | swayward unstable | swayward n.a. |
 |---|---|---|---:|---:|---:|---:|
-| Hand-picked state scenarios | 559 captures, 4,917 rows | 4,916 match, 1 mismatch | 4,908 | 9 | 0 | 0 |
+| Hand-picked state scenarios | 566 captures, 4,987 rows | 4,986 match, 1 mismatch | 4,970 | 17 | 0 | 0 |
 | Events | 45 captures, 45 rows | 45 match | 45 | 0 | 0 | 0 |
-| i3-derived states | 416 states, 4,160 rows | 4,160 match | 4,148 | 12 | 0 | 0 |
-| Random sequences | 500 seeds × 20 steps | 500 match | 466 | 34 | 0 | 0 |
+| i3-derived states | 416 states, 4,160 rows | 4,160 match | 4,151 | 9 | 0 | 0 |
+| Random sequences | 500 seeds × 20 steps | 500 match | 466 | 33 | 1 | 0 |
 | Command fuzz | 195 cases | 195 match | 195 | 0 | 0 | 0 |
 | Wire fuzz | 10 cases | 10 match | 6 | 4 | 0 | 0 |
 
