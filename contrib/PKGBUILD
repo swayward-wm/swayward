@@ -4,7 +4,7 @@
 # container before publishing:
 #
 #   distrobox create --name arch-pkg --image docker.io/library/archlinux:latest
-#   distrobox enter arch-pkg -- bash -lc 'sudo pacman -S --needed base-devel namcap'
+#   distrobox enter arch-pkg -- bash -lc 'sudo pacman -Syu --needed base-devel namcap'
 #   cd contrib && makepkg -s && namcap PKGBUILD *.pkg.tar.zst
 #
 # Publishing needs an AUR account with an SSH key; see

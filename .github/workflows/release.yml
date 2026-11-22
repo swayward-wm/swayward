@@ -373,7 +373,10 @@ jobs:
           path: artifact
       - name: Install and execute Arch package
         run: |
-          pacman -Sy --noconfirm
+          # -Sy alone is a partial upgrade: -U resolves dependencies against the
+          # refreshed database, and they can conflict with the image's older
+          # installed packages.
+          pacman -Syu --noconfirm
           pacman -U --noconfirm artifact/*.pkg.tar.zst
           for binary in swayward swaywardmsg; do
             version=$("$binary" --version)

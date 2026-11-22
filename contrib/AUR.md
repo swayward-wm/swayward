@@ -9,7 +9,7 @@ No Arch machine required; a container is enough.
 
 ```sh
 distrobox create --name arch-pkg --image docker.io/library/archlinux:latest --yes
-distrobox enter arch-pkg -- bash -lc 'sudo pacman -Sy --needed --noconfirm base-devel namcap'
+distrobox enter arch-pkg -- bash -lc 'sudo pacman -Syu --needed --noconfirm base-devel namcap'
 
 cd contrib
 distrobox enter arch-pkg -- bash -lc 'cd contrib && makepkg -s'
