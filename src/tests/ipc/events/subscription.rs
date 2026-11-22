@@ -293,22 +293,31 @@ fn input_event_queue_overflow_disconnects_a_non_reading_subscriber() {
             },
         );
     }
-    for _ in 0..10 {
-        fixture.dispatch();
-    }
+    // The server closes the connection from its event loop, so on a slow
+    // runner the close lands only after several dispatches. Keep dispatching
+    // until the subscriber sees EOF, bounded so a server that never drops it
+    // still fails.
     subscriber.set_nonblocking(true).unwrap();
-    let mut bytes = Vec::new();
-    loop {
-        let mut buffer = [0; 64 * 1024];
-        match subscriber.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(length) => bytes.extend_from_slice(&buffer[..length]),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                panic!("subscriber remained connected after its input event queue overflowed")
+    let mut buffer = vec![0; 64 * 1024];
+    let mut disconnected = false;
+    'dispatch: for _ in 0..1000 {
+        fixture.dispatch();
+        loop {
+            match subscriber.read(&mut buffer) {
+                Ok(0) => {
+                    disconnected = true;
+                    break 'dispatch;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("error reading subscriber: {error}"),
             }
-            Err(error) => panic!("error reading subscriber: {error}"),
         }
     }
+    assert!(
+        disconnected,
+        "subscriber remained connected after its input event queue overflowed"
+    );
 }
 
 #[test]
